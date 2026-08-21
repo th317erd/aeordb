@@ -4,11 +4,14 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aeordb::engine::memory_coordinator::{MemoryPressure, MemoryOwner};
+use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy, MemoryPressure};
 use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
+use aeordb::engine::query_engine::QueryBuilder;
 use aeordb::engine::request_context::RequestContext;
-use aeordb::engine::emergency_spill::{EMERGENCY_SPILL_FORMAT_V3, EmergencySpillFormatVersion, scan_for_database_with_dirs};
+use aeordb::engine::emergency_spill::scan_for_database_with_dirs;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::contract_generated::CONTRACT_REGISTRY_SHA256;
 use aeordb::engine::v4::migration_destination::{
@@ -28,23 +31,27 @@ use aeordb::engine::v4::first_authority::{
 use aeordb::engine::v4::index_coordinator_recovery::{
   IndexCheckpointRootV1, IndexRecoveryOptionsV1, IndexRecoveryOwnerV1, IndexRecoveryStoreV1,
 };
-use aeordb::engine::v4::index_coordinator::IndexCoordinatorOptionsV1;
+use aeordb::engine::v4::index_coordinator::{
+  FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1,
+};
 use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
+use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
 use aeordb::engine::v4::index_producer_coordinator::IndexProducerCoordinatorOptionsV1;
 use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
-use aeordb::engine::v4::index_runtime_batch_publisher::{DurableIndexRuntimeBatchPublisherV1, NativeIndexRuntimeBatchPublisherV1};
-use aeordb::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1;
 use aeordb::engine::v4::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
 };
+use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
+use aeordb::engine::v4::index_runtime_batch_publisher::{DurableIndexRuntimeBatchPublisherV1, NativeIndexRuntimeBatchPublisherV1};
 use aeordb::engine::v4::index_runtime_installation::{
-  IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeCadenceInstallationErrorV1,
-  NativeIndexRuntimeInstallationErrorV1, NativeIndexRuntimeInstallationRequestV1, install_native_index_runtime_v1,
+  IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeInstallationErrorV1,
+  NativeIndexRuntimeInstallationRequestV1, NativeIndexRuntimePublisherOptionsV1, install_native_index_runtime_v1,
 };
 use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1};
+use aeordb::engine::v4::index_runtime_owner::IndexRuntimeBatchPublisherV1;
 use aeordb::engine::v4::index_runtime_workspace_store::{
-  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1,
 };
 use aeordb::engine::v4::index_task::{
   IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, JournalOwnerKindV1,
@@ -299,6 +306,47 @@ impl VirtualClock for CancelingClock {
   }
 }
 
+struct AdvancingRuntimeClock {
+  calls: AtomicUsize,
+  now_ms: u64,
+  advance: Mutex<Option<(NativeIndexRuntimeBatchPublisherV1, FrozenIndexBatchV1)>>,
+}
+
+struct PressuringRuntimeClock {
+  calls: AtomicUsize,
+  now_ms: u64,
+  memory: Arc<MemoryCoordinator>,
+}
+
+impl VirtualClock for PressuringRuntimeClock {
+  fn now_ms(&self) -> u64 {
+    if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+      self.memory.reconfigure_policy(MemoryPolicy::new(1, 2, 1, 1).unwrap()).unwrap();
+    }
+    self.now_ms
+  }
+
+  fn node_id(&self) -> u64 {
+    43
+  }
+}
+
+impl VirtualClock for AdvancingRuntimeClock {
+  fn now_ms(&self) -> u64 {
+    if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+      let Some((mut publisher, batch)) = self.advance.lock().unwrap().take() else {
+        panic!("runtime selection advance was not available");
+      };
+      publisher.publish(&batch).unwrap();
+    }
+    self.now_ms
+  }
+
+  fn node_id(&self) -> u64 {
+    41
+  }
+}
+
 impl RuntimeFixture {
   fn new(name: &str) -> Self {
     Self::new_with_authority(name, HashAlgorithm::Blake3_256, id(0x10), id(0x40))
@@ -417,15 +465,61 @@ fn descriptor_with_algorithm(
   .unwrap()
 }
 
-fn cadence_publisher(fixture: &RuntimeFixture, runtime_id: [u8; 16], workspace_id: [u8; 16]) -> NativeIndexRuntimeBatchPublisherV1 {
+fn runtime_publisher_options_for(
+  base: &Path,
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  workspace_id: [u8; 16],
+) -> NativeIndexRuntimePublisherOptionsV1 {
+  runtime_publisher_options_for_generation(base, algorithm, database_id, workspace_id, 1)
+}
+
+fn runtime_publisher_options_for_generation(
+  base: &Path,
+  algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  workspace_id: [u8; 16],
+  generation: u64,
+) -> NativeIndexRuntimePublisherOptionsV1 {
+  NativeIndexRuntimePublisherOptionsV1::new(
+    descriptor_with_algorithm(algorithm, database_id, 0xd1, 0xd2, 0xd3),
+    workspace_id,
+    generation,
+    runtime_workspace_options(base, workspace_id),
+  )
+  .unwrap()
+}
+
+fn runtime_workspace_options(base: &Path, workspace_id: [u8; 16]) -> IndexRuntimeWorkspaceOptionsV1 {
+  let scratch = base.join(format!("runtime-{}", hex::encode(workspace_id)));
+  fs::create_dir_all(&scratch).unwrap();
+  IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap()
+}
+
+fn runtime_publisher_options(fixture: &RuntimeFixture, workspace_id: [u8; 16]) -> NativeIndexRuntimePublisherOptionsV1 {
+  runtime_publisher_options_for(fixture._directory.path(), fixture.permit.hash_algorithm(), fixture.permit.database_id(), workspace_id)
+}
+
+fn seed_selected_runtime_dirty_overlay(
+  fixture: &RuntimeFixture,
+  runtime_id: [u8; 16],
+  workspace_id: [u8; 16],
+) -> IndexRuntimeWorkspaceSelectedHeadV1 {
+  let (selected, _publisher, _successor) = seed_selected_runtime_dirty_overlay_with_successor(fixture, runtime_id, workspace_id);
+  selected
+}
+
+fn seed_selected_runtime_dirty_overlay_with_successor(
+  fixture: &RuntimeFixture,
+  runtime_id: [u8; 16],
+  workspace_id: [u8; 16],
+) -> (IndexRuntimeWorkspaceSelectedHeadV1, NativeIndexRuntimeBatchPublisherV1, FrozenIndexBatchV1) {
   let algorithm = fixture.permit.hash_algorithm();
   let descriptor = descriptor_with_algorithm(algorithm, fixture.permit.database_id(), 0xd1, 0xd2, 0xd3);
-  let clock = fixture.clock(7, 1_700_000_000_300);
+  let clock = fixture.clock(31, 1_700_000_000_500);
   let store =
     NativeIndexRecoveryStoreV1::new(descriptor.clone(), fixture.destination.shared_publisher(), fixture.retirement(), Arc::clone(&clock))
       .unwrap();
-  let scratch = fixture._directory.path().join(format!("cadence-{}", hex::encode(workspace_id)));
-  fs::create_dir(&scratch).unwrap();
   let workspace = DurableIndexRuntimeWorkspaceV1::create(
     &fixture.source_path,
     IndexRuntimeWorkspaceIdentityV1::new(
@@ -436,23 +530,67 @@ fn cadence_publisher(fixture: &RuntimeFixture, runtime_id: [u8; 16], workspace_i
       algorithm,
     )
     .unwrap(),
-    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    runtime_workspace_options(fixture._directory.path(), workspace_id),
     fixture.cancellation.clone(),
     &fixture.source.memory_coordinator(),
   )
   .unwrap();
-  DurableIndexRuntimeBatchPublisherV1::new_unselected(
+  let owner = IndexRecoveryOwnerV1::new(fixture.permit.database_id(), descriptor.index_id().to_vec(), descriptor.operation_id()).unwrap();
+  let source_root = fixture.destination.publisher().load_selected_semantic_authority().unwrap().root_hash;
+  let mut publisher = DurableIndexRuntimeBatchPublisherV1::new_unselected(
     algorithm,
-    IndexRecoveryOwnerV1::new(fixture.permit.database_id(), descriptor.index_id().to_vec(), descriptor.operation_id()).unwrap(),
-    digest_parts(algorithm, &[b"cadence source root"]),
+    owner,
+    source_root,
     1,
-    1_700_000_000_300,
+    1_700_000_000_500,
     workspace,
     store,
     fixture.cancellation.clone(),
-    clock,
+    Arc::clone(&clock),
   )
-  .unwrap()
+  .unwrap();
+  let mut coordinator = IndexCoordinatorV1::new(
+    runtime_id,
+    algorithm,
+    (*fixture.source.memory_coordinator()).clone(),
+    IndexCoordinatorOptionsV1::new(1024 * 1024, 16, 1_000, 1024 * 1024).unwrap(),
+    1_700_000_000_500,
+  )
+  .unwrap();
+  admit_runtime_dirty_record(&mut coordinator, algorithm, 1, 1, 1_700_000_000_501);
+  let batch = coordinator.begin_flush(1_700_000_000_502, Some(IndexFlushReasonV1::Explicit), false).unwrap().expect("seeded runtime batch");
+  publisher.publish(&batch).unwrap();
+  let selected = publisher.workspace_head().unwrap().selected_descriptor();
+  coordinator.complete_success(&batch).unwrap();
+  admit_runtime_dirty_record(&mut coordinator, algorithm, 2, 2, 1_700_000_000_503);
+  let successor =
+    coordinator.begin_flush(1_700_000_000_504, Some(IndexFlushReasonV1::Explicit), false).unwrap().expect("successor runtime batch");
+  (selected, publisher, successor)
+}
+
+fn admit_runtime_dirty_record(
+  coordinator: &mut IndexCoordinatorV1,
+  algorithm: HashAlgorithm,
+  ordinal: u64,
+  publication_sequence: u64,
+  now_ms: u64,
+) {
+  let index_id = digest_parts(algorithm, &[b"runtime-dirty-index", &ordinal.to_le_bytes()]);
+  let file_key = digest_parts(algorithm, &[b"runtime-dirty-file", &ordinal.to_le_bytes()]);
+  let encoded_record =
+    encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: ordinal, file_key: &file_key }, algorithm).unwrap();
+  coordinator
+    .admit(
+      IndexMutationRequestV1 {
+        index_id: &index_id,
+        role: OrderedIndexRoleV1::ScopeReverse,
+        publication_sequence,
+        operation_id: id(0x73 + ordinal as u8),
+        encoded_record: &encoded_record,
+      },
+      now_ms,
+    )
+    .unwrap();
 }
 
 #[derive(Clone, Copy)]
@@ -566,6 +704,7 @@ fn install_runtime_fixture(
       operation_descriptors: std::slice::from_ref(selected_descriptor),
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(fixture, id(coordinator_byte)),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(u64::from(coordinator_byte), 1_700_000_000_200),
       now_ms: 1_700_000_000_200,
@@ -666,6 +805,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x51)),
       cancellation: &canceled,
       clock: Arc::clone(&clock),
       now_ms: 1_700_000_000_200,
@@ -685,6 +825,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x52)),
       cancellation: &cancellation,
       clock,
       now_ms: 1_700_000_000_201,
@@ -709,6 +850,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x53)),
       cancellation: &cancellation,
       clock: Arc::new(MockClock::new(2, 1_700_000_000_202)),
       now_ms: 1_700_000_000_202,
@@ -719,16 +861,171 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
 }
 
 #[test]
-fn native_runtime_cadence_installation_rejects_invalid_authority_without_consuming_its_slot() {
-  let fixture = RuntimeFixture::new("runtime-cadence-installation");
+fn native_runtime_activation_preserves_legacy_query_results_and_cached_observability() {
+  let fixture = RuntimeFixture::new("runtime-legacy-query-authority");
+  let ops = DirectoryOps::new(&fixture.source);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  ops
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+  let contents = br#"{"authority":"legacy-v3"}"#;
+  ops.store_file_with_indexing(&RequestContext::system(), "/legacy/document.json", contents, Some("application/json")).unwrap();
+  let content_hash = blake3::hash(contents).to_hex().to_string();
+  let query = || QueryBuilder::new(&fixture.source, "/legacy").field("@hash").eq(content_hash.as_bytes()).all().unwrap();
+  let before = query();
+  assert_eq!(before.len(), 1);
+  assert_eq!(before[0].file_record.path, "/legacy/document.json");
+  drop(before);
+
+  let identity = fixture.identity();
+  let receipt = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: id(0x54),
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0x55)),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(3, 1_700_000_000_203),
+      now_ms: 1_700_000_000_203,
+    },
+  )
+  .unwrap();
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Running);
+
+  let after = query();
+  assert_eq!(after.len(), 1);
+  assert_eq!(after[0].file_record.path, "/legacy/document.json");
+  let cached = fixture.source.index_runtime_snapshot_v1().expect("installed runtime cached snapshot");
+  assert_eq!(cached.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(cached.highest_checkpoint_sequence, 0);
+}
+
+#[test]
+fn native_runtime_atomic_installation_rejects_invalid_publisher_authority_without_exposing_a_partial_runtime() {
+  let fixture = RuntimeFixture::new("runtime-atomic-installation");
   let runtime_id = [0x61; 16];
+  let identity = fixture.identity();
+  let foreign_database = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(fixture._directory.path(), fixture.permit.hash_algorithm(), id(0x11), id(0xe0)),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(9, 1_700_000_000_320),
+      now_ms: 1_700_000_000_320,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(
+    foreign_database,
+    NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_runtime_publisher_authority", .. }
+  ));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
 
-  let missing_runtime = fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe0)), fixture.clock(8, 1_700_000_000_310))
-    .unwrap_err();
-  assert_eq!(missing_runtime, NativeIndexRuntimeCadenceInstallationErrorV1::RuntimeNotInstalled);
+  let invalid_clock = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xe1)),
+      cancellation: &fixture.cancellation,
+      clock: Arc::new(MockClock::new(10, 0)),
+      now_ms: 1_700_000_000_330,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(invalid_clock, NativeIndexRuntimeInstallationErrorV1::PublisherStore(_)));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
 
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xe2)),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(11, 1_700_000_000_340),
+      now_ms: 1_700_000_000_340,
+    },
+  )
+  .unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
+}
+
+#[test]
+fn selected_runtime_dirty_overlay_resumes_after_source_and_destination_restart_without_claiming_coverage() {
+  let fixture = RuntimeFixture::new("runtime-dirty-overlay-restart");
+  let runtime_id = id(0x63);
+  let workspace_id = id(0xe3);
+  let selected = seed_selected_runtime_dirty_overlay(&fixture, runtime_id, workspace_id);
+  assert_eq!(selected.durable_sequence(), 1);
+  let identity = fixture.identity();
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  let shadow_path = destination.path().to_path_buf();
+  drop(source);
+  drop(destination);
+  drop(cancellation);
+
+  let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  let reopened_publisher = Arc::new(reopen(&shadow_path));
+  let reopened_cancellation = CancellationToken::new();
+  let receipt = install_native_index_runtime_v1(
+    &reopened_source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: Arc::clone(&reopened_publisher),
+      retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
+      cancellation: &reopened_cancellation,
+      clock: Arc::new(MockClock::new(32, 1_700_000_000_600)),
+      now_ms: 1_700_000_000_600,
+    },
+  )
+  .unwrap();
+
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  let snapshot = reopened_source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(snapshot.highest_checkpoint_sequence, 0, "dirty overlay is not query-visible coverage");
+  assert_eq!(snapshot.degraded.as_ref().unwrap().code, "native_index_dirty_overlay_requires_reconciliation");
+  assert_eq!(reopened_publisher.load_selected_semantic_authority().unwrap().root_hash, receipt.selected_root_hash);
+}
+
+#[test]
+fn fresh_runtime_reuses_its_exact_empty_workspace_after_restart() {
+  let fixture = RuntimeFixture::new("runtime-empty-workspace-restart");
+  let runtime_id = id(0x65);
+  let workspace_id = id(0xe5);
   let identity = fixture.identity();
   install_native_index_runtime_v1(
     &fixture.source,
@@ -740,67 +1037,240 @@ fn native_runtime_cadence_installation_rejects_invalid_authority_without_consumi
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
       cancellation: &fixture.cancellation,
-      clock: fixture.clock(9, 1_700_000_000_320),
-      now_ms: 1_700_000_000_320,
+      clock: fixture.clock(34, 1_700_000_000_620),
+      now_ms: 1_700_000_000_620,
     },
   )
   .unwrap();
 
-  let runtime_mismatch = fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, [0x62; 16], id(0xe1)), fixture.clock(10, 1_700_000_000_330))
-    .unwrap_err();
-  assert!(matches!(runtime_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  let shadow_path = destination.path().to_path_buf();
+  drop(source);
+  drop(destination);
+  drop(cancellation);
+  let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  let reopened_publisher = Arc::new(reopen(&shadow_path));
+  let reopened_cancellation = CancellationToken::new();
+  let receipt = install_native_index_runtime_v1(
+    &reopened_source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: reopened_publisher,
+      retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
+      cancellation: &reopened_cancellation,
+      clock: Arc::new(MockClock::new(35, 1_700_000_000_630)),
+      now_ms: 1_700_000_000_630,
+    },
+  )
+  .unwrap();
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(receipt.highest_checkpoint_sequence, 0);
+}
 
-  let database_mismatch_fixture =
-    RuntimeFixture::new_with_authority("runtime-cadence-database-mismatch", HashAlgorithm::Blake3_256, id(0x11), id(0x40));
-  let database_mismatch = fixture
-    .source
-    .install_index_runtime_cadence_v1(
-      cadence_publisher(&database_mismatch_fixture, runtime_id, id(0xe2)),
-      fixture.clock(11, 1_700_000_000_331),
-    )
-    .unwrap_err();
-  assert!(matches!(database_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+#[test]
+fn malformed_selected_runtime_dirty_overlay_refuses_installation_without_consuming_the_runtime_slot() {
+  let fixture = RuntimeFixture::new("runtime-dirty-overlay-malformed");
+  let runtime_id = id(0x64);
+  let workspace_id = id(0xe4);
+  let selected = seed_selected_runtime_dirty_overlay(&fixture, runtime_id, workspace_id);
+  let manifest = selected.workspace_path().join("manifests").join(format!("{:016x}.aiwm", selected.durable_sequence()));
+  fs::write(&manifest, b"truncated").unwrap();
+  let identity = fixture.identity();
 
-  let destination_mismatch_fixture =
-    RuntimeFixture::new_with_authority("runtime-cadence-destination-mismatch", HashAlgorithm::Blake3_256, id(0x10), id(0x41));
-  let destination_mismatch = fixture
-    .source
-    .install_index_runtime_cadence_v1(
-      cadence_publisher(&destination_mismatch_fixture, runtime_id, id(0xe3)),
-      fixture.clock(12, 1_700_000_000_332),
-    )
-    .unwrap_err();
-  assert!(matches!(destination_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(33, 1_700_000_000_610),
+      now_ms: 1_700_000_000_610,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_runtime_publisher_recovery", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
+  fixture.source.shutdown().unwrap();
+}
 
-  let hash_mismatch_fixture =
-    RuntimeFixture::new_with_authority("runtime-cadence-hash-mismatch", HashAlgorithm::Sha512, id(0x10), id(0x40));
-  let hash_mismatch = fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&hash_mismatch_fixture, runtime_id, id(0xe4)), fixture.clock(13, 1_700_000_000_333))
-    .unwrap_err();
-  assert!(matches!(hash_mismatch, NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(_)));
+#[test]
+fn resumed_runtime_refuses_an_unexpected_generation_without_consuming_the_runtime_slot() {
+  let fixture = RuntimeFixture::new("runtime-dirty-overlay-generation");
+  let runtime_id = id(0x67);
+  let workspace_id = id(0xe7);
+  seed_selected_runtime_dirty_overlay(&fixture, runtime_id, workspace_id);
+  let identity = fixture.identity();
 
-  let invalid_clock = fixture
-    .source
-    .install_index_runtime_cadence_v1(
-      cadence_publisher(&fixture, runtime_id, id(0xe5)),
-      Arc::new(MockClock::new(14, 0)) as Arc<dyn VirtualClock>,
-    )
-    .unwrap_err();
-  assert_eq!(invalid_clock, NativeIndexRuntimeCadenceInstallationErrorV1::Cadence(IndexRuntimeCadenceErrorV1::InvalidClock));
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for_generation(
+        fixture._directory.path(),
+        fixture.permit.hash_algorithm(),
+        fixture.permit.database_id(),
+        workspace_id,
+        2,
+      ),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(36, 1_700_000_000_650),
+      now_ms: 1_700_000_000_650,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_runtime_publisher_resume_generation", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
 
-  fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe6)), fixture.clock(15, 1_700_000_000_340))
-    .unwrap();
-  let duplicate = fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe7)), fixture.clock(16, 1_700_000_000_350))
-    .unwrap_err();
-  assert_eq!(duplicate, NativeIndexRuntimeCadenceInstallationErrorV1::AlreadyInstalled);
+  let receipt = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(37, 1_700_000_000_651),
+      now_ms: 1_700_000_000_651,
+    },
+  )
+  .unwrap();
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+}
+
+#[test]
+fn publisher_recovery_cancellation_and_pressure_leave_no_partial_runtime_or_memory_reservation() {
+  let canceled = RuntimeFixture::new("runtime-publisher-recovery-canceled");
+  let canceled_runtime_id = id(0x68);
+  let canceled_workspace_id = id(0xe8);
+  seed_selected_runtime_dirty_overlay(&canceled, canceled_runtime_id, canceled_workspace_id);
+  let canceled_identity = canceled.identity();
+  let cancellation = CancellationToken::new();
+  let error = install_native_index_runtime_v1(
+    &canceled.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: canceled_runtime_id,
+      shadow_identity: &canceled_identity,
+      publisher: canceled.destination.shared_publisher(),
+      retirement_owner: canceled.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&canceled, canceled_workspace_id),
+      cancellation: &cancellation,
+      clock: Arc::new(CancelingClock { cancellation: cancellation.clone(), now_ms: 1_700_000_000_660 }),
+      now_ms: 1_700_000_000_660,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Canceled));
+  assert!(canceled.source.index_runtime_snapshot_v1().is_none());
+
+  let pressured = RuntimeFixture::new("runtime-publisher-recovery-pressure");
+  let pressured_runtime_id = id(0x69);
+  let pressured_workspace_id = id(0xe9);
+  seed_selected_runtime_dirty_overlay(&pressured, pressured_runtime_id, pressured_workspace_id);
+  let pressured_identity = pressured.identity();
+  let memory = pressured.source.memory_coordinator();
+  let baseline = memory.snapshot().unwrap();
+  let baseline_dirty = baseline.owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes;
+  let original_policy = baseline.policy.unwrap();
+  let error = install_native_index_runtime_v1(
+    &pressured.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: pressured_runtime_id,
+      shadow_identity: &pressured_identity,
+      publisher: pressured.destination.shared_publisher(),
+      retirement_owner: pressured.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&pressured, pressured_workspace_id),
+      cancellation: &pressured.cancellation,
+      clock: Arc::new(PressuringRuntimeClock { calls: AtomicUsize::new(0), now_ms: 1_700_000_000_670, memory: Arc::clone(&memory) }),
+      now_ms: 1_700_000_000_670,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::DirtyOverlayRecovery(_)));
+  assert!(pressured.source.index_runtime_snapshot_v1().is_none());
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, baseline_dirty);
+
+  memory.reconfigure_policy(original_policy).unwrap();
+  let receipt = install_native_index_runtime_v1(
+    &pressured.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: pressured_runtime_id,
+      shadow_identity: &pressured_identity,
+      publisher: pressured.destination.shared_publisher(),
+      retirement_owner: pressured.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&pressured, pressured_workspace_id),
+      cancellation: &pressured.cancellation,
+      clock: pressured.clock(38, 1_700_000_000_671),
+      now_ms: 1_700_000_000_671,
+    },
+  )
+  .unwrap();
+  assert_eq!(receipt.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+}
+
+#[test]
+fn runtime_selection_change_during_installation_is_rejected_at_the_final_authority_frontier() {
+  let fixture = RuntimeFixture::new("runtime-selection-race");
+  let runtime_id = id(0x66);
+  let workspace_id = id(0xe6);
+  let (_selected, publisher, successor) = seed_selected_runtime_dirty_overlay_with_successor(&fixture, runtime_id, workspace_id);
+  let identity = fixture.identity();
+  let clock: Arc<dyn VirtualClock> = Arc::new(AdvancingRuntimeClock {
+    calls: AtomicUsize::new(0),
+    now_ms: 1_700_000_000_640,
+    advance: Mutex::new(Some((publisher, successor))),
+  });
+
+  let error = install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
+      cancellation: &fixture.cancellation,
+      clock,
+      now_ms: 1_700_000_000_640,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Invalid { code: "native_index_runtime_publisher_selection_changed", .. }));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
 }
 
 #[test]
@@ -818,16 +1288,13 @@ fn storage_shutdown_drains_the_installed_runtime_before_completing() {
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xea)),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(17, 1_700_000_000_360),
       now_ms: 1_700_000_000_360,
     },
   )
   .unwrap();
-  fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xea)), fixture.clock(18, 1_700_000_000_370))
-    .unwrap();
 
   fixture.source.shutdown().unwrap();
 
@@ -836,11 +1303,11 @@ fn storage_shutdown_drains_the_installed_runtime_before_completing() {
 }
 
 #[test]
-fn storage_shutdown_preserves_runtime_reconciliation_when_the_cadence_is_missing() {
-  let fixture = RuntimeFixture::new("runtime-shutdown-spill");
+fn storage_shutdown_cannot_observe_a_runtime_whose_publisher_construction_failed() {
+  let fixture = RuntimeFixture::new("runtime-shutdown-atomic-refusal");
   let runtime_id = [0x6b; 16];
   let identity = fixture.identity();
-  install_native_index_runtime_v1(
+  let error = install_native_index_runtime_v1(
     &fixture.source,
     NativeIndexRuntimeInstallationRequestV1 {
       coordinator_id: runtime_id,
@@ -850,32 +1317,18 @@ fn storage_shutdown_preserves_runtime_reconciliation_when_the_cadence_is_missing
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xea)),
       cancellation: &fixture.cancellation,
-      clock: fixture.clock(19, 1_700_000_000_380),
+      clock: Arc::new(MockClock::new(19, 0)),
       now_ms: 1_700_000_000_380,
     },
   )
-  .unwrap();
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::PublisherStore(_)));
+  assert!(fixture.source.index_runtime_snapshot_v1().is_none());
 
-  let error = fixture.source.shutdown().unwrap_err();
-  assert!(error.to_string().contains("cadence"), "{error}");
-  let report = fixture.source.emergency_spill_report().expect("failed shutdown must preserve runtime recovery evidence");
-  assert!(report.succeeded, "spill failed: {:?}", report.errors);
-  let manifest: serde_json::Value = serde_json::from_slice(&fs::read(report.manifest_path.as_ref().unwrap()).unwrap()).unwrap();
-  assert_eq!(manifest.get("format").and_then(serde_json::Value::as_str), Some(EMERGENCY_SPILL_FORMAT_V3));
-
-  let spill_root = fixture._directory.path().join("runtime-shutdown-spill-spill");
-  let artifacts = scan_for_database_with_dirs(&fixture.source_path, &[spill_root]).unwrap();
-  assert_eq!(artifacts.len(), 1);
-  assert_eq!(artifacts[0].format_version, EmergencySpillFormatVersion::V3);
-  let runtime = artifacts[0].index_runtime_state.as_ref().expect("typed runtime reconciliation evidence");
-  assert_eq!(runtime.database_id, fixture.permit.database_id());
-  assert_eq!(runtime.destination_physical_instance_id, fixture.permit.destination_physical_instance_id());
-  assert_eq!(runtime.runtime_id, runtime_id);
-  assert_eq!(runtime.hash_algorithm, fixture.permit.hash_algorithm());
-  assert!(runtime.reconciliation_required);
-  assert_eq!(runtime.reason, "shutdown_drain_incomplete");
-  assert!(runtime.workspace.is_none(), "a missing cadence must not invent workspace authority");
+  fixture.source.shutdown().unwrap();
+  assert!(fixture.source.emergency_spill_report().is_none());
 }
 
 #[test]
@@ -894,16 +1347,13 @@ fn storage_shutdown_preserves_the_existing_workspace_when_soft_work_blocks_drain
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(20, 1_700_000_000_390),
       now_ms: 1_700_000_000_390,
     },
   )
   .unwrap();
-  fixture
-    .source
-    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, workspace_id), fixture.clock(21, 1_700_000_000_400))
-    .unwrap();
   DirectoryOps::new(&fixture.source)
     .store_file_buffered(&RequestContext::system(), "/queued-before-shutdown.json", br#"{"queued":true}"#, Some("application/json"))
     .unwrap();
@@ -953,6 +1403,12 @@ fn runtime_identity_refusal_and_content_only_descriptor_refusal_do_not_consume_i
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(
+        directory.path(),
+        wrong_permit.hash_algorithm(),
+        wrong_permit.database_id(),
+        id(0x71),
+      ),
       cancellation: &cancellation,
       clock: Arc::clone(&clock),
       now_ms: 1_700_000_000_200,
@@ -976,6 +1432,12 @@ fn runtime_identity_refusal_and_content_only_descriptor_refusal_do_not_consume_i
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(
+        directory.path(),
+        correct_permit.hash_algorithm(),
+        correct_permit.database_id(),
+        id(0x72),
+      ),
       cancellation: &cancellation,
       clock,
       now_ms: 1_700_000_000_201,
@@ -1001,6 +1463,7 @@ fn complete_semantic_authority_without_a_selected_checkpoint_starts_a_clean_buil
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&empty, id(0x81)),
       cancellation: &empty.cancellation,
       clock: empty.clock(1, 1_700_000_000_200),
       now_ms: 1_700_000_000_200,
@@ -1023,6 +1486,7 @@ fn complete_semantic_authority_without_a_selected_checkpoint_starts_a_clean_buil
       operation_descriptors: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&unbuilt, id(0x82)),
       cancellation: &unbuilt.cancellation,
       clock: unbuilt.clock(2, 1_700_000_000_200),
       now_ms: 1_700_000_000_200,
@@ -1134,6 +1598,7 @@ fn cancellation_during_native_checkpoint_recovery_releases_the_unconsumed_instal
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xb1)),
       cancellation: &fixture.cancellation,
       clock: Arc::new(CancelingClock { cancellation: fixture.cancellation.clone(), now_ms: 1_700_000_000_201 }),
       now_ms: 1_700_000_000_201,
@@ -1164,6 +1629,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       operation_descriptors: &descriptors,
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xc1)),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(1, 1_700_000_000_200),
       now_ms: 1_700_000_000_200,
@@ -1191,6 +1657,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       operation_descriptors: &descriptors,
       runtime_options: runtime_options(),
       recovery_options: count_options,
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xc2)),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(2, 1_700_000_000_201),
       now_ms: 1_700_000_000_201,
@@ -1217,6 +1684,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       operation_descriptors: std::slice::from_ref(&first),
       runtime_options: runtime_options(),
       recovery_options: byte_options,
+      runtime_publisher: runtime_publisher_options(&fixture, id(0xc3)),
       cancellation: &fixture.cancellation,
       clock: fixture.clock(3, 1_700_000_000_202),
       now_ms: 1_700_000_000_202,
@@ -1260,6 +1728,7 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0x91)),
       cancellation: &fixture.cancellation,
       clock,
       now_ms: 1_700_000_000_201,
@@ -1293,6 +1762,7 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x92)),
       cancellation: &reopened_cancellation,
       clock: Arc::new(MockClock::new(2, 1_700_000_000_300)),
       now_ms: 1_700_000_000_300,
@@ -1398,5 +1868,33 @@ fn destination_initializer_is_a_disconnected_composition_of_existing_physical_ow
   }
   for forbidden in ["StorageEngine", "DirectoryOps", "crate::server", "axum", "tokio::spawn", "remove_file(", "rename(", "repair"] {
     assert!(!source.contains(forbidden), "destination initializer gained activation or destructive authority {forbidden}");
+  }
+}
+
+#[test]
+fn native_runtime_has_one_atomic_publisher_and_cadence_installation_boundary() {
+  let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+  let installation = fs::read_to_string(package.join("src/engine/v4/index_runtime_installation.rs")).unwrap();
+  let storage_engine = fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
+
+  assert_eq!(installation.matches("NativeIndexRuntimeCadenceV1::new").count(), 1);
+  assert!(installation.contains("cadence: Arc<NativeIndexRuntimeCadenceV1>"));
+  assert!(installation.contains("build_runtime_publisher("));
+  let source_frontier = installation
+    .find("let source_authority_guard = engine.direct_hard_authority_guard()?;")
+    .expect("runtime installation must acquire source hard authority at its final frontier");
+  let destination_frontier = installation
+    .find("let semantic_authority_guard = request.publisher.selected_semantic_authority_guard()?;")
+    .expect("runtime installation must pin destination selection at its final frontier");
+  assert!(
+    source_frontier < destination_frontier,
+    "runtime installation must never hold destination selection while waiting on source authority"
+  );
+  assert!(installation.contains("installation.install(&source_authority_guard, runtime)"));
+  for forbidden in
+    ["NativeIndexRuntimeCadenceInstallationErrorV1", "install_index_runtime_cadence_v1", "OnceLock<Arc<NativeIndexRuntimeCadenceV1>>"]
+  {
+    assert!(!installation.contains(forbidden), "runtime installation retained split cadence authority {forbidden}");
+    assert!(!storage_engine.contains(forbidden), "storage engine retained split cadence authority {forbidden}");
   }
 }

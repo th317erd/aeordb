@@ -5,25 +5,34 @@
 //! v4 destination are the exact pair admitted by migration preflight.
 
 use std::mem::size_of;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::native_durability::{NativeDurabilityError, PlatformFileIdentityDescriptorV1, platform_file_identity};
-use crate::engine::{HashAlgorithm, StorageEngine, VirtualClock};
+use crate::engine::{EngineError, HashAlgorithm, StorageEngine, VirtualClock};
 
 use super::first_authority::{FirstAuthorityPublicationErrorV1, SelectedSemanticAuthorityV1, V4FirstAuthorityPublisher};
-use super::index_coordinator_recovery::{IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryReasonV1};
+use super::index_coordinator_recovery::{
+  IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
+  IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
+};
 use super::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryErrorV1, IndexScopeOrdinalStoreRegistryOptionsV1, IndexScopeOrdinalStoreRegistryV1,
-  NativeIndexOperationDescriptorV1, SharedRetirementJournalOwnerV1,
+  NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
 };
-use super::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1;
+use super::index_runtime_batch_publisher::{IndexRuntimeBatchPublisherBuildErrorV1, NativeIndexRuntimeBatchPublisherV1};
 use super::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, NativeIndexRuntimeCadenceV1};
+use super::index_runtime_dirty_overlay_recovery::{
+  IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, recover_index_runtime_dirty_overlay_v1,
+};
 use super::index_runtime_owner::{
   IndexRuntimeErrorV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimeRecoveryDecisionV1,
+};
+use super::index_runtime_workspace_store::{
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::migration_owner::MigrationStateOwnerV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
@@ -104,6 +113,31 @@ impl IndexRuntimeNativeRecoveryOptionsV1 {
   }
 }
 
+#[derive(Clone, Debug)]
+pub struct NativeIndexRuntimePublisherOptionsV1 {
+  descriptor: NativeIndexOperationDescriptorV1,
+  workspace_id: [u8; 16],
+  generation: u64,
+  workspace: IndexRuntimeWorkspaceOptionsV1,
+}
+
+impl NativeIndexRuntimePublisherOptionsV1 {
+  pub fn new(
+    descriptor: NativeIndexOperationDescriptorV1,
+    workspace_id: [u8; 16],
+    generation: u64,
+    workspace: IndexRuntimeWorkspaceOptionsV1,
+  ) -> Result<Self, NativeIndexRuntimeInstallationErrorV1> {
+    if workspace_id.iter().all(|byte| *byte == 0) || generation == 0 {
+      return Err(invalid(
+        "native_index_runtime_publisher_identity",
+        "runtime publisher workspace identity and generation must be nonzero",
+      ));
+    }
+    Ok(Self { descriptor, workspace_id, generation, workspace })
+  }
+}
+
 pub struct NativeIndexRuntimeInstallationRequestV1<'request> {
   pub coordinator_id: [u8; 16],
   pub shadow_identity: &'request IndexRuntimeShadowIdentityV1,
@@ -112,6 +146,7 @@ pub struct NativeIndexRuntimeInstallationRequestV1<'request> {
   pub operation_descriptors: &'request [NativeIndexOperationDescriptorV1],
   pub runtime_options: IndexRuntimeOwnerOptionsV1,
   pub recovery_options: IndexRuntimeNativeRecoveryOptionsV1,
+  pub runtime_publisher: NativeIndexRuntimePublisherOptionsV1,
   pub cancellation: &'request CancellationToken,
   pub clock: Arc<dyn VirtualClock>,
   pub now_ms: u64,
@@ -124,7 +159,7 @@ pub struct NativeIndexRuntimeV1 {
   shadow_identity: IndexRuntimeShadowIdentityV1,
   semantic_authority: SelectedSemanticAuthorityV1,
   cancellation: CancellationToken,
-  cadence: OnceLock<Arc<NativeIndexRuntimeCadenceV1>>,
+  cadence: Arc<NativeIndexRuntimeCadenceV1>,
 }
 
 impl NativeIndexRuntimeV1 {
@@ -152,33 +187,8 @@ impl NativeIndexRuntimeV1 {
     &self.cancellation
   }
 
-  pub fn cadence(&self) -> Option<&Arc<NativeIndexRuntimeCadenceV1>> {
-    self.cadence.get()
-  }
-
-  pub fn install_cadence(
-    &self,
-    publisher: NativeIndexRuntimeBatchPublisherV1,
-    clock: Arc<dyn VirtualClock>,
-  ) -> Result<(), NativeIndexRuntimeCadenceInstallationErrorV1> {
-    let publisher_identity = publisher.workspace_identity();
-    if publisher.runtime_id() != self.owner.coordinator_id()
-      || publisher_identity.database_id() != self.shadow_identity.database_id()
-      || publisher_identity.destination_physical_instance_id() != self.shadow_identity.destination_physical_instance_id()
-      || publisher_identity.hash_algorithm() != self.owner.hash_algorithm()
-    {
-      return Err(NativeIndexRuntimeCadenceInstallationErrorV1::Invalid(
-        "runtime cadence publisher and installed runtime authorities disagree".to_string(),
-      ));
-    }
-    let cadence = Arc::new(NativeIndexRuntimeCadenceV1::new(Arc::clone(&self.owner), publisher, self.cancellation.clone(), clock)?);
-    match self.cadence.set(cadence) {
-      Ok(()) => Ok(()),
-      Err(rejected) => {
-        drop(rejected);
-        Err(NativeIndexRuntimeCadenceInstallationErrorV1::AlreadyInstalled)
-      }
-    }
+  pub fn cadence(&self) -> &Arc<NativeIndexRuntimeCadenceV1> {
+    &self.cadence
   }
 }
 
@@ -205,26 +215,28 @@ pub enum NativeIndexRuntimeInstallationErrorV1 {
   Invalid { code: &'static str, message: String },
   #[error("native index runtime source-file identity failed: {0}")]
   SourceIdentity(#[from] NativeDurabilityError),
+  #[error("native index runtime source engine is not writable: {0}")]
+  SourceEngine(#[from] EngineError),
   #[error("native index runtime selected authority failed: {0}")]
   Authority(#[from] FirstAuthorityPublicationErrorV1),
   #[error("native index runtime memory admission failed: {0}")]
   Memory(#[from] MemoryCoordinatorError),
   #[error("native index runtime registry construction failed: {0}")]
   Registry(#[from] IndexScopeOrdinalStoreRegistryErrorV1),
+  #[error("native index runtime publisher recovery owner is invalid: {0}")]
+  PublisherRecovery(#[from] IndexRecoveryErrorV1),
+  #[error("native index runtime publisher recovery store failed: {0}")]
+  PublisherStore(#[from] IndexRecoveryStoreErrorV1),
+  #[error("native index runtime dirty-overlay recovery failed: {0}")]
+  DirtyOverlayRecovery(#[from] IndexRuntimeDirtyOverlayRecoveryErrorV1),
+  #[error("native index runtime workspace failed: {0}")]
+  Workspace(#[from] IndexRuntimeWorkspaceStoreErrorV1),
+  #[error("native index runtime publisher construction failed: {0}")]
+  Publisher(#[from] IndexRuntimeBatchPublisherBuildErrorV1),
+  #[error("native index runtime cadence construction failed: {0}")]
+  Cadence(#[from] IndexRuntimeCadenceErrorV1),
   #[error("native index runtime owner failed: {0}")]
   Runtime(#[from] IndexRuntimeErrorV1),
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum NativeIndexRuntimeCadenceInstallationErrorV1 {
-  #[error("native index runtime is not installed")]
-  RuntimeNotInstalled,
-  #[error("native index runtime cadence is already installed")]
-  AlreadyInstalled,
-  #[error("native index runtime cadence identity is invalid: {0}")]
-  Invalid(String),
-  #[error(transparent)]
-  Cadence(#[from] IndexRuntimeCadenceErrorV1),
 }
 
 pub fn install_native_index_runtime_v1(
@@ -237,11 +249,18 @@ pub fn install_native_index_runtime_v1(
     Err(error) => return Err(error.into()),
   };
   check_cancellation(request.cancellation)?;
+  engine.ensure_writable()?;
   validate_source_and_shadow(engine, request.shadow_identity, &request.publisher)?;
   let semantic_authority = request.publisher.load_selected_semantic_authority()?;
   validate_selected_semantic_authority(request.shadow_identity, &semantic_authority)?;
   let descriptor_order =
     validate_descriptors(engine, request.shadow_identity, request.operation_descriptors, request.recovery_options, request.cancellation)?;
+  validate_runtime_publisher_descriptor(
+    request.shadow_identity,
+    request.operation_descriptors,
+    &request.runtime_publisher.descriptor,
+    request.recovery_options,
+  )?;
   check_cancellation(request.cancellation)?;
 
   let owner = installation.prepare_owner(request.coordinator_id, request.runtime_options, request.now_ms)?;
@@ -252,23 +271,56 @@ pub fn install_native_index_runtime_v1(
     request.shadow_identity.database_id,
     request.recovery_options.checkpoint,
     Arc::clone(&request.publisher),
-    request.retirement_owner,
+    Arc::clone(&request.retirement_owner),
     Arc::clone(&memory),
     request.cancellation.clone(),
     Arc::clone(&request.clock),
   )?);
 
   let content_only = matches!(semantic_authority.semantic_state.availability, SemanticAvailabilityV1::ContentOnly { .. });
-  let recovery = recover_selected_operations(
+  let mut recovery = recover_selected_operations(
     &registry,
     request.operation_descriptors,
     descriptor_order.indices(),
     &semantic_authority,
     request.cancellation,
   )?;
+  let (runtime_publisher, resumed_dirty_overlay) = build_runtime_publisher(
+    engine,
+    request.coordinator_id,
+    request.shadow_identity,
+    &semantic_authority,
+    &request.runtime_publisher,
+    Arc::clone(&request.publisher),
+    Arc::clone(&request.retirement_owner),
+    request.cancellation,
+    Arc::clone(&request.clock),
+    request.now_ms,
+  )?;
+  let expected_runtime_checkpoint = runtime_publisher.selected_checkpoint().cloned();
+  if resumed_dirty_overlay && matches!(recovery, IndexRuntimeRecoveryDecisionV1::Ready { .. }) {
+    recovery = IndexRuntimeRecoveryDecisionV1::ReconciliationRequired {
+      code: "native_index_dirty_overlay_requires_reconciliation",
+      context: "a selected no-journal dirty overlay was recovered; authoritative reconciliation is required before it can become coverage"
+        .to_string(),
+    };
+  }
+  let cadence = Arc::new(NativeIndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    runtime_publisher,
+    request.cancellation.clone(),
+    Arc::clone(&request.clock),
+  )?);
+  let source_authority_guard = engine.direct_hard_authority_guard()?;
   let semantic_authority_guard = request.publisher.selected_semantic_authority_guard()?;
   let current_semantic_authority = semantic_authority_guard.load()?;
   validate_selected_semantic_authority(request.shadow_identity, &current_semantic_authority)?;
+  let current_runtime_control = semantic_authority_guard.load_index_operation_control(
+    &request.shadow_identity.database_id,
+    request.runtime_publisher.descriptor.index_id(),
+    &request.runtime_publisher.descriptor.operation_id(),
+  )?;
+  validate_runtime_publisher_selection(expected_runtime_checkpoint.as_ref(), current_runtime_control.as_ref())?;
   validate_final_installation_frontier(
     request.cancellation,
     &semantic_authority.root_hash,
@@ -286,13 +338,15 @@ pub fn install_native_index_runtime_v1(
     shadow_identity: request.shadow_identity.clone(),
     semantic_authority: semantic_authority.clone(),
     cancellation: request.cancellation.clone(),
-    cadence: OnceLock::new(),
+    cadence,
   });
   check_cancellation(request.cancellation)?;
-  let snapshot = installation.install(runtime).map_err(|error| match error {
+  let snapshot = installation.install(&source_authority_guard, runtime).map_err(|error| match error {
     IndexRuntimeErrorV1::AlreadyInstalled => NativeIndexRuntimeInstallationErrorV1::AlreadyInstalled,
     error => NativeIndexRuntimeInstallationErrorV1::Runtime(error),
   })?;
+  drop(semantic_authority_guard);
+  drop(source_authority_guard);
 
   Ok(NativeIndexRuntimeInstallationReceiptV1 {
     source_physical_instance_id: request.shadow_identity.source_physical_instance_id,
@@ -352,6 +406,26 @@ fn validate_selected_semantic_authority(
   Ok(())
 }
 
+fn validate_runtime_publisher_selection(
+  expected: Option<&super::index_coordinator_recovery::IndexCheckpointRootV1>,
+  current: Option<&super::first_authority::LoadedIndexOperationControlV1>,
+) -> Result<(), NativeIndexRuntimeInstallationErrorV1> {
+  let agrees = match (expected, current) {
+    (None, None) => true,
+    (Some(expected), Some(current)) => {
+      expected.checkpoint_sequence == current.control_sequence && expected.checkpoint_key == current.checkpoint_artifact
+    }
+    (None, Some(_)) | (Some(_), None) => false,
+  };
+  if !agrees {
+    return Err(invalid(
+      "native_index_runtime_publisher_selection_changed",
+      "runtime publisher checkpoint selection changed while native recovery was in progress",
+    ));
+  }
+  Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_final_installation_frontier(
   cancellation: &CancellationToken,
@@ -384,6 +458,115 @@ impl ValidatedDescriptorOrderV1 {
   fn indices(&self) -> &[usize] {
     &self.indices
   }
+}
+
+fn validate_runtime_publisher_descriptor(
+  identity: &IndexRuntimeShadowIdentityV1,
+  descriptors: &[NativeIndexOperationDescriptorV1],
+  runtime_descriptor: &NativeIndexOperationDescriptorV1,
+  options: IndexRuntimeNativeRecoveryOptionsV1,
+) -> Result<(), NativeIndexRuntimeInstallationErrorV1> {
+  if runtime_descriptor.hash_algorithm() != identity.hash_algorithm || runtime_descriptor.database_id() != identity.database_id {
+    return Err(invalid("native_index_runtime_publisher_authority", "runtime publisher descriptor belongs to another shadow authority"));
+  }
+  if runtime_descriptor
+    .retained_identity_bytes()
+    .map_err(|error| invalid("native_index_runtime_publisher_descriptor_size", error.to_string()))?
+    > options.maximum_descriptor_bytes
+  {
+    return Err(invalid("native_index_runtime_publisher_descriptor_size", "runtime publisher descriptor exceeds the recovery byte bound"));
+  }
+  if descriptors.iter().any(|descriptor| {
+    descriptor.index_id() == runtime_descriptor.index_id() || descriptor.operation_id() == runtime_descriptor.operation_id()
+  }) {
+    return Err(invalid(
+      "native_index_runtime_publisher_descriptor_collision",
+      "runtime publisher descriptor collides with a query-visible index recovery descriptor",
+    ));
+  }
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_runtime_publisher(
+  engine: &StorageEngine,
+  coordinator_id: [u8; 16],
+  identity: &IndexRuntimeShadowIdentityV1,
+  semantic_authority: &SelectedSemanticAuthorityV1,
+  options: &NativeIndexRuntimePublisherOptionsV1,
+  publisher: Arc<V4FirstAuthorityPublisher>,
+  retirement_owner: SharedRetirementJournalOwnerV1,
+  cancellation: &CancellationToken,
+  clock: Arc<dyn VirtualClock>,
+  now_ms: u64,
+) -> Result<(NativeIndexRuntimeBatchPublisherV1, bool), NativeIndexRuntimeInstallationErrorV1> {
+  let owner = IndexRecoveryOwnerV1::new(identity.database_id, options.descriptor.index_id().to_vec(), options.descriptor.operation_id())?;
+  let mut store = NativeIndexRecoveryStoreV1::new(options.descriptor.clone(), publisher, retirement_owner, Arc::clone(&clock))?;
+  check_cancellation(cancellation)?;
+  if store.load_selected(&owner)?.is_some() {
+    let recovered = recover_index_runtime_dirty_overlay_v1(
+      &mut store,
+      identity.hash_algorithm,
+      identity.database_id,
+      identity.destination_physical_instance_id,
+      &owner,
+      options.workspace.clone(),
+      &engine.memory_coordinator(),
+      cancellation,
+    )?;
+    let recovered = match recovered {
+      IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) => recovered,
+      IndexRuntimeDirtyOverlayRecoveryOutcomeV1::ReconciliationRequired { reason, evidence } => {
+        return Err(invalid(
+          "native_index_runtime_publisher_recovery",
+          format!("selected runtime dirty overlay requires reconciliation ({reason:?}): {evidence:?}"),
+        ));
+      }
+      IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled => return Err(NativeIndexRuntimeInstallationErrorV1::Canceled),
+    };
+    if recovered.generation() != options.generation {
+      return Err(invalid(
+        "native_index_runtime_publisher_resume_generation",
+        "selected runtime workspace generation does not match the requested runtime generation",
+      ));
+    }
+    let publisher = NativeIndexRuntimeBatchPublisherV1::new_resumed(recovered, store, clock)?;
+    let workspace_identity = publisher.workspace_identity();
+    if publisher.runtime_id() != coordinator_id || workspace_identity.workspace_id() != options.workspace_id {
+      return Err(invalid(
+        "native_index_runtime_publisher_resume_identity",
+        "selected runtime workspace does not match the requested runtime and workspace identities",
+      ));
+    }
+    return Ok((publisher, true));
+  }
+
+  let workspace = DurableIndexRuntimeWorkspaceV1::create(
+    engine.database_path(),
+    IndexRuntimeWorkspaceIdentityV1::new(
+      identity.database_id,
+      identity.destination_physical_instance_id,
+      options.workspace_id,
+      coordinator_id,
+      identity.hash_algorithm,
+    )?,
+    options.workspace.clone(),
+    cancellation.clone(),
+    &engine.memory_coordinator(),
+  )?;
+  check_cancellation(cancellation)?;
+  let publisher = NativeIndexRuntimeBatchPublisherV1::new_unselected(
+    identity.hash_algorithm,
+    owner,
+    semantic_authority.root_hash.clone(),
+    options.generation,
+    now_ms,
+    workspace,
+    store,
+    cancellation.clone(),
+    clock,
+  )?;
+  Ok((publisher, false))
 }
 
 fn validate_descriptors(

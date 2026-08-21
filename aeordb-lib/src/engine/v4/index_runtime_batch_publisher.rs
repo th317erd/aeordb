@@ -244,6 +244,10 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     self.workspace.identity()
   }
 
+  pub(crate) fn selected_checkpoint(&self) -> Option<&IndexCheckpointRootV1> {
+    self.selected.as_ref()
+  }
+
   fn publish_exact(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
     if self.cancellation.is_cancelled() {
       return Err(cancelled("runtime_batch_cancelled", "runtime batch publication was canceled before workspace append"));

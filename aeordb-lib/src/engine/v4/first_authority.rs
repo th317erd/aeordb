@@ -2626,6 +2626,15 @@ impl SelectedSemanticAuthorityGuardV1<'_> {
   pub(crate) fn load(&self) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
     self.publisher.load_selected_semantic_authority_locked()
   }
+
+  pub(crate) fn load_index_operation_control(
+    &self,
+    database_id: &[u8; 16],
+    index_id: &[u8],
+    operation_id: &[u8; 16],
+  ) -> Result<Option<LoadedIndexOperationControlV1>, FirstAuthorityPublicationErrorV1> {
+    self.publisher.load_index_operation_control_locked(database_id, index_id, operation_id)
+  }
 }
 
 impl V4FirstAuthorityPublisher {
@@ -3320,10 +3329,16 @@ impl V4FirstAuthorityPublisher {
     index_id: &[u8],
     operation_id: &[u8; 16],
   ) -> Result<Option<LoadedIndexOperationControlV1>, FirstAuthorityPublicationErrorV1> {
-    let _authority = self.root_state.lock().map_err(|poisoned| {
-      drop(poisoned);
-      FirstAuthorityPublicationErrorV1::StateLockPoisoned
-    })?;
+    let authority = self.selected_semantic_authority_guard()?;
+    authority.load_index_operation_control(database_id, index_id, operation_id)
+  }
+
+  fn load_index_operation_control_locked(
+    &self,
+    database_id: &[u8; 16],
+    index_id: &[u8],
+    operation_id: &[u8; 16],
+  ) -> Result<Option<LoadedIndexOperationControlV1>, FirstAuthorityPublicationErrorV1> {
     let observation = self.observe()?;
     let header = &observation.selected.header;
     validate_index_operation_identity(header, database_id, index_id, operation_id)?;

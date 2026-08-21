@@ -27,8 +27,6 @@ pub enum IndexRuntimeCadenceErrorV1 {
   InvalidClock,
   #[error("index runtime cadence publisher lock is poisoned")]
   PublisherPoisoned,
-  #[error("installed index runtime has no cadence publisher")]
-  NotInstalled,
   #[error("index runtime drain made no progress while dirty records remained")]
   DrainStalled,
   #[error("index runtime drain accounting overflowed")]

@@ -357,14 +357,15 @@ impl DurableIndexRuntimeWorkspaceV1 {
     validate_canonical_native_path(database_path, "database path")?;
     validate_regular_database_path(database_path, "index runtime workspace database")?;
     let workspace_path = create_workspace_root(database_path, identity, &options)?;
+    validate_reusable_empty_workspace(&workspace_path)?;
     let manifests_path = workspace_path.join(MANIFEST_DIRECTORY);
     let objects_path = workspace_path.join("objects");
     let runtime_objects_path = objects_path.join(RUNTIME_OBJECT_DIRECTORY);
     let producer_objects_path = objects_path.join(PRODUCER_OBJECT_DIRECTORY);
-    create_private_directory_synced(&manifests_path, &workspace_path)?;
-    create_private_directory_synced(&objects_path, &workspace_path)?;
-    create_private_directory_synced(&runtime_objects_path, &objects_path)?;
-    create_private_directory_synced(&producer_objects_path, &objects_path)?;
+    ensure_private_directory_synced(&manifests_path, &workspace_path, "index runtime manifest directory")?;
+    ensure_private_directory_synced(&objects_path, &workspace_path, "index runtime object directory")?;
+    ensure_private_directory_synced(&runtime_objects_path, &objects_path, "index runtime batch directory")?;
+    ensure_private_directory_synced(&producer_objects_path, &objects_path, "index runtime producer-task directory")?;
     Ok(Self {
       identity,
       options,
@@ -1175,7 +1176,7 @@ fn create_workspace_root(
       create_private_directory_synced(&database_directory, base)?;
     }
     let workspace = database_directory.join(hex::encode(identity.workspace_id));
-    create_private_directory_synced(&workspace, &database_directory)?;
+    ensure_private_directory_synced(&workspace, &database_directory, "index runtime workspace directory")?;
     return Ok(workspace);
   }
   let parent = database_path.parent().ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database path has no parent".to_string()))?;
@@ -1186,8 +1187,57 @@ fn create_workspace_root(
     .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database filename is not canonical UTF-8".to_string()))?;
   let workspace =
     parent.join(format!(".{file_name}-index-runtime-{}-{}", hex::encode(identity.database_id), hex::encode(identity.workspace_id)));
-  create_private_directory_synced(&workspace, parent)?;
+  ensure_private_directory_synced(&workspace, parent, "index runtime workspace directory")?;
   Ok(workspace)
+}
+
+fn validate_reusable_empty_workspace(workspace: &Path) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_directory_entries(workspace, &[MANIFEST_DIRECTORY, "objects"], "index runtime workspace")?;
+  let manifests = workspace.join(MANIFEST_DIRECTORY);
+  if path_present(&manifests)? {
+    validate_directory_entries(&manifests, &[], "index runtime manifest directory")?;
+  }
+  let objects = workspace.join("objects");
+  if path_present(&objects)? {
+    validate_directory_entries(&objects, &[RUNTIME_OBJECT_DIRECTORY, PRODUCER_OBJECT_DIRECTORY], "index runtime object directory")?;
+  }
+  for (path, role) in [
+    (objects.join(RUNTIME_OBJECT_DIRECTORY), "index runtime batch directory"),
+    (objects.join(PRODUCER_OBJECT_DIRECTORY), "index runtime producer-task directory"),
+  ] {
+    if path_present(&path)? {
+      validate_directory_entries(&path, &[], role)?;
+    }
+  }
+  Ok(())
+}
+
+fn validate_directory_entries(path: &Path, allowed: &[&str], role: &str) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_private_directory(path, role)?;
+  let entries = fs::read_dir(path)
+    .map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "reusable empty workspace inventory", source })?;
+  for entry in entries {
+    let entry =
+      entry.map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "reusable empty workspace inventory entry", source })?;
+    let name = entry
+      .file_name()
+      .into_string()
+      .map_err(|_| IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} contains a non-UTF-8 entry")))?;
+    if !allowed.contains(&name.as_str()) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} contains unexpected retained state {name}")));
+    }
+    validate_private_directory(&entry.path(), role)?;
+  }
+  Ok(())
+}
+
+fn ensure_private_directory_synced(path: &Path, parent: &Path, role: &str) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  if path_present(path)? {
+    validate_private_directory(path, role)?;
+  } else {
+    create_private_directory_synced(path, parent)?;
+  }
+  Ok(())
 }
 
 fn object_stored_bytes(payload_length: usize) -> Result<u64, IndexRuntimeWorkspaceStoreErrorV1> {

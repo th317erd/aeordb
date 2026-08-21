@@ -910,19 +910,25 @@ impl IndexRuntimeInstallationPermitV1<'_> {
 
   pub(crate) fn install(
     self,
+    source_authority: &NamespaceWriteGuard<'_>,
     runtime: Arc<crate::engine::v4::index_runtime_installation::NativeIndexRuntimeV1>,
   ) -> Result<
     Arc<crate::engine::v4::index_runtime_owner::IndexRuntimeSnapshotV1>,
     crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1,
   > {
+    if source_authority.engine_id != self.engine as *const StorageEngine as usize {
+      return Err(crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(
+        "native index runtime source-authority token belongs to another engine".to_string(),
+      ));
+    }
     if runtime.owner().hash_algorithm() != self.engine.hash_algo || !runtime.owner().shares_soft_hub(&self.engine.soft_mutation_hub) {
       return Err(crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(
         "native index runtime does not share the engine hash profile and soft-mutation hub".to_string(),
       ));
     }
-    let _authority = self
+    self
       .engine
-      .direct_hard_authority_guard()
+      .ensure_writable()
       .map_err(|error| crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::Installation(error.to_string()))?;
     let snapshot = runtime.owner().refresh_for_installation()?;
     self.engine.index_runtime_v1.set(runtime).map_err(|_| crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1::AlreadyInstalled)?;
@@ -3664,18 +3670,6 @@ impl StorageEngine {
     IndexManager::new(self).flush_buffered_indexes_if_due()
   }
 
-  pub fn install_index_runtime_cadence_v1(
-    &self,
-    publisher: crate::engine::v4::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1,
-    clock: Arc<dyn crate::engine::VirtualClock>,
-  ) -> Result<(), crate::engine::v4::index_runtime_installation::NativeIndexRuntimeCadenceInstallationErrorV1> {
-    let runtime = self
-      .index_runtime_v1
-      .get()
-      .ok_or(crate::engine::v4::index_runtime_installation::NativeIndexRuntimeCadenceInstallationErrorV1::RuntimeNotInstalled)?;
-    runtime.install_cadence(publisher, clock)
-  }
-
   pub(crate) fn flush_index_runtime_if_due_v1(
     &self,
   ) -> Result<
@@ -3685,10 +3679,7 @@ impl StorageEngine {
     let Some(runtime) = self.index_runtime_v1.get() else {
       return Ok(None);
     };
-    let Some(cadence) = runtime.cadence() else {
-      return Ok(None);
-    };
-    cadence.flush_if_due().map(Some)
+    runtime.cadence().flush_if_due().map(Some)
   }
 
   fn index_runtime_emergency_state_v1(
@@ -3704,15 +3695,12 @@ impl StorageEngine {
     if snapshot.lifecycle == IndexRuntimeLifecycleV1::Stopped {
       return None;
     }
-    let workspace = match runtime.cadence() {
-      Some(cadence) => match cadence.try_emergency_workspace_snapshot() {
-        Ok(workspace) => workspace,
-        Err(error) => {
-          Self::push_spill_error(report, format!("index runtime workspace evidence unavailable during emergency spill: {error}"));
-          None
-        }
-      },
-      None => None,
+    let workspace = match runtime.cadence().try_emergency_workspace_snapshot() {
+      Ok(workspace) => workspace,
+      Err(error) => {
+        Self::push_spill_error(report, format!("index runtime workspace evidence unavailable during emergency spill: {error}"));
+        None
+      }
     }
     .map(|workspace| EmergencyIndexRuntimeWorkspaceV1 {
       path_encoding: crate::engine::emergency_spill::native_path_encoding(),
@@ -3764,8 +3752,7 @@ impl StorageEngine {
     let Some(runtime) = self.index_runtime_v1.get() else {
       return Ok(None);
     };
-    let cadence = runtime.cadence().ok_or(crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::NotInstalled)?;
-    cadence.drain_and_stop().map(Some)
+    runtime.cadence().drain_and_stop().map(Some)
   }
 
   /// Force all buffered index mutations to disk.

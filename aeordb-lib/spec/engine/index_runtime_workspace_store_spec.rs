@@ -174,6 +174,108 @@ fn reopen(
 }
 
 #[test]
+fn fresh_create_reuses_only_an_exact_empty_workspace_layout() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let create = || {
+    DurableIndexRuntimeWorkspaceV1::create(
+      &database,
+      identity(),
+      options(scratch.clone(), 8 * 1024 * 1024, 16),
+      CancellationToken::new(),
+      &memory,
+    )
+  };
+
+  let workspace = create().unwrap();
+  let workspace_path = workspace.workspace_path().to_path_buf();
+  drop(workspace);
+  assert!(create().is_ok(), "an exact empty workspace skeleton must be restartable");
+
+  fs::write(workspace_path.join("manifests/unselected.aiwm"), b"unselected state").unwrap();
+  let error = create().err().expect("retained workspace state must refuse fresh creation");
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(_)));
+}
+
+#[test]
+fn fresh_create_restores_missing_empty_directories_but_rejects_an_expected_file() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let create = || {
+    DurableIndexRuntimeWorkspaceV1::create(
+      &database,
+      identity(),
+      options(scratch.clone(), 8 * 1024 * 1024, 16),
+      CancellationToken::new(),
+      &memory,
+    )
+  };
+
+  let workspace = create().unwrap();
+  let workspace_path = workspace.workspace_path().to_path_buf();
+  drop(workspace);
+  fs::remove_dir(workspace_path.join("objects/tasks")).unwrap();
+  let reopened = create().unwrap();
+  assert!(workspace_path.join("objects/tasks").is_dir());
+  drop(reopened);
+
+  fs::remove_dir(workspace_path.join("manifests")).unwrap();
+  fs::write(workspace_path.join("manifests"), b"not a directory").unwrap();
+  let error = create().err().expect("an expected directory replaced by a file must fail closed");
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Workspace(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_create_rejects_symlinked_and_non_utf8_empty_workspace_entries() {
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+  use std::os::unix::fs::symlink;
+
+  for case in ["symlink", "non-utf8"] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path());
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let memory = memory(16 * 1024 * 1024);
+    let create = || {
+      DurableIndexRuntimeWorkspaceV1::create(
+        &database,
+        identity(),
+        options(scratch.clone(), 8 * 1024 * 1024, 16),
+        CancellationToken::new(),
+        &memory,
+      )
+    };
+
+    let workspace = create().unwrap();
+    let workspace_path = workspace.workspace_path().to_path_buf();
+    drop(workspace);
+    let error = if case == "symlink" {
+      fs::remove_dir(workspace_path.join("manifests")).unwrap();
+      let outside = directory.path().join("outside");
+      fs::create_dir(&outside).unwrap();
+      symlink(&outside, workspace_path.join("manifests")).unwrap();
+      create().err().expect("an allowed entry name replaced by a symlink must fail closed")
+    } else {
+      fs::write(workspace_path.join(OsString::from_vec(vec![0xff])), b"unexpected state").unwrap();
+      create().err().expect("a non-UTF-8 retained entry must fail closed")
+    };
+    assert!(matches!(
+      error,
+      aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Workspace(_)
+        | aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(_)
+    ));
+  }
+}
+
+#[test]
 fn private_runtime_workspace_appends_and_reopens_one_exact_streamed_head() {
   let directory = tempdir().unwrap();
   let database = database_file(directory.path());

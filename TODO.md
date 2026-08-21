@@ -1032,6 +1032,16 @@
                     - [x] Pass the exact-commit native Darwin matrix, including the raw native-path identity fixture.
                     - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
+                  - [x] Add compile-red proof that runtime publication and cadence cannot be installed as a second, partial lifecycle step.
+                  - [x] Construct one fresh or selected-head-resumed publisher and cadence before exposing the recovered runtime owner.
+                  - [x] Reuse only an exact empty unselected workspace after restart; reject any unexpected retained state.
+                  - [x] Prove selected dirty-overlay restart, malformed recovery, cancellation, pressure, spill/shutdown refusal, cached metrics, and legacy-query invariants.
+                  - [x] Acquire source hard authority before pinning destination selection at the final installation frontier; prove the cross-file lock order cannot regress.
+                  - [x] Prove fresh-workspace restart accepts partial empty skeletons but rejects wrong node types, symlinks, non-UTF-8 names, and retained payloads.
+                  - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3f.
+                    - [x] Pass the final Linux focused, affected, architecture, suppression, contract, documentation, static, full-workspace, resource, and real-filesystem gates.
+                    - [ ] Pass the exact-commit native Darwin matrix after landing the Linux unit.
+                    - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
