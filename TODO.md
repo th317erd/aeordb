@@ -1040,7 +1040,7 @@
                   - [x] Prove fresh-workspace restart accepts partial empty skeletons but rejects wrong node types, symlinks, non-UTF-8 names, and retained payloads.
                   - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3f.
                     - [x] Pass the final Linux focused, affected, architecture, suppression, contract, documentation, static, full-workspace, resource, and real-filesystem gates.
-                    - [ ] Pass the exact-commit native Darwin matrix after landing the Linux unit.
+                    - [x] Pass the exact-commit native Darwin matrix after landing the Linux unit.
                     - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
