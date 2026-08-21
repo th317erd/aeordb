@@ -13,11 +13,14 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::VirtualClock;
 
 use super::index_coordinator::IndexFlushReasonV1;
+use super::index_producer_admission::IndexProducerJournalAdmissionSummaryV1;
+use super::index_producer_coordinator::{IndexProducerAdmissionV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1};
 use super::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimeErrorV1, IndexRuntimeFlushOutcomeV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerV1,
 };
 use super::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1;
 use super::index_runtime_workspace_store::{IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceSelectedHeadV1};
+use super::index_task::MutationJournalV1;
 
 pub type NativeIndexRuntimeCadenceV1 = IndexRuntimeCadenceV1<NativeIndexRuntimeBatchPublisherV1>;
 
@@ -185,6 +188,59 @@ where
       .publisher
       .lock()
       .map_err(|_| self.fail_closed(IndexRuntimeCadenceErrorV1::PublisherPoisoned, "cadence_publisher_poisoned", context))
+  }
+}
+
+impl<Publisher> IndexRuntimeCadenceV1<Publisher>
+where
+  Publisher: IndexRuntimeBatchPublisherV1 + IndexProducerSpillStoreV1 + Send,
+{
+  /// Admit one canonical producer task through the same serialized publisher
+  /// that owns pressure spill and runtime-batch publication.
+  pub(crate) fn admit_task(&self, request: IndexProducerTaskRequestV1<'_>) -> Result<IndexProducerAdmissionV1, IndexRuntimeCadenceErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let now_ms = self.clock.now_ms();
+    if now_ms == 0 {
+      return Err(self.fail_closed(
+        IndexRuntimeCadenceErrorV1::InvalidClock,
+        "cadence_invalid_clock",
+        "index runtime cadence clock returned zero during producer admission; queued index work was retained",
+      ));
+    }
+    let mut publisher =
+      self.lock_publisher("index runtime cadence publisher lock was poisoned during producer admission; queued index work was retained")?;
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    Ok(self.owner.admit_task(request, now_ms, &mut *publisher)?)
+  }
+
+  /// Admit every exact mutation record from one validated journal through the
+  /// same serialized spill boundary used by maintenance tasks and publication.
+  pub(crate) fn admit_mutation_journal(
+    &self,
+    journal: &MutationJournalV1<'_>,
+  ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeCadenceErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let now_ms = self.clock.now_ms();
+    if now_ms == 0 {
+      return Err(self.fail_closed(
+        IndexRuntimeCadenceErrorV1::InvalidClock,
+        "cadence_invalid_clock",
+        "index runtime cadence clock returned zero during journal admission; queued index work was retained",
+      ));
+    }
+    let mut publisher =
+      self.lock_publisher("index runtime cadence publisher lock was poisoned during journal admission; queued index work was retained")?;
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let cancelled = || self.cancellation.is_cancelled();
+    Ok(self.owner.admit_mutation_journal(journal, now_ms, &cancelled, &mut *publisher)?)
   }
 }
 

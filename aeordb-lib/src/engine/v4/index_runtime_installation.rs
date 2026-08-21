@@ -25,6 +25,10 @@ use super::index_recovery_store::{
 };
 use super::index_runtime_batch_publisher::{IndexRuntimeBatchPublisherBuildErrorV1, NativeIndexRuntimeBatchPublisherV1};
 use super::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, NativeIndexRuntimeCadenceV1};
+use super::index_producer_admission::{
+  IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceClassV1, IndexProducerMaintenanceIntentV1, build_maintenance_task,
+};
+use super::index_producer_coordinator::IndexProducerAdmissionV1;
 use super::index_runtime_dirty_overlay_recovery::{
   IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, recover_index_runtime_dirty_overlay_v1,
 };
@@ -190,6 +194,31 @@ impl NativeIndexRuntimeV1 {
   pub fn cadence(&self) -> &Arc<NativeIndexRuntimeCadenceV1> {
     &self.cadence
   }
+
+  pub(crate) fn admit_maintenance_task(
+    &self,
+    source_operation_id: [u8; 16],
+    class: IndexProducerMaintenanceClassV1,
+    publication_sequence: u64,
+    namespace_root: &[u8],
+    scope: &str,
+  ) -> Result<IndexProducerAdmissionV1, NativeIndexRuntimeTaskAdmissionErrorV1> {
+    let semantic_authority = self.publisher.load_selected_semantic_authority()?;
+    validate_selected_semantic_authority_identity(&self.shadow_identity, &semantic_authority)
+      .map_err(|(code, message)| NativeIndexRuntimeTaskAdmissionErrorV1::Invalid { code, message: message.to_string() })?;
+    let request = build_maintenance_task(
+      self.shadow_identity.hash_algorithm,
+      IndexProducerMaintenanceIntentV1 {
+        source_operation_id,
+        class,
+        publication_sequence,
+        namespace_root,
+        semantic_state_root: &semantic_authority.semantic_state.object_id,
+        scope,
+      },
+    )?;
+    self.cadence.admit_task(request).map_err(Into::into)
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,6 +266,20 @@ pub enum NativeIndexRuntimeInstallationErrorV1 {
   Cadence(#[from] IndexRuntimeCadenceErrorV1),
   #[error("native index runtime owner failed: {0}")]
   Runtime(#[from] IndexRuntimeErrorV1),
+}
+
+#[derive(Debug, Error)]
+pub enum NativeIndexRuntimeTaskAdmissionErrorV1 {
+  #[error("native index maintenance source authority failed: {0}")]
+  Source(#[from] EngineError),
+  #[error("native index maintenance semantic authority failed: {0}")]
+  Authority(#[from] FirstAuthorityPublicationErrorV1),
+  #[error("native index maintenance intent failed: {0}")]
+  Intent(#[from] IndexProducerMaintenanceAdmissionErrorV1),
+  #[error("native index maintenance cadence failed: {0}")]
+  Cadence(#[from] IndexRuntimeCadenceErrorV1),
+  #[error("native index maintenance runtime authority is invalid: {code}: {message}")]
+  Invalid { code: &'static str, message: String },
 }
 
 pub fn install_native_index_runtime_v1(
@@ -397,11 +440,18 @@ fn validate_selected_semantic_authority(
   identity: &IndexRuntimeShadowIdentityV1,
   authority: &SelectedSemanticAuthorityV1,
 ) -> Result<(), NativeIndexRuntimeInstallationErrorV1> {
+  validate_selected_semantic_authority_identity(identity, authority).map_err(|(code, message)| invalid(code, message))
+}
+
+fn validate_selected_semantic_authority_identity(
+  identity: &IndexRuntimeShadowIdentityV1,
+  authority: &SelectedSemanticAuthorityV1,
+) -> Result<(), (&'static str, &'static str)> {
   if authority.database_id != identity.database_id
     || authority.physical_instance_id != identity.destination_physical_instance_id
     || authority.system_family_registry_fingerprint != identity.system_family_registry_fingerprint
   {
-    return Err(invalid("native_index_semantic_authority_identity", "selected semantic authority belongs to another destination identity"));
+    return Err(("native_index_semantic_authority_identity", "selected semantic authority belongs to another destination identity"));
   }
   Ok(())
 }

@@ -1043,6 +1043,13 @@
                     - [x] Pass the exact-commit native Darwin matrix after landing the Linux unit.
                     - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
+            - [x] P6-2c-d1: freeze the complete maintenance producer taxonomy and deterministic root/semantic/scope-bound operation identity.
+            - [x] P6-2c-d2: make the installed cadence the sole serialized admission and durable-spill boundary for both exact mutation journals and root-pinned maintenance tasks.
+            - [x] P6-2c-d3: expose one source-authority-first `StorageEngine` maintenance admission facade that is inert without an installed runtime and reloads current semantic authority.
+            - [ ] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
+            - [ ] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
+            - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
+            - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.

@@ -37,7 +37,8 @@ use aeordb::engine::v4::index_coordinator::{
 use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
-use aeordb::engine::v4::index_producer_coordinator::IndexProducerCoordinatorOptionsV1;
+use aeordb::engine::v4::index_producer_coordinator::{IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1};
+use aeordb::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1;
 use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
 use aeordb::engine::v4::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
@@ -793,6 +794,12 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   let clock: Arc<dyn VirtualClock> = Arc::new(MockClock::new(1, 1_700_000_000_200));
   let identity = IndexRuntimeShadowIdentityV1::from_preflight(&permit);
 
+  assert_eq!(
+    source.admit_index_maintenance_task_v1([0x41; 16], IndexProducerMaintenanceClassV1::Reindex, "/runtime").unwrap(),
+    None,
+    "an engine without an installed runtime must preserve the legacy-only path"
+  );
+
   let canceled = CancellationToken::new();
   canceled.cancel();
   let error = install_native_index_runtime_v1(
@@ -838,6 +845,20 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   assert_eq!(source.index_runtime_snapshot_v1().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
   DirectoryOps::new(&source).store_file_buffered(&RequestContext::system(), "/runtime-routed.txt", b"runtime", Some("text/plain")).unwrap();
   assert_eq!(source.index_runtime_snapshot_v1().unwrap().soft_hub.queued_notices, 1);
+  assert_eq!(
+    source.admit_index_maintenance_task_v1([0x42; 16], IndexProducerMaintenanceClassV1::Reindex, "/runtime").unwrap(),
+    Some(IndexProducerAdmissionV1::Queued)
+  );
+  assert_eq!(
+    source.admit_index_maintenance_task_v1([0x42; 16], IndexProducerMaintenanceClassV1::Reindex, "/runtime").unwrap(),
+    Some(IndexProducerAdmissionV1::Duplicate)
+  );
+  assert_eq!(source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
+  assert!(
+    source.admit_index_maintenance_task_v1([0x43; 16], IndexProducerMaintenanceClassV1::Repair, "runtime").is_err(),
+    "malformed scope must not enter the root-pinned maintenance doorway"
+  );
+  assert_eq!(source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
   assert_eq!(source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes > 0, true,);
 
   let duplicate = install_native_index_runtime_v1(

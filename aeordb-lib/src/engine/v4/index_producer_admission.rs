@@ -1,16 +1,73 @@
 use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
+use crate::engine::path_utils::normalize_path;
 
 use super::hash::digest_parts;
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerSpillStoreV1,
-  IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
+  IndexProducerTaskKindV1, IndexProducerTaskRequestV1, INDEX_PRODUCER_SCOPE_BYTES_MAX,
 };
 use super::index_task::{MutationJournalV1, MutationRecordV1};
 use super::reader::FormatError;
 
 const MUTATION_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:mutation-operation:v1\0";
+const MAINTENANCE_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:maintenance-operation:v1\0";
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexProducerMaintenanceIntentV1<'a> {
+  pub source_operation_id: [u8; 16],
+  pub class: IndexProducerMaintenanceClassV1,
+  pub publication_sequence: u64,
+  pub namespace_root: &'a [u8],
+  pub semantic_state_root: &'a [u8],
+  pub scope: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexProducerMaintenanceClassV1 {
+  DeleteCleanup,
+  ConfigurationRetirement,
+  Reindex,
+  Repair,
+  ExplicitLegacyMutation,
+  LegacyMigration,
+  DefinitionBuild,
+  Compaction,
+}
+
+impl IndexProducerMaintenanceClassV1 {
+  pub const fn id(self) -> u16 {
+    match self {
+      Self::DeleteCleanup => 1,
+      Self::ConfigurationRetirement => 2,
+      Self::Reindex => 3,
+      Self::Repair => 4,
+      Self::ExplicitLegacyMutation => 5,
+      Self::LegacyMigration => 6,
+      Self::DefinitionBuild => 7,
+      Self::Compaction => 8,
+    }
+  }
+
+  pub const fn task_kind(self) -> IndexProducerTaskKindV1 {
+    match self {
+      Self::DeleteCleanup | Self::Reindex => IndexProducerTaskKindV1::Rebuild,
+      Self::ConfigurationRetirement => IndexProducerTaskKindV1::Retire,
+      Self::Repair => IndexProducerTaskKindV1::Repair,
+      Self::ExplicitLegacyMutation => IndexProducerTaskKindV1::ExplicitMutation,
+      Self::LegacyMigration => IndexProducerTaskKindV1::LegacyMigration,
+      Self::DefinitionBuild => IndexProducerTaskKindV1::Build,
+      Self::Compaction => IndexProducerTaskKindV1::Compact,
+    }
+  }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum IndexProducerMaintenanceAdmissionErrorV1 {
+  #[error("invalid index producer maintenance intent: {0}")]
+  Invalid(String),
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexProducerJournalAdmissionSummaryV1 {
@@ -65,6 +122,73 @@ pub fn derive_mutation_operation_id(
     return Err(IndexProducerJournalAdmissionErrorV1::ZeroOperationIdentity);
   }
   Ok(operation_id)
+}
+
+pub fn build_maintenance_task<'a>(
+  hash_algorithm: HashAlgorithm,
+  intent: IndexProducerMaintenanceIntentV1<'a>,
+) -> Result<IndexProducerTaskRequestV1<'a>, IndexProducerMaintenanceAdmissionErrorV1> {
+  if intent.source_operation_id == [0; 16] {
+    return Err(maintenance_invalid("source operation identity is all zeroes"));
+  }
+  if intent.publication_sequence == 0 {
+    return Err(maintenance_invalid("publication sequence must be nonzero"));
+  }
+  let hash_width = hash_algorithm.hash_length();
+  for (role, value) in [("namespace root", intent.namespace_root), ("semantic-state root", intent.semantic_state_root)] {
+    if value.len() != hash_width || value.iter().all(|byte| *byte == 0) {
+      return Err(maintenance_invalid(format!("{role} must be a nonzero complete database hash")));
+    }
+  }
+  if intent.scope.is_empty()
+    || !intent.scope.starts_with('/')
+    || intent.scope.len() > INDEX_PRODUCER_SCOPE_BYTES_MAX
+    || normalize_path(intent.scope) != intent.scope
+  {
+    return Err(maintenance_invalid("scope must be a nonempty canonical absolute path within the fixed bound"));
+  }
+  let class = intent.class.id().to_le_bytes();
+  let kind = intent.class.task_kind();
+  let kind_id = kind.id().to_le_bytes();
+  let publication_sequence = intent.publication_sequence.to_le_bytes();
+  let scope_length = u64::try_from(intent.scope.len())
+    .map_err(|error| maintenance_invalid(format!("scope length does not fit u64: {error}")))?
+    .to_le_bytes();
+  let digest = digest_parts(
+    hash_algorithm,
+    &[
+      MAINTENANCE_OPERATION_DOMAIN_V1,
+      &intent.source_operation_id,
+      &class,
+      &kind_id,
+      &publication_sequence,
+      intent.namespace_root,
+      intent.semantic_state_root,
+      &scope_length,
+      intent.scope.as_bytes(),
+    ],
+  );
+  let operation_prefix =
+    digest.get(..16).ok_or_else(|| maintenance_invalid(format!("derived operation digest has only {} bytes", digest.len())))?;
+  let mut operation_id = [0u8; 16];
+  operation_id.copy_from_slice(operation_prefix);
+  if operation_id == [0; 16] {
+    return Err(maintenance_invalid("derived operation identity is all zeroes"));
+  }
+  Ok(IndexProducerTaskRequestV1 {
+    operation_id,
+    kind,
+    publication_sequence: intent.publication_sequence,
+    namespace_root_before: intent.namespace_root,
+    namespace_root_after: intent.namespace_root,
+    semantic_state_root: intent.semantic_state_root,
+    journal_head: None,
+    scope: Some(intent.scope),
+  })
+}
+
+fn maintenance_invalid(message: impl Into<String>) -> IndexProducerMaintenanceAdmissionErrorV1 {
+  IndexProducerMaintenanceAdmissionErrorV1::Invalid(message.into())
 }
 
 pub fn admit_mutation_journal_tasks(

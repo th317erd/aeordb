@@ -1271,6 +1271,24 @@ impl StorageEngine {
     self.index_runtime_v1.get().map(|runtime| runtime.owner().cached_snapshot())
   }
 
+  pub fn admit_index_maintenance_task_v1(
+    &self,
+    source_operation_id: [u8; 16],
+    class: crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1,
+    scope: &str,
+  ) -> Result<
+    Option<crate::engine::v4::index_producer_coordinator::IndexProducerAdmissionV1>,
+    crate::engine::v4::index_runtime_installation::NativeIndexRuntimeTaskAdmissionErrorV1,
+  > {
+    let Some(runtime) = self.index_runtime_v1.get() else {
+      return Ok(None);
+    };
+    let _source_authority = self.direct_hard_authority_guard()?;
+    let namespace_root = self.head_hash()?;
+    let publication_sequence = self.durability_snapshot()?.hard_frontier;
+    runtime.admit_maintenance_task(source_operation_id, class, publication_sequence, &namespace_root, scope).map(Some)
+  }
+
   pub(crate) fn begin_index_runtime_installation_v1(
     &self,
   ) -> Result<IndexRuntimeInstallationPermitV1<'_>, crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1> {

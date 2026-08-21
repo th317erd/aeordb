@@ -1,7 +1,8 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::index_producer_admission::{
-  IndexProducerJournalAdmissionErrorV1, admit_mutation_journal_tasks, derive_mutation_operation_id,
+  IndexProducerJournalAdmissionErrorV1, IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceIntentV1,
+  IndexProducerMaintenanceClassV1, admit_mutation_journal_tasks, build_maintenance_task, derive_mutation_operation_id,
 };
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
@@ -242,5 +243,127 @@ fn operation_identity_rejects_wrong_width_and_supports_every_hash_profile() {
     let second = derive_mutation_operation_id(algorithm, &identity, 1).unwrap();
     assert_ne!(first, [0; 16]);
     assert_ne!(first, second);
+  }
+}
+
+#[test]
+fn maintenance_intent_builds_one_root_pinned_body_free_retry_stable_task() {
+  let root = hash(b"maintenance-root");
+  let semantic = hash(b"maintenance-semantic");
+  let intent = IndexProducerMaintenanceIntentV1 {
+    source_operation_id: [0x71; 16],
+    class: IndexProducerMaintenanceClassV1::Reindex,
+    publication_sequence: 42,
+    namespace_root: &root,
+    semantic_state_root: &semantic,
+    scope: "/docs",
+  };
+
+  let first = build_maintenance_task(ALGORITHM, intent).unwrap();
+  let retry = build_maintenance_task(ALGORITHM, intent).unwrap();
+  assert_eq!(first.operation_id, retry.operation_id);
+  assert_ne!(first.operation_id, [0; 16]);
+  assert_eq!(first.kind, IndexProducerTaskKindV1::Rebuild);
+  assert_eq!(first.publication_sequence, 42);
+  assert_eq!(first.namespace_root_before, root);
+  assert_eq!(first.namespace_root_after, root);
+  assert_eq!(first.semantic_state_root, semantic);
+  assert_eq!(first.journal_head, None);
+  assert_eq!(first.scope, Some("/docs"));
+}
+
+#[test]
+fn maintenance_identity_separates_every_authority_dimension() {
+  let root = hash(b"maintenance-root");
+  let other_root = hash(b"maintenance-root-other");
+  let semantic = hash(b"maintenance-semantic");
+  let other_semantic = hash(b"maintenance-semantic-other");
+  let base = IndexProducerMaintenanceIntentV1 {
+    source_operation_id: [0x72; 16],
+    class: IndexProducerMaintenanceClassV1::Repair,
+    publication_sequence: 42,
+    namespace_root: &root,
+    semantic_state_root: &semantic,
+    scope: "/docs",
+  };
+  let base_id = build_maintenance_task(ALGORITHM, base).unwrap().operation_id;
+  for changed in [
+    IndexProducerMaintenanceIntentV1 { source_operation_id: [0x73; 16], ..base },
+    IndexProducerMaintenanceIntentV1 { class: IndexProducerMaintenanceClassV1::Reindex, ..base },
+    IndexProducerMaintenanceIntentV1 { publication_sequence: 43, ..base },
+    IndexProducerMaintenanceIntentV1 { namespace_root: &other_root, ..base },
+    IndexProducerMaintenanceIntentV1 { semantic_state_root: &other_semantic, ..base },
+    IndexProducerMaintenanceIntentV1 { scope: "/docs/sub", ..base },
+  ] {
+    assert_ne!(build_maintenance_task(ALGORITHM, changed).unwrap().operation_id, base_id);
+  }
+}
+
+#[test]
+fn maintenance_intent_rejects_malformed_authority_before_admission() {
+  let root = hash(b"maintenance-root");
+  let semantic = hash(b"maintenance-semantic");
+  let valid = IndexProducerMaintenanceIntentV1 {
+    source_operation_id: [0x74; 16],
+    class: IndexProducerMaintenanceClassV1::ConfigurationRetirement,
+    publication_sequence: 42,
+    namespace_root: &root,
+    semantic_state_root: &semantic,
+    scope: "/docs",
+  };
+  let malformed = [
+    IndexProducerMaintenanceIntentV1 { source_operation_id: [0; 16], ..valid },
+    IndexProducerMaintenanceIntentV1 { publication_sequence: 0, ..valid },
+    IndexProducerMaintenanceIntentV1 { namespace_root: &[0x11; 31], ..valid },
+    IndexProducerMaintenanceIntentV1 { namespace_root: &[0; 32], ..valid },
+    IndexProducerMaintenanceIntentV1 { semantic_state_root: &[0x11; 31], ..valid },
+    IndexProducerMaintenanceIntentV1 { semantic_state_root: &[0; 32], ..valid },
+    IndexProducerMaintenanceIntentV1 { scope: "docs", ..valid },
+    IndexProducerMaintenanceIntentV1 { scope: "/docs/../private", ..valid },
+  ];
+  for intent in malformed {
+    assert!(matches!(build_maintenance_task(ALGORITHM, intent), Err(IndexProducerMaintenanceAdmissionErrorV1::Invalid(_))));
+  }
+}
+
+#[test]
+fn maintenance_intent_supports_every_database_hash_profile() {
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let root = vec![0x81; algorithm.hash_length()];
+    let semantic = vec![0x82; algorithm.hash_length()];
+    let request = build_maintenance_task(
+      algorithm,
+      IndexProducerMaintenanceIntentV1 {
+        source_operation_id: [0x75; 16],
+        class: IndexProducerMaintenanceClassV1::LegacyMigration,
+        publication_sequence: 1,
+        namespace_root: &root,
+        semantic_state_root: &semantic,
+        scope: "/",
+      },
+    )
+    .unwrap();
+    assert_ne!(request.operation_id, [0; 16]);
+  }
+}
+
+#[test]
+fn maintenance_classes_freeze_every_live_producer_mapping_without_exposing_journal_kinds() {
+  let expected = [
+    (IndexProducerMaintenanceClassV1::DeleteCleanup, 1, IndexProducerTaskKindV1::Rebuild),
+    (IndexProducerMaintenanceClassV1::ConfigurationRetirement, 2, IndexProducerTaskKindV1::Retire),
+    (IndexProducerMaintenanceClassV1::Reindex, 3, IndexProducerTaskKindV1::Rebuild),
+    (IndexProducerMaintenanceClassV1::Repair, 4, IndexProducerTaskKindV1::Repair),
+    (IndexProducerMaintenanceClassV1::ExplicitLegacyMutation, 5, IndexProducerTaskKindV1::ExplicitMutation),
+    (IndexProducerMaintenanceClassV1::LegacyMigration, 6, IndexProducerTaskKindV1::LegacyMigration),
+    (IndexProducerMaintenanceClassV1::DefinitionBuild, 7, IndexProducerTaskKindV1::Build),
+    (IndexProducerMaintenanceClassV1::Compaction, 8, IndexProducerTaskKindV1::Compact),
+  ];
+  for (class, id, kind) in expected {
+    assert_eq!(class.id(), id);
+    assert_eq!(class.task_kind(), kind);
+    assert!(!class.task_kind().requires_journal());
   }
 }

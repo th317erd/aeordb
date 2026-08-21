@@ -12,7 +12,7 @@ use super::index_coordinator::{IndexCoordinatorErrorV1, IndexCoordinatorV1, Inde
 use super::index_page::{OrderedIndexRoleV1, decode_ordered_record};
 use super::index_record::{DocumentStateOwnerV1, is_valid_document_state_class};
 
-const MAX_SCOPE_BYTES: usize = 16 * 1024;
+pub const INDEX_PRODUCER_SCOPE_BYTES_MAX: usize = 16 * 1024;
 static NEXT_COORDINATOR_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -742,7 +742,7 @@ impl IndexProducerCoordinatorV1 {
       }
       let scope =
         request.scope.ok_or_else(|| IndexProducerCoordinatorErrorV1::InvalidTask("root-pinned work requires a scope".to_string()))?;
-      if scope.is_empty() || !scope.starts_with('/') || scope.len() > MAX_SCOPE_BYTES || normalize_path(scope) != scope {
+      if scope.is_empty() || !scope.starts_with('/') || scope.len() > INDEX_PRODUCER_SCOPE_BYTES_MAX || normalize_path(scope) != scope {
         return Err(IndexProducerCoordinatorErrorV1::InvalidTask(
           "scope must be a nonempty canonical absolute path within the fixed bound".to_string(),
         ));
