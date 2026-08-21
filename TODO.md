@@ -1029,6 +1029,8 @@
                     - [x] Reject any caller-supplied artifact whose typed fields disagree with the exact retained manifest/component bytes.
                     - [x] Reject foreign-database artifacts before WAL replay, persistent catalog/latch seeding, or applied-marker publication.
                   - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3e.
+                    - [x] Pass the exact-commit native Darwin matrix, including the raw native-path identity fixture.
+                    - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
