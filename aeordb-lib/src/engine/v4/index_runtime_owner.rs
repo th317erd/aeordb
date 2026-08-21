@@ -513,6 +513,21 @@ impl IndexRuntimeOwnerV1 {
     Ok(snapshot)
   }
 
+  pub(crate) fn admit_recovered_task(
+    &self,
+    request: IndexProducerTaskRequestV1<'_>,
+    now_ms: u64,
+  ) -> Result<IndexProducerAdmissionV1, IndexRuntimeErrorV1> {
+    let result = (|| {
+      let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+      if state.lifecycle != IndexRuntimeLifecycleV1::Recovering {
+        return Err(IndexRuntimeErrorV1::RecoveryAlreadyResolved { lifecycle: state.lifecycle });
+      }
+      state.producer.admit(request, now_ms).map_err(|error| producer_error(error.to_string()))
+    })();
+    self.finish_observed(result)
+  }
+
   pub fn admit_task(
     &self,
     request: IndexProducerTaskRequestV1<'_>,

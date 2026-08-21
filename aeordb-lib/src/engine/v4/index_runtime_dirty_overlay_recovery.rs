@@ -18,8 +18,8 @@ use super::index_coordinator_recovery::{
   IndexRecoveryStoreV1, LoadedIndexCheckpointOutcomeV1, load_index_checkpoint_from_key_v1,
 };
 use super::index_runtime_workspace_store::{
-  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1,
-  IndexRuntimeWorkspaceStoreErrorV1,
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeRecoveredTaskSinkV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceOptionsV1,
+  IndexRuntimeWorkspaceSelectedHeadV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::index_task::{IndexTaskKindV1, IndexTaskStateV1, decode_index_task_checkpoint};
 
@@ -130,6 +130,56 @@ pub fn recover_index_runtime_dirty_overlay_v1(
   memory: &MemoryCoordinator,
   cancellation: &CancellationToken,
 ) -> Result<IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryErrorV1> {
+  recover_index_runtime_dirty_overlay_inner_v1(
+    store,
+    hash_algorithm,
+    database_id,
+    destination_physical_instance_id,
+    owner,
+    workspace_options,
+    memory,
+    cancellation,
+    None,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recover_index_runtime_dirty_overlay_with_task_sink_v1(
+  store: &mut dyn IndexRecoveryStoreV1,
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  destination_physical_instance_id: [u8; 16],
+  owner: &IndexRecoveryOwnerV1,
+  workspace_options: IndexRuntimeWorkspaceOptionsV1,
+  memory: &MemoryCoordinator,
+  cancellation: &CancellationToken,
+  recovered_task_sink: &mut dyn IndexRuntimeRecoveredTaskSinkV1,
+) -> Result<IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryErrorV1> {
+  recover_index_runtime_dirty_overlay_inner_v1(
+    store,
+    hash_algorithm,
+    database_id,
+    destination_physical_instance_id,
+    owner,
+    workspace_options,
+    memory,
+    cancellation,
+    Some(recovered_task_sink),
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_index_runtime_dirty_overlay_inner_v1(
+  store: &mut dyn IndexRecoveryStoreV1,
+  hash_algorithm: HashAlgorithm,
+  database_id: [u8; 16],
+  destination_physical_instance_id: [u8; 16],
+  owner: &IndexRecoveryOwnerV1,
+  workspace_options: IndexRuntimeWorkspaceOptionsV1,
+  memory: &MemoryCoordinator,
+  cancellation: &CancellationToken,
+  recovered_task_sink: Option<&mut dyn IndexRuntimeRecoveredTaskSinkV1>,
+) -> Result<IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryErrorV1> {
   if cancellation.is_cancelled() {
     return Ok(IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled);
   }
@@ -200,15 +250,28 @@ pub fn recover_index_runtime_dirty_overlay_v1(
     )
   };
   drop(loaded);
-  let workspace = match DurableIndexRuntimeWorkspaceV1::resume(
-    database_id,
-    destination_physical_instance_id,
-    hash_algorithm,
-    selected_workspace,
-    workspace_options,
-    cancellation.clone(),
-    memory,
-  ) {
+  let resumed = match recovered_task_sink {
+    Some(sink) => DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+      database_id,
+      destination_physical_instance_id,
+      hash_algorithm,
+      selected_workspace,
+      workspace_options,
+      cancellation.clone(),
+      memory,
+      sink,
+    ),
+    None => DurableIndexRuntimeWorkspaceV1::resume(
+      database_id,
+      destination_physical_instance_id,
+      hash_algorithm,
+      selected_workspace,
+      workspace_options,
+      cancellation.clone(),
+      memory,
+    ),
+  };
+  let workspace = match resumed {
     Ok(workspace) => workspace,
     Err(IndexRuntimeWorkspaceStoreErrorV1::Canceled) => return Ok(IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Canceled),
     Err(error @ IndexRuntimeWorkspaceStoreErrorV1::Capacity(_)) => {

@@ -37,7 +37,10 @@ use aeordb::engine::v4::index_coordinator::{
 use aeordb::engine::v4::index_operation_control::IndexOperationKindV1;
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
-use aeordb::engine::v4::index_producer_coordinator::{IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1};
+use aeordb::engine::v4::index_producer_coordinator::{
+  IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerTaskKindV1,
+  IndexProducerTaskRequestV1,
+};
 use aeordb::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1;
 use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
 use aeordb::engine::v4::index_recovery_store::{
@@ -1070,6 +1073,74 @@ fn selected_runtime_dirty_overlay_resumes_after_source_and_destination_restart_w
   assert_eq!(snapshot.highest_checkpoint_sequence, 0, "dirty overlay is not query-visible coverage");
   assert_eq!(snapshot.degraded.as_ref().unwrap().code, "native_index_dirty_overlay_requires_reconciliation");
   assert_eq!(reopened_publisher.load_selected_semantic_authority().unwrap().root_hash, receipt.selected_root_hash);
+}
+
+#[test]
+fn selected_runtime_restart_streams_each_durable_producer_task_into_the_recovering_owner_once() {
+  let fixture = RuntimeFixture::new("runtime-selected-producer-restart");
+  let runtime_id = id(0x64);
+  let workspace_id = id(0xe4);
+  let (_selected, mut runtime_publisher, _successor) =
+    seed_selected_runtime_dirty_overlay_with_successor(&fixture, runtime_id, workspace_id);
+  let authority = fixture.destination.publisher().load_selected_semantic_authority().unwrap();
+  let task = IndexProducerTaskRequestV1 {
+    operation_id: id(0x91),
+    kind: IndexProducerTaskKindV1::Rebuild,
+    publication_sequence: authority.root_publication_sequence,
+    namespace_root_before: &authority.root_hash,
+    namespace_root_after: &authority.root_hash,
+    semantic_state_root: &authority.semantic_state.object_id,
+    journal_head: None,
+    scope: Some("/docs"),
+  };
+  let mut producer = IndexProducerCoordinatorV1::new(
+    fixture.permit.hash_algorithm(),
+    (*fixture.source.memory_coordinator()).clone(),
+    IndexProducerCoordinatorOptionsV1::new(8, 1024 * 1024, 3, 10, 1_000, 16, 256, 1024 * 1024).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(producer.admit_durable_or_spill(task, 1_700_000_000_510, &mut runtime_publisher).unwrap(), IndexProducerAdmissionV1::Queued);
+  let selected_after_task = runtime_publisher.workspace_head().unwrap().selected_descriptor();
+  assert_eq!(selected_after_task.durable_sequence(), 2);
+  assert_eq!(
+    producer.admit_durable_or_spill(task, 1_700_000_000_511, &mut runtime_publisher).unwrap(),
+    IndexProducerAdmissionV1::Duplicate
+  );
+  assert_eq!(runtime_publisher.workspace_head().unwrap().manifest_sequence(), 2, "exact durable retry appended another task object");
+
+  let identity = fixture.identity();
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  let shadow_path = destination.path().to_path_buf();
+  drop(runtime_publisher);
+  drop(source);
+  drop(destination);
+  drop(cancellation);
+
+  let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  let reopened_publisher = Arc::new(reopen(&shadow_path));
+  let reopened_cancellation = CancellationToken::new();
+  install_native_index_runtime_v1(
+    &reopened_source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: Arc::clone(&reopened_publisher),
+      retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
+      cancellation: &reopened_cancellation,
+      clock: Arc::new(MockClock::new(32, 1_700_000_000_600)),
+      now_ms: 1_700_000_000_600,
+    },
+  )
+  .unwrap();
+
+  let snapshot = reopened_source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(snapshot.producer.pending_tasks, 1);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
 }
 
 #[test]

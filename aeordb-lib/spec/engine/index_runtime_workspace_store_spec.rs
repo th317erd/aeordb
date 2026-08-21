@@ -12,8 +12,9 @@ use aeordb::engine::v4::index_runtime_workspace::{
   decode_index_workspace_manifest_v1, decode_index_workspace_object_v1, decode_index_workspace_producer_task_payload_v1,
 };
 use aeordb::engine::v4::index_runtime_workspace_store::{
-  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
-  IndexRuntimeWorkspaceReopenOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1, ReopenedIndexRuntimeWorkspaceV1,
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeRecoveredTaskSinkErrorV1, IndexRuntimeRecoveredTaskSinkV1, IndexRuntimeWorkspaceHeadV1,
+  IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceReopenOptionsV1,
+  IndexRuntimeWorkspaceSelectedHeadV1, ReopenedIndexRuntimeWorkspaceV1,
 };
 use tempfile::{TempDir, tempdir};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +73,48 @@ fn producer_task<'a>(
   }
 }
 
+#[derive(Default)]
+struct RecoveredTasks {
+  tasks: Vec<([u8; 16], IndexProducerTaskKindV1, u64, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>)>,
+  reject_after: Option<usize>,
+}
+
+struct MemoryObservingRecoveredTaskSink<'a> {
+  memory: &'a MemoryCoordinator,
+  reserved_bytes_during_callback: Vec<u64>,
+}
+
+impl IndexRuntimeRecoveredTaskSinkV1 for MemoryObservingRecoveredTaskSink<'_> {
+  fn admit_recovered_task(&mut self, _task: IndexProducerTaskRequestV1<'_>) -> Result<(), IndexRuntimeRecoveredTaskSinkErrorV1> {
+    let snapshot =
+      self.memory.snapshot().map_err(|error| IndexRuntimeRecoveredTaskSinkErrorV1::new("memory_snapshot_failed", error.to_string()))?;
+    let owner = snapshot
+      .owner(MemoryOwner::IndexDirtyBuffers)
+      .ok_or_else(|| IndexRuntimeRecoveredTaskSinkErrorV1::new("memory_owner_missing", "index dirty-buffer owner is absent"))?;
+    self.reserved_bytes_during_callback.push(owner.reserved_bytes);
+    Ok(())
+  }
+}
+
+impl IndexRuntimeRecoveredTaskSinkV1 for RecoveredTasks {
+  fn admit_recovered_task(&mut self, task: IndexProducerTaskRequestV1<'_>) -> Result<(), IndexRuntimeRecoveredTaskSinkErrorV1> {
+    if self.reject_after == Some(self.tasks.len()) {
+      return Err(IndexRuntimeRecoveredTaskSinkErrorV1::new("injected_recovery_refusal", "injected selected-task refusal"));
+    }
+    self.tasks.push((
+      task.operation_id,
+      task.kind,
+      task.publication_sequence,
+      task.namespace_root_before.to_vec(),
+      task.namespace_root_after.to_vec(),
+      task.semantic_state_root.to_vec(),
+      task.journal_head.map(<[u8]>::to_vec),
+      task.scope.map(str::to_owned),
+    ));
+    Ok(())
+  }
+}
+
 fn batch(memory: &MemoryCoordinator) -> (IndexCoordinatorV1, aeordb::engine::v4::index_coordinator::FrozenIndexBatchV1) {
   batch_for(memory, ALGORITHM)
 }
@@ -119,6 +162,180 @@ fn populated_two(
   workspace.append_runtime_batch([0x55; 16], 101, &batch).unwrap();
   let head = workspace.append_runtime_batch([0x66; 16], 102, &batch).unwrap();
   (directory, memory, coordinator, batch, head)
+}
+
+#[test]
+fn selected_resume_streams_producer_tasks_once_and_skips_runtime_batches() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, batch) = batch(&memory);
+  let root = digest_parts(ALGORITHM, &[b"root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"semantic"]);
+  let first = producer_task([0x61; 16], 50, &root, &semantic);
+  let second = producer_task([0x62; 16], 51, &root, &semantic);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  workspace.append_producer_task([0x71; 16], 101, &first).unwrap();
+  workspace.append_runtime_batch([0x72; 16], 102, &batch).unwrap();
+  let selected = workspace.append_producer_task([0x73; 16], 103, &second).unwrap().selected_descriptor();
+  drop(workspace);
+
+  let mut recovered = RecoveredTasks::default();
+  let resumed = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+    &mut recovered,
+  )
+  .unwrap();
+
+  assert_eq!(resumed.head().unwrap().cumulative_object_count(), 3);
+  assert_eq!(recovered.tasks.len(), 2);
+  recovered.tasks.sort_unstable_by_key(|task| task.2);
+  assert_eq!(recovered.tasks[0].0, [0x61; 16]);
+  assert_eq!(recovered.tasks[1].0, [0x62; 16]);
+  assert_eq!(recovered.tasks[0].7.as_deref(), Some("/docs"));
+  assert_eq!(recovered.tasks[1].7.as_deref(), Some("/docs"));
+}
+
+#[test]
+fn selected_resume_surfaces_sink_refusal_without_returning_a_partial_workspace() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let root = digest_parts(ALGORITHM, &[b"root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"semantic"]);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  workspace.append_producer_task([0x71; 16], 101, &producer_task([0x61; 16], 50, &root, &semantic)).unwrap();
+  let selected =
+    workspace.append_producer_task([0x72; 16], 102, &producer_task([0x62; 16], 51, &root, &semantic)).unwrap().selected_descriptor();
+  drop(workspace);
+  let mut recovered = RecoveredTasks { tasks: Vec::new(), reject_after: Some(1) };
+
+  let error = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+    &mut recovered,
+  )
+  .err()
+  .expect("sink refusal must abort selected workspace resume");
+
+  assert!(error.to_string().contains("injected_recovery_refusal"));
+  assert_eq!(recovered.tasks.len(), 1);
+}
+
+#[test]
+fn selected_resume_returns_no_workspace_when_an_older_object_is_corrupt_after_a_task_callback() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, batch) = batch(&memory);
+  let root = digest_parts(ALGORITHM, &[b"root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"semantic"]);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  workspace.append_runtime_batch([0x71; 16], 101, &batch).unwrap();
+  let selected =
+    workspace.append_producer_task([0x72; 16], 102, &producer_task([0x61; 16], 50, &root, &semantic)).unwrap().selected_descriptor();
+  let runtime_object = object_path(workspace.workspace_path(), [0x71; 16]);
+  drop(workspace);
+  let mut bytes = fs::read(&runtime_object).unwrap();
+  let last = bytes.len() - 1;
+  bytes[last] ^= 0xff;
+  fs::write(runtime_object, bytes).unwrap();
+  let mut recovered = RecoveredTasks::default();
+
+  let error = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+    &mut recovered,
+  )
+  .err()
+  .expect("older corruption must abort after the newer task callback");
+
+  assert!(error.to_string().contains("digest") || error.to_string().contains("CRC"));
+  assert_eq!(recovered.tasks.len(), 1);
+}
+
+#[test]
+fn selected_resume_retains_payload_memory_through_the_recovery_callback() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let root = digest_parts(ALGORITHM, &[b"root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"semantic"]);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  let selected =
+    workspace.append_producer_task([0x71; 16], 101, &producer_task([0x61; 16], 50, &root, &semantic)).unwrap().selected_descriptor();
+  drop(workspace);
+  let baseline = memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes;
+  let mut sink = MemoryObservingRecoveredTaskSink { memory: &memory, reserved_bytes_during_callback: Vec::new() };
+
+  let resumed = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+    &mut sink,
+  )
+  .unwrap();
+
+  assert_eq!(sink.reserved_bytes_during_callback.len(), 1);
+  assert!(sink.reserved_bytes_during_callback[0] > baseline);
+  drop(resumed);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, baseline);
 }
 
 fn repair_manifest_crc(bytes: &mut [u8]) {

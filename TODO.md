@@ -1060,12 +1060,17 @@
                 - [x] Reject stale or invalidated collection results without completing or canceling a replacement lease; preserve exact memory-reservation lifetime.
                 - [x] Run focused concurrency/failure tests, affected owner/worker/coordinator gates, suppression/static checks, and the broad phase-boundary suite.
               - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
+                - [x] P6-2c-d5d1: stream selected AITK producer tasks from the validated workspace chain into the recovering runtime coordinator with exact duplicate/conflict handling and no second persistence path.
+                - [ ] P6-2c-d5d2: retain bounded maintenance `resume_after` state only inside the leased coordinator task and advance it atomically with per-document idempotent mutation admission.
+                - [ ] P6-2c-d5d3: execute root-pinned upsert/retirement scan pages through the same semantic/parser/mapper/collector worker and unlocked owner boundary.
+                - [ ] P6-2c-d5d4: prove restart replay, duplicate collapse, continuation/reset, cancellation, pressure, corruption, task-kind dispatch, and architecture uniqueness across focused and broad gates.
               - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
+        - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
         - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.
         - [ ] Measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.

@@ -84,6 +84,32 @@ pub enum IndexRuntimeWorkspaceStoreErrorV1 {
   },
   #[error("index runtime workspace completion is uncertain after {primary}; exact reopen also failed: {reopen}")]
   Uncertain { primary: String, reopen: String },
+  #[error("index runtime recovered producer-task sink failed ({code}): {context}")]
+  RecoveredTaskSink { code: &'static str, context: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRuntimeRecoveredTaskSinkErrorV1 {
+  code: &'static str,
+  context: String,
+}
+
+impl IndexRuntimeRecoveredTaskSinkErrorV1 {
+  pub fn new(code: &'static str, context: impl Into<String>) -> Self {
+    Self { code, context: context.into() }
+  }
+
+  pub const fn code(&self) -> &'static str {
+    self.code
+  }
+
+  pub fn context(&self) -> &str {
+    &self.context
+  }
+}
+
+pub trait IndexRuntimeRecoveredTaskSinkV1 {
+  fn admit_recovered_task(&mut self, task: IndexProducerTaskRequestV1<'_>) -> Result<(), IndexRuntimeRecoveredTaskSinkErrorV1>;
 }
 
 impl From<FormatError> for IndexRuntimeWorkspaceStoreErrorV1 {
@@ -389,9 +415,37 @@ impl DurableIndexRuntimeWorkspaceV1 {
     cancellation: CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
+    Self::resume_inner(database_id, destination_physical_instance_id, hash_algorithm, selected, options, cancellation, memory, None)
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn resume_with_recovered_task_sink(
+    database_id: [u8; 16],
+    destination_physical_instance_id: [u8; 16],
+    hash_algorithm: HashAlgorithm,
+    selected: IndexRuntimeWorkspaceSelectedHeadV1,
+    options: IndexRuntimeWorkspaceOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+    sink: &mut dyn IndexRuntimeRecoveredTaskSinkV1,
+  ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
+    Self::resume_inner(database_id, destination_physical_instance_id, hash_algorithm, selected, options, cancellation, memory, Some(sink))
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn resume_inner(
+    database_id: [u8; 16],
+    destination_physical_instance_id: [u8; 16],
+    hash_algorithm: HashAlgorithm,
+    selected: IndexRuntimeWorkspaceSelectedHeadV1,
+    options: IndexRuntimeWorkspaceOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+    recovered_task_sink: Option<&mut dyn IndexRuntimeRecoveredTaskSinkV1>,
+  ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
     check_cancellation(&cancellation)?;
     let workspace_path = selected.workspace_path.clone();
-    let reopened = ReopenedIndexRuntimeWorkspaceV1::open(
+    let reopened = ReopenedIndexRuntimeWorkspaceV1::open_inner(
       &workspace_path,
       database_id,
       destination_physical_instance_id,
@@ -400,6 +454,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
       IndexRuntimeWorkspaceReopenOptionsV1::new(options.maximum_stored_bytes, options.maximum_object_count)?,
       cancellation.clone(),
       memory,
+      recovered_task_sink,
     )?;
     ensure_capacity(&workspace_path, 0, options.minimum_free_bytes)?;
     let objects_path = workspace_path.join("objects");
@@ -881,6 +936,31 @@ impl ReopenedIndexRuntimeWorkspaceV1 {
     cancellation: CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
+    Self::open_inner(
+      workspace_path,
+      database_id,
+      destination_physical_instance_id,
+      hash_algorithm,
+      selected,
+      options,
+      cancellation,
+      memory,
+      None,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn open_inner(
+    workspace_path: &Path,
+    database_id: [u8; 16],
+    destination_physical_instance_id: [u8; 16],
+    hash_algorithm: HashAlgorithm,
+    selected: IndexRuntimeWorkspaceSelectedHeadV1,
+    options: IndexRuntimeWorkspaceReopenOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+    mut recovered_task_sink: Option<&mut dyn IndexRuntimeRecoveredTaskSinkV1>,
+  ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
     check_cancellation(&cancellation)?;
     if database_id.iter().all(|byte| *byte == 0) || destination_physical_instance_id.iter().all(|byte| *byte == 0) {
       return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid(
@@ -968,7 +1048,15 @@ impl ReopenedIndexRuntimeWorkspaceV1 {
         sequence,
         manifest.created_at_ms,
       );
-      let object = validate_object_file(&object_path(object_directory, manifest.object_id), &expected_object, &cancellation, memory)?;
+      let object_path = object_path(object_directory, manifest.object_id);
+      let object = if manifest.object_kind == IndexWorkspaceObjectKindV1::ProducerTask {
+        match recovered_task_sink.as_deref_mut() {
+          Some(sink) => validate_object_file_with_recovered_task(&object_path, &expected_object, &cancellation, memory, sink)?,
+          None => validate_object_file(&object_path, &expected_object, &cancellation, memory)?,
+        }
+      } else {
+        validate_object_file(&object_path, &expected_object, &cancellation, memory)?
+      };
       if object.digest != manifest.object_digest || object.stored_bytes != manifest.object_stored_bytes {
         return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!("manifest {sequence} object digest or bytes do not close")));
       }
@@ -1141,6 +1229,11 @@ struct ValidatedObjectV1 {
   stored_bytes: u64,
   object_sequence: u64,
   created_at_ms: u64,
+}
+
+struct RetainedProducerTaskPayloadV1 {
+  bytes: Vec<u8>,
+  _reservation: MemoryReservation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1366,6 +1459,26 @@ fn validate_object_file(
   cancellation: &CancellationToken,
   memory: &MemoryCoordinator,
 ) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_object_file_inner(path, expected, cancellation, memory, None)
+}
+
+fn validate_object_file_with_recovered_task(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  sink: &mut dyn IndexRuntimeRecoveredTaskSinkV1,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_object_file_inner(path, expected, cancellation, memory, Some(sink))
+}
+
+fn validate_object_file_inner(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  recovered_task_sink: Option<&mut dyn IndexRuntimeRecoveredTaskSinkV1>,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
   check_cancellation(cancellation)?;
   let mut file = open_regular_file_no_follow(path).map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Path(error.to_string()))?;
   validate_private_regular_file(path, &file, "index runtime workspace object")?;
@@ -1385,14 +1498,15 @@ fn validate_object_file(
   let mut payload_digest = blake3::Hasher::new();
   let mut object_digest = blake3::Hasher::new();
   object_digest.update(&header_bytes);
-  match header.kind {
+  let recovered_payload = match header.kind {
     IndexWorkspaceObjectKindV1::RuntimeBatch => {
-      validate_runtime_payload_stream(&mut file, &header, cancellation, memory, &mut crc, &mut payload_digest, &mut object_digest)?
+      validate_runtime_payload_stream(&mut file, &header, cancellation, memory, &mut crc, &mut payload_digest, &mut object_digest)?;
+      None
     }
     IndexWorkspaceObjectKindV1::ProducerTask => {
-      validate_producer_payload_stream(&mut file, &header, cancellation, memory, &mut crc, &mut payload_digest, &mut object_digest)?
+      Some(validate_producer_payload_stream(&mut file, &header, cancellation, memory, &mut crc, &mut payload_digest, &mut object_digest)?)
     }
-  }
+  };
   if *payload_digest.finalize().as_bytes() != header.payload_digest {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("workspace object payload digest does not match".to_string()));
   }
@@ -1414,6 +1528,22 @@ fn validate_object_file(
     != metadata.len()
   {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("workspace object length changed while reading".to_string()));
+  }
+  if let (Some(payload), Some(sink)) = (recovered_payload.as_ref(), recovered_task_sink) {
+    check_cancellation(cancellation)?;
+    let decoded = decode_index_workspace_producer_task_payload_v1(&payload.bytes, header.hash_algorithm)?;
+    sink
+      .admit_recovered_task(IndexProducerTaskRequestV1 {
+        operation_id: decoded.operation_id,
+        kind: decoded.kind,
+        publication_sequence: decoded.publication_sequence,
+        namespace_root_before: decoded.namespace_root_before,
+        namespace_root_after: decoded.namespace_root_after,
+        semantic_state_root: decoded.semantic_state_root,
+        journal_head: decoded.journal_head,
+        scope: decoded.scope,
+      })
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::RecoveredTaskSink { code: error.code(), context: error.context().to_string() })?;
   }
   Ok(ValidatedObjectV1 {
     digest: *object_digest.finalize().as_bytes(),
@@ -1521,14 +1651,14 @@ fn validate_producer_payload_stream(
   crc: &mut crc32fast::Hasher,
   payload_digest: &mut blake3::Hasher,
   object_digest: &mut blake3::Hasher,
-) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+) -> Result<RetainedProducerTaskPayloadV1, IndexRuntimeWorkspaceStoreErrorV1> {
   let (minimum_length, maximum_length) = index_workspace_producer_task_payload_bounds_v1(object.hash_algorithm)?;
   if object.payload_length < minimum_length || object.payload_length > maximum_length {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("producer-task object payload is outside its frozen bounds".to_string()));
   }
   let payload_bytes = u64::try_from(object.payload_length)
     .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("producer payload length exceeds u64: {error}")))?;
-  let _reservation = memory
+  let reservation = memory
     .reserve(MemoryOwner::IndexDirtyBuffers, payload_bytes, AdmissionClass::Maintenance)
     .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
   let mut payload = Vec::new();
@@ -1544,7 +1674,7 @@ fn validate_producer_payload_stream(
   {
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("producer-task payload counters do not close over its object".to_string()));
   }
-  Ok(())
+  Ok(RetainedProducerTaskPayloadV1 { bytes: payload, _reservation: reservation })
 }
 
 fn compare_previous_runtime_sort_key(

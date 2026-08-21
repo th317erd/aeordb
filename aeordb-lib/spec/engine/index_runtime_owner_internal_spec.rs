@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use crate::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind};
+use crate::engine::v4::index_producer_coordinator::IndexProducerTaskKindV1;
 
 use super::*;
 
@@ -16,6 +17,40 @@ fn options() -> IndexRuntimeOwnerOptionsV1 {
     source_retry_after_ms: 25,
     publication_retry_after_ms: 100,
   }
+}
+
+fn recovered_task<'a>(operation_id: [u8; 16], root: &'a [u8], semantic: &'a [u8]) -> IndexProducerTaskRequestV1<'a> {
+  IndexProducerTaskRequestV1 {
+    operation_id,
+    kind: IndexProducerTaskKindV1::Rebuild,
+    publication_sequence: 7,
+    namespace_root_before: root,
+    namespace_root_after: root,
+    semantic_state_root: semantic,
+    journal_head: None,
+    scope: Some("/docs"),
+  }
+}
+
+#[test]
+fn selected_task_recovery_is_exact_and_only_legal_before_recovery_completion() {
+  let (owner, _hub) = owner_with_hub();
+  let root = vec![0x31; HashAlgorithm::Blake3_256.hash_length()];
+  let semantic = vec![0x32; HashAlgorithm::Blake3_256.hash_length()];
+
+  assert_eq!(owner.admit_recovered_task(recovered_task([0x41; 16], &root, &semantic), 10).unwrap(), IndexProducerAdmissionV1::Queued);
+  assert_eq!(owner.admit_recovered_task(recovered_task([0x41; 16], &root, &semantic), 10).unwrap(), IndexProducerAdmissionV1::Duplicate);
+  let mut conflicting_semantic = semantic.clone();
+  conflicting_semantic[0] ^= 0xff;
+  assert!(owner.admit_recovered_task(recovered_task([0x41; 16], &root, &conflicting_semantic), 10).is_err());
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
+
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 0, highest_checkpoint_sequence: 0 }).unwrap();
+  assert!(matches!(
+    owner.admit_recovered_task(recovered_task([0x42; 16], &root, &semantic), 11),
+    Err(IndexRuntimeErrorV1::RecoveryAlreadyResolved { lifecycle: IndexRuntimeLifecycleV1::Running })
+  ));
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
 }
 
 fn owner_with_hub() -> (IndexRuntimeOwnerV1, Arc<SoftMutationHubV1>) {

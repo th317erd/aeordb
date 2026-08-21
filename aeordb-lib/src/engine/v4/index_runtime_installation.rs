@@ -38,13 +38,14 @@ use super::index_producer_admission::{
 };
 use super::index_producer_coordinator::IndexProducerAdmissionV1;
 use super::index_runtime_dirty_overlay_recovery::{
-  IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, recover_index_runtime_dirty_overlay_v1,
+  IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, recover_index_runtime_dirty_overlay_with_task_sink_v1,
 };
 use super::index_runtime_owner::{
   IndexRuntimeErrorV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimeRecoveryDecisionV1,
 };
 use super::index_runtime_workspace_store::{
-  DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceStoreErrorV1,
+  DurableIndexRuntimeWorkspaceV1, IndexRuntimeRecoveredTaskSinkErrorV1, IndexRuntimeRecoveredTaskSinkV1, IndexRuntimeWorkspaceIdentityV1,
+  IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::index_scope_ordinal_authority::IndexScopeOrdinalStateOptionsV1;
 use super::migration_owner::MigrationStateOwnerV1;
@@ -514,6 +515,7 @@ pub fn install_native_index_runtime_v1(
   let mut recovery = recover_selected_operations(&registry, descriptor_catalog.descriptors(), &semantic_authority, request.cancellation)?;
   let (runtime_publisher, resumed_dirty_overlay) = build_runtime_publisher(
     engine,
+    owner.as_ref(),
     request.coordinator_id,
     request.shadow_identity,
     &semantic_authority,
@@ -715,6 +717,7 @@ fn validate_runtime_publisher_descriptor(
 #[allow(clippy::too_many_arguments)]
 fn build_runtime_publisher(
   engine: &StorageEngine,
+  runtime_owner: &IndexRuntimeOwnerV1,
   coordinator_id: [u8; 16],
   identity: &IndexRuntimeShadowIdentityV1,
   semantic_authority: &SelectedSemanticAuthorityV1,
@@ -729,7 +732,8 @@ fn build_runtime_publisher(
   let mut store = NativeIndexRecoveryStoreV1::new(options.descriptor.clone(), publisher, retirement_owner, Arc::clone(&clock))?;
   check_cancellation(cancellation)?;
   if store.load_selected(&owner)?.is_some() {
-    let recovered = recover_index_runtime_dirty_overlay_v1(
+    let mut task_sink = NativeIndexRecoveredTaskSinkV1 { owner: runtime_owner, now_ms };
+    let recovered = recover_index_runtime_dirty_overlay_with_task_sink_v1(
       &mut store,
       identity.hash_algorithm,
       identity.database_id,
@@ -738,6 +742,7 @@ fn build_runtime_publisher(
       options.workspace.clone(),
       &engine.memory_coordinator(),
       cancellation,
+      &mut task_sink,
     )?;
     let recovered = match recovered {
       IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) => recovered,
@@ -792,6 +797,24 @@ fn build_runtime_publisher(
     clock,
   )?;
   Ok((publisher, false))
+}
+
+struct NativeIndexRecoveredTaskSinkV1<'owner> {
+  owner: &'owner IndexRuntimeOwnerV1,
+  now_ms: u64,
+}
+
+impl IndexRuntimeRecoveredTaskSinkV1 for NativeIndexRecoveredTaskSinkV1<'_> {
+  fn admit_recovered_task(
+    &mut self,
+    task: super::index_producer_coordinator::IndexProducerTaskRequestV1<'_>,
+  ) -> Result<(), IndexRuntimeRecoveredTaskSinkErrorV1> {
+    self
+      .owner
+      .admit_recovered_task(task, self.now_ms)
+      .map(|_| ())
+      .map_err(|error| IndexRuntimeRecoveredTaskSinkErrorV1::new("native_index_recovered_task_admission", error.to_string()))
+  }
 }
 
 fn recover_selected_operations(
