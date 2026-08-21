@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use crate::engine::memory_coordinator::MemoryOwner;
 use crate::engine::native_durability::PlatformFileIdentityDescriptorV1;
 use crate::engine::v4::index_coordinator_recovery::IndexRecoveryOptionsV1;
@@ -10,11 +8,11 @@ use crate::engine::{HashAlgorithm, StorageEngine};
 use super::*;
 
 fn reserved_index_bytes(engine: &StorageEngine) -> u64 {
-  engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes
+  engine.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes
 }
 
 #[test]
-fn descriptor_order_retains_its_memory_reservation_until_recovery_finishes() {
+fn descriptor_catalog_retains_its_memory_reservation_for_the_runtime_lifetime() {
   let directory = tempfile::tempdir().unwrap();
   let engine = StorageEngine::create(directory.path().join("descriptor-order.aeordb").to_str().unwrap()).unwrap();
   let algorithm = HashAlgorithm::Blake3_256;
@@ -55,11 +53,20 @@ fn descriptor_order_retains_its_memory_reservation_until_recovery_finishes() {
   let cancellation = CancellationToken::new();
   let baseline = reserved_index_bytes(&engine);
 
-  let order = validate_descriptors(&engine, &identity, std::slice::from_ref(&descriptor), options, &cancellation).unwrap();
+  let catalog = NativeIndexOperationDescriptorCatalogV1::new(
+    algorithm,
+    identity.database_id,
+    std::slice::from_ref(&descriptor),
+    options.maximum_operation_descriptors,
+    options.maximum_descriptor_bytes,
+    engine.memory_coordinator(),
+    &|| cancellation.is_cancelled(),
+  )
+  .unwrap();
 
-  assert_eq!(order.indices(), &[0]);
-  assert_eq!(reserved_index_bytes(&engine), baseline + size_of::<usize>() as u64);
-  drop(order);
+  assert_eq!(catalog.descriptors(), std::slice::from_ref(&descriptor));
+  assert_eq!(reserved_index_bytes(&engine), baseline + catalog.retained_bytes());
+  drop(catalog);
   assert_eq!(reserved_index_bytes(&engine), baseline);
 }
 

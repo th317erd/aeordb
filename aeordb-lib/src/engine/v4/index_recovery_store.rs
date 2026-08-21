@@ -92,6 +92,19 @@ impl NativeIndexOperationDescriptorV1 {
       .ok_or_else(|| store_error("native_index_descriptor_size", "operation descriptor retained size overflowed"))
   }
 
+  pub(super) fn try_clone_retained(&self) -> Result<Self, IndexRecoveryStoreErrorV1> {
+    Ok(Self {
+      hash_algorithm: self.hash_algorithm,
+      database_id: self.database_id,
+      index_id: try_clone_descriptor_bytes(&self.index_id, "index identity")?,
+      operation_id: self.operation_id,
+      operation_kind: self.operation_kind,
+      definition_id: try_clone_descriptor_bytes(&self.definition_id, "definition identity")?,
+      base_manifest: try_clone_optional_descriptor_bytes(self.base_manifest.as_deref(), "base manifest")?,
+      target_manifest: try_clone_optional_descriptor_bytes(self.target_manifest.as_deref(), "target manifest")?,
+    })
+  }
+
   fn variable_bytes(&self) -> Result<u64, IndexRecoveryStoreErrorV1> {
     let variable = self
       .index_id
@@ -103,6 +116,19 @@ impl NativeIndexOperationDescriptorV1 {
     u64::try_from(variable)
       .map_err(|error| store_error("index_registry_entry_size", format!("operation descriptor size exceeds u64: {error}")))
   }
+}
+
+fn try_clone_descriptor_bytes(bytes: &[u8], label: &'static str) -> Result<Vec<u8>, IndexRecoveryStoreErrorV1> {
+  let mut cloned = Vec::new();
+  cloned
+    .try_reserve_exact(bytes.len())
+    .map_err(|error| store_error("native_index_descriptor_allocation", format!("{label} allocation failed: {error}")))?;
+  cloned.extend_from_slice(bytes);
+  Ok(cloned)
+}
+
+fn try_clone_optional_descriptor_bytes(bytes: Option<&[u8]>, label: &'static str) -> Result<Option<Vec<u8>>, IndexRecoveryStoreErrorV1> {
+  bytes.map(|bytes| try_clone_descriptor_bytes(bytes, label)).transpose()
 }
 
 pub struct NativeIndexRecoveryStoreV1 {
@@ -562,6 +588,14 @@ impl IndexScopeOrdinalStoreRegistryV1 {
       },
     );
     Ok(adapter)
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
   }
 
   pub fn evict_all_unpinned(&self) -> Result<u64, IndexScopeOrdinalStoreRegistryErrorV1> {

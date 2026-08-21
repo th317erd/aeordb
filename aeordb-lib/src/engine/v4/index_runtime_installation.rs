@@ -4,13 +4,12 @@
 //! recovered shadow owner after proving that the open source file and selected
 //! v4 destination are the exact pair admitted by migration preflight.
 
-use std::mem::size_of;
 use std::sync::Arc;
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
+use crate::engine::memory_coordinator::{MemoryCoordinatorError, MemoryReservation};
 use crate::engine::native_durability::{NativeDurabilityError, PlatformFileIdentityDescriptorV1, platform_file_identity};
 use crate::engine::{EngineError, HashAlgorithm, StorageEngine, VirtualClock};
 
@@ -28,6 +27,10 @@ use super::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryErrorV1, IndexScopeOrdinalStoreRegistryOptionsV1, IndexScopeOrdinalStoreRegistryV1,
   NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
 };
+use super::index_native_semantic_source::{
+  FirstAuthorityIndexSemanticObjectReadSourceV1, NativeIndexOperationDescriptorCatalogV1, NativeIndexScopeOrdinalAuthorityV1,
+  NativeIndexSemanticSourceErrorV1,
+};
 use super::index_runtime_batch_publisher::{IndexRuntimeBatchPublisherBuildErrorV1, NativeIndexRuntimeBatchPublisherV1};
 use super::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, NativeIndexRuntimeCadenceV1};
 use super::index_producer_admission::{
@@ -43,6 +46,7 @@ use super::index_runtime_owner::{
 use super::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
+use super::index_scope_ordinal_authority::IndexScopeOrdinalStateOptionsV1;
 use super::migration_owner::MigrationStateOwnerV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::namespace::SemanticAvailabilityV1;
@@ -168,6 +172,7 @@ pub struct NativeIndexRuntimeV1 {
   owner: Arc<IndexRuntimeOwnerV1>,
   publisher: Arc<V4FirstAuthorityPublisher>,
   registry: Arc<IndexScopeOrdinalStoreRegistryV1>,
+  descriptor_catalog: Arc<NativeIndexOperationDescriptorCatalogV1>,
   shadow_identity: IndexRuntimeShadowIdentityV1,
   semantic_authority: SelectedSemanticAuthorityV1,
   journal_generation: u64,
@@ -298,6 +303,26 @@ impl NativeIndexRuntimeV1 {
 
   pub fn registry(&self) -> &Arc<IndexScopeOrdinalStoreRegistryV1> {
     &self.registry
+  }
+
+  pub fn descriptor_catalog(&self) -> &Arc<NativeIndexOperationDescriptorCatalogV1> {
+    &self.descriptor_catalog
+  }
+
+  pub fn semantic_object_source(&self) -> FirstAuthorityIndexSemanticObjectReadSourceV1 {
+    FirstAuthorityIndexSemanticObjectReadSourceV1::new(Arc::clone(&self.publisher))
+  }
+
+  pub fn scope_ordinal_authority(
+    &self,
+    options: IndexScopeOrdinalStateOptionsV1,
+  ) -> Result<NativeIndexScopeOrdinalAuthorityV1, NativeIndexSemanticSourceErrorV1> {
+    NativeIndexScopeOrdinalAuthorityV1::new(
+      self.shadow_identity.hash_algorithm,
+      Arc::clone(&self.descriptor_catalog),
+      Arc::clone(&self.registry),
+      options,
+    )
   }
 
   pub const fn shadow_identity(&self) -> &IndexRuntimeShadowIdentityV1 {
@@ -451,11 +476,21 @@ pub fn install_native_index_runtime_v1(
   validate_source_and_shadow(engine, request.shadow_identity, &request.publisher)?;
   let semantic_authority = request.publisher.load_selected_semantic_authority()?;
   validate_selected_semantic_authority(request.shadow_identity, &semantic_authority)?;
-  let descriptor_order =
-    validate_descriptors(engine, request.shadow_identity, request.operation_descriptors, request.recovery_options, request.cancellation)?;
+  let descriptor_catalog = Arc::new(
+    NativeIndexOperationDescriptorCatalogV1::new(
+      request.shadow_identity.hash_algorithm,
+      request.shadow_identity.database_id,
+      request.operation_descriptors,
+      request.recovery_options.maximum_operation_descriptors,
+      request.recovery_options.maximum_descriptor_bytes,
+      engine.memory_coordinator(),
+      &|| request.cancellation.is_cancelled(),
+    )
+    .map_err(map_descriptor_catalog_installation_error)?,
+  );
   validate_runtime_publisher_descriptor(
     request.shadow_identity,
-    request.operation_descriptors,
+    descriptor_catalog.descriptors(),
     &request.runtime_publisher.descriptor,
     request.recovery_options,
   )?;
@@ -476,13 +511,7 @@ pub fn install_native_index_runtime_v1(
   )?);
 
   let content_only = matches!(semantic_authority.semantic_state.availability, SemanticAvailabilityV1::ContentOnly { .. });
-  let mut recovery = recover_selected_operations(
-    &registry,
-    request.operation_descriptors,
-    descriptor_order.indices(),
-    &semantic_authority,
-    request.cancellation,
-  )?;
+  let mut recovery = recover_selected_operations(&registry, descriptor_catalog.descriptors(), &semantic_authority, request.cancellation)?;
   let (runtime_publisher, resumed_dirty_overlay) = build_runtime_publisher(
     engine,
     request.coordinator_id,
@@ -533,6 +562,7 @@ pub fn install_native_index_runtime_v1(
     owner,
     publisher: Arc::clone(&request.publisher),
     registry,
+    descriptor_catalog,
     shadow_identity: request.shadow_identity.clone(),
     semantic_authority: semantic_authority.clone(),
     journal_generation: request.runtime_publisher.generation,
@@ -655,17 +685,6 @@ fn validate_final_installation_frontier(
   Ok(())
 }
 
-struct ValidatedDescriptorOrderV1 {
-  indices: Vec<usize>,
-  _memory: Option<MemoryReservation>,
-}
-
-impl ValidatedDescriptorOrderV1 {
-  fn indices(&self) -> &[usize] {
-    &self.indices
-  }
-}
-
 fn validate_runtime_publisher_descriptor(
   identity: &IndexRuntimeShadowIdentityV1,
   descriptors: &[NativeIndexOperationDescriptorV1],
@@ -775,67 +794,9 @@ fn build_runtime_publisher(
   Ok((publisher, false))
 }
 
-fn validate_descriptors(
-  engine: &StorageEngine,
-  identity: &IndexRuntimeShadowIdentityV1,
-  descriptors: &[NativeIndexOperationDescriptorV1],
-  options: IndexRuntimeNativeRecoveryOptionsV1,
-  cancellation: &CancellationToken,
-) -> Result<ValidatedDescriptorOrderV1, NativeIndexRuntimeInstallationErrorV1> {
-  if descriptors.len() > options.maximum_operation_descriptors || descriptors.len() > u32::MAX as usize {
-    return Err(invalid("native_index_descriptor_count", "selected operation descriptor count exceeds the recovery bound"));
-  }
-  let mut total_bytes = 0u64;
-  for descriptor in descriptors {
-    check_cancellation(cancellation)?;
-    if descriptor.hash_algorithm() != identity.hash_algorithm || descriptor.database_id() != identity.database_id {
-      return Err(invalid("native_index_descriptor_authority", "operation descriptor belongs to another shadow authority"));
-    }
-    total_bytes = total_bytes
-      .checked_add(descriptor.retained_identity_bytes().map_err(|error| invalid("native_index_descriptor_size", error.to_string()))?)
-      .ok_or_else(|| invalid("native_index_descriptor_size", "operation descriptor bytes overflowed"))?;
-    if total_bytes > options.maximum_descriptor_bytes {
-      return Err(invalid("native_index_descriptor_bytes", "selected operation descriptors exceed the recovery byte bound"));
-    }
-  }
-
-  let order_bytes = descriptors
-    .len()
-    .checked_mul(size_of::<usize>())
-    .ok_or_else(|| invalid("native_index_descriptor_order", "descriptor ordering workspace overflowed"))?;
-  let order_bytes = u64::try_from(order_bytes)
-    .map_err(|error| invalid("native_index_descriptor_order", format!("descriptor ordering workspace exceeds u64: {error}")))?;
-  let _order_memory = if order_bytes == 0 {
-    None
-  } else {
-    Some(engine.memory_coordinator().reserve(MemoryOwner::IndexDirtyBuffers, order_bytes, AdmissionClass::Maintenance)?)
-  };
-  let mut order = Vec::new();
-  order
-    .try_reserve_exact(descriptors.len())
-    .map_err(|error| invalid("native_index_descriptor_order", format!("descriptor ordering allocation failed: {error}")))?;
-  order.extend(0..descriptors.len());
-  order.sort_unstable_by(|left, right| {
-    descriptors[*left]
-      .index_id()
-      .cmp(descriptors[*right].index_id())
-      .then_with(|| descriptors[*left].operation_id().cmp(&descriptors[*right].operation_id()))
-  });
-  for adjacent in order.windows(2) {
-    if descriptors[adjacent[0]].index_id() == descriptors[adjacent[1]].index_id() {
-      return Err(invalid(
-        "native_index_descriptor_duplicate",
-        "selected recovery contains more than one operation descriptor for one index scope",
-      ));
-    }
-  }
-  Ok(ValidatedDescriptorOrderV1 { indices: order, _memory: _order_memory })
-}
-
 fn recover_selected_operations(
   registry: &IndexScopeOrdinalStoreRegistryV1,
   descriptors: &[NativeIndexOperationDescriptorV1],
-  order: &[usize],
   semantic_authority: &SelectedSemanticAuthorityV1,
   cancellation: &CancellationToken,
 ) -> Result<IndexRuntimeRecoveryDecisionV1, NativeIndexRuntimeInstallationErrorV1> {
@@ -854,9 +815,8 @@ fn recover_selected_operations(
 
   let mut recovered_scopes = 0u32;
   let mut highest_checkpoint_sequence = 0u64;
-  for descriptor_index in order {
+  for descriptor in descriptors {
     check_cancellation(cancellation)?;
-    let descriptor = &descriptors[*descriptor_index];
     let adapter = match registry.acquire(descriptor.clone()) {
       Ok(adapter) => adapter,
       Err(IndexScopeOrdinalStoreRegistryErrorV1::Canceled) => return Err(NativeIndexRuntimeInstallationErrorV1::Canceled),
@@ -926,6 +886,26 @@ fn check_cancellation(cancellation: &CancellationToken) -> Result<(), NativeInde
     Err(NativeIndexRuntimeInstallationErrorV1::Canceled)
   } else {
     Ok(())
+  }
+}
+
+fn map_descriptor_catalog_installation_error(error: NativeIndexSemanticSourceErrorV1) -> NativeIndexRuntimeInstallationErrorV1 {
+  match error {
+    NativeIndexSemanticSourceErrorV1::Cancelled => NativeIndexRuntimeInstallationErrorV1::Canceled,
+    NativeIndexSemanticSourceErrorV1::Memory(error) => NativeIndexRuntimeInstallationErrorV1::Memory(error),
+    NativeIndexSemanticSourceErrorV1::Invalid { code, message } => {
+      let code = match code {
+        "native_scope_descriptor_options" => "native_index_descriptor_options",
+        "native_scope_descriptor_count" => "native_index_descriptor_count",
+        "native_scope_descriptor_authority" => "native_index_descriptor_authority",
+        "native_scope_descriptor_size" => "native_index_descriptor_size",
+        "native_scope_descriptor_bytes" => "native_index_descriptor_bytes",
+        "native_scope_descriptor_allocation" => "native_index_descriptor_order",
+        "native_scope_descriptor_duplicate" => "native_index_descriptor_duplicate",
+        _ => "native_index_descriptor_catalog",
+      };
+      invalid(code, message)
+    }
   }
 }
 

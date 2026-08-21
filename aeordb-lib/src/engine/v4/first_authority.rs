@@ -2873,6 +2873,32 @@ impl V4FirstAuthorityPublisher {
       .transpose()
   }
 
+  /// Load one immutable semantic object from this exact v4 authority.
+  ///
+  /// The canonical system-file representation, body bound, semantic kind,
+  /// and object identity are all verified before bytes reach a catalog reader.
+  pub fn load_semantic_object(&self, kind_id: u16, object_id: &[u8]) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    let path = semantic_object_path(header.hash_algorithm, kind_id, object_id)?;
+    let maximum_body_length = super::semantic_store::semantic_object_cap(kind_id)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let Some(loaded) =
+      load_canonical_system_file_at_path(&self.file, &kv, header, &path, SEMANTIC_OBJECT_CONTENT_TYPE, maximum_body_length)?
+    else {
+      return Ok(None);
+    };
+    let object = decode_semantic_object(&loaded.body, header.hash_algorithm)?;
+    if object.kind_id != kind_id || object.object_id != object_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_semantic_object_identity",
+        "semantic-object bytes disagree with their canonical authority path",
+      ));
+    }
+    Ok(Some(loaded.body))
+  }
+
   pub fn load_immutable_system_control(
     &self,
     kind: SystemControlKindV1,
