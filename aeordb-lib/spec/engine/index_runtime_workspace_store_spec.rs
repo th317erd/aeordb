@@ -257,21 +257,33 @@ fn fresh_create_rejects_symlinked_and_non_utf8_empty_workspace_entries() {
     let workspace = create().unwrap();
     let workspace_path = workspace.workspace_path().to_path_buf();
     drop(workspace);
-    let error = if case == "symlink" {
+    if case == "symlink" {
       fs::remove_dir(workspace_path.join("manifests")).unwrap();
       let outside = directory.path().join("outside");
       fs::create_dir(&outside).unwrap();
       symlink(&outside, workspace_path.join("manifests")).unwrap();
-      create().err().expect("an allowed entry name replaced by a symlink must fail closed")
+      let error = create().err().expect("an allowed entry name replaced by a symlink must fail closed");
+      assert!(matches!(
+        error,
+        aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Workspace(_)
+          | aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(_)
+      ));
     } else {
-      fs::write(workspace_path.join(OsString::from_vec(vec![0xff])), b"unexpected state").unwrap();
-      create().err().expect("a non-UTF-8 retained entry must fail closed")
-    };
-    assert!(matches!(
-      error,
-      aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Workspace(_)
-        | aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(_)
-    ));
+      let name = OsString::from_vec(vec![0xff]);
+      assert!(name.clone().into_string().is_err());
+      match fs::write(workspace_path.join(name), b"unexpected state") {
+        Ok(()) => {
+          let error = create().err().expect("a non-UTF-8 retained entry must fail closed");
+          assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(_)));
+        }
+        Err(error) => {
+          #[cfg(target_os = "macos")]
+          assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "macOS must reject the raw filename before engine inspection");
+          #[cfg(not(target_os = "macos"))]
+          panic!("the native filesystem unexpectedly rejected the non-UTF-8 fixture before engine inspection: {error}");
+        }
+      }
+    }
   }
 }
 
