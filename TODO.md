@@ -1048,6 +1048,11 @@
             - [x] P6-2c-d3: expose one source-authority-first `StorageEngine` maintenance admission facade that is inert without an installed runtime and reloads current semantic authority.
             - [x] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
             - [ ] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
+              - [x] P6-2c-d5a: freeze the bounded root-pinned scan/service contract, task-kind semantics, continuation authority, and architecture falsifiers.
+              - [ ] P6-2c-d5b: add production exact-revision, semantic-catalog, scope-ordinal, and parser adapters without buffering whole indexes or adding a producer path.
+              - [ ] P6-2c-d5c: collect mutation and maintenance work outside the runtime owner mutex, then validate and complete the exact retained lease under the sole owner.
+              - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
+              - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
