@@ -291,14 +291,16 @@ fn mutations(max_bytes: u64) -> IndexCoordinatorV1 {
 }
 
 fn worker_with_retry(source_retry_after_ms: u64) -> Result<IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1> {
+  let coordinator = memory(32 * 1_024 * 1_024);
   let collector = IndexProducerCollectorV1::new(
     ALGORITHM,
-    memory(32 * 1_024 * 1_024),
+    coordinator.clone(),
     IndexProducerCollectorOptionsV1::new(8, 16, 32, 2 * 1_024 * 1_024, 256, 2 * 1_024 * 1_024, 50).unwrap(),
   )
   .unwrap();
   IndexProducerMutationWorkerV1::new(
     ALGORITHM,
+    coordinator,
     IndexProducerExecutorV1::new(collector),
     IndexSemanticScopeLimitsV1::new(8, 16, 32, 2 * 1_024 * 1_024).unwrap(),
     source_retry_after_ms,
@@ -733,4 +735,15 @@ fn mutation_worker_has_one_runtime_owner_and_no_storage_or_route_bypass() {
     assert!(!source.contains("IndexProducerMutationWorkerV1"), "{path} bypasses the sole v4 runtime worker owner");
     assert!(!source.contains("index_producer_worker"), "{path} imports the v4 mutation worker outside its runtime owner");
   }
+}
+
+#[test]
+fn journal_and_maintenance_documents_share_one_semantic_parser_mapper_collector_core() {
+  let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_producer_worker.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+
+  assert_eq!(source.matches("self.collect_resolved_transition_inner(").count(), 2);
+  assert_eq!(source.matches("self.executor.collect_transition(").count(), 1);
+  assert_eq!(source.matches("resolve_semantic_scope_work(").count(), 1);
+  assert_eq!(source.matches("derive_index_maintenance_document_operation_id_v1(").count(), 1);
+  assert!(!source.contains("IndexProducerCollectorV1"));
 }

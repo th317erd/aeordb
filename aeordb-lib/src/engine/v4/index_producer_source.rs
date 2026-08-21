@@ -14,6 +14,7 @@ use super::index_producer_collector::{
   IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1,
   IndexCollectorScopeWorkV1, IndexCollectorValueStoreDefinitionV1,
 };
+use super::index_maintenance_scan::IndexMaintenanceScanReadErrorV1;
 use super::index_producer_coordinator::{
   IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1, IndexProducerTaskKindV1,
 };
@@ -416,6 +417,10 @@ pub struct IndexSemanticScopeReadRequestV1<'request> {
 pub enum IndexProducerSourceErrorV1 {
   #[error("index producer source resolution was cancelled")]
   Cancelled,
+  #[error("index producer source allocation failed: {0}")]
+  Allocation(String),
+  #[error("index producer maintenance scan failed: {0}")]
+  MaintenanceScan(#[from] IndexMaintenanceScanReadErrorV1),
   #[error("index producer leased task does not match source evidence: {0}")]
   TaskMismatch(String),
   #[error("index producer journal record decoding failed: {0}")]

@@ -1,15 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aeordb::engine::{HashAlgorithm, MockClock, VirtualClock};
 use aeordb::engine::file_record::FileRecord;
-use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryCoordinator, MemoryObservation, MemoryOwner, MemoryPolicy};
 use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
 use aeordb::engine::v4::index_coordinator::{FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexFlushReasonV1};
+use aeordb::engine::v4::index_maintenance_scan::{
+  IndexMaintenanceScanDocumentV1, IndexMaintenanceScanLimitsV1, IndexMaintenanceScanPageV1, IndexMaintenanceScanReadErrorV1,
+  IndexMaintenanceScanReadV1, IndexMaintenanceScanRequestV1, IndexMaintenanceScanSourceV1,
+  derive_index_maintenance_document_operation_id_v1,
+};
 use aeordb::engine::v4::index_producer_collector::{
   IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1, IndexProducerCollectorOptionsV1,
 };
@@ -23,10 +28,12 @@ use aeordb::engine::v4::index_producer_source::{
   IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
   OwnedIndexValueStoreDefinitionV1, ResolvedIndexScopeWorkV1,
 };
+use aeordb::engine::v4::index_producer_worker::IndexProducerWorkerOutcomeV1;
 use aeordb::engine::v4::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimeErrorV1, IndexRuntimeFlushOutcomeV1, IndexRuntimeLifecycleV1,
-  IndexRuntimeMutationWorkRequestV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimePublicationErrorClassV1,
-  IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1, IndexRuntimeWorkOutcomeV1,
+  IndexRuntimeMaintenanceWorkRequestV1, IndexRuntimeMutationWorkRequestV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1,
+  IndexRuntimePublicationErrorClassV1, IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1,
+  IndexRuntimeWorkOutcomeV1,
 };
 
 use aeordb::engine::v4::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, IndexRuntimeCadenceV1};
@@ -174,19 +181,49 @@ struct SemanticSource {
   semantic_state_root: Vec<u8>,
 }
 
+struct RecordingSemanticSource {
+  semantic_state_root: Vec<u8>,
+  observed: Arc<Mutex<Vec<([u8; 16], u64, String)>>>,
+}
+
 impl IndexSemanticScopeSourceV1 for SemanticSource {
   fn resolve_scopes(
     &self,
-    _request: IndexSemanticScopeReadRequestV1<'_>,
+    request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    let path = request
+      .transition
+      .after
+      .as_ref()
+      .or(request.transition.before.as_ref())
+      .map(|document| document.file_record.path.as_str())
+      .unwrap_or("/");
+    let ordinal = path.bytes().fold(3u64, |value, byte| value.saturating_add(u64::from(byte)));
     let resolution = IndexSemanticScopeResolutionV1::Complete {
       semantic_state_root: self.semantic_state_root.clone(),
-      scope_work: vec![scope_work(&self.semantic_state_root, 3)],
+      scope_work: vec![scope_work(&self.semantic_state_root, ordinal)],
     };
     let reservation = memory()
       .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
       .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
     IndexSemanticScopeReadV1::new(resolution, reservation)
+  }
+}
+
+impl IndexSemanticScopeSourceV1 for RecordingSemanticSource {
+  fn resolve_scopes(
+    &self,
+    request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    let path = request
+      .transition
+      .after
+      .as_ref()
+      .or(request.transition.before.as_ref())
+      .map(|document| document.file_record.path.clone())
+      .unwrap_or_else(|| "/".to_string());
+    self.observed.lock().unwrap().push((request.operation_id, request.source_publication_sequence, path));
+    SemanticSource { semantic_state_root: self.semantic_state_root.clone() }.resolve_scopes(request)
   }
 }
 
@@ -219,6 +256,82 @@ struct UnexpectedParser;
 impl IndexParserExecutorV1 for UnexpectedParser {
   fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
     Err(IndexParserExecutionErrorV1::host_failure("unexpected_parser", "metadata-only definition invoked parser"))
+  }
+}
+
+struct MaintenanceSource {
+  pages: Mutex<VecDeque<(Vec<IndexMaintenanceScanDocumentV1>, bool)>>,
+  observed: Arc<Mutex<Vec<(Vec<u8>, String, Option<String>)>>>,
+}
+
+impl IndexMaintenanceScanSourceV1 for MaintenanceSource {
+  fn scan(&self, request: IndexMaintenanceScanRequestV1<'_>) -> Result<IndexMaintenanceScanReadV1, IndexMaintenanceScanReadErrorV1> {
+    self.observed.lock().unwrap().push((
+      request.namespace_root.to_vec(),
+      request.scope.to_string(),
+      request.resume_after.map(str::to_string),
+    ));
+    let (documents, complete) = self
+      .pages
+      .lock()
+      .unwrap()
+      .pop_front()
+      .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("test_page_missing", "test source has no remaining page"))?;
+    let next_resume_after = (!complete).then(|| documents.last().unwrap().file_record.path.clone());
+    let retained_bytes = 1_024 * 1_024;
+    let reservation = memory()
+      .reserve(MemoryOwner::Task, retained_bytes, AdmissionClass::Workload)
+      .map_err(|error| IndexMaintenanceScanReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexMaintenanceScanReadV1::new(
+      ALGORITHM,
+      &request,
+      IndexMaintenanceScanPageV1 { documents, next_resume_after, complete, retained_bytes },
+      reservation,
+    )
+    .map_err(|error| IndexMaintenanceScanReadErrorV1::corrupt("test_page", error.to_string()))
+  }
+}
+
+#[derive(Clone, Copy)]
+enum MaintenanceFailure {
+  Cancelled,
+  Retryable,
+  Corrupt,
+}
+
+struct FailingMaintenanceSource(MaintenanceFailure);
+
+impl IndexMaintenanceScanSourceV1 for FailingMaintenanceSource {
+  fn scan(&self, _request: IndexMaintenanceScanRequestV1<'_>) -> Result<IndexMaintenanceScanReadV1, IndexMaintenanceScanReadErrorV1> {
+    Err(match self.0 {
+      MaintenanceFailure::Cancelled => IndexMaintenanceScanReadErrorV1::cancelled("test_cancelled", "injected scan cancellation"),
+      MaintenanceFailure::Retryable => IndexMaintenanceScanReadErrorV1::retryable("test_busy", "injected retryable scan refusal"),
+      MaintenanceFailure::Corrupt => IndexMaintenanceScanReadErrorV1::corrupt("test_corrupt", "injected corrupt scan evidence"),
+    })
+  }
+}
+
+struct BlockingMaintenanceSource {
+  entered: mpsc::Sender<()>,
+  release: Mutex<mpsc::Receiver<()>>,
+  document: IndexMaintenanceScanDocumentV1,
+}
+
+impl IndexMaintenanceScanSourceV1 for BlockingMaintenanceSource {
+  fn scan(&self, request: IndexMaintenanceScanRequestV1<'_>) -> Result<IndexMaintenanceScanReadV1, IndexMaintenanceScanReadErrorV1> {
+    self.entered.send(()).unwrap();
+    self.release.lock().unwrap().recv_timeout(Duration::from_secs(2)).unwrap();
+    let retained_bytes = 1_024 * 1_024;
+    let reservation = memory()
+      .reserve(MemoryOwner::Task, retained_bytes, AdmissionClass::Workload)
+      .map_err(|error| IndexMaintenanceScanReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexMaintenanceScanReadV1::new(
+      ALGORITHM,
+      &request,
+      IndexMaintenanceScanPageV1 { documents: vec![self.document.clone()], next_resume_after: None, complete: true, retained_bytes },
+      reservation,
+    )
+    .map_err(|error| IndexMaintenanceScanReadErrorV1::corrupt("test_page", error.to_string()))
   }
 }
 
@@ -388,6 +501,443 @@ fn task<'a>(root_before: &'a [u8], root_after: &'a [u8], semantic: &'a [u8], jou
     journal_head: Some(journal),
     scope: None,
   }
+}
+
+fn maintenance_task<'a>(root: &'a [u8], semantic: &'a [u8], kind: IndexProducerTaskKindV1) -> IndexProducerTaskRequestV1<'a> {
+  maintenance_task_with(root, semantic, kind, [0x56; 16], 8, "/")
+}
+
+fn maintenance_task_with<'a>(
+  root: &'a [u8],
+  semantic: &'a [u8],
+  kind: IndexProducerTaskKindV1,
+  operation_id: [u8; 16],
+  publication_sequence: u64,
+  scope: &'a str,
+) -> IndexProducerTaskRequestV1<'a> {
+  IndexProducerTaskRequestV1 {
+    operation_id,
+    kind,
+    publication_sequence,
+    namespace_root_before: root,
+    namespace_root_after: root,
+    semantic_state_root: semantic,
+    journal_head: None,
+    scope: Some(scope),
+  }
+}
+
+#[test]
+fn runtime_executes_root_pinned_page_through_the_existing_worker_and_completes_the_task() {
+  let owner = owner();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let root = hash(b"maintenance-root");
+  let semantic = hash(b"maintenance-semantic");
+  let revision = hash(b"maintenance-revision");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let source = MaintenanceSource {
+    pages: Mutex::new(VecDeque::from([(
+      vec![IndexMaintenanceScanDocumentV1 { revision_hash: revision.clone(), file_record: file("/a.json") }],
+      true,
+    )])),
+    observed: Arc::clone(&observed),
+  };
+  let semantic_observed = Arc::new(Mutex::new(Vec::new()));
+  let semantics = RecordingSemanticSource { semantic_state_root: semantic.clone(), observed: Arc::clone(&semantic_observed) };
+
+  let outcome = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &source,
+        limits: IndexMaintenanceScanLimitsV1::new(4, 2 * 1_024 * 1_024, 16 * 1_024).unwrap(),
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+
+  assert!(matches!(outcome, IndexRuntimeWorkOutcomeV1::Completed(_)));
+  let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.producer.pending_tasks, 0);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+  assert!(snapshot.mutations.active_records > 0, "maintenance outcome {outcome:?}, snapshot {snapshot:?}");
+  assert_eq!(*observed.lock().unwrap(), vec![(root, "/".to_string(), None)]);
+  assert_eq!(
+    *semantic_observed.lock().unwrap(),
+    vec![(
+      derive_index_maintenance_document_operation_id_v1(
+        ALGORITHM,
+        [0x56; 16],
+        IndexProducerTaskKindV1::Build,
+        &hash(b"maintenance-root"),
+        &revision,
+        "/a.json",
+      )
+      .unwrap(),
+      8,
+      "/a.json".to_string(),
+    )]
+  );
+}
+
+#[test]
+fn runtime_releases_incomplete_page_lease_and_resumes_after_the_last_committed_document() {
+  let coordinator = memory();
+  let owner = IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, coordinator.clone(), options(), 1).unwrap();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let root = hash(b"paged-maintenance-root");
+  let semantic = hash(b"paged-maintenance-semantic");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  let retained_task_bytes = reserved(&coordinator, MemoryOwner::Task);
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let source = MaintenanceSource {
+    pages: Mutex::new(VecDeque::from([
+      (vec![IndexMaintenanceScanDocumentV1 { revision_hash: hash(b"paged-revision-a"), file_record: file("/a.json") }], false),
+      (vec![IndexMaintenanceScanDocumentV1 { revision_hash: hash(b"paged-revision-b"), file_record: file("/b.json") }], true),
+    ])),
+    observed: Arc::clone(&observed),
+  };
+  let semantics = SemanticSource { semantic_state_root: semantic.clone() };
+  let limits = IndexMaintenanceScanLimitsV1::new(1, 2 * 1_024 * 1_024, 16 * 1_024).unwrap();
+
+  let first = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &source,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(
+    first,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::MaintenancePage {
+      processed_documents: 1,
+      complete: false,
+      completion: None,
+    })
+  ));
+  let after_first = owner.snapshot().unwrap();
+  assert_eq!(after_first.producer.pending_tasks, 1);
+  assert_eq!(after_first.producer.leased_tasks, 0);
+  assert_eq!(after_first.mutations.active_records, 4);
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), retained_task_bytes + u64::try_from("/a.json".len()).unwrap());
+
+  let second = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &source,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 3,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(
+    second,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::MaintenancePage {
+      processed_documents: 1,
+      complete: true,
+      completion: Some(_),
+    })
+  ));
+  let after_second = owner.snapshot().unwrap();
+  assert_eq!(after_second.producer.pending_tasks, 0);
+  assert_eq!(after_second.mutations.active_records, 8);
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), 0);
+  assert_eq!(*observed.lock().unwrap(), vec![(root.clone(), "/".to_string(), None), (root, "/".to_string(), Some("/a.json".to_string()))]);
+}
+
+#[test]
+fn runtime_retirement_scan_uses_the_same_worker_to_replace_upserts_with_removals() {
+  let owner = owner();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let root = hash(b"retirement-root");
+  let semantic = hash(b"retirement-semantic");
+  let revision = hash(b"retirement-revision");
+  let semantics = SemanticSource { semantic_state_root: semantic.clone() };
+  let limits = IndexMaintenanceScanLimitsV1::new(1, 2 * 1_024 * 1_024, 16 * 1_024).unwrap();
+
+  owner.admit_task(maintenance_task_with(&root, &semantic, IndexProducerTaskKindV1::Build, [0x56; 16], 8, "/"), 1, &mut Spill).unwrap();
+  let build = MaintenanceSource {
+    pages: Mutex::new(VecDeque::from([(
+      vec![IndexMaintenanceScanDocumentV1 { revision_hash: revision.clone(), file_record: file("/a.json") }],
+      true,
+    )])),
+    observed: Arc::new(Mutex::new(Vec::new())),
+  };
+  owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &build,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  let after_build = owner.snapshot().unwrap();
+  assert_eq!(after_build.mutations.active_records, 4);
+  assert_eq!(after_build.mutations.active_mutations, 4);
+
+  owner.admit_task(maintenance_task_with(&root, &semantic, IndexProducerTaskKindV1::Retire, [0x57; 16], 9, "/"), 3, &mut Spill).unwrap();
+  let retire = MaintenanceSource {
+    pages: Mutex::new(VecDeque::from([(
+      vec![IndexMaintenanceScanDocumentV1 { revision_hash: revision, file_record: file("/a.json") }],
+      true,
+    )])),
+    observed: Arc::new(Mutex::new(Vec::new())),
+  };
+  let retired = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &retire,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 4,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(retired, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::MaintenancePage { complete: true, .. })));
+  let after_retire = owner.snapshot().unwrap();
+  assert_eq!(after_retire.producer.pending_tasks, 0);
+  assert_eq!(after_retire.mutations.active_records, 4);
+  assert!(after_retire.mutations.active_mutations > after_build.mutations.active_mutations);
+}
+
+#[test]
+fn maintenance_scan_retry_cancellation_and_corruption_preserve_the_fail_closed_runtime_direction() {
+  let root = hash(b"maintenance-failure-root");
+  let semantic = hash(b"maintenance-failure-semantic");
+  let semantics = SemanticSource { semantic_state_root: semantic.clone() };
+  let limits = IndexMaintenanceScanLimitsV1::new(1, 2 * 1_024 * 1_024, 16 * 1_024).unwrap();
+
+  let retrying = owner();
+  retrying.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  retrying.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  let retry = retrying
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &FailingMaintenanceSource(MaintenanceFailure::Retryable),
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(retry, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::SourceRetry { .. })));
+  let retry_snapshot = retrying.snapshot().unwrap();
+  assert_eq!(retry_snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(retry_snapshot.producer.pending_tasks, 1);
+  assert_eq!(retry_snapshot.producer.leased_tasks, 0);
+  assert_eq!(retry_snapshot.producer.scheduled_retries, 1);
+
+  let cancelled = owner();
+  cancelled.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  cancelled.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  assert!(matches!(
+    cancelled.execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &FailingMaintenanceSource(MaintenanceFailure::Cancelled),
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    ),
+    Err(IndexRuntimeErrorV1::Canceled)
+  ));
+  let cancelled_snapshot = cancelled.snapshot().unwrap();
+  assert_eq!(cancelled_snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(cancelled_snapshot.producer.pending_tasks, 1);
+  assert_eq!(cancelled_snapshot.producer.leased_tasks, 0);
+
+  let corrupt = owner();
+  corrupt.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  corrupt.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  assert!(matches!(
+    corrupt.execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &FailingMaintenanceSource(MaintenanceFailure::Corrupt),
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    ),
+    Err(IndexRuntimeErrorV1::Work(message)) if message.contains("test_corrupt")
+  ));
+  let corrupt_snapshot = corrupt.snapshot().unwrap();
+  assert_eq!(corrupt_snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(corrupt_snapshot.producer.pending_tasks, 1);
+  assert_eq!(corrupt_snapshot.producer.leased_tasks, 0);
+  assert_eq!(corrupt_snapshot.mutations.active_records, 0);
+}
+
+#[test]
+fn maintenance_scan_plan_pressure_retries_before_source_io_and_releases_temporary_memory() {
+  let coordinator = memory();
+  let owner = IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, coordinator.clone(), options(), 1).unwrap();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let root = hash(b"pressured-maintenance-root");
+  let semantic = hash(b"pressured-maintenance-semantic");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  let retained_task_bytes = reserved(&coordinator, MemoryOwner::Task);
+  coordinator
+    .observe_legacy(
+      MemoryOwner::IndexCleanCache,
+      MemoryObservation {
+        resident_bytes: 60 * 1_024 * 1_024,
+        clean_bytes: 60 * 1_024 * 1_024,
+        dirty_bytes: 0,
+        evictable_bytes: 60 * 1_024 * 1_024,
+        pinned_bytes: 0,
+        spill_bytes: 0,
+        items: 1,
+        hits: 0,
+        misses: 0,
+        evictions: 0,
+      },
+    )
+    .unwrap();
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let source = MaintenanceSource {
+    pages: Mutex::new(VecDeque::from([(
+      vec![IndexMaintenanceScanDocumentV1 { revision_hash: hash(b"pressured-revision"), file_record: file("/a.json") }],
+      true,
+    )])),
+    observed: Arc::clone(&observed),
+  };
+  let semantics = SemanticSource { semantic_state_root: semantic };
+  let limits = IndexMaintenanceScanLimitsV1::new(1, 2 * 1_024 * 1_024, 16 * 1_024).unwrap();
+
+  let retry = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &source,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(retry, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::SourceRetry { .. })));
+  assert!(observed.lock().unwrap().is_empty());
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), retained_task_bytes);
+  assert_eq!(owner.snapshot().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
+
+  coordinator.observe_legacy(MemoryOwner::IndexCleanCache, MemoryObservation::default()).unwrap();
+  let completed = owner
+    .execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: &source,
+        limits,
+        semantic_source: &semantics,
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 30,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
+  assert!(matches!(completed, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::MaintenancePage { complete: true, .. })));
+  assert_eq!(observed.lock().unwrap().len(), 1);
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), 0);
+}
+
+#[test]
+fn blocked_maintenance_scan_does_not_hold_the_runtime_owner_mutex() {
+  let owner = Arc::new(owner());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 7 }).unwrap();
+  let root = hash(b"blocked-maintenance-root");
+  let semantic = hash(b"blocked-maintenance-semantic");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Build), 1, &mut Spill).unwrap();
+  let (entered_tx, entered_rx) = mpsc::channel();
+  let (release_tx, release_rx) = mpsc::channel();
+  let source = Arc::new(BlockingMaintenanceSource {
+    entered: entered_tx,
+    release: Mutex::new(release_rx),
+    document: IndexMaintenanceScanDocumentV1 { revision_hash: hash(b"blocked-maintenance-revision"), file_record: file("/a.json") },
+  });
+  let semantics = Arc::new(SemanticSource { semantic_state_root: semantic });
+  let worker_owner = Arc::clone(&owner);
+  let worker_source = Arc::clone(&source);
+  let worker_semantics = Arc::clone(&semantics);
+  let worker = std::thread::spawn(move || {
+    worker_owner.execute_next_maintenance(
+      IndexRuntimeMaintenanceWorkRequestV1 {
+        source: worker_source.as_ref(),
+        limits: IndexMaintenanceScanLimitsV1::new(1, 2 * 1_024 * 1_024, 16 * 1_024).unwrap(),
+        semantic_source: worker_semantics.as_ref(),
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+  });
+  entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+  let (snapshot_tx, snapshot_rx) = mpsc::channel();
+  let snapshot_owner = Arc::clone(&owner);
+  let snapshot = std::thread::spawn(move || snapshot_tx.send(snapshot_owner.cached_snapshot()).unwrap());
+  assert_eq!(snapshot_rx.recv_timeout(Duration::from_millis(250)).unwrap().producer.leased_tasks, 1);
+
+  let (drain_tx, drain_rx) = mpsc::channel();
+  let drain_owner = Arc::clone(&owner);
+  let drain = std::thread::spawn(move || drain_tx.send(drain_owner.begin_draining()).unwrap());
+  assert!(drain_rx.recv_timeout(Duration::from_millis(250)).unwrap().is_ok());
+
+  release_tx.send(()).unwrap();
+  assert!(matches!(
+    worker.join().unwrap(),
+    Ok(IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::MaintenancePage { complete: true, .. }))
+  ));
+  snapshot.join().unwrap();
+  drain.join().unwrap();
+  let final_snapshot = owner.snapshot().unwrap();
+  assert_eq!(final_snapshot.lifecycle, IndexRuntimeLifecycleV1::Draining);
+  assert_eq!(final_snapshot.producer.pending_tasks, 0);
+  assert_eq!(final_snapshot.producer.leased_tasks, 0);
+  assert_eq!(final_snapshot.mutations.active_records, 4);
 }
 
 fn acknowledgement(path: String, publication_sequence: u64) -> NamespaceMutationAcknowledgement {
@@ -1001,7 +1551,7 @@ fn concurrent_degradation_discards_unlocked_collection_and_releases_only_its_lea
 fn runtime_source_has_one_unlocked_collection_and_one_owner_locked_finalization_path() {
   let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
   let start = source.find("  fn execute_next_mutation_inner(").unwrap();
-  let end = source[start..].find("  fn apply_caught_worker_result(").map(|offset| start + offset).unwrap();
+  let end = source[start..].find("  pub fn execute_next_maintenance(").map(|offset| start + offset).unwrap();
   let implementation = &source[start..end];
   let first_lock = implementation.find("self.state.lock()").unwrap();
   let collection = implementation.find("self.worker.collect_resolved_mutation(").unwrap();
@@ -1016,6 +1566,30 @@ fn runtime_source_has_one_unlocked_collection_and_one_owner_locked_finalization_
   assert!(collection < second_lock);
   assert!(second_lock < finalization);
   assert!(implementation[first_lock..collection].contains("(lease, record)\n    };"));
+}
+
+#[test]
+fn runtime_maintenance_source_has_one_unlocked_scan_and_only_the_shared_worker_collection_path() {
+  let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let start = source.find("  fn execute_next_maintenance_inner(").unwrap();
+  let end = source[start..].find("  fn reacquire_maintenance_state(").map(|offset| start + offset).unwrap();
+  let implementation = &source[start..end];
+  let first_lock = implementation.find("self.state.lock()").unwrap();
+  let scan = implementation.find("request.source.scan(").unwrap();
+  let collection = implementation.find("self.worker.collect_maintenance_document(").unwrap();
+  let finalization = implementation.find("self.worker.finish_maintenance_collection(").unwrap();
+
+  assert_eq!(implementation.matches("request.source.scan(").count(), 1);
+  assert_eq!(implementation.matches("self.worker.collect_maintenance_document(").count(), 1);
+  assert_eq!(implementation.matches("self.worker.finish_maintenance_collection(").count(), 1);
+  assert_eq!(implementation.matches("self.worker.finish_maintenance_page(").count(), 1);
+  assert_eq!(implementation.matches("self.state.lock()").count(), 1);
+  assert!(!implementation.contains("IndexProducerCollectorV1"));
+  assert!(!implementation.contains("self.worker.collect_resolved_mutation("));
+  assert!(!implementation.contains("self.worker.execute("));
+  assert!(first_lock < scan);
+  assert!(scan < collection);
+  assert!(collection < finalization);
 }
 
 impl IndexSemanticScopeSourceV1 for FailingSemanticSource {

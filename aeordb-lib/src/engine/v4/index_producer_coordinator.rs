@@ -400,6 +400,35 @@ struct RetainedMaintenanceContinuationV1 {
   _reservation: MemoryReservation,
 }
 
+pub(crate) struct IndexProducerMaintenanceScanPlanV1 {
+  namespace_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  scope: String,
+  resume_after: Option<String>,
+  limits: IndexMaintenanceScanLimitsV1,
+  _reservation: MemoryReservation,
+}
+
+impl IndexProducerMaintenanceScanPlanV1 {
+  pub(crate) fn namespace_root(&self) -> &[u8] {
+    &self.namespace_root
+  }
+
+  pub(crate) fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub(crate) fn request<'request>(&'request self, is_cancelled: &'request dyn Fn() -> bool) -> IndexMaintenanceScanRequestV1<'request> {
+    IndexMaintenanceScanRequestV1 {
+      namespace_root: &self.namespace_root,
+      scope: &self.scope,
+      resume_after: self.resume_after.as_deref(),
+      limits: self.limits,
+      is_cancelled,
+    }
+  }
+}
+
 struct RetainedIndexProducerTaskV1 {
   operation_id: [u8; 16],
   kind: IndexProducerTaskKindV1,
@@ -651,6 +680,63 @@ impl IndexProducerCoordinatorV1 {
     let task = &self.tasks[self.task_index(lease.operation_id)?];
     require_maintenance_scan_task(task.kind)?;
     Ok(task.maintenance_continuation.as_ref().map(|continuation| continuation.resume_after.as_str()))
+  }
+
+  pub(crate) fn leased_maintenance_scan_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    limits: IndexMaintenanceScanLimitsV1,
+  ) -> Result<IndexProducerMaintenanceScanPlanV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    let task = &self.tasks[self.task_index(lease.operation_id)?];
+    require_maintenance_scan_task(task.kind)?;
+    let scope = task
+      .scope
+      .as_deref()
+      .ok_or_else(|| IndexProducerCoordinatorErrorV1::Invariant("root-pinned document-scan task lost its scope".to_string()))?;
+    let never_cancelled = || false;
+    validate_index_maintenance_scan_request_v1(
+      self.hash_algorithm,
+      &IndexMaintenanceScanRequestV1 {
+        namespace_root: &task.namespace_root_after,
+        scope,
+        resume_after: task.maintenance_continuation.as_ref().map(|continuation| continuation.resume_after.as_str()),
+        limits,
+        is_cancelled: &never_cancelled,
+      },
+    )
+    .map_err(|error| IndexProducerCoordinatorErrorV1::InvalidMaintenanceDocument(error.to_string()))?;
+
+    let requested_bytes = maintenance_scan_plan_bytes(
+      task.namespace_root_after.len(),
+      task.semantic_state_root.len(),
+      scope.len(),
+      task.maintenance_continuation.as_ref().map_or(0, |continuation| continuation.resume_after.len()),
+    )?;
+    let mut reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, requested_bytes, AdmissionClass::Workload)
+      .map_err(|error| memory_error(requested_bytes, self.options.max_pending_bytes, error))?;
+    let namespace_root = clone_bytes(&task.namespace_root_after, "maintenance scan namespace root")?;
+    let semantic_state_root = clone_bytes(&task.semantic_state_root, "maintenance scan semantic-state root")?;
+    let scope = clone_string(scope, "maintenance scan scope")?;
+    let resume_after = task
+      .maintenance_continuation
+      .as_ref()
+      .map(|continuation| clone_string(&continuation.resume_after, "maintenance scan continuation"))
+      .transpose()?;
+    let retained_bytes = maintenance_scan_plan_bytes(
+      namespace_root.capacity(),
+      semantic_state_root.capacity(),
+      scope.capacity(),
+      resume_after.as_ref().map_or(0, String::capacity),
+    )?;
+    if retained_bytes > requested_bytes {
+      reservation
+        .grow(retained_bytes - requested_bytes)
+        .map_err(|error| memory_error(retained_bytes, self.options.max_pending_bytes, error))?;
+    }
+    Ok(IndexProducerMaintenanceScanPlanV1 { namespace_root, semantic_state_root, scope, resume_after, limits, _reservation: reservation })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1203,6 +1289,22 @@ fn retained_task_bytes(request: &IndexProducerTaskRequestV1<'_>) -> Result<u64, 
     .and_then(|bytes| bytes.checked_add(size_of::<RetainedIndexProducerTaskV1>()))
     .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("retained task size"))?;
   Ok(payload as u64)
+}
+
+fn maintenance_scan_plan_bytes(
+  namespace_root_bytes: usize,
+  semantic_state_root_bytes: usize,
+  scope_bytes: usize,
+  continuation_bytes: usize,
+) -> Result<u64, IndexProducerCoordinatorErrorV1> {
+  let retained = size_of::<IndexProducerMaintenanceScanPlanV1>()
+    .checked_add(namespace_root_bytes)
+    .and_then(|bytes| bytes.checked_add(semantic_state_root_bytes))
+    .and_then(|bytes| bytes.checked_add(scope_bytes))
+    .and_then(|bytes| bytes.checked_add(continuation_bytes))
+    .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance scan plan bytes"))?;
+  u64::try_from(retained)
+    .map_err(|source| IndexProducerCoordinatorErrorV1::Invariant(format!("maintenance scan plan bytes exceed u64: {source}")))
 }
 
 fn clone_task(
