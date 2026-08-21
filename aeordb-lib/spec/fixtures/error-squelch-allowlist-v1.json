@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1514,
+  "maximum_occurrences": 1517,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -10186,7 +10186,7 @@
     {
       "id": "esq-v1-50461baeb70523bacca8-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 401,
+      "line": 403,
       "column": 17,
       "enclosing_item": "impl IndexRuntimeOwnerV1::snapshot",
       "kind": "error_conversion",
@@ -10196,7 +10196,7 @@
     {
       "id": "esq-v1-d84f65795054b8898ade-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 411,
+      "line": 413,
       "column": 21,
       "enclosing_item": "impl IndexRuntimeOwnerV1::latch_cadence_failure",
       "kind": "error_conversion",
@@ -10206,7 +10206,7 @@
     {
       "id": "esq-v1-e4b8eb49aca411feeede-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 459,
+      "line": 461,
       "column": 21,
       "enclosing_item": "impl IndexRuntimeOwnerV1::complete_recovery",
       "kind": "error_conversion",
@@ -10216,7 +10216,7 @@
     {
       "id": "esq-v1-9b798ba7a41853bc702e-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 503,
+      "line": 505,
       "column": 21,
       "enclosing_item": "impl IndexRuntimeOwnerV1::refresh_for_installation",
       "kind": "error_conversion",
@@ -10226,7 +10226,7 @@
     {
       "id": "esq-v1-424727f08a667cedd0b0-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 522,
+      "line": 524,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::admit_task",
       "kind": "error_conversion",
@@ -10236,7 +10236,7 @@
     {
       "id": "esq-v1-da677bdb971908215d81-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 567,
+      "line": 569,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::coordinate_mutation_journal_admission",
       "kind": "error_conversion",
@@ -10244,21 +10244,51 @@
       "review": "authority-state-failure"
     },
     {
-      "id": "esq-v1-b9d24051e4a476f5b21f-00",
+      "id": "esq-v1-5d4b5780aeb33635b971-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 585,
+      "line": 596,
       "column": 23,
-      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation",
+      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation_inner",
       "kind": "error_conversion",
       "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
       "review": "authority-state-failure"
     },
     {
-      "id": "esq-v1-fb05ddd50d3bd48a1ecb-00",
+      "id": "esq-v1-659d63991962e079710f-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 635,
+      "line": 617,
       "column": 9,
-      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation",
+      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation_inner",
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-5d4b5780aeb33635b971-01",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
+      "line": 640,
+      "column": 21,
+      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation_inner",
+      "kind": "error_conversion",
+      "pattern": "self . state . lock () . map_err (| _ | IndexRuntimeErrorV1 :: Poisoned)",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-659d63991962e079710f-01",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
+      "line": 672,
+      "column": 7,
+      "enclosing_item": "impl IndexRuntimeOwnerV1::execute_next_mutation_inner",
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "authority-state-failure"
+    },
+    {
+      "id": "esq-v1-1898dac1e63dfd252fcc-00",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
+      "line": 685,
+      "column": 7,
+      "enclosing_item": "impl IndexRuntimeOwnerV1::apply_caught_worker_result",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
       "review": "authority-state-failure"
@@ -10266,7 +10296,7 @@
     {
       "id": "esq-v1-4ae2de5a6869b8c02a6f-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 664,
+      "line": 746,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "error_conversion",
@@ -10276,7 +10306,7 @@
     {
       "id": "esq-v1-4ae2de5a6869b8c02a6f-01",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 693,
+      "line": 775,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "error_conversion",
@@ -10286,7 +10316,7 @@
     {
       "id": "esq-v1-dbac20a6bdaf0b05a966-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 715,
+      "line": 797,
       "column": 9,
       "enclosing_item": "impl IndexRuntimeOwnerV1::flush",
       "kind": "broad_err_pattern",
@@ -10296,7 +10326,7 @@
     {
       "id": "esq-v1-618bfb10c7501e1bb9dd-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 773,
+      "line": 855,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::begin_draining",
       "kind": "error_conversion",
@@ -10306,7 +10336,7 @@
     {
       "id": "esq-v1-c089d1a70228fa16ffdc-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_owner.rs",
-      "line": 790,
+      "line": 872,
       "column": 23,
       "enclosing_item": "impl IndexRuntimeOwnerV1::finish_draining",
       "kind": "error_conversion",

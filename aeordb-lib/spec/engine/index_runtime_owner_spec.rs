@@ -409,6 +409,8 @@ fn acknowledgement(path: String, publication_sequence: u64) -> NamespaceMutation
 
 struct Spill;
 
+struct PanickingSpill;
+
 impl IndexProducerSpillStoreV1 for Spill {
   fn spill(
     &mut self,
@@ -416,6 +418,16 @@ impl IndexProducerSpillStoreV1 for Spill {
     _reason: IndexProducerSpillReasonV1,
   ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
     IndexProducerSpillReceiptV1::new(task.operation_id(), vec![0x61; 32])
+  }
+}
+
+impl IndexProducerSpillStoreV1 for PanickingSpill {
+  fn spill(
+    &mut self,
+    _task: IndexProducerTaskViewV1<'_>,
+    _reason: IndexProducerSpillReasonV1,
+  ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    panic!("injected finalization spill panic")
   }
 }
 
@@ -803,6 +815,12 @@ struct BlockingSemanticSource {
   release: Mutex<mpsc::Receiver<()>>,
 }
 
+struct BlockingSuccessfulSemanticSource {
+  entered: mpsc::Sender<()>,
+  release: Mutex<mpsc::Receiver<()>>,
+  semantic_state_root: Vec<u8>,
+}
+
 impl IndexSemanticScopeSourceV1 for BlockingSemanticSource {
   fn resolve_scopes(
     &self,
@@ -811,6 +829,17 @@ impl IndexSemanticScopeSourceV1 for BlockingSemanticSource {
     self.entered.send(()).unwrap();
     self.release.lock().unwrap().recv().unwrap();
     Err(IndexSemanticScopeReadErrorV1::retryable("store_busy", "injected blocked semantic read"))
+  }
+}
+
+impl IndexSemanticScopeSourceV1 for BlockingSuccessfulSemanticSource {
+  fn resolve_scopes(
+    &self,
+    request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    self.entered.send(()).unwrap();
+    self.release.lock().unwrap().recv().unwrap();
+    SemanticSource { semantic_state_root: self.semantic_state_root.clone() }.resolve_scopes(request)
   }
 }
 
@@ -858,11 +887,135 @@ fn cached_observability_does_not_wait_for_worker_owned_runtime_state() {
   let snapshot = std::thread::spawn(move || snapshot_tx.send(snapshot_owner.cached_snapshot()).unwrap());
   let cached = snapshot_rx.recv_timeout(Duration::from_secs(1)).expect("cached runtime observability blocked behind worker state");
   assert_eq!(cached.lifecycle, IndexRuntimeLifecycleV1::Running);
-  assert_eq!(cached.producer.pending_tasks, 1);
+  assert_eq!(cached.producer.pending_tasks, 0);
+  assert_eq!(cached.producer.leased_tasks, 1);
 
   release_tx.send(()).unwrap();
   assert!(worker.join().unwrap().is_ok());
   snapshot.join().unwrap();
+}
+
+#[test]
+fn owner_drain_does_not_wait_for_blocked_collection_and_preserves_the_active_lease() {
+  let owner = Arc::new(owner());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  let (entered_tx, entered_rx) = mpsc::channel();
+  let (release_tx, release_rx) = mpsc::channel();
+  let semantics = Arc::new(BlockingSemanticSource { entered: entered_tx, release: Mutex::new(release_rx) });
+  let worker_owner = Arc::clone(&owner);
+  let worker_semantics = Arc::clone(&semantics);
+  let worker = std::thread::spawn(move || {
+    let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+    let revisions = revision_source(&encoded);
+    worker_owner.execute_next_mutation(
+      IndexRuntimeMutationWorkRequestV1 {
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: worker_semantics.as_ref(),
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+  });
+  entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+  let (drain_tx, drain_rx) = mpsc::channel();
+  let drain_owner = Arc::clone(&owner);
+  let drain = std::thread::spawn(move || drain_tx.send(drain_owner.begin_draining()).unwrap());
+  let drain_while_blocked = drain_rx.recv_timeout(Duration::from_millis(250));
+
+  release_tx.send(()).unwrap();
+  let worker_result = worker.join().unwrap();
+  drain.join().unwrap();
+
+  assert!(drain_while_blocked.is_ok(), "runtime drain blocked behind source/parser/collector work");
+  assert!(worker_result.is_ok());
+  let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Draining);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+  assert_eq!(snapshot.producer.pending_tasks, 1);
+}
+
+#[test]
+fn concurrent_degradation_discards_unlocked_collection_and_releases_only_its_lease() {
+  let coordinator = memory();
+  let owner = Arc::new(IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, coordinator.clone(), options(), 1).unwrap());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  let retained_before_collection = reserved(&coordinator, MemoryOwner::IndexDirtyBuffers);
+  let (entered_tx, entered_rx) = mpsc::channel();
+  let (release_tx, release_rx) = mpsc::channel();
+  let semantics = Arc::new(BlockingSuccessfulSemanticSource {
+    entered: entered_tx,
+    release: Mutex::new(release_rx),
+    semantic_state_root: journal.semantic_state_root.to_vec(),
+  });
+  let worker_owner = Arc::clone(&owner);
+  let worker_semantics = Arc::clone(&semantics);
+  let worker = std::thread::spawn(move || {
+    let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+    let revisions = revision_source(&encoded);
+    worker_owner.execute_next_mutation(
+      IndexRuntimeMutationWorkRequestV1 {
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: worker_semantics.as_ref(),
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+  });
+  entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+  let oversized_path = format!("/{}", "x".repeat(70 * 1_024));
+  assert!(matches!(owner.offer_acknowledgement(&acknowledgement(oversized_path, 8)), SoftMutationAdmissionV1::ReconciliationRequired(_)));
+  let mut publisher = Publisher { behavior: PublishBehavior::Success, calls: 0 };
+  assert!(matches!(
+    owner.flush(102, None, false, &mut publisher),
+    Err(IndexRuntimeErrorV1::NotRunning { lifecycle: IndexRuntimeLifecycleV1::Degraded })
+  ));
+  assert_eq!(publisher.calls, 0);
+
+  release_tx.send(()).unwrap();
+  assert!(matches!(worker.join().unwrap(), Err(IndexRuntimeErrorV1::NotRunning { lifecycle: IndexRuntimeLifecycleV1::Degraded })));
+  let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+  assert_eq!(snapshot.producer.pending_tasks, 1);
+  assert_eq!(snapshot.mutations.active_records, 0);
+  assert_eq!(snapshot.mutations.frozen_records, 0);
+  assert_eq!(reserved(&coordinator, MemoryOwner::IndexDirtyBuffers), retained_before_collection);
+}
+
+#[test]
+fn runtime_source_has_one_unlocked_collection_and_one_owner_locked_finalization_path() {
+  let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let start = source.find("  fn execute_next_mutation_inner(").unwrap();
+  let end = source[start..].find("  fn apply_caught_worker_result(").map(|offset| start + offset).unwrap();
+  let implementation = &source[start..end];
+  let first_lock = implementation.find("self.state.lock()").unwrap();
+  let collection = implementation.find("self.worker.collect_resolved_mutation(").unwrap();
+  let second_lock = implementation[collection..].find("self.state.lock()").map(|offset| collection + offset).unwrap();
+  let finalization = implementation.find("self.worker.finish_mutation_collection(").unwrap();
+
+  assert_eq!(implementation.matches("self.worker.collect_resolved_mutation(").count(), 1);
+  assert_eq!(implementation.matches("self.worker.finish_mutation_collection(").count(), 1);
+  assert_eq!(implementation.matches("self.state.lock()").count(), 2);
+  assert!(!implementation.contains("self.worker.execute("));
+  assert!(first_lock < collection);
+  assert!(collection < second_lock);
+  assert!(second_lock < finalization);
+  assert!(implementation[first_lock..collection].contains("(lease, record)\n    };"));
 }
 
 impl IndexSemanticScopeSourceV1 for FailingSemanticSource {
@@ -1020,6 +1173,39 @@ fn cancellation_during_journal_validation_is_typed_and_worker_panics_retain_the_
         is_cancelled: &|| false,
       },
       &mut Spill,
+    ),
+    Err(IndexRuntimeErrorV1::Work(_))
+  ));
+  let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(snapshot.degraded.unwrap().code, "worker_panic");
+  assert_eq!(snapshot.producer.pending_tasks, 1);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+}
+
+#[test]
+fn finalization_panic_does_not_poison_the_owner_or_strand_the_lease() {
+  let mut panic_options = options();
+  panic_options.producer = IndexProducerCoordinatorOptionsV1::new(32, 2 * 1_024 * 1_024, 1, 10, 1_000, 16, 256, 2 * 1_024 * 1_024).unwrap();
+  let owner = IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, memory(), panic_options, 1).unwrap();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/doc.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  let revisions = revision_source(&encoded);
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+
+  assert!(matches!(
+    owner.execute_next_mutation(
+      IndexRuntimeMutationWorkRequestV1 {
+        journal: &journal,
+        revision_source: &revisions,
+        semantic_source: &FailingSemanticSource { retryable: true },
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 101,
+        is_cancelled: &|| false,
+      },
+      &mut PanickingSpill,
     ),
     Err(IndexRuntimeErrorV1::Work(_))
   ));

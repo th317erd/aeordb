@@ -591,6 +591,35 @@ fn lease_identity_and_cancellation_fail_closed() {
 }
 
 #[test]
+fn stale_completion_cannot_consume_or_cancel_a_replacement_lease() {
+  let mut coordinator = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(2, 20_000, 2)).unwrap();
+  let root = hash(b"root");
+  let semantic = hash(b"semantic");
+  coordinator.admit(task([11; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  let stale = coordinator.lease_next(1, false).unwrap().unwrap();
+  coordinator.cancel(&stale).unwrap();
+  let replacement = coordinator.lease_next(2, false).unwrap().unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+
+  assert!(matches!(
+    coordinator.complete(&stale, IndexProducerReportV1 { outcomes: Vec::new() }, &mut mutations, 2, false, &mut SpillStore::default(),),
+    Err(IndexProducerCoordinatorErrorV1::StaleLease)
+  ));
+  assert_eq!(coordinator.snapshot().leased_tasks, 1);
+  assert!(matches!(
+    coordinator.complete(
+      &replacement,
+      IndexProducerReportV1 { outcomes: Vec::new() },
+      &mut mutations,
+      3,
+      false,
+      &mut SpillStore::default(),
+    ),
+    Ok(IndexProducerCompletionV1::Completed { .. })
+  ));
+}
+
+#[test]
 fn every_producer_kind_uses_the_same_leased_path() {
   let root = hash(b"root");
   let before = hash(b"before");

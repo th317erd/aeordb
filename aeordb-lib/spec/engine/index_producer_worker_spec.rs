@@ -717,9 +717,11 @@ fn source_retry_failure_preserves_both_source_and_spill_evidence() {
 }
 
 #[test]
-fn mutation_worker_remains_disconnected_until_runtime_ownership_lands() {
+fn mutation_worker_has_one_runtime_owner_and_no_storage_or_route_bypass() {
   let manifest = std::fs::read_to_string(format!("{}/src/engine/v4/mod.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
   assert_eq!(manifest.matches("pub mod index_producer_worker;").count(), 1);
+  let owner = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  assert_eq!(owner.matches("IndexProducerMutationWorkerV1").count(), 3);
   for path in [
     "src/engine/storage_engine.rs",
     "src/engine/directory_ops.rs",
@@ -728,7 +730,7 @@ fn mutation_worker_remains_disconnected_until_runtime_ownership_lands() {
     "src/server/mod.rs",
   ] {
     let source = std::fs::read_to_string(format!("{}/../aeordb-lib/{path}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-    assert!(!source.contains("IndexProducerMutationWorkerV1"), "{path} activated the v4 mutation worker before P6-2d");
-    assert!(!source.contains("index_producer_worker"), "{path} imports the v4 mutation worker before P6-2d");
+    assert!(!source.contains("IndexProducerMutationWorkerV1"), "{path} bypasses the sole v4 runtime worker owner");
+    assert!(!source.contains("index_producer_worker"), "{path} imports the v4 mutation worker outside its runtime owner");
   }
 }

@@ -1054,7 +1054,11 @@
                 - [x] P6-2c-d5b2: page historical maintenance scopes through bounded seekable flat/B-tree scans.
                 - [x] P6-2c-d5b3: bind selected semantic objects and durable scope ordinals through one retained descriptor catalog.
                 - [x] P6-2c-d5b4: execute the frozen parser plan and dependency table against exact verified chunks with bounded input and shared-memory admission.
-              - [ ] P6-2c-d5c: collect mutation and maintenance work outside the runtime owner mutex, then validate and complete the exact retained lease under the sole owner.
+              - [x] P6-2c-d5c: collect mutation and maintenance work outside the runtime owner mutex, then validate and complete the exact retained lease under the sole owner.
+                - [x] Prove the owner control plane remains responsive while a source/parser/collector blocks and draining cannot strand an active lease.
+                - [x] Split source/collector execution from owner-locked lease validation, retry/cancel, mutation admission, and completion without weakening panic handling.
+                - [x] Reject stale or invalidated collection results without completing or canceling a replacement lease; preserve exact memory-reservation lifetime.
+                - [x] Run focused concurrency/failure tests, affected owner/worker/coordinator gates, suppression/static checks, and the broad phase-boundary suite.
               - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
               - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.

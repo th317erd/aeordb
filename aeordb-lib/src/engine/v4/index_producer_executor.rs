@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use super::index_coordinator::IndexCoordinatorV1;
 use super::index_producer_collector::{
-  IndexCollectorDocumentRevisionTransitionV1, IndexCollectorScopeWorkV1, IndexParserExecutorV1, IndexProducerCollectorErrorV1,
-  IndexProducerCollectorV1,
+  CollectedIndexProducerReportV1, IndexCollectorDocumentRevisionTransitionV1, IndexCollectorScopeWorkV1, IndexParserExecutorV1,
+  IndexProducerCollectorErrorV1, IndexProducerCollectorV1,
 };
 use super::index_producer_coordinator::{
   IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1, IndexProducerSpillStoreV1,
@@ -65,28 +65,70 @@ impl IndexProducerExecutorV1 {
       return Err(error);
     }
 
-    let collected = match self.collector.collect_scopes(input.scope_work, input.transition, parser, mapper, is_cancelled) {
+    let collected = match self.collect_transition(input, parser, mapper, is_cancelled) {
       Ok(collected) => collected,
-      Err(IndexProducerCollectorErrorV1::Cancelled) => {
+      Err(IndexProducerExecutionErrorV1::Cancelled) => {
         release_lease(producer, lease, "collection cancellation")?;
         return Err(IndexProducerExecutionErrorV1::Cancelled);
       }
       Err(error) => {
         release_lease(producer, lease, "collection failure")?;
-        return Err(IndexProducerExecutionErrorV1::Collector(error));
+        return Err(error);
       }
     };
+    self.complete_collected(producer, mutations, lease, collected, now_ms, is_cancelled, spill_store)
+  }
+
+  pub(crate) fn collect_transition(
+    &self,
+    input: IndexProducerExecutionInputV1<'_>,
+    parser: &dyn IndexParserExecutorV1,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+    is_cancelled: &dyn Fn() -> bool,
+  ) -> Result<CollectedIndexProducerReportV1, IndexProducerExecutionErrorV1> {
+    if is_cancelled() {
+      return Err(IndexProducerExecutionErrorV1::Cancelled);
+    }
+    match self.collector.collect_scopes(input.scope_work, input.transition, parser, mapper, is_cancelled) {
+      Ok(collected) => Ok(collected),
+      Err(IndexProducerCollectorErrorV1::Cancelled) => Err(IndexProducerExecutionErrorV1::Cancelled),
+      Err(error) => Err(IndexProducerExecutionErrorV1::Collector(error)),
+    }
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn complete_collected(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    mutations: &mut IndexCoordinatorV1,
+    lease: &IndexProducerLeaseV1,
+    collected: CollectedIndexProducerReportV1,
+    now_ms: u64,
+    is_cancelled: &dyn Fn() -> bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerCompletionV1, IndexProducerExecutionErrorV1> {
     let (report, _report_reservation) = collected.into_parts();
     match producer.complete(lease, report, mutations, now_ms, is_cancelled(), spill_store) {
       Ok(completion) => Ok(completion),
       Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerExecutionErrorV1::Cancelled),
       Err(error) => {
-        if producer.snapshot().leased_tasks != 0 {
+        if lease_is_still_active(producer, lease)? {
           release_lease(producer, lease, "completion failure")?;
         }
         Err(IndexProducerExecutionErrorV1::Completion(error))
       }
     }
+  }
+}
+
+fn lease_is_still_active(
+  producer: &IndexProducerCoordinatorV1,
+  lease: &IndexProducerLeaseV1,
+) -> Result<bool, IndexProducerExecutionErrorV1> {
+  match producer.leased_task(lease) {
+    Ok(_) => Ok(true),
+    Err(IndexProducerCoordinatorErrorV1::ForeignLease | IndexProducerCoordinatorErrorV1::StaleLease) => Ok(false),
+    Err(source) => Err(IndexProducerExecutionErrorV1::LeaseRelease { phase: "completion lease validation", source }),
   }
 }
 

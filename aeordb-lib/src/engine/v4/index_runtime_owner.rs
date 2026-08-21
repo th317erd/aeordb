@@ -35,7 +35,9 @@ use super::index_producer_coordinator::{
   IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
 };
 use super::index_producer_executor::IndexProducerExecutorV1;
-use super::index_producer_source::{IndexFileRevisionSourceV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeSourceV1};
+use super::index_producer_source::{
+  IndexFileRevisionSourceV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeSourceV1, resolve_leased_mutation_record,
+};
 use super::index_producer_worker::{
   IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
 };
@@ -235,7 +237,6 @@ struct IndexRuntimeStateV1 {
   degraded: Option<IndexRuntimeDegradedStateV1>,
   producer: IndexProducerCoordinatorV1,
   mutations: IndexCoordinatorV1,
-  worker: IndexProducerMutationWorkerV1,
   service_retry_not_before_ms: u64,
   publication_retry_not_before_ms: u64,
   publication_in_flight: Option<IndexRuntimePublicationAttemptV1>,
@@ -248,6 +249,7 @@ pub struct IndexRuntimeOwnerV1 {
   soft_options: SoftMutationHubOptionsV1,
   soft_hub: Arc<SoftMutationHubV1>,
   _soft_capacity: MemoryReservation,
+  worker: IndexProducerMutationWorkerV1,
   state: Mutex<IndexRuntimeStateV1>,
   observability: ArcSwap<IndexRuntimeSnapshotV1>,
   source_retry_after_ms: u64,
@@ -308,7 +310,6 @@ impl IndexRuntimeOwnerV1 {
       degraded: None,
       producer,
       mutations,
-      worker,
       service_retry_not_before_ms: 0,
       publication_retry_not_before_ms: 0,
       publication_in_flight: None,
@@ -321,6 +322,7 @@ impl IndexRuntimeOwnerV1 {
       soft_options: options.soft_hub,
       soft_hub,
       _soft_capacity: soft_capacity,
+      worker,
       state: Mutex::new(state),
       observability,
       source_retry_after_ms: options.source_retry_after_ms,
@@ -577,11 +579,20 @@ impl IndexRuntimeOwnerV1 {
     request: IndexRuntimeMutationWorkRequestV1<'_, '_>,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
-    let result = (|| {
-      if (request.is_cancelled)() {
-        return Err(IndexRuntimeErrorV1::Canceled);
-      }
-      let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+    let result = self.execute_next_mutation_inner(request, spill_store);
+    self.finish_observed(result)
+  }
+
+  fn execute_next_mutation_inner(
+    &self,
+    request: IndexRuntimeMutationWorkRequestV1<'_, '_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    if (request.is_cancelled)() {
+      return Err(IndexRuntimeErrorV1::Canceled);
+    }
+    let soft = self.soft_hub.snapshot().map_err(soft_error)?;
+    let (lease, record) = {
       let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
       observe_soft_loss(&mut state, &soft);
       require_serviceable(&state)?;
@@ -593,60 +604,131 @@ impl IndexRuntimeOwnerV1 {
       else {
         return Ok(IndexRuntimeWorkOutcomeV1::Idle);
       };
-      let execution = {
-        let IndexRuntimeStateV1 { producer, mutations, worker, .. } = &mut *state;
-        catch_unwind(AssertUnwindSafe(|| {
-          worker.execute(
-            producer,
-            mutations,
-            IndexProducerMutationWorkRequestV1 {
-              lease: &lease,
-              journal: request.journal,
-              revision_source: request.revision_source,
-              semantic_source: request.semantic_source,
-              parser: request.parser,
-              mapper: request.mapper,
-              now_ms: request.now_ms,
-              is_cancelled: request.is_cancelled,
-            },
-            spill_store,
-          )
-        }))
+      let record = match catch_unwind(AssertUnwindSafe(|| {
+        resolve_leased_mutation_record(self.hash_algorithm, &state.producer, &lease, request.journal, request.is_cancelled)
+      })) {
+        Ok(Ok(record)) => record,
+        Ok(Err(source)) => {
+          let execution = catch_unwind(AssertUnwindSafe(|| {
+            self.worker.finish_source_failure(&mut state.producer, &lease, source, request.now_ms, request.is_cancelled, spill_store)
+          }));
+          return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms);
+        }
+        Err(_) => return self.latch_worker_panic(&mut state, &lease),
       };
-      match execution {
-        Ok(Ok(outcome)) => {
-          state.service_retry_not_before_ms = 0;
-          Ok(IndexRuntimeWorkOutcomeV1::Completed(outcome))
-        }
-        Ok(Err(IndexProducerWorkerErrorV1::Cancelled)) => Err(IndexRuntimeErrorV1::Canceled),
-        Ok(Err(error)) if retryable_worker_error(&error) => {
-          let Some(retry_at_ms) = request.now_ms.checked_add(self.source_retry_after_ms) else {
-            let context = "worker retry deadline overflowed after releasing the exact task lease".to_string();
-            latch_degraded(&mut state, "worker_retry_deadline", context.clone());
-            return Err(IndexRuntimeErrorV1::Work(context));
-          };
-          state.service_retry_not_before_ms = retry_at_ms;
-          Err(IndexRuntimeErrorV1::Work(error.to_string()))
-        }
-        Ok(Err(error)) => {
-          latch_degraded(&mut state, "worker_terminal", error.to_string());
-          Err(IndexRuntimeErrorV1::Work(error.to_string()))
-        }
-        Err(_) => {
-          let context = if state.producer.snapshot().leased_tasks != 0 {
-            match state.producer.cancel(&lease) {
-              Ok(()) => "index producer worker panicked".to_string(),
-              Err(error) => format!("index producer worker panicked and its lease could not be released: {error}"),
-            }
-          } else {
-            "index producer worker panicked after releasing its lease".to_string()
-          };
-          latch_degraded(&mut state, "worker_panic", context.clone());
-          Err(IndexRuntimeErrorV1::Work(context))
-        }
+      self.project_state_observation(&state);
+      (lease, record)
+    };
+
+    let collection = catch_unwind(AssertUnwindSafe(|| {
+      self.worker.collect_resolved_mutation(
+        record,
+        IndexProducerMutationWorkRequestV1 {
+          lease: &lease,
+          journal: request.journal,
+          revision_source: request.revision_source,
+          semantic_source: request.semantic_source,
+          parser: request.parser,
+          mapper: request.mapper,
+          now_ms: request.now_ms,
+          is_cancelled: request.is_cancelled,
+        },
+      )
+    }));
+
+    let soft = self.soft_hub.snapshot();
+    let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
+    let soft = match soft {
+      Ok(soft) => soft,
+      Err(error) => {
+        let context = match state.producer.cancel(&lease) {
+          Ok(()) => format!("soft mutation authority failed after unlocked collection: {error}"),
+          Err(release) => {
+            format!("soft mutation authority failed after unlocked collection ({error}); exact lease release failed: {release}")
+          }
+        };
+        latch_degraded(&mut state, "worker_completion_soft_hub", context.clone());
+        return Err(IndexRuntimeErrorV1::SoftHub(context));
       }
-    })();
-    self.finish_observed(result)
+    };
+    observe_soft_loss(&mut state, &soft);
+    if let Err(error) = require_serviceable(&state) {
+      if let Err(release) = state.producer.cancel(&lease) {
+        let context = format!("runtime state changed during unlocked collection and exact lease release failed: {release}");
+        latch_degraded(&mut state, "worker_state_change_lease", context.clone());
+        return Err(IndexRuntimeErrorV1::Work(context));
+      }
+      return Err(error);
+    }
+
+    match collection {
+      Ok(collection) => {
+        let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+          self.worker.finish_mutation_collection(producer, mutations, collection, request.now_ms, request.is_cancelled, spill_store)
+        }));
+        self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms)
+      }
+      Err(_) => self.latch_worker_panic(&mut state, &lease),
+    }
+  }
+
+  fn apply_caught_worker_result(
+    &self,
+    state: &mut IndexRuntimeStateV1,
+    lease: &super::index_producer_coordinator::IndexProducerLeaseV1,
+    execution: Result<Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1>, Box<dyn std::any::Any + Send>>,
+    now_ms: u64,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    match execution {
+      Ok(execution) => self.apply_worker_result(state, execution, now_ms),
+      Err(_) => self.latch_worker_panic(state, lease),
+    }
+  }
+
+  fn latch_worker_panic(
+    &self,
+    state: &mut IndexRuntimeStateV1,
+    lease: &super::index_producer_coordinator::IndexProducerLeaseV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let context = match state.producer.cancel(lease) {
+      Ok(()) => "index producer worker panicked".to_string(),
+      Err(error) => format!("index producer worker panicked and its exact lease could not be released: {error}"),
+    };
+    latch_degraded(state, "worker_panic", context.clone());
+    Err(IndexRuntimeErrorV1::Work(context))
+  }
+
+  fn apply_worker_result(
+    &self,
+    state: &mut IndexRuntimeStateV1,
+    execution: Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1>,
+    now_ms: u64,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    match execution {
+      Ok(outcome) => {
+        state.service_retry_not_before_ms = 0;
+        Ok(IndexRuntimeWorkOutcomeV1::Completed(outcome))
+      }
+      Err(IndexProducerWorkerErrorV1::Cancelled) => Err(IndexRuntimeErrorV1::Canceled),
+      Err(error) if retryable_worker_error(&error) => {
+        let Some(retry_at_ms) = now_ms.checked_add(self.source_retry_after_ms) else {
+          let context = "worker retry deadline overflowed after releasing the exact task lease".to_string();
+          latch_degraded(state, "worker_retry_deadline", context.clone());
+          return Err(IndexRuntimeErrorV1::Work(context));
+        };
+        state.service_retry_not_before_ms = retry_at_ms;
+        Err(IndexRuntimeErrorV1::Work(error.to_string()))
+      }
+      Err(error) => {
+        latch_degraded(state, "worker_terminal", error.to_string());
+        Err(IndexRuntimeErrorV1::Work(error.to_string()))
+      }
+    }
+  }
+
+  fn project_state_observation(&self, state: &IndexRuntimeStateV1) {
+    self.observability.rcu(|current| Arc::new(runtime_snapshot(state, current.soft_hub.clone())));
   }
 
   pub fn flush(

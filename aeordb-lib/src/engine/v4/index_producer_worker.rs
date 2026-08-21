@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::engine::HashAlgorithm;
 
 use super::index_coordinator::IndexCoordinatorV1;
-use super::index_producer_collector::IndexParserExecutorV1;
+use super::index_producer_collector::{CollectedIndexProducerReportV1, IndexParserExecutorV1};
 use super::index_producer_coordinator::{
   IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1, IndexProducerReportV1,
   IndexProducerSpillStoreV1,
@@ -15,7 +15,7 @@ use super::index_producer_source::{
   resolve_mutation_document_transition, resolve_semantic_scope_work,
 };
 use super::index_source::PluginMapperExecutorV1;
-use super::index_task::MutationJournalV1;
+use super::index_task::{MutationJournalV1, MutationRecordV1};
 
 pub struct IndexProducerMutationWorkRequestV1<'request, 'journal> {
   pub lease: &'request IndexProducerLeaseV1,
@@ -33,6 +33,21 @@ pub enum IndexProducerWorkerOutcomeV1 {
   Completed(IndexProducerCompletionV1),
   ContentOnly { semantic_state_root: Vec<u8>, completion: IndexProducerCompletionV1 },
   SourceRetry { source: IndexProducerSourceErrorV1, completion: IndexProducerCompletionV1 },
+}
+
+pub(crate) struct IndexProducerMutationCollectionV1 {
+  lease: IndexProducerLeaseV1,
+  result: Result<IndexProducerMutationCollectionOutcomeV1, IndexProducerMutationCollectionErrorV1>,
+}
+
+enum IndexProducerMutationCollectionOutcomeV1 {
+  Collected(CollectedIndexProducerReportV1),
+  ContentOnly { semantic_state_root: Vec<u8> },
+}
+
+enum IndexProducerMutationCollectionErrorV1 {
+  Source(IndexProducerSourceErrorV1),
+  Execution(IndexProducerExecutionErrorV1),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -92,10 +107,31 @@ impl IndexProducerMutationWorkerV1 {
       Ok(record) => record,
       Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
     };
+    let now_ms = request.now_ms;
+    let is_cancelled = request.is_cancelled;
+    let collection = self.collect_resolved_mutation(record, request);
+    self.finish_mutation_collection(producer, mutations, collection, now_ms, is_cancelled, spill_store)
+  }
+
+  pub(crate) fn collect_resolved_mutation(
+    &self,
+    record: MutationRecordV1<'_>,
+    request: IndexProducerMutationWorkRequestV1<'_, '_>,
+  ) -> IndexProducerMutationCollectionV1 {
+    let lease = request.lease.clone();
+    let result = self.collect_resolved_mutation_inner(&record, request);
+    IndexProducerMutationCollectionV1 { lease, result }
+  }
+
+  fn collect_resolved_mutation_inner(
+    &self,
+    record: &MutationRecordV1<'_>,
+    request: IndexProducerMutationWorkRequestV1<'_, '_>,
+  ) -> Result<IndexProducerMutationCollectionOutcomeV1, IndexProducerMutationCollectionErrorV1> {
     let transition_read =
-      match resolve_mutation_document_transition(self.hash_algorithm, &record, request.revision_source, request.is_cancelled) {
+      match resolve_mutation_document_transition(self.hash_algorithm, record, request.revision_source, request.is_cancelled) {
         Ok(transition) => transition,
-        Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
+        Err(error) => return Err(IndexProducerMutationCollectionErrorV1::Source(error)),
       };
     let transition = transition_read.transition();
     let scope_read = match resolve_semantic_scope_work(
@@ -109,17 +145,14 @@ impl IndexProducerMutationWorkerV1 {
       request.is_cancelled,
     ) {
       Ok(scopes) => scopes,
-      Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
+      Err(error) => return Err(IndexProducerMutationCollectionErrorV1::Source(error)),
     };
     let (scopes, _scope_reservation) = scope_read.into_parts();
 
     match scopes {
       IndexSemanticScopeResolutionV1::Complete { semantic_state_root, scope_work } => {
         let collector_scope_work = scope_work.iter().map(|scope| scope.as_collector_scope_work()).collect();
-        let completion = self.executor.execute_transition(
-          producer,
-          mutations,
-          request.lease,
+        let collected = self.executor.collect_transition(
           IndexProducerExecutionInputV1 {
             semantic_state_root: &semantic_state_root,
             scope_work: collector_scope_work,
@@ -127,31 +160,76 @@ impl IndexProducerMutationWorkerV1 {
           },
           request.parser,
           request.mapper,
-          request.now_ms,
           request.is_cancelled,
-          spill_store,
         );
-        match completion {
+        collected.map(IndexProducerMutationCollectionOutcomeV1::Collected).map_err(IndexProducerMutationCollectionErrorV1::Execution)
+      }
+      IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root } => {
+        Ok(IndexProducerMutationCollectionOutcomeV1::ContentOnly { semantic_state_root })
+      }
+    }
+  }
+
+  pub(crate) fn finish_mutation_collection(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    mutations: &mut IndexCoordinatorV1,
+    collection: IndexProducerMutationCollectionV1,
+    now_ms: u64,
+    is_cancelled: &dyn Fn() -> bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    let lease = collection.lease;
+    match collection.result {
+      Ok(IndexProducerMutationCollectionOutcomeV1::Collected(collected)) => {
+        match self.executor.complete_collected(producer, mutations, &lease, collected, now_ms, is_cancelled, spill_store) {
           Ok(completion) => Ok(IndexProducerWorkerOutcomeV1::Completed(completion)),
           Err(IndexProducerExecutionErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
           Err(error) => Err(IndexProducerWorkerErrorV1::Execution(error)),
         }
       }
-      IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root } => {
-        let completion = producer.complete(
-          request.lease,
-          IndexProducerReportV1 { outcomes: Vec::new() },
-          mutations,
-          request.now_ms,
-          (request.is_cancelled)(),
-          spill_store,
-        );
+      Ok(IndexProducerMutationCollectionOutcomeV1::ContentOnly { semantic_state_root }) => {
+        let completion =
+          producer.complete(&lease, IndexProducerReportV1 { outcomes: Vec::new() }, mutations, now_ms, is_cancelled(), spill_store);
         match completion {
           Ok(completion) => Ok(IndexProducerWorkerOutcomeV1::ContentOnly { semantic_state_root, completion }),
           Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
-          Err(error) => self.coordinator_failure(producer, request.lease, error),
+          Err(error) => self.coordinator_failure(producer, &lease, error),
         }
       }
+      Err(IndexProducerMutationCollectionErrorV1::Source(source)) => {
+        self.handle_source_failure(producer, &lease, source, now_ms, is_cancelled, spill_store)
+      }
+      Err(IndexProducerMutationCollectionErrorV1::Execution(error)) => self.release_after_execution(producer, &lease, error),
+    }
+  }
+
+  pub(crate) fn finish_source_failure(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    lease: &IndexProducerLeaseV1,
+    source: IndexProducerSourceErrorV1,
+    now_ms: u64,
+    is_cancelled: &dyn Fn() -> bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    self.handle_source_failure(producer, lease, source, now_ms, is_cancelled, spill_store)
+  }
+
+  fn release_after_execution(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    lease: &IndexProducerLeaseV1,
+    error: IndexProducerExecutionErrorV1,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    let cancelled = error == IndexProducerExecutionErrorV1::Cancelled;
+    match producer.cancel(lease) {
+      Ok(()) if cancelled => Err(IndexProducerWorkerErrorV1::Cancelled),
+      Ok(()) => Err(IndexProducerWorkerErrorV1::Execution(error)),
+      Err(source) => Err(IndexProducerWorkerErrorV1::Execution(IndexProducerExecutionErrorV1::LeaseRelease {
+        phase: if cancelled { "collection cancellation" } else { "collection failure" },
+        source,
+      })),
     }
   }
 
@@ -199,6 +277,9 @@ impl IndexProducerMutationWorkerV1 {
     lease: &IndexProducerLeaseV1,
     source: IndexProducerCoordinatorErrorV1,
   ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    if matches!(source, IndexProducerCoordinatorErrorV1::ForeignLease | IndexProducerCoordinatorErrorV1::StaleLease) {
+      return Err(IndexProducerWorkerErrorV1::Coordinator(source));
+    }
     if producer.snapshot().leased_tasks == 0 {
       return Err(IndexProducerWorkerErrorV1::Coordinator(source));
     }
