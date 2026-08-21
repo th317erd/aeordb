@@ -12,7 +12,7 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_producer_source::{
-  IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
+  IndexFileRevisionReadErrorV1, IndexFileRevisionReadV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
   IndexSemanticScopeReadErrorClassV1, IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1,
   IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1,
   OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1,
@@ -251,17 +251,40 @@ fn semantic_scope_reads_require_task_owned_memory_for_their_complete_lifetime() 
   assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }
 
+#[test]
+fn file_revision_reads_require_task_owned_memory_for_their_complete_lifetime() {
+  let revision = LoadedIndexFileRevisionV1 { revision_hash: hash(b"revision-memory"), file_record: file("/doc.json", 0x41) };
+  let coordinator = MemoryCoordinator::new(MemoryPolicy::new(6_000, 8_000, 1, 1_000).unwrap());
+  let wrong_owner = coordinator.reserve(MemoryOwner::Query, 4_000, AdmissionClass::Workload).unwrap();
+  assert!(IndexFileRevisionReadV1::new(revision.clone(), wrong_owner).is_err());
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let under_reserved = coordinator.reserve(MemoryOwner::Task, 1, AdmissionClass::Workload).unwrap();
+  assert!(IndexFileRevisionReadV1::new(revision.clone(), under_reserved).is_err());
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+
+  let reservation = coordinator.reserve(MemoryOwner::Task, 4_000, AdmissionClass::Workload).unwrap();
+  let read = IndexFileRevisionReadV1::new(revision, reservation).unwrap();
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 4_000);
+  drop(read);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+}
+
 impl IndexFileRevisionSourceV1 for RevisionSource {
-  fn load_file_revision(
-    &self,
-    namespace_root: &[u8],
-    path: &str,
-  ) -> Result<Option<LoadedIndexFileRevisionV1>, IndexFileRevisionReadErrorV1> {
+  fn load_file_revision(&self, namespace_root: &[u8], path: &str) -> Result<Option<IndexFileRevisionReadV1>, IndexFileRevisionReadErrorV1> {
     if let Some(error) = &self.failure {
       return Err(error.clone());
     }
-    Ok(self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned())
+    self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned().map(test_revision_read).transpose()
   }
+}
+
+fn test_revision_read(revision: LoadedIndexFileRevisionV1) -> Result<IndexFileRevisionReadV1, IndexFileRevisionReadErrorV1> {
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
+  let reservation = memory
+    .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
+    .map_err(|error| IndexFileRevisionReadErrorV1::retryable("test_memory", error.to_string()))?;
+  IndexFileRevisionReadV1::new(revision, reservation)
 }
 
 fn leased_fixture(
@@ -302,7 +325,7 @@ fn exact_before_and_after_revisions_become_a_borrowable_collector_transition() {
   );
 
   let resolved = resolve_mutation_document_transition(ALGORITHM, &record, &source, &|| false).unwrap();
-  let borrowed = resolved.as_collector_transition();
+  let borrowed = resolved.transition().as_collector_transition();
   assert_eq!(borrowed.before.unwrap().file_record.content_hash, vec![0x41; 32]);
   assert_eq!(borrowed.after.unwrap().file_record.content_hash, vec![0x42; 32]);
   assert_eq!(borrowed.before.unwrap().namespace_root, record.root_before);

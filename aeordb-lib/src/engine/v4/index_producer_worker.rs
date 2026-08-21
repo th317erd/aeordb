@@ -92,17 +92,18 @@ impl IndexProducerMutationWorkerV1 {
       Ok(record) => record,
       Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
     };
-    let transition = match resolve_mutation_document_transition(self.hash_algorithm, &record, request.revision_source, request.is_cancelled)
-    {
-      Ok(transition) => transition,
-      Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
-    };
+    let transition_read =
+      match resolve_mutation_document_transition(self.hash_algorithm, &record, request.revision_source, request.is_cancelled) {
+        Ok(transition) => transition,
+        Err(error) => return self.handle_source_failure(producer, request.lease, error, request.now_ms, request.is_cancelled, spill_store),
+      };
+    let transition = transition_read.transition();
     let scope_read = match resolve_semantic_scope_work(
       self.hash_algorithm,
       request.lease.operation_id(),
       request.lease.publication_sequence(),
       request.journal.semantic_state_root,
-      &transition,
+      transition,
       request.semantic_source,
       self.semantic_limits,
       request.is_cancelled,

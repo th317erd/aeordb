@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::mem::size_of;
 
 use thiserror::Error;
 
@@ -68,12 +69,86 @@ pub struct LoadedIndexFileRevisionV1 {
   pub file_record: FileRecord,
 }
 
+pub struct IndexFileRevisionReadV1 {
+  revision: LoadedIndexFileRevisionV1,
+  reservation: MemoryReservation,
+}
+
+impl std::fmt::Debug for IndexFileRevisionReadV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("IndexFileRevisionReadV1")
+      .field("revision", &self.revision)
+      .field("reservation_owner", &self.reservation.owner())
+      .field("reserved_bytes", &self.reservation.bytes())
+      .finish()
+  }
+}
+
+impl IndexFileRevisionReadV1 {
+  pub fn new(revision: LoadedIndexFileRevisionV1, reservation: MemoryReservation) -> Result<Self, IndexFileRevisionReadErrorV1> {
+    if reservation.owner() != MemoryOwner::Task {
+      return Err(IndexFileRevisionReadErrorV1::corrupt(
+        "revision_memory_owner",
+        format!("file revision is owned by {:?}, expected Task", reservation.owner()),
+      ));
+    }
+    let required_bytes = file_revision_retained_bytes(&revision)?;
+    if reservation.bytes() < required_bytes {
+      return Err(IndexFileRevisionReadErrorV1::corrupt(
+        "revision_memory_reservation",
+        format!("file revision retains at least {required_bytes} bytes but reserves {}", reservation.bytes()),
+      ));
+    }
+    Ok(Self { revision, reservation })
+  }
+
+  pub const fn revision(&self) -> &LoadedIndexFileRevisionV1 {
+    &self.revision
+  }
+
+  pub const fn reserved_bytes(&self) -> u64 {
+    self.reservation.bytes()
+  }
+
+  pub fn into_parts(self) -> (LoadedIndexFileRevisionV1, MemoryReservation) {
+    (self.revision, self.reservation)
+  }
+}
+
+fn file_revision_retained_bytes(revision: &LoadedIndexFileRevisionV1) -> Result<u64, IndexFileRevisionReadErrorV1> {
+  let record = &revision.file_record;
+  let mut retained = size_of::<LoadedIndexFileRevisionV1>();
+  retained = add_revision_retained_bytes(retained, revision.revision_hash.capacity(), "revision hash")?;
+  retained = add_revision_retained_bytes(retained, record.path.capacity(), "file path")?;
+  retained = add_revision_retained_bytes(retained, record.content_type.as_ref().map_or(0, String::capacity), "content type")?;
+  retained = add_revision_retained_bytes(retained, record.metadata.capacity(), "metadata")?;
+  retained = add_revision_retained_bytes(retained, record.content_hash.capacity(), "content hash")?;
+  retained = add_revision_retained_bytes(
+    retained,
+    record
+      .chunk_hashes
+      .capacity()
+      .checked_mul(size_of::<Vec<u8>>())
+      .ok_or_else(|| IndexFileRevisionReadErrorV1::corrupt("revision_memory_overflow", "chunk-vector accounting overflowed"))?,
+    "chunk vector",
+  )?;
+  for chunk_hash in &record.chunk_hashes {
+    retained = add_revision_retained_bytes(retained, chunk_hash.capacity(), "chunk hash")?;
+  }
+  u64::try_from(retained).map_err(|error| {
+    IndexFileRevisionReadErrorV1::corrupt("revision_memory_overflow", format!("retained revision bytes exceed u64: {error}"))
+  })
+}
+
+fn add_revision_retained_bytes(retained: usize, additional: usize, resource: &'static str) -> Result<usize, IndexFileRevisionReadErrorV1> {
+  retained.checked_add(additional).ok_or_else(|| {
+    IndexFileRevisionReadErrorV1::corrupt("revision_memory_overflow", format!("retained {resource} byte accounting overflowed"))
+  })
+}
+
 pub trait IndexFileRevisionSourceV1: Send + Sync {
-  fn load_file_revision(
-    &self,
-    namespace_root: &[u8],
-    path: &str,
-  ) -> Result<Option<LoadedIndexFileRevisionV1>, IndexFileRevisionReadErrorV1>;
+  fn load_file_revision(&self, namespace_root: &[u8], path: &str) -> Result<Option<IndexFileRevisionReadV1>, IndexFileRevisionReadErrorV1>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +178,24 @@ impl ResolvedIndexDocumentTransitionV1 {
         file_record: &document.file_record,
       }),
     }
+  }
+}
+
+pub struct ResolvedIndexDocumentTransitionReadV1 {
+  transition: ResolvedIndexDocumentTransitionV1,
+  _before_reservation: Option<MemoryReservation>,
+  _after_reservation: Option<MemoryReservation>,
+}
+
+impl std::fmt::Debug for ResolvedIndexDocumentTransitionReadV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.debug_struct("ResolvedIndexDocumentTransitionReadV1").field("transition", &self.transition).finish_non_exhaustive()
+  }
+}
+
+impl ResolvedIndexDocumentTransitionReadV1 {
+  pub const fn transition(&self) -> &ResolvedIndexDocumentTransitionV1 {
+    &self.transition
   }
 }
 
@@ -601,7 +694,7 @@ pub fn resolve_mutation_document_transition(
   record: &MutationRecordV1<'_>,
   source: &dyn IndexFileRevisionSourceV1,
   is_cancelled: &dyn Fn() -> bool,
-) -> Result<ResolvedIndexDocumentTransitionV1, IndexProducerSourceErrorV1> {
+) -> Result<ResolvedIndexDocumentTransitionReadV1, IndexProducerSourceErrorV1> {
   if is_cancelled() {
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }
@@ -627,7 +720,19 @@ pub fn resolve_mutation_document_transition(
     source,
     is_cancelled,
   )?;
-  Ok(ResolvedIndexDocumentTransitionV1 { before, after })
+  let (before, before_reservation) = match before {
+    Some((document, reservation)) => (Some(document), Some(reservation)),
+    None => (None, None),
+  };
+  let (after, after_reservation) = match after {
+    Some((document, reservation)) => (Some(document), Some(reservation)),
+    None => (None, None),
+  };
+  Ok(ResolvedIndexDocumentTransitionReadV1 {
+    transition: ResolvedIndexDocumentTransitionV1 { before, after },
+    _before_reservation: before_reservation,
+    _after_reservation: after_reservation,
+  })
 }
 
 #[derive(Clone, Copy)]
@@ -643,7 +748,7 @@ fn resolve_side(
   side: MutationSideRefV1<'_>,
   source: &dyn IndexFileRevisionSourceV1,
   is_cancelled: &dyn Fn() -> bool,
-) -> Result<Option<ResolvedIndexDocumentV1>, IndexProducerSourceErrorV1> {
+) -> Result<Option<(ResolvedIndexDocumentV1, MemoryReservation)>, IndexProducerSourceErrorV1> {
   let Some(path) = side.path else {
     return Ok(None);
   };
@@ -654,8 +759,8 @@ fn resolve_side(
     side.file_key.ok_or_else(|| IndexProducerSourceErrorV1::TaskMismatch("present mutation side has no FileKey".to_string()))?;
   let expected_revision =
     side.revision_hash.ok_or_else(|| IndexProducerSourceErrorV1::TaskMismatch("present mutation side has no revision".to_string()))?;
-  let loaded = match source.load_file_revision(side.namespace_root, path) {
-    Ok(Some(loaded)) => loaded,
+  let read = match source.load_file_revision(side.namespace_root, path) {
+    Ok(Some(read)) => read,
     Ok(None) => {
       return Err(IndexProducerSourceErrorV1::MissingRevision { root: hex::encode(side.namespace_root), path: path.to_string() });
     }
@@ -664,6 +769,7 @@ fn resolve_side(
     }
     Err(error) => return Err(IndexProducerSourceErrorV1::RevisionRead(error)),
   };
+  let (loaded, mut reservation) = read.into_parts();
   if loaded.revision_hash != expected_revision {
     return Err(IndexProducerSourceErrorV1::RevisionMismatch {
       path: path.to_string(),
@@ -678,9 +784,24 @@ fn resolve_side(
   if actual_key != expected_key {
     return Err(IndexProducerSourceErrorV1::FileKeyMismatch { path: path.to_string() });
   }
-  Ok(Some(ResolvedIndexDocumentV1 {
-    namespace_root: side.namespace_root.to_vec(),
-    revision_hash: loaded.revision_hash,
-    file_record: loaded.file_record,
-  }))
+  let namespace_root_bytes = u64::try_from(side.namespace_root.len()).map_err(|error| {
+    IndexProducerSourceErrorV1::RevisionRead(IndexFileRevisionReadErrorV1::corrupt(
+      "revision_transition_memory",
+      format!("namespace-root retained byte length does not fit u64: {error}"),
+    ))
+  })?;
+  reservation.grow(namespace_root_bytes).map_err(|error| {
+    IndexProducerSourceErrorV1::RevisionRead(IndexFileRevisionReadErrorV1::retryable(
+      "revision_transition_memory",
+      format!("namespace-root retention admission failed: {error}"),
+    ))
+  })?;
+  Ok(Some((
+    ResolvedIndexDocumentV1 {
+      namespace_root: side.namespace_root.to_vec(),
+      revision_hash: loaded.revision_hash,
+      file_record: loaded.file_record,
+    },
+    reservation,
+  )))
 }

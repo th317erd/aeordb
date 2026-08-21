@@ -18,10 +18,10 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_producer_source::{
-  IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeReadErrorV1,
-  IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
-  LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1, OwnedIndexValueStoreDefinitionV1,
-  ResolvedIndexScopeWorkV1,
+  IndexFileRevisionReadErrorV1, IndexFileRevisionReadV1, IndexFileRevisionSourceV1, IndexSemanticScopeLimitsV1,
+  IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1,
+  IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
+  OwnedIndexValueStoreDefinitionV1, ResolvedIndexScopeWorkV1,
 };
 use aeordb::engine::v4::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimeErrorV1, IndexRuntimeFlushOutcomeV1, IndexRuntimeLifecycleV1,
@@ -158,13 +158,16 @@ struct RevisionSource {
 }
 
 impl IndexFileRevisionSourceV1 for RevisionSource {
-  fn load_file_revision(
-    &self,
-    namespace_root: &[u8],
-    path: &str,
-  ) -> Result<Option<LoadedIndexFileRevisionV1>, IndexFileRevisionReadErrorV1> {
-    Ok(self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned())
+  fn load_file_revision(&self, namespace_root: &[u8], path: &str) -> Result<Option<IndexFileRevisionReadV1>, IndexFileRevisionReadErrorV1> {
+    self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned().map(test_revision_read).transpose()
   }
+}
+
+fn test_revision_read(revision: LoadedIndexFileRevisionV1) -> Result<IndexFileRevisionReadV1, IndexFileRevisionReadErrorV1> {
+  let reservation = memory()
+    .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
+    .map_err(|error| IndexFileRevisionReadErrorV1::retryable("test_memory", error.to_string()))?;
+  IndexFileRevisionReadV1::new(revision, reservation)
 }
 
 struct SemanticSource {

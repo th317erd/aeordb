@@ -18,7 +18,7 @@ use aeordb::engine::v4::index_producer_coordinator::{
 };
 use aeordb::engine::v4::index_producer_executor::IndexProducerExecutorV1;
 use aeordb::engine::v4::index_producer_source::{
-  IndexFileRevisionReadErrorV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
+  IndexFileRevisionReadErrorV1, IndexFileRevisionReadV1, IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1,
   IndexSemanticScopeReadErrorV1, IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1,
   IndexSemanticScopeSourceV1, LoadedIndexFileRevisionV1, OwnedIndexFieldDefinitionV1, OwnedIndexScopeDefinitionV1,
   OwnedIndexValueStoreDefinitionV1, ResolvedIndexScopeWorkV1,
@@ -96,16 +96,19 @@ struct RevisionSource {
 }
 
 impl IndexFileRevisionSourceV1 for RevisionSource {
-  fn load_file_revision(
-    &self,
-    namespace_root: &[u8],
-    path: &str,
-  ) -> Result<Option<LoadedIndexFileRevisionV1>, IndexFileRevisionReadErrorV1> {
+  fn load_file_revision(&self, namespace_root: &[u8], path: &str) -> Result<Option<IndexFileRevisionReadV1>, IndexFileRevisionReadErrorV1> {
     if let Some(error) = &self.failure {
       return Err(error.clone());
     }
-    Ok(self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned())
+    self.records.get(&(namespace_root.to_vec(), path.to_string())).cloned().map(test_revision_read).transpose()
   }
+}
+
+fn test_revision_read(revision: LoadedIndexFileRevisionV1) -> Result<IndexFileRevisionReadV1, IndexFileRevisionReadErrorV1> {
+  let reservation = memory(8 * 1_024 * 1_024)
+    .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
+    .map_err(|error| IndexFileRevisionReadErrorV1::retryable("test_memory", error.to_string()))?;
+  IndexFileRevisionReadV1::new(revision, reservation)
 }
 
 #[derive(Clone)]
