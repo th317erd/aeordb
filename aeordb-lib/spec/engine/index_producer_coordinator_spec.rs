@@ -8,7 +8,7 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorOptionsV1,
   IndexProducerCoordinatorV1, IndexProducerFallbackModeV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1,
   IndexProducerOwnerOutcomeV1, IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
-  IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_record::{
   CanonicalValueRecordV1, ScopeReverseRecordV1, encode_canonical_value_record, encode_scope_reverse_record,
@@ -102,9 +102,20 @@ fn mutation_coordinator(memory: MemoryCoordinator) -> IndexCoordinatorV1 {
 #[derive(Default)]
 struct SpillStore {
   calls: Vec<([u8; 16], IndexProducerSpillReasonV1)>,
+  persisted: Vec<[u8; 16]>,
   fail: bool,
   malformed_receipt: bool,
   dishonest_receipt: bool,
+}
+
+impl IndexProducerDurableTaskStoreV1 for SpillStore {
+  fn persist_task(&mut self, task: IndexProducerTaskViewV1<'_>) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    self.persisted.push(task.operation_id());
+    if self.fail {
+      return Err(IndexProducerSpillErrorV1::new("persist_refused", "injected durable-task refusal"));
+    }
+    Ok(IndexProducerSpillReceiptV1::new(task.operation_id(), hash(b"durable-task")).unwrap())
+  }
 }
 
 impl IndexProducerSpillStoreV1 for SpillStore {
@@ -191,6 +202,39 @@ fn admission_is_bounded_body_free_deduplicated_and_canonical() {
   let overflow = task([3; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
   assert!(matches!(coordinator.admit(overflow, 14), Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. })));
   assert_eq!(coordinator.snapshot().pending_tasks, 2);
+}
+
+#[test]
+fn durable_admission_persists_before_queueing_duplicate_or_pressure_outcomes() {
+  let mut coordinator = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(100_000), options(1, 20_000, 3)).unwrap();
+  let before = hash(b"before");
+  let after = hash(b"after");
+  let semantic = hash(b"semantic");
+  let journal = hash(b"journal");
+  let first = task([0x21; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, Some(&journal), None);
+  let second = task([0x22; 16], IndexProducerTaskKindV1::MutationWindow, 2, &before, &after, &semantic, Some(&journal), None);
+  let mut store = SpillStore::default();
+
+  assert_eq!(coordinator.admit_durable_or_spill(first, 10, &mut store).unwrap(), IndexProducerAdmissionV1::Queued);
+  assert_eq!(store.persisted, vec![[0x21; 16]]);
+  assert_eq!(coordinator.admit_durable_or_spill(first, 11, &mut store).unwrap(), IndexProducerAdmissionV1::Duplicate);
+  assert_eq!(store.persisted, vec![[0x21; 16], [0x21; 16]]);
+
+  let pressure = coordinator.admit_durable_or_spill(second, 12, &mut store).unwrap();
+  assert!(matches!(pressure, IndexProducerAdmissionV1::Spilled { .. }));
+  assert_eq!(store.persisted, vec![[0x21; 16], [0x21; 16], [0x22; 16]]);
+  assert_eq!(store.calls, vec![([0x22; 16], IndexProducerSpillReasonV1::AdmissionPressure)]);
+  assert_eq!(coordinator.snapshot().pending_tasks, 1);
+
+  store.fail = true;
+  let third = task([0x23; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
+  assert!(matches!(coordinator.admit_durable_or_spill(third, 13, &mut store), Err(IndexProducerCoordinatorErrorV1::SpillFailed { .. })));
+  assert_eq!(coordinator.snapshot().pending_tasks, 1, "durability refusal must precede queue admission");
+
+  let invalid = task([0; 16], IndexProducerTaskKindV1::MutationWindow, 4, &before, &after, &semantic, Some(&journal), None);
+  let persisted_before = store.persisted.len();
+  assert!(matches!(coordinator.admit_durable_or_spill(invalid, 14, &mut store), Err(IndexProducerCoordinatorErrorV1::InvalidTask(_))));
+  assert_eq!(store.persisted.len(), persisted_before, "invalid tasks must not reach durable storage");
 }
 
 #[test]

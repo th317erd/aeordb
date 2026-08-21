@@ -17,8 +17,8 @@ use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_coordinator::FrozenIndexBatchV1;
 use super::index_coordinator_recovery::{IndexCheckpointRootV1, IndexRecoveryOwnerV1, IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1};
 use super::index_producer_coordinator::{
-  IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1,
-  IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerDurableTaskStoreV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
+  IndexProducerSpillStoreV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use super::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimePublicationErrorClassV1, IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1,
@@ -32,7 +32,8 @@ use super::index_runtime_workspace_store::{
   IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::index_task::{
-  ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, encode_index_task_checkpoint,
+  ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, decode_mutation_journal,
+  encode_index_task_checkpoint,
 };
 
 pub use super::index_runtime_dirty_overlay_recovery::INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1;
@@ -44,6 +45,10 @@ pub trait IndexRuntimeCheckpointStoreV1: IndexRecoveryStoreV1 {
   fn hash_algorithm(&self) -> HashAlgorithm;
   fn database_id(&self) -> [u8; 16];
   fn destination_physical_instance_id(&self) -> [u8; 16];
+}
+
+pub trait IndexRuntimeMutationJournalStoreV1 {
+  fn persist_mutation_journal(&mut self, journal: &EncodedImmutableIndexArtifactV1) -> Result<(), IndexRuntimePublicationErrorV1>;
 }
 
 impl IndexRuntimeCheckpointStoreV1 for NativeIndexRecoveryStoreV1 {
@@ -246,6 +251,32 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
 
   pub(crate) fn selected_checkpoint(&self) -> Option<&IndexCheckpointRootV1> {
     self.selected.as_ref()
+  }
+
+  /// Persist one immutable mutation journal and establish its data barrier
+  /// without advancing the dirty-overlay selector. A producer task references
+  /// the journal only after this succeeds.
+  pub fn persist_mutation_journal(&mut self, journal: &EncodedImmutableIndexArtifactV1) -> Result<(), IndexRuntimePublicationErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(cancelled("mutation_journal_cancelled", "mutation journal persistence was canceled before immutable publication"));
+    }
+    let decoded = decode_mutation_journal(&journal.value, self.hash_algorithm)
+      .map_err(|error| corrupt("mutation_journal_format", format!("mutation journal bytes are invalid: {error}")))?;
+    if decoded.key != journal.key {
+      return Err(corrupt(
+        "mutation_journal_identity",
+        "mutation journal key disagrees with the identity derived from its validated bytes",
+      ));
+    }
+    self.store.put_immutable(journal).map_err(map_store_before_selection)?;
+    self.store.sync_immutable().map_err(map_store_before_selection)?;
+    if self.cancellation.is_cancelled() {
+      return Err(cancelled(
+        "mutation_journal_cancelled",
+        "mutation journal persistence was canceled after immutable durability and before task admission",
+      ));
+    }
+    Ok(())
   }
 
   fn publish_exact(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
@@ -551,6 +582,20 @@ impl<Store: IndexRuntimeCheckpointStoreV1> IndexProducerSpillStoreV1 for Durable
     reason: IndexProducerSpillReasonV1,
   ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
     self.spill_exact(task, reason).map_err(|error| IndexProducerSpillErrorV1::new(error.code(), error.to_string()))
+  }
+}
+
+impl<Store: IndexRuntimeCheckpointStoreV1> IndexProducerDurableTaskStoreV1 for DurableIndexRuntimeBatchPublisherV1<Store> {
+  fn persist_task(&mut self, task: IndexProducerTaskViewV1<'_>) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    self
+      .spill_exact(task, IndexProducerSpillReasonV1::AdmissionPressure)
+      .map_err(|error| IndexProducerSpillErrorV1::new(error.code(), error.to_string()))
+  }
+}
+
+impl<Store: IndexRuntimeCheckpointStoreV1> IndexRuntimeMutationJournalStoreV1 for DurableIndexRuntimeBatchPublisherV1<Store> {
+  fn persist_mutation_journal(&mut self, journal: &EncodedImmutableIndexArtifactV1) -> Result<(), IndexRuntimePublicationErrorV1> {
+    DurableIndexRuntimeBatchPublisherV1::persist_mutation_journal(self, journal)
   }
 }
 

@@ -85,6 +85,7 @@ fn installation_refresh_observes_pre_install_queue_and_loss() {
 
   assert_eq!(hub.offer_acknowledgement(&acknowledgement(9)), SoftMutationAdmissionV1::Accepted);
   assert_eq!(owner.cached_snapshot().soft_hub.queued_notices, 0, "disconnected owner cache should still be stale before installation");
+  assert!(owner.has_pending_soft_mutations(), "scheduler admission must not depend on stale cached telemetry");
   owner.refresh_for_installation().unwrap();
   let queued = owner.cached_snapshot();
   assert_eq!(queued.lifecycle, IndexRuntimeLifecycleV1::Running);

@@ -12,13 +12,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::VirtualClock;
 
+use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_coordinator::IndexFlushReasonV1;
 use super::index_producer_admission::IndexProducerJournalAdmissionSummaryV1;
-use super::index_producer_coordinator::{IndexProducerAdmissionV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1};
+use super::index_producer_coordinator::{
+  IndexProducerAdmissionV1, IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
+};
 use super::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimeErrorV1, IndexRuntimeFlushOutcomeV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerV1,
+  IndexRuntimePublicationErrorV1,
 };
-use super::index_runtime_batch_publisher::NativeIndexRuntimeBatchPublisherV1;
+use super::index_runtime_batch_publisher::{IndexRuntimeMutationJournalStoreV1, NativeIndexRuntimeBatchPublisherV1};
 use super::index_runtime_workspace_store::{IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceSelectedHeadV1};
 use super::index_task::MutationJournalV1;
 
@@ -38,8 +42,12 @@ pub enum IndexRuntimeCadenceErrorV1 {
   DrainDeferred { retry_at_ms: u64 },
   #[error("index runtime cadence failed ({failure}) and could not latch degraded state: {source}")]
   FailureLatch { failure: &'static str, source: IndexRuntimeErrorV1 },
+  #[error("index runtime soft-journal handoff failed: {0}")]
+  SoftJournal(String),
   #[error(transparent)]
   Runtime(#[from] IndexRuntimeErrorV1),
+  #[error(transparent)]
+  Publication(#[from] IndexRuntimePublicationErrorV1),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,11 +224,18 @@ where
     }
     Ok(self.owner.admit_task(request, now_ms, &mut *publisher)?)
   }
+}
 
-  /// Admit every exact mutation record from one validated journal through the
+impl<Publisher> IndexRuntimeCadenceV1<Publisher>
+where
+  Publisher:
+    IndexRuntimeBatchPublisherV1 + IndexRuntimeMutationJournalStoreV1 + IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1 + Send,
+{
+  /// Persist and admit every exact mutation record from one validated journal through the
   /// same serialized spill boundary used by maintenance tasks and publication.
-  pub(crate) fn admit_mutation_journal(
+  pub(crate) fn persist_and_admit_mutation_journal(
     &self,
+    artifact: &EncodedImmutableIndexArtifactV1,
     journal: &MutationJournalV1<'_>,
   ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeCadenceErrorV1> {
     if self.cancellation.is_cancelled() {
@@ -239,8 +254,9 @@ where
     if self.cancellation.is_cancelled() {
       return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
     }
+    publisher.persist_mutation_journal(artifact)?;
     let cancelled = || self.cancellation.is_cancelled();
-    Ok(self.owner.admit_mutation_journal(journal, now_ms, &cancelled, &mut *publisher)?)
+    Ok(self.owner.admit_durable_mutation_journal(journal, now_ms, &cancelled, &mut *publisher)?)
   }
 }
 

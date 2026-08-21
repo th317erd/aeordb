@@ -73,6 +73,10 @@ impl CoverageBoundaryV1 {
     }
     Ok(Self { authority, publication_sequence })
   }
+
+  pub(crate) fn initial(authority: CoverageAuthorityV1) -> Self {
+    Self { authority, publication_sequence: 0 }
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,12 +390,35 @@ pub enum SoftMutationReconciliationClearV1 {
 struct SoftMutationQueueV1 {
   notices: VecDeque<SoftMutationNoticeV1>,
   retained_bytes: usize,
+  active_lease: Option<SoftMutationLeaseStateV1>,
+  next_lease_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SoftMutationLeaseStateV1 {
+  lease_id: u64,
+  notice_count: usize,
+  record_count: usize,
+  retained_bytes: usize,
+  latest_publication_sequence: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SoftMutationLeaseV1<'a> {
+  hub: &'a SoftMutationHubV1,
+  lease_id: u64,
+  drain: SoftMutationDrainV1,
+  record_count: usize,
+  queue_exhausted: bool,
+  latest_publication_sequence: Option<u64>,
+  committed: bool,
 }
 
 #[derive(Debug)]
 pub struct SoftMutationHubV1 {
   options: SoftMutationHubOptionsV1,
   queue: Mutex<SoftMutationQueueV1>,
+  pending_notices: AtomicBool,
   admission_closed: AtomicBool,
   lost_through_sequence: AtomicU64,
   loss_reason_bits: AtomicU8,
@@ -408,7 +435,8 @@ impl SoftMutationHubV1 {
     notices.try_reserve_exact(options.maximum_notices).map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
     Ok(Self {
       options,
-      queue: Mutex::new(SoftMutationQueueV1 { notices, retained_bytes: 0 }),
+      queue: Mutex::new(SoftMutationQueueV1 { notices, retained_bytes: 0, active_lease: None, next_lease_id: 1 }),
+      pending_notices: AtomicBool::new(false),
       admission_closed: AtomicBool::new(false),
       lost_through_sequence: AtomicU64::new(0),
       loss_reason_bits: AtomicU8::new(0),
@@ -451,7 +479,8 @@ impl SoftMutationHubV1 {
       Some(bytes) => bytes,
       None => return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueFull),
     };
-    if queue.notices.len() >= self.options.maximum_notices || next_bytes > self.options.maximum_retained_bytes {
+    let retained_notices = queue.active_lease.map_or(queue.notices.len(), |lease| queue.notices.len().saturating_add(lease.notice_count));
+    if retained_notices >= self.options.maximum_notices || next_bytes > self.options.maximum_retained_bytes {
       return self.latch_loss(acknowledgement.publication_sequence, SoftMutationLossReasonV1::QueueFull);
     }
     let notice = match clone_notice(acknowledgement, retained_bytes) {
@@ -463,7 +492,15 @@ impl SoftMutationHubV1 {
     };
     queue.notices.push_back(notice);
     queue.retained_bytes = next_bytes;
+    self.pending_notices.store(true, Ordering::Release);
     SoftMutationAdmissionV1::Accepted
+  }
+
+  /// Lock-free scheduler signal maintained while the queue lock is held.
+  /// False means no queued or leased notice exists; true remains set until a
+  /// successful drain or durable lease commit retires the final notice.
+  pub(crate) fn has_pending_notices(&self) -> bool {
+    self.pending_notices.load(Ordering::Acquire)
   }
 
   /// Mark an acknowledgement as lost without consulting the bounded queue.
@@ -500,14 +537,23 @@ impl SoftMutationHubV1 {
     let loss_epoch = self.loss_epoch.load(Ordering::Acquire);
     let reconciled_loss_epoch = self.reconciled_loss_epoch.load(Ordering::Acquire);
     let losses_in_flight = self.losses_in_flight.load(Ordering::Acquire);
+    let leased_notices = queue.active_lease.map_or(0, |lease| lease.notice_count);
+    let latest_queued_publication_sequence = match (
+      queue.active_lease.and_then(|lease| lease.latest_publication_sequence),
+      queue.notices.back().map(|notice| notice.publication_sequence),
+    ) {
+      (Some(leased), Some(queued)) => Some(leased.max(queued)),
+      (Some(sequence), None) | (None, Some(sequence)) => Some(sequence),
+      (None, None) => None,
+    };
     SoftMutationHubSnapshotV1 {
       admission_closed: self.admission_closed.load(Ordering::Acquire),
-      queued_notices: queue.notices.len(),
+      queued_notices: queue.notices.len().saturating_add(leased_notices),
       retained_bytes: queue.retained_bytes,
       maximum_notices: self.options.maximum_notices,
       maximum_retained_bytes: self.options.maximum_retained_bytes,
       maximum_notice_bytes: self.options.maximum_notice_bytes,
-      latest_queued_publication_sequence: queue.notices.back().map(|notice| notice.publication_sequence),
+      latest_queued_publication_sequence,
       reconciliation_required: losses_in_flight != 0 || loss_epoch != reconciled_loss_epoch,
       lost_through_sequence: (lost != 0).then_some(lost),
       loss_reasons: SoftMutationLossReasonV1::ALL.into_iter().filter(|reason| reason_bits & reason.bit() != 0).collect(),
@@ -560,6 +606,9 @@ impl SoftMutationHubV1 {
         return SoftMutationReconciliationClearV1::QueueUnavailable;
       }
     };
+    if queue.active_lease.is_some() {
+      return SoftMutationReconciliationClearV1::Stale;
+    }
     if queue.notices.iter().any(|notice| notice.publication_sequence > reconciled_through_sequence) {
       return SoftMutationReconciliationClearV1::BoundaryBehind;
     }
@@ -568,12 +617,87 @@ impl SoftMutationHubV1 {
     }
     queue.notices.clear();
     queue.retained_bytes = 0;
+    self.pending_notices.store(false, Ordering::Release);
     self.reconciled_loss_epoch.store(token.loss_epoch, Ordering::Release);
     if self.losses_in_flight.load(Ordering::Acquire) == 0 && self.loss_epoch.load(Ordering::Acquire) == token.loss_epoch {
       SoftMutationReconciliationClearV1::Cleared
     } else {
       SoftMutationReconciliationClearV1::Stale
     }
+  }
+
+  /// Move one bounded prefix into a rollback-safe lease without releasing its
+  /// queue capacity. New hard acknowledgements may append while the consumer
+  /// performs durability I/O; dropping the lease restores the exact prefix.
+  pub(crate) fn try_lease(
+    &self,
+    maximum_notices: usize,
+    maximum_bytes: usize,
+    maximum_records: usize,
+  ) -> Result<Option<SoftMutationLeaseV1<'_>>, SoftMutationHubErrorV1> {
+    if maximum_notices == 0 || maximum_bytes == 0 || maximum_records == 0 {
+      return Err(SoftMutationHubErrorV1::InvalidOptions("soft mutation lease limits must be nonzero"));
+    }
+    let mut notices = Vec::new();
+    notices
+      .try_reserve_exact(maximum_notices.min(self.options.maximum_notices))
+      .map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
+    let mut queue = match self.queue.try_lock() {
+      Ok(queue) => queue,
+      Err(std::sync::TryLockError::WouldBlock) => return Err(SoftMutationHubErrorV1::QueueContended),
+      Err(std::sync::TryLockError::Poisoned(_)) => return Err(SoftMutationHubErrorV1::QueueUnavailable),
+    };
+    if queue.active_lease.is_some() {
+      return Err(SoftMutationHubErrorV1::QueueContended);
+    }
+    let mut count = 0usize;
+    let mut record_count = 0usize;
+    let mut retained_bytes = 0usize;
+    for notice in &queue.notices {
+      if count == maximum_notices {
+        break;
+      }
+      let Some(next_bytes) = retained_bytes.checked_add(notice.retained_bytes) else {
+        return Err(SoftMutationHubErrorV1::ArithmeticOverflow);
+      };
+      if next_bytes > maximum_bytes {
+        break;
+      }
+      let Some(next_records) = record_count.checked_add(notice.source_identities.len()) else {
+        return Err(SoftMutationHubErrorV1::ArithmeticOverflow);
+      };
+      if next_records > maximum_records {
+        break;
+      }
+      retained_bytes = next_bytes;
+      record_count = next_records;
+      count += 1;
+    }
+    if count == 0 {
+      if let Some(first) = queue.notices.front() {
+        if first.retained_bytes > maximum_bytes {
+          return Err(SoftMutationHubErrorV1::DrainLimitTooSmall { required: first.retained_bytes, maximum: maximum_bytes });
+        }
+        return Err(SoftMutationHubErrorV1::RecordLimitTooSmall { required: first.source_identities.len(), maximum: maximum_records });
+      }
+      return Ok(None);
+    }
+    let lease_id = queue.next_lease_id;
+    queue.next_lease_id = queue.next_lease_id.checked_add(1).ok_or(SoftMutationHubErrorV1::ArithmeticOverflow)?;
+    let queue_exhausted = count == queue.notices.len();
+    notices.extend(queue.notices.drain(..count));
+    let latest_publication_sequence = notices.last().map(|notice| notice.publication_sequence);
+    queue.active_lease =
+      Some(SoftMutationLeaseStateV1 { lease_id, notice_count: count, record_count, retained_bytes, latest_publication_sequence });
+    Ok(Some(SoftMutationLeaseV1 {
+      hub: self,
+      lease_id,
+      drain: SoftMutationDrainV1 { notices, retained_bytes },
+      record_count,
+      queue_exhausted,
+      latest_publication_sequence,
+      committed: false,
+    }))
   }
 
   pub fn try_drain(&self, maximum_notices: usize, maximum_bytes: usize) -> Result<SoftMutationDrainV1, SoftMutationHubErrorV1> {
@@ -584,7 +708,14 @@ impl SoftMutationHubV1 {
     notices
       .try_reserve_exact(maximum_notices.min(self.options.maximum_notices))
       .map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
-    let mut queue = self.queue.try_lock().map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)?;
+    let mut queue = match self.queue.try_lock() {
+      Ok(queue) => queue,
+      Err(std::sync::TryLockError::WouldBlock) => return Err(SoftMutationHubErrorV1::QueueContended),
+      Err(std::sync::TryLockError::Poisoned(_)) => return Err(SoftMutationHubErrorV1::QueueUnavailable),
+    };
+    if queue.active_lease.is_some() {
+      return Err(SoftMutationHubErrorV1::QueueContended);
+    }
     let mut count = 0usize;
     let mut retained_bytes = 0usize;
     for notice in &queue.notices {
@@ -610,6 +741,9 @@ impl SoftMutationHubV1 {
       notices.push(queue.notices.pop_front().ok_or(SoftMutationHubErrorV1::QueueUnavailable)?);
     }
     queue.retained_bytes = remaining_bytes;
+    if queue.notices.is_empty() {
+      self.pending_notices.store(false, Ordering::Release);
+    }
     Ok(SoftMutationDrainV1 { notices, retained_bytes })
   }
 
@@ -654,6 +788,96 @@ impl SoftMutationHubV1 {
   #[cfg(test)]
   pub(crate) fn clear_queue_poison_for_test(&self) {
     self.queue.clear_poison();
+  }
+}
+
+impl SoftMutationLeaseV1<'_> {
+  pub(crate) fn drain(&self) -> &SoftMutationDrainV1 {
+    &self.drain
+  }
+
+  pub(crate) fn record_count(&self) -> usize {
+    self.record_count
+  }
+
+  pub(crate) fn queue_exhausted(&self) -> bool {
+    self.queue_exhausted
+  }
+
+  pub(crate) fn try_clone_drain(&self) -> Result<SoftMutationDrainV1, SoftMutationHubErrorV1> {
+    let mut notices = Vec::new();
+    notices.try_reserve_exact(self.drain.notices.len()).map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
+    for notice in &self.drain.notices {
+      notices.push(clone_retained_notice(notice)?);
+    }
+    Ok(SoftMutationDrainV1 { notices, retained_bytes: self.drain.retained_bytes })
+  }
+
+  /// Retire the leased prefix only after its caller has established durable
+  /// recovery authority for every notice.
+  pub(crate) fn commit(mut self) -> Result<(), SoftMutationHubErrorV1> {
+    let mut queue = self.hub.queue.lock().map_err(|_| SoftMutationHubErrorV1::QueueUnavailable)?;
+    let expected = SoftMutationLeaseStateV1 {
+      lease_id: self.lease_id,
+      notice_count: self.drain.notices.len(),
+      record_count: self.record_count,
+      retained_bytes: self.drain.retained_bytes,
+      latest_publication_sequence: self.latest_publication_sequence,
+    };
+    if queue.active_lease != Some(expected) {
+      return Err(SoftMutationHubErrorV1::QueueUnavailable);
+    }
+    queue.retained_bytes = queue.retained_bytes.checked_sub(self.drain.retained_bytes).ok_or(SoftMutationHubErrorV1::ArithmeticOverflow)?;
+    queue.active_lease = None;
+    if queue.notices.is_empty() {
+      self.hub.pending_notices.store(false, Ordering::Release);
+    }
+    self.committed = true;
+    Ok(())
+  }
+}
+
+impl Drop for SoftMutationLeaseV1<'_> {
+  fn drop(&mut self) {
+    if self.committed {
+      return;
+    }
+    let mut queue = match self.hub.queue.lock() {
+      Ok(queue) => queue,
+      Err(error) => {
+        tracing::error!(?error, lease_id = self.lease_id, "Soft mutation lease could not restore its prefix into a poisoned queue");
+        self.record_failed_restore();
+        return;
+      }
+    };
+    let expected = SoftMutationLeaseStateV1 {
+      lease_id: self.lease_id,
+      notice_count: self.drain.notices.len(),
+      record_count: self.record_count,
+      retained_bytes: self.drain.retained_bytes,
+      latest_publication_sequence: self.latest_publication_sequence,
+    };
+    if queue.active_lease != Some(expected) {
+      tracing::error!(lease_id = self.lease_id, "Soft mutation lease state changed before rollback");
+      drop(queue);
+      self.record_failed_restore();
+      return;
+    }
+    while let Some(notice) = self.drain.notices.pop() {
+      queue.notices.push_front(notice);
+    }
+    queue.active_lease = None;
+    self.hub.pending_notices.store(true, Ordering::Release);
+  }
+}
+
+impl SoftMutationLeaseV1<'_> {
+  fn record_failed_restore(&self) {
+    if let Some(sequence) = self.latest_publication_sequence {
+      self.hub.record_loss(sequence, Some(SoftMutationLossReasonV1::QueueUnavailable));
+    } else {
+      self.hub.record_loss(0, Some(SoftMutationLossReasonV1::InvalidNotice));
+    }
   }
 }
 
@@ -704,6 +928,34 @@ fn clone_notice(
   })
 }
 
+fn clone_retained_notice(notice: &SoftMutationNoticeV1) -> Result<SoftMutationNoticeV1, SoftMutationHubErrorV1> {
+  let mut source_identities = Vec::new();
+  source_identities
+    .try_reserve_exact(notice.source_identities.len())
+    .map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
+  for source in &notice.source_identities {
+    let mut path = String::new();
+    path.try_reserve_exact(source.path.len()).map_err(|error| SoftMutationHubErrorV1::Allocation(error.to_string()))?;
+    path.push_str(&source.path);
+    source_identities.push(NamespaceMutationSourceIdentity {
+      path,
+      entry_type: source.entry_type,
+      previous_identity: clone_optional_bytes(source.previous_identity.as_deref())?,
+      new_identity: clone_optional_bytes(source.new_identity.as_deref())?,
+    });
+  }
+  Ok(SoftMutationNoticeV1 {
+    operation_id: notice.operation_id,
+    kind: notice.kind,
+    publication_sequence: notice.publication_sequence,
+    committed_at_ms: notice.committed_at_ms,
+    previous_namespace_root: clone_bytes(&notice.previous_namespace_root)?,
+    namespace_root: clone_bytes(&notice.namespace_root)?,
+    source_identities,
+    retained_bytes: notice.retained_bytes,
+  })
+}
+
 fn clone_optional_bytes(value: Option<&[u8]>) -> Result<Option<Vec<u8>>, SoftMutationHubErrorV1> {
   value.map(clone_bytes).transpose()
 }
@@ -729,6 +981,8 @@ pub enum SoftMutationHubErrorV1 {
   ArithmeticOverflow,
   #[error("soft mutation drain byte limit {maximum} is smaller than the first queued notice ({required} bytes)")]
   DrainLimitTooSmall { required: usize, maximum: usize },
+  #[error("soft mutation lease record limit {maximum} is smaller than the first queued notice ({required} records)")]
+  RecordLimitTooSmall { required: usize, maximum: usize },
 }
 
 #[cfg(test)]
@@ -738,24 +992,41 @@ mod tests {
 
   use uuid::Uuid;
 
-  use super::{SoftMutationAdmissionV1, SoftMutationHubErrorV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
+  use super::{
+    CoverageAuthorityV1, CoverageBoundaryV1, CoverageRuntimeErrorV1, SoftMutationAdmissionV1, SoftMutationHubErrorV1,
+    SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1,
+  };
+  use crate::engine::HashAlgorithm;
   use crate::engine::namespace_mutation::{NamespaceMutationAcknowledgement, NamespaceMutationKind, NamespaceMutationSourceIdentity};
 
-  fn acknowledgement() -> NamespaceMutationAcknowledgement {
+  fn acknowledgement_at(publication_sequence: u64) -> NamespaceMutationAcknowledgement {
     NamespaceMutationAcknowledgement {
-      operation_id: Uuid::from_bytes([1; 16]),
+      operation_id: Uuid::from_bytes([publication_sequence as u8; 16]),
       kind: NamespaceMutationKind::FileWrite,
-      publication_sequence: 1,
-      previous_root_hash: vec![1; 32],
-      root_hash: vec![2; 32],
+      publication_sequence,
+      previous_root_hash: vec![publication_sequence as u8; 32],
+      root_hash: vec![publication_sequence.saturating_add(1) as u8; 32],
       source_identities: vec![NamespaceMutationSourceIdentity {
-        path: "/docs/contended.txt".to_string(),
+        path: format!("/docs/{publication_sequence}.txt"),
         entry_type: Some(1),
-        previous_identity: Some(vec![1; 32]),
-        new_identity: Some(vec![2; 32]),
+        previous_identity: Some(vec![publication_sequence as u8; 32]),
+        new_identity: Some(vec![publication_sequence.saturating_add(1) as u8; 32]),
       }],
       locator_replacements: Vec::new(),
     }
+  }
+
+  fn acknowledgement() -> NamespaceMutationAcknowledgement {
+    acknowledgement_at(1)
+  }
+
+  #[test]
+  fn internal_initial_boundary_does_not_weaken_the_public_nonzero_contract() {
+    let authority = CoverageAuthorityV1::new(HashAlgorithm::Blake3_256, vec![0x31; 32], Vec::new()).unwrap();
+    assert_eq!(CoverageBoundaryV1::new(authority.clone(), 0).unwrap_err(), CoverageRuntimeErrorV1::ZeroPublicationSequence);
+    let initial = CoverageBoundaryV1::initial(authority.clone());
+    assert_eq!(initial.authority, authority);
+    assert_eq!(initial.publication_sequence, 0);
   }
 
   #[test]
@@ -778,5 +1049,88 @@ mod tests {
       received.expect("soft admission blocked behind its consumer lock"),
       SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueContended)
     );
+  }
+
+  #[test]
+  fn leased_prefix_remains_counted_accepts_appends_and_rolls_back_in_exact_order() {
+    let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(3, 8_192, 4_096).unwrap()).unwrap();
+    assert!(!hub.has_pending_notices());
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(1)), SoftMutationAdmissionV1::Accepted);
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(2)), SoftMutationAdmissionV1::Accepted);
+    assert!(hub.has_pending_notices());
+    let before = hub.snapshot().unwrap();
+
+    {
+      let lease = hub.try_lease(1, 8_192, 10).unwrap().unwrap();
+      assert_eq!(lease.drain().notices.len(), 1);
+      assert_eq!(lease.record_count(), 1);
+      assert!(!lease.queue_exhausted());
+      assert_eq!(lease.try_clone_drain().unwrap(), *lease.drain());
+      assert_eq!(lease.drain().notices[0].publication_sequence, 1);
+      assert_eq!(hub.snapshot().unwrap(), before, "leased work must remain visible as pending");
+      assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(3)), SoftMutationAdmissionV1::Accepted);
+      assert_eq!(
+        hub.offer_acknowledgement(&acknowledgement_at(4)),
+        SoftMutationAdmissionV1::ReconciliationRequired(SoftMutationLossReasonV1::QueueFull),
+        "leased capacity must not be reused by later offers"
+      );
+      assert_eq!(hub.try_lease(1, 8_192, 10).unwrap_err(), SoftMutationHubErrorV1::QueueContended);
+      assert_eq!(hub.try_drain(1, 8_192).unwrap_err(), SoftMutationHubErrorV1::QueueContended);
+    }
+
+    let restored = hub.try_drain(3, 8_192).unwrap();
+    assert_eq!(
+      restored.notices.iter().map(|notice| notice.publication_sequence).collect::<Vec<_>>(),
+      vec![1, 2, 3],
+      "lease rollback must restore the prefix ahead of concurrently appended notices"
+    );
+    assert!(!hub.has_pending_notices());
+  }
+
+  #[test]
+  fn committed_lease_retires_only_its_prefix_and_is_not_restored_on_drop() {
+    let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(3, 8_192, 4_096).unwrap()).unwrap();
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(1)), SoftMutationAdmissionV1::Accepted);
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(2)), SoftMutationAdmissionV1::Accepted);
+
+    let lease = hub.try_lease(1, 8_192, 10).unwrap().unwrap();
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(3)), SoftMutationAdmissionV1::Accepted);
+    lease.commit().unwrap();
+    assert!(hub.has_pending_notices(), "committing one prefix must not hide later queued work");
+
+    let retained = hub.try_drain(3, 8_192).unwrap();
+    assert_eq!(retained.notices.iter().map(|notice| notice.publication_sequence).collect::<Vec<_>>(), vec![2, 3]);
+    assert_eq!(hub.snapshot().unwrap().queued_notices, 0);
+    assert!(!hub.has_pending_notices());
+  }
+
+  #[test]
+  fn lease_is_empty_without_owning_the_queue_and_record_limit_bounds_its_prefix() {
+    let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(3, 8_192, 4_096).unwrap()).unwrap();
+    assert!(hub.try_lease(3, 8_192, 1).unwrap().is_none());
+
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(1)), SoftMutationAdmissionV1::Accepted);
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(2)), SoftMutationAdmissionV1::Accepted);
+    let lease = hub.try_lease(3, 8_192, 1).unwrap().unwrap();
+    assert_eq!(lease.drain().notices.len(), 1);
+    assert_eq!(lease.record_count(), 1);
+    assert!(!lease.queue_exhausted());
+    lease.commit().unwrap();
+
+    let retained = hub.try_drain(3, 8_192).unwrap();
+    assert_eq!(retained.notices.iter().map(|notice| notice.publication_sequence).collect::<Vec<_>>(), vec![2]);
+    assert!(!hub.has_pending_notices());
+  }
+
+  #[test]
+  fn a_complete_lease_keeps_the_scheduler_signal_until_commit() {
+    let hub = SoftMutationHubV1::new(SoftMutationHubOptionsV1::new(2, 8_192, 4_096).unwrap()).unwrap();
+    assert_eq!(hub.offer_acknowledgement(&acknowledgement_at(1)), SoftMutationAdmissionV1::Accepted);
+
+    let lease = hub.try_lease(2, 8_192, 10).unwrap().unwrap();
+    assert!(lease.queue_exhausted());
+    assert!(hub.has_pending_notices(), "leased work must remain scheduler-visible until durable commit");
+    lease.commit().unwrap();
+    assert!(!hub.has_pending_notices());
   }
 }

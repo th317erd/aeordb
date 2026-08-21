@@ -17,21 +17,22 @@ use crate::engine::namespace_mutation::NamespaceMutationAcknowledgement;
 
 use super::coverage_runtime::{
   SoftMutationAdmissionV1, SoftMutationHubErrorV1, SoftMutationHubOptionsV1, SoftMutationHubSnapshotV1, SoftMutationHubV1,
-  SoftMutationLossReasonV1,
+  SoftMutationLeaseV1, SoftMutationLossReasonV1,
 };
 use super::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorLifecycleV1, IndexCoordinatorOptionsV1, IndexCoordinatorSnapshotV1, IndexCoordinatorV1,
   IndexFlushReasonV1,
 };
 use super::index_producer_admission::{
-  IndexProducerJournalAdmissionErrorV1, IndexProducerJournalAdmissionSummaryV1, admit_mutation_journal_tasks,
+  IndexProducerJournalAdmissionErrorV1, IndexProducerJournalAdmissionSummaryV1, admit_durable_mutation_journal_tasks,
+  admit_mutation_journal_tasks,
 };
 use super::index_producer_collector::{
   IndexParserExecutorV1, IndexProducerCollectorErrorV1, IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
 };
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorSnapshotV1, IndexProducerCoordinatorV1,
-  IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
+  IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
 };
 use super::index_producer_executor::IndexProducerExecutorV1;
 use super::index_producer_source::{IndexFileRevisionSourceV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeSourceV1};
@@ -243,6 +244,8 @@ struct IndexRuntimeStateV1 {
 pub struct IndexRuntimeOwnerV1 {
   coordinator_id: [u8; 16],
   hash_algorithm: HashAlgorithm,
+  memory: MemoryCoordinator,
+  soft_options: SoftMutationHubOptionsV1,
   soft_hub: Arc<SoftMutationHubV1>,
   _soft_capacity: MemoryReservation,
   state: Mutex<IndexRuntimeStateV1>,
@@ -289,7 +292,7 @@ impl IndexRuntimeOwnerV1 {
       .map_err(|error| producer_error(error.to_string()))?;
     let mutations = IndexCoordinatorV1::new(coordinator_id, hash_algorithm, memory.clone(), options.mutations, now_ms)
       .map_err(|error| IndexRuntimeErrorV1::Mutations(error.to_string()))?;
-    let collector = IndexProducerCollectorV1::new(hash_algorithm, memory, options.collector)
+    let collector = IndexProducerCollectorV1::new(hash_algorithm, memory.clone(), options.collector)
       .map_err(|error| IndexRuntimeErrorV1::Invalid(error.to_string()))?;
     let worker = IndexProducerMutationWorkerV1::new(
       hash_algorithm,
@@ -314,6 +317,8 @@ impl IndexRuntimeOwnerV1 {
     Ok(Self {
       coordinator_id,
       hash_algorithm,
+      memory,
+      soft_options: options.soft_hub,
       soft_hub,
       _soft_capacity: soft_capacity,
       state: Mutex::new(state),
@@ -339,7 +344,8 @@ impl IndexRuntimeOwnerV1 {
         | SoftMutationHubErrorV1::InvalidOptions(_)
         | SoftMutationHubErrorV1::Allocation(_)
         | SoftMutationHubErrorV1::ArithmeticOverflow
-        | SoftMutationHubErrorV1::DrainLimitTooSmall { .. },
+        | SoftMutationHubErrorV1::DrainLimitTooSmall { .. }
+        | SoftMutationHubErrorV1::RecordLimitTooSmall { .. },
       ) => {
         if matches!(admission, SoftMutationAdmissionV1::Accepted) {
           let forced =
@@ -425,6 +431,29 @@ impl IndexRuntimeOwnerV1 {
     Arc::ptr_eq(&self.soft_hub, hub)
   }
 
+  pub(crate) fn reserve_soft_journal_memory(&self, bytes: u64) -> Result<MemoryReservation, IndexRuntimeErrorV1> {
+    self
+      .memory
+      .reserve(MemoryOwner::IndexDirtyBuffers, bytes, AdmissionClass::Workload)
+      .map_err(|error| IndexRuntimeErrorV1::Memory(error.to_string()))
+  }
+
+  pub(crate) fn has_pending_soft_mutations(&self) -> bool {
+    self.soft_hub.has_pending_notices()
+  }
+
+  pub(crate) const fn soft_mutation_options(&self) -> SoftMutationHubOptionsV1 {
+    self.soft_options
+  }
+
+  pub(crate) fn lease_soft_mutations(&self, maximum_records: usize) -> Result<Option<SoftMutationLeaseV1<'_>>, SoftMutationHubErrorV1> {
+    self.soft_hub.try_lease(self.soft_options.maximum_notices, self.soft_options.maximum_retained_bytes, maximum_records)
+  }
+
+  pub(crate) fn refresh_soft_hub_observation(&self) -> Result<(), IndexRuntimeErrorV1> {
+    self.refresh_cached_snapshot()
+  }
+
   pub fn complete_recovery(&self, decision: IndexRuntimeRecoveryDecisionV1) -> Result<(), IndexRuntimeErrorV1> {
     let soft = self.soft_hub.snapshot().map_err(soft_error)?;
     let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
@@ -505,6 +534,31 @@ impl IndexRuntimeOwnerV1 {
     is_cancelled: &dyn Fn() -> bool,
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeErrorV1> {
+    self.coordinate_mutation_journal_admission(is_cancelled, |producer| {
+      admit_mutation_journal_tasks(self.hash_algorithm, producer, journal, now_ms, is_cancelled, spill_store)
+    })
+  }
+
+  pub(crate) fn admit_durable_mutation_journal<Store>(
+    &self,
+    journal: &MutationJournalV1<'_>,
+    now_ms: u64,
+    is_cancelled: &dyn Fn() -> bool,
+    store: &mut Store,
+  ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeErrorV1>
+  where
+    Store: IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1,
+  {
+    self.coordinate_mutation_journal_admission(is_cancelled, |producer| {
+      admit_durable_mutation_journal_tasks(self.hash_algorithm, producer, journal, now_ms, is_cancelled, store)
+    })
+  }
+
+  fn coordinate_mutation_journal_admission(
+    &self,
+    is_cancelled: &dyn Fn() -> bool,
+    admit: impl FnOnce(&mut IndexProducerCoordinatorV1) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexProducerJournalAdmissionErrorV1>,
+  ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexRuntimeErrorV1> {
     let result = (|| {
       if is_cancelled() {
         return Err(IndexRuntimeErrorV1::Canceled);
@@ -513,8 +567,7 @@ impl IndexRuntimeOwnerV1 {
       let mut state = self.state.lock().map_err(|_| IndexRuntimeErrorV1::Poisoned)?;
       observe_soft_loss(&mut state, &soft);
       require_running(&state)?;
-      admit_mutation_journal_tasks(self.hash_algorithm, &mut state.producer, journal, now_ms, is_cancelled, spill_store)
-        .map_err(journal_error)
+      admit(&mut state.producer).map_err(journal_error)
     })();
     self.finish_observed(result)
   }
@@ -845,9 +898,12 @@ fn modeled_soft_capacity(options: SoftMutationHubOptionsV1) -> Result<u64, Index
     .maximum_notices
     .checked_mul(size_of::<super::coverage_runtime::SoftMutationNoticeV1>())
     .ok_or_else(|| IndexRuntimeErrorV1::Invalid("soft mutation slot capacity overflowed".to_string()))?;
+  let queue_and_lease_slots = slots
+    .checked_mul(2)
+    .ok_or_else(|| IndexRuntimeErrorV1::Invalid("soft mutation queue and lease slot capacity overflowed".to_string()))?;
   let capacity = options
     .maximum_retained_bytes
-    .checked_add(slots)
+    .checked_add(queue_and_lease_slots)
     .ok_or_else(|| IndexRuntimeErrorV1::Invalid("soft mutation capacity overflowed".to_string()))?;
   u64::try_from(capacity).map_err(|error| IndexRuntimeErrorV1::Invalid(format!("soft mutation capacity exceeds this platform: {error}")))
 }

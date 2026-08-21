@@ -1,17 +1,21 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1;
+use crate::engine::v4::index_artifact::EncodedImmutableIndexArtifactV1;
 use crate::engine::v4::index_coordinator::{FrozenIndexBatchV1, IndexCoordinatorOptionsV1};
 use crate::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
 use crate::engine::v4::index_producer_coordinator::{
-  IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
-  IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerDurableTaskStoreV1, IndexProducerSpillErrorV1,
+  IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
+  IndexProducerTaskViewV1,
 };
 use crate::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
+use crate::engine::v4::index_runtime_batch_publisher::IndexRuntimeMutationJournalStoreV1;
 use crate::engine::v4::index_runtime_owner::{
-  IndexRuntimeBatchPublisherV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimePublicationErrorV1,
-  IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1,
+  IndexRuntimeBatchPublisherV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1,
+  IndexRuntimePublicationErrorClassV1, IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1,
 };
 use crate::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -49,6 +53,56 @@ impl IndexRuntimeBatchPublisherV1 for RecordingPublisher {
   }
 }
 
+struct JournalPublisher {
+  events: Arc<Mutex<Vec<&'static str>>>,
+  refuse_journal: Arc<AtomicBool>,
+  refuse_task: Arc<AtomicBool>,
+  cancel_after_journal: Option<CancellationToken>,
+}
+
+impl IndexRuntimeBatchPublisherV1 for JournalPublisher {
+  fn publish(&mut self, _batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
+    panic!("journal-admission test unexpectedly published a runtime batch")
+  }
+}
+
+impl IndexRuntimeMutationJournalStoreV1 for JournalPublisher {
+  fn persist_mutation_journal(&mut self, _journal: &EncodedImmutableIndexArtifactV1) -> Result<(), IndexRuntimePublicationErrorV1> {
+    self.events.lock().unwrap().push("journal");
+    if self.refuse_journal.load(Ordering::Acquire) {
+      return Err(IndexRuntimePublicationErrorV1::new(
+        IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection,
+        "injected_journal_refusal",
+        "injected mutation-journal durability refusal",
+      ));
+    }
+    if let Some(cancellation) = &self.cancel_after_journal {
+      cancellation.cancel();
+    }
+    Ok(())
+  }
+}
+
+impl IndexProducerDurableTaskStoreV1 for JournalPublisher {
+  fn persist_task(&mut self, task: IndexProducerTaskViewV1<'_>) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    self.events.lock().unwrap().push("task");
+    if self.refuse_task.load(Ordering::Acquire) {
+      return Err(IndexProducerSpillErrorV1::new("injected_task_refusal", "injected durable-task refusal"));
+    }
+    IndexProducerSpillReceiptV1::new(task.operation_id(), vec![0x91; 32])
+  }
+}
+
+impl IndexProducerSpillStoreV1 for JournalPublisher {
+  fn spill(
+    &mut self,
+    _task: IndexProducerTaskViewV1<'_>,
+    _reason: IndexProducerSpillReasonV1,
+  ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    panic!("non-pressure journal admission unexpectedly invoked pressure spill")
+  }
+}
+
 impl IndexProducerSpillStoreV1 for RecordingPublisher {
   fn spill(
     &mut self,
@@ -78,7 +132,7 @@ fn maintenance_task<'a>(
   }
 }
 
-fn encoded_journal(path: &str) -> Vec<u8> {
+fn encoded_journal(path: &str) -> EncodedImmutableIndexArtifactV1 {
   let hash = |label: &[u8]| crate::engine::v4::hash::digest_parts(HashAlgorithm::Blake3_256, &[b"cadence-journal:", label]);
   encode_mutation_journal(&MutationJournalWriteV1 {
     hash_algorithm: HashAlgorithm::Blake3_256,
@@ -104,7 +158,6 @@ fn encoded_journal(path: &str) -> Vec<u8> {
     }],
   })
   .unwrap()
-  .value
 }
 
 fn owner() -> Arc<IndexRuntimeOwnerV1> {
@@ -279,27 +332,120 @@ fn task_admission_fails_closed_on_cancellation_zero_clock_and_publisher_poison()
 }
 
 #[test]
-fn mutation_journal_admission_uses_the_same_cadence_owned_spill_boundary() {
+fn mutation_journal_is_persisted_before_durable_task_admission_and_queueing() {
   let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let refuse_journal = Arc::new(AtomicBool::new(false));
   let cadence = IndexRuntimeCadenceV1::new(
     Arc::clone(&owner),
-    UnusedPublisher,
+    JournalPublisher {
+      events: Arc::clone(&events),
+      refuse_journal,
+      refuse_task: Arc::new(AtomicBool::new(false)),
+      cancel_after_journal: None,
+    },
     CancellationToken::new(),
     Arc::new(MockClock::new(9, 100)) as Arc<dyn VirtualClock>,
   )
   .unwrap();
   let encoded = encoded_journal("/docs/a.json");
-  let journal = decode_mutation_journal(&encoded, HashAlgorithm::Blake3_256).unwrap();
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
 
-  let admitted = cadence.admit_mutation_journal(&journal).unwrap();
+  let admitted = cadence.persist_and_admit_mutation_journal(&encoded, &journal).unwrap();
   assert_eq!(admitted.queued, 1);
   assert_eq!(admitted.duplicates, 0);
   assert_eq!(admitted.spilled, 0);
+  assert_eq!(*events.lock().unwrap(), vec!["journal", "task"]);
   assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
 
-  let duplicate = cadence.admit_mutation_journal(&journal).unwrap();
+  let duplicate = cadence.persist_and_admit_mutation_journal(&encoded, &journal).unwrap();
   assert_eq!(duplicate.queued, 0);
   assert_eq!(duplicate.duplicates, 1);
   assert_eq!(duplicate.spilled, 0);
+  assert_eq!(*events.lock().unwrap(), vec!["journal", "task", "journal", "task"]);
   assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
+}
+
+#[test]
+fn mutation_journal_persistence_refusal_leaves_the_task_queue_unchanged() {
+  let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let refuse_journal = Arc::new(AtomicBool::new(true));
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    JournalPublisher {
+      events: Arc::clone(&events),
+      refuse_journal,
+      refuse_task: Arc::new(AtomicBool::new(false)),
+      cancel_after_journal: None,
+    },
+    CancellationToken::new(),
+    Arc::new(MockClock::new(10, 100)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let encoded = encoded_journal("/docs/refused.json");
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
+
+  assert!(matches!(
+    cadence.persist_and_admit_mutation_journal(&encoded, &journal),
+    Err(IndexRuntimeCadenceErrorV1::Publication(error))
+      if error.class() == IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection
+  ));
+  assert_eq!(*events.lock().unwrap(), vec!["journal"]);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 0);
+}
+
+#[test]
+fn mutation_task_durability_refusal_occurs_after_journal_but_before_queue_admission() {
+  let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    JournalPublisher {
+      events: Arc::clone(&events),
+      refuse_journal: Arc::new(AtomicBool::new(false)),
+      refuse_task: Arc::new(AtomicBool::new(true)),
+      cancel_after_journal: None,
+    },
+    CancellationToken::new(),
+    Arc::new(MockClock::new(11, 100)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let encoded = encoded_journal("/docs/task-refused.json");
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
+
+  assert!(matches!(
+    cadence.persist_and_admit_mutation_journal(&encoded, &journal),
+    Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Journal(_)))
+  ));
+  assert_eq!(*events.lock().unwrap(), vec!["journal", "task"]);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 0);
+}
+
+#[test]
+fn cancellation_after_journal_durability_does_not_admit_a_task() {
+  let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let cancellation = CancellationToken::new();
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    JournalPublisher {
+      events: Arc::clone(&events),
+      refuse_journal: Arc::new(AtomicBool::new(false)),
+      refuse_task: Arc::new(AtomicBool::new(false)),
+      cancel_after_journal: Some(cancellation.clone()),
+    },
+    cancellation,
+    Arc::new(MockClock::new(12, 100)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let encoded = encoded_journal("/docs/canceled-after-journal.json");
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
+
+  assert_eq!(
+    cadence.persist_and_admit_mutation_journal(&encoded, &journal).unwrap_err(),
+    IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled)
+  );
+  assert_eq!(*events.lock().unwrap(), vec!["journal"]);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 0);
 }

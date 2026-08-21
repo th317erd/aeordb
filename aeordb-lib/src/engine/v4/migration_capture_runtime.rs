@@ -1045,5 +1045,6 @@ fn hub_error_code(error: &SoftMutationHubErrorV1) -> &'static str {
     SoftMutationHubErrorV1::QueueContended => "migration_capture_runtime_hub_contended",
     SoftMutationHubErrorV1::ArithmeticOverflow => "migration_capture_runtime_hub_overflow",
     SoftMutationHubErrorV1::DrainLimitTooSmall { .. } => "migration_capture_runtime_hub_drain_limit",
+    SoftMutationHubErrorV1::RecordLimitTooSmall { .. } => "migration_capture_runtime_hub_record_limit",
   }
 }

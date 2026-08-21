@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use crate::engine::HashAlgorithm;
 use crate::engine::namespace_mutation::{NamespaceMutationKind, NamespaceMutationSourceIdentity};
 
@@ -5,7 +7,7 @@ use super::coverage_runtime::{
   CoverageAuthorityV1, CoverageBoundaryV1, CoverageControlIdentityV1, CoverageReconciliationV1, CoverageTrackerV1, SoftMutationNoticeV1,
 };
 use super::hash::digest_parts;
-use super::index_artifact::EncodedImmutableIndexArtifactV1;
+use super::index_artifact::{EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1};
 use super::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
   encode_mutation_journal, validate_journal_chain,
@@ -39,9 +41,22 @@ pub fn build_coverage_authority(
     return Err(CoverageJournalErrorV1::AuthorityClosure("NamespaceRoot semantic-state edge does not match the verified semantic object"));
   }
 
+  build_source_coverage_authority(hash_algorithm, &root.root_hash, semantic_state, registry)
+}
+
+pub fn build_source_coverage_authority(
+  hash_algorithm: HashAlgorithm,
+  source_namespace_root: &[u8],
+  semantic_state: &SemanticStateV1,
+  registry: &SystemFamilyRegistryV1<'_>,
+) -> Result<CoverageAuthorityV1, CoverageJournalErrorV1> {
+  let hash_width = hash_algorithm.hash_length();
+  require_hash(source_namespace_root, hash_width, "source namespace root")?;
+  require_hash(&semantic_state.object_id, hash_width, "semantic-state object")?;
+  require_hash(&registry.semantic_projection_fingerprint, hash_width, "SystemFamily semantic projection")?;
   CoverageAuthorityV1::new(
     hash_algorithm,
-    root.root_hash.clone(),
+    source_namespace_root.to_vec(),
     vec![
       CoverageControlIdentityV1 { domain: CoverageControlDomainV1::SemanticStateRoot as u16, identity: semantic_state.object_id.clone() },
       CoverageControlIdentityV1 {
@@ -51,6 +66,38 @@ pub fn build_coverage_authority(
     ],
   )
   .map_err(CoverageJournalErrorV1::Runtime)
+}
+
+pub(crate) fn soft_mutation_journal_working_bytes(
+  hash_algorithm: HashAlgorithm,
+  maximum_notices: usize,
+  maximum_retained_bytes: usize,
+  maximum_notice_bytes: usize,
+  maximum_records: usize,
+) -> Result<u64, CoverageJournalErrorV1> {
+  if maximum_notices == 0 || maximum_retained_bytes == 0 || maximum_notice_bytes == 0 || maximum_records == 0 {
+    return Err(CoverageJournalErrorV1::InvalidOptions("journal memory limits must be nonzero"));
+  }
+  let artifact_bytes = ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length();
+  let mutation_ids = maximum_notices
+    .checked_mul(
+      size_of::<Vec<u8>>()
+        .checked_add(hash_algorithm.hash_length())
+        .ok_or(CoverageJournalErrorV1::Allocation("journal mutation-ID memory estimate overflowed".to_string()))?,
+    )
+    .ok_or_else(|| CoverageJournalErrorV1::Allocation("journal mutation-ID memory estimate overflowed".to_string()))?;
+  let records = maximum_records
+    .checked_mul(size_of::<MutationRecordWriteV1<'static>>())
+    .ok_or_else(|| CoverageJournalErrorV1::Allocation("journal record memory estimate overflowed".to_string()))?;
+  let bytes = artifact_bytes
+    .checked_mul(2)
+    .and_then(|bytes| bytes.checked_add(maximum_retained_bytes))
+    .and_then(|bytes| bytes.checked_add(maximum_notice_bytes))
+    .and_then(|bytes| bytes.checked_add(mutation_ids))
+    .and_then(|bytes| bytes.checked_add(records))
+    .and_then(|bytes| bytes.checked_add(64 * 1_024))
+    .ok_or_else(|| CoverageJournalErrorV1::Allocation("journal working-memory estimate overflowed".to_string()))?;
+  u64::try_from(bytes).map_err(|error| CoverageJournalErrorV1::Allocation(format!("journal working-memory estimate exceeds u64: {error}")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

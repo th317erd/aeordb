@@ -39,7 +39,8 @@ use aeordb::engine::v4::index_runtime_workspace_store::{
 };
 use aeordb::engine::v4::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1,
-  IndexTaskStateV1, decode_index_task_checkpoint, encode_index_task_checkpoint,
+  IndexTaskStateV1, JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1,
+  decode_index_task_checkpoint, encode_index_task_checkpoint, encode_mutation_journal,
 };
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use aeordb::engine::{DiskKVStore, HashAlgorithm, MockClock, VirtualClock};
@@ -73,6 +74,9 @@ struct FakeState {
   cancel_on_selected_load: Option<(u64, CancellationToken)>,
   cancel_on_immutable_load: Option<CancellationToken>,
   refuse_loads: bool,
+  immutable_syncs: u64,
+  refuse_immutable_sync: bool,
+  cancel_on_immutable_sync: Option<CancellationToken>,
 }
 
 impl Default for FakeState {
@@ -87,6 +91,9 @@ impl Default for FakeState {
       cancel_on_selected_load: None,
       cancel_on_immutable_load: None,
       refuse_loads: false,
+      immutable_syncs: 0,
+      refuse_immutable_sync: false,
+      cancel_on_immutable_sync: None,
     }
   }
 }
@@ -154,6 +161,14 @@ impl IndexRecoveryStoreV1 for FakeStore {
   }
 
   fn sync_immutable(&mut self) -> Result<(), IndexRecoveryStoreErrorV1> {
+    let mut state = self.state.lock().unwrap();
+    state.immutable_syncs += 1;
+    if state.refuse_immutable_sync {
+      return Err(IndexRecoveryStoreErrorV1::new("fake_sync_refusal", "injected immutable sync refusal"));
+    }
+    if let Some(cancellation) = &state.cancel_on_immutable_sync {
+      cancellation.cancel();
+    }
     Ok(())
   }
 
@@ -302,6 +317,116 @@ fn cumulative_runtime_batches_publish_truthful_external_heads_selector_last() {
   assert_eq!(external.durable_sequence, 2);
   assert!(external.durable_bytes > 0);
   assert!(Path::new(external.path).is_absolute());
+}
+
+#[test]
+fn mutation_journal_persistence_validates_and_syncs_without_moving_runtime_selection() {
+  let (mut fixture, _) = Fixture::new(SelectorBehavior::Commit);
+  let before_root = digest_parts(ALGORITHM, &[b"journal-before"]);
+  let after_root = digest_parts(ALGORITHM, &[b"journal-after"]);
+  let semantic = digest_parts(ALGORITHM, &[b"journal-semantic"]);
+  let mutation = digest_parts(ALGORITHM, &[b"journal-mutation"]);
+  let revision = digest_parts(ALGORITHM, &[b"journal-revision"]);
+  let record = MutationRecordWriteV1 {
+    kind: MutationKindV1::Create,
+    sequence: 7,
+    mutation_id: &mutation,
+    batch_ordinal: 0,
+    batch_count: 1,
+    root_before: &before_root,
+    root_after: &after_root,
+    before: None,
+    after: Some(MutationSideWriteV1 { path: "/docs/a.json", revision: &revision }),
+    committed_at_ms: 100,
+  };
+  let journal = encode_mutation_journal(&MutationJournalWriteV1 {
+    hash_algorithm: ALGORITHM,
+    owner_id: *b"AEORIDXJOURNALV1",
+    owner_kind: JournalOwnerKindV1::System,
+    generation: 1,
+    segment_ordinal: 7,
+    chain_reset: true,
+    previous_segment: &[0; 32],
+    semantic_state_root: &semantic,
+    runtime_boot_id: RUNTIME_ID,
+    records: &[record],
+  })
+  .unwrap();
+
+  fixture.publisher.persist_mutation_journal(&journal).unwrap();
+  {
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.immutable.get(&journal.key), Some(&journal.value));
+    assert_eq!(state.immutable_syncs, 1);
+    assert_eq!(state.selector_calls, 0);
+    assert!(state.selected.is_none());
+  }
+  fixture.publisher.persist_mutation_journal(&journal).unwrap();
+  assert_eq!(fixture.state.lock().unwrap().immutable_syncs, 2, "exact retry must re-establish the durability barrier");
+
+  fixture.state.lock().unwrap().refuse_immutable_sync = true;
+  let refused = fixture.publisher.persist_mutation_journal(&journal).unwrap_err();
+  assert_eq!(refused.class(), IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 0);
+  fixture.state.lock().unwrap().refuse_immutable_sync = false;
+  fixture.publisher.persist_mutation_journal(&journal).unwrap();
+
+  let malformed = aeordb::engine::v4::index_artifact::EncodedImmutableIndexArtifactV1 { key: journal.key.clone(), value: vec![0; 64] };
+  let immutable_before = fixture.state.lock().unwrap().immutable.clone();
+  assert_eq!(fixture.publisher.persist_mutation_journal(&malformed).unwrap_err().class(), IndexRuntimePublicationErrorClassV1::Corrupt);
+  assert_eq!(fixture.state.lock().unwrap().immutable, immutable_before, "malformed bytes must fail before storage");
+
+  let wrong_key = aeordb::engine::v4::index_artifact::EncodedImmutableIndexArtifactV1 {
+    key: digest_parts(ALGORITHM, &[b"forged-journal-key"]),
+    value: journal.value.clone(),
+  };
+  let immutable_before = fixture.state.lock().unwrap().immutable.clone();
+  assert_eq!(fixture.publisher.persist_mutation_journal(&wrong_key).unwrap_err().class(), IndexRuntimePublicationErrorClassV1::Corrupt);
+  assert_eq!(fixture.state.lock().unwrap().immutable, immutable_before, "forged identity must fail before storage");
+}
+
+#[test]
+fn mutation_journal_cancellation_after_sync_retains_the_durable_artifact_without_selection() {
+  let (mut fixture, _) = Fixture::new(SelectorBehavior::Commit);
+  let before_root = digest_parts(ALGORITHM, &[b"cancel-journal-before"]);
+  let after_root = digest_parts(ALGORITHM, &[b"cancel-journal-after"]);
+  let semantic = digest_parts(ALGORITHM, &[b"cancel-journal-semantic"]);
+  let mutation = digest_parts(ALGORITHM, &[b"cancel-journal-mutation"]);
+  let revision = digest_parts(ALGORITHM, &[b"cancel-journal-revision"]);
+  let record = MutationRecordWriteV1 {
+    kind: MutationKindV1::Create,
+    sequence: 8,
+    mutation_id: &mutation,
+    batch_ordinal: 0,
+    batch_count: 1,
+    root_before: &before_root,
+    root_after: &after_root,
+    before: None,
+    after: Some(MutationSideWriteV1 { path: "/docs/cancel.json", revision: &revision }),
+    committed_at_ms: 101,
+  };
+  let journal = encode_mutation_journal(&MutationJournalWriteV1 {
+    hash_algorithm: ALGORITHM,
+    owner_id: *b"AEORIDXJOURNALV1",
+    owner_kind: JournalOwnerKindV1::System,
+    generation: 1,
+    segment_ordinal: 8,
+    chain_reset: true,
+    previous_segment: &[0; 32],
+    semantic_state_root: &semantic,
+    runtime_boot_id: RUNTIME_ID,
+    records: &[record],
+  })
+  .unwrap();
+  fixture.state.lock().unwrap().cancel_on_immutable_sync = Some(fixture.cancellation.clone());
+
+  let error = fixture.publisher.persist_mutation_journal(&journal).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection);
+  let state = fixture.state.lock().unwrap();
+  assert_eq!(state.immutable.get(&journal.key), Some(&journal.value));
+  assert_eq!(state.immutable_syncs, 1);
+  assert_eq!(state.selector_calls, 0);
+  assert!(state.selected.is_none());
 }
 
 #[test]
@@ -1105,6 +1230,16 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   assert!(server.contains("engine.flush_index_runtime_if_due_v1()"));
   assert!(!directory_ops.contains("flush_index_runtime_if_due_v1"));
   let shutdown = include_str!("../../src/engine/storage_engine.rs");
+  assert!(shutdown.contains("runtime.owner().has_pending_soft_mutations()"));
+  assert!(!shutdown.contains("cached_snapshot().soft_hub.queued_notices"));
+  assert!(shutdown.contains("try_direct_hard_authority_guard()"));
+  let source_lease = shutdown.find("runtime.lease_soft_mutation_journal").expect("source-authority soft lease");
+  let post_authority_prepare = shutdown.find("leased.map(|leased| leased.prepare())").expect("post-authority journal preparation");
+  let durable_handoff = shutdown.find("prepared.persist()").expect("durable journal handoff");
+  assert!(
+    source_lease < post_authority_prepare && post_authority_prepare < durable_handoff,
+    "journal cloning/encoding or durability moved back under source namespace authority"
+  );
   let runtime_drain = shutdown.find("self.drain_index_runtime_v1()").expect("shutdown must enter the installed runtime cadence");
   let legacy_flush = shutdown.rfind("self.flush_index_buffer()").expect("legacy shutdown flush");
   let kv_flush = shutdown.rfind("kv.flush_for_shutdown()").expect("KV shutdown flush");

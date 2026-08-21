@@ -309,6 +309,13 @@ pub trait IndexProducerSpillStoreV1 {
   ) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1>;
 }
 
+/// Durable recovery authority for a task that may also remain queued in
+/// memory. This is distinct from pressure spill: successful persistence does
+/// not remove the task from the bounded live coordinator.
+pub trait IndexProducerDurableTaskStoreV1 {
+  fn persist_task(&mut self, task: IndexProducerTaskViewV1<'_>) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexProducerAdmissionV1 {
   Queued,
@@ -560,6 +567,27 @@ impl IndexProducerCoordinatorV1 {
       }
       Err(error) => Err(error),
     }
+  }
+
+  pub fn admit_durable_or_spill<Store>(
+    &mut self,
+    request: IndexProducerTaskRequestV1<'_>,
+    now_ms: u64,
+    store: &mut Store,
+  ) -> Result<IndexProducerAdmissionV1, IndexProducerCoordinatorErrorV1>
+  where
+    Store: IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1,
+  {
+    self.observe_time(now_ms)?;
+    self.validate_task(&request)?;
+    if let Some(retained) = self.tasks.iter().find(|task| task.operation_id == request.operation_id) {
+      if !retained.matches(&request) {
+        return Err(IndexProducerCoordinatorErrorV1::ConflictingTask { operation_id: request.operation_id });
+      }
+    }
+    let receipt = store.persist_task(task_view_from_request(&request)).map_err(spill_error)?;
+    self.validate_spill_receipt(&receipt, request.operation_id)?;
+    self.admit_or_spill(request, now_ms, store)
   }
 
   pub fn lease_next(&mut self, now_ms: u64, cancelled: bool) -> Result<Option<IndexProducerLeaseV1>, IndexProducerCoordinatorErrorV1> {

@@ -45,11 +45,12 @@ use aeordb::engine::v4::index_recovery_store::{
 };
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
 use aeordb::engine::v4::index_runtime_batch_publisher::{DurableIndexRuntimeBatchPublisherV1, NativeIndexRuntimeBatchPublisherV1};
+use aeordb::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1;
 use aeordb::engine::v4::index_runtime_installation::{
   IndexRuntimeNativeRecoveryOptionsV1, IndexRuntimeShadowIdentityV1, NativeIndexRuntimeInstallationErrorV1,
   NativeIndexRuntimeInstallationRequestV1, NativeIndexRuntimePublisherOptionsV1, install_native_index_runtime_v1,
 };
-use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1};
+use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeErrorV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerOptionsV1};
 use aeordb::engine::v4::index_runtime_owner::IndexRuntimeBatchPublisherV1;
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceSelectedHeadV1,
@@ -777,7 +778,13 @@ fn initializer_creates_one_private_reopenable_shadow_for_both_hash_widths_withou
 fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellation_checks() {
   let directory = tempfile::tempdir().unwrap();
   let source_path = directory.path().join("runtime-source.aeordb");
-  let source = source_engine(&source_path, &directory.path().join("spill"));
+  let bootstrap_source = source_engine(&source_path, &directory.path().join("spill"));
+  DirectoryOps::new(&bootstrap_source)
+    .store_file_buffered(&RequestContext::system(), "/bootstrap.txt", b"bootstrap", Some("text/plain"))
+    .unwrap();
+  bootstrap_source.shutdown().unwrap();
+  drop(bootstrap_source);
+  let source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
   let shadow_path = directory.path().join("runtime-shadow.aeordb");
   let destination = observe_migration_destination_path_v1(&shadow_path).unwrap();
   let permit = permit_with_source_identity(HashAlgorithm::Blake3_256, &destination, platform_file_identity(&source_path).unwrap());
@@ -791,7 +798,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   })
   .unwrap();
   let retirement = retirement_owner(&source, permit.database_id(), &cancellation);
-  let clock: Arc<dyn VirtualClock> = Arc::new(MockClock::new(1, 1_700_000_000_200));
+  let clock: Arc<dyn VirtualClock> = Arc::new(MockClock::new(1, 1_700_000_000_201));
   let identity = IndexRuntimeShadowIdentityV1::from_preflight(&permit);
 
   assert_eq!(
@@ -859,7 +866,30 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
     "malformed scope must not enter the root-pinned maintenance doorway"
   );
   assert_eq!(source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
-  assert_eq!(source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes > 0, true,);
+  let journal_memory_before = source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes;
+  assert!(journal_memory_before > 0);
+  let normal_memory_policy = source.memory_coordinator().snapshot().unwrap().policy.unwrap();
+  source.memory_coordinator().reconfigure_policy(MemoryPolicy::new(1, 2, 1, 1).unwrap()).unwrap();
+  assert!(matches!(source.flush_index_runtime_if_due_v1(), Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Memory(_)))));
+  let after_memory_refusal = source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(after_memory_refusal.soft_hub.queued_notices, 1, "memory refusal must restore the leased source notice");
+  assert_eq!(after_memory_refusal.producer.pending_tasks, 1, "memory refusal must not admit a journal task");
+  assert_eq!(
+    source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes,
+    journal_memory_before,
+    "memory refusal must release the failed journal reservation and restored lease"
+  );
+  source.memory_coordinator().reconfigure_policy(normal_memory_policy).unwrap();
+
+  source.flush_index_runtime_if_due_v1().unwrap().expect("installed runtime must service its cadence");
+  let after_journal = source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(after_journal.soft_hub.queued_notices, 0, "durable journal and task evidence must retire the leased notice");
+  assert_eq!(after_journal.producer.pending_tasks, 2, "the exact mutation task must join the existing maintenance task");
+  assert_eq!(
+    source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes,
+    journal_memory_before,
+    "journal encoding and persistence must release their temporary working reservation"
+  );
 
   let duplicate = install_native_index_runtime_v1(
     &source,

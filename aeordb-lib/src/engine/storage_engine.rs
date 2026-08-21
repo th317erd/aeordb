@@ -3688,7 +3688,11 @@ impl StorageEngine {
     IndexManager::new(self).flush_buffered_indexes_if_due()
   }
 
-  pub(crate) fn flush_index_runtime_if_due_v1(
+  /// Drive one embedded v4 index-runtime cadence tick.
+  ///
+  /// The server calls this from its shared index timer. Embedded hosts that
+  /// install the native v4 runtime must call it on their own bounded cadence.
+  pub fn flush_index_runtime_if_due_v1(
     &self,
   ) -> Result<
     Option<crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1>,
@@ -3697,6 +3701,29 @@ impl StorageEngine {
     let Some(runtime) = self.index_runtime_v1.get() else {
       return Ok(None);
     };
+    let leased = if !runtime.owner().has_pending_soft_mutations() {
+      None
+    } else {
+      let _source_authority = match self
+        .try_direct_hard_authority_guard()
+        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?
+      {
+        Some(authority) => authority,
+        None => return runtime.cadence().flush_if_due().map(Some),
+      };
+      let namespace_root = self
+        .head_hash()
+        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?;
+      let publication_sequence = self
+        .durability_snapshot()
+        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?
+        .hard_frontier;
+      runtime.lease_soft_mutation_journal(&namespace_root, publication_sequence)?
+    };
+    let prepared = leased.map(|leased| leased.prepare()).transpose()?;
+    if let Some(prepared) = prepared {
+      prepared.persist()?;
+    }
     runtime.cadence().flush_if_due().map(Some)
   }
 

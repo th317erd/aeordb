@@ -15,6 +15,11 @@ use crate::engine::native_durability::{NativeDurabilityError, PlatformFileIdenti
 use crate::engine::{EngineError, HashAlgorithm, StorageEngine, VirtualClock};
 
 use super::first_authority::{FirstAuthorityPublicationErrorV1, SelectedSemanticAuthorityV1, V4FirstAuthorityPublisher};
+use super::coverage_journal::{
+  CoverageJournalEncodeOptionsV1, CoverageJournalErrorV1, CoverageJournalWindowOptionsV1, CoverageJournalWindowOutcomeV1,
+  build_source_coverage_authority, encode_soft_mutation_journal_segment, order_soft_mutation_window, soft_mutation_journal_working_bytes,
+};
+use super::coverage_runtime::{CoverageBoundaryV1, SoftMutationHubErrorV1, SoftMutationHubOptionsV1};
 use super::index_coordinator_recovery::{
   IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
   IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
@@ -41,6 +46,9 @@ use super::index_runtime_workspace_store::{
 use super::migration_owner::MigrationStateOwnerV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::namespace::SemanticAvailabilityV1;
+use super::system_family::embedded_system_family_registry;
+
+const INDEX_RUNTIME_SOFT_JOURNAL_MAX_RECORDS: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexRuntimeShadowIdentityV1 {
@@ -162,8 +170,121 @@ pub struct NativeIndexRuntimeV1 {
   registry: Arc<IndexScopeOrdinalStoreRegistryV1>,
   shadow_identity: IndexRuntimeShadowIdentityV1,
   semantic_authority: SelectedSemanticAuthorityV1,
+  journal_generation: u64,
   cancellation: CancellationToken,
   cadence: Arc<NativeIndexRuntimeCadenceV1>,
+}
+
+pub(crate) struct PreparedNativeSoftMutationJournalV1<'runtime> {
+  lease: super::coverage_runtime::SoftMutationLeaseV1<'runtime>,
+  artifact: super::index_artifact::EncodedImmutableIndexArtifactV1,
+  cadence: Arc<NativeIndexRuntimeCadenceV1>,
+  owner: Arc<IndexRuntimeOwnerV1>,
+  _memory: MemoryReservation,
+}
+
+pub(crate) struct LeasedNativeSoftMutationJournalV1<'runtime> {
+  runtime: &'runtime NativeIndexRuntimeV1,
+  lease: super::coverage_runtime::SoftMutationLeaseV1<'runtime>,
+  soft_options: SoftMutationHubOptionsV1,
+}
+
+impl<'runtime> LeasedNativeSoftMutationJournalV1<'runtime> {
+  /// Clone and encode after the caller has released source namespace
+  /// authority. The lease retains the original queue prefix for exact
+  /// rollback until journal and task durability are established.
+  pub(crate) fn prepare(self) -> Result<PreparedNativeSoftMutationJournalV1<'runtime>, IndexRuntimeCadenceErrorV1> {
+    let Self { runtime, lease, soft_options } = self;
+    if runtime.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let working_bytes = soft_mutation_journal_working_bytes(
+      runtime.shadow_identity.hash_algorithm,
+      soft_options.maximum_notices,
+      soft_options.maximum_retained_bytes,
+      soft_options.maximum_notice_bytes,
+      INDEX_RUNTIME_SOFT_JOURNAL_MAX_RECORDS,
+    )
+    .map_err(soft_journal_error)?;
+    let memory = runtime.owner.reserve_soft_journal_memory(working_bytes)?;
+    let semantic_authority = runtime.publisher.load_selected_semantic_authority().map_err(|error| soft_journal(error.to_string()))?;
+    validate_selected_semantic_authority_identity(&runtime.shadow_identity, &semantic_authority)
+      .map_err(|(code, message)| soft_journal(format!("{code}: {message}")))?;
+    let drain = lease.try_clone_drain().map_err(|error| soft_journal(error.to_string()))?;
+    let first = drain.notices.first().ok_or_else(|| soft_journal("leased soft-mutation window is empty"))?;
+    let last = drain.notices.last().ok_or_else(|| soft_journal("leased soft-mutation window is empty"))?;
+    let first_publication_sequence = first.publication_sequence;
+    let registry =
+      embedded_system_family_registry(runtime.shadow_identity.hash_algorithm).map_err(|error| soft_journal(error.to_string()))?;
+    if registry.operational_fingerprint != semantic_authority.system_family_registry_fingerprint {
+      return Err(soft_journal("selected semantic authority uses a different SystemFamily registry"));
+    }
+    let covered_sequence = first_publication_sequence
+      .checked_sub(1)
+      .ok_or_else(|| soft_journal("soft-mutation window has no valid preceding publication sequence"))?;
+    let controls = build_source_coverage_authority(
+      runtime.shadow_identity.hash_algorithm,
+      &first.previous_namespace_root,
+      &semantic_authority.semantic_state,
+      registry,
+    )
+    .map_err(soft_journal_error)?;
+    let selected = build_source_coverage_authority(
+      runtime.shadow_identity.hash_algorithm,
+      &last.namespace_root,
+      &semantic_authority.semantic_state,
+      registry,
+    )
+    .map_err(soft_journal_error)?;
+    let covered = if covered_sequence == 0 {
+      CoverageBoundaryV1::initial(controls)
+    } else {
+      CoverageBoundaryV1::new(controls, covered_sequence).map_err(|error| soft_journal(error.to_string()))?
+    };
+    let selected = CoverageBoundaryV1::new(selected, last.publication_sequence).map_err(|error| soft_journal(error.to_string()))?;
+    let window = match order_soft_mutation_window(
+      runtime.shadow_identity.hash_algorithm,
+      drain.notices,
+      &covered,
+      &selected,
+      CoverageJournalWindowOptionsV1::new(soft_options.maximum_notices, soft_options.maximum_retained_bytes).map_err(soft_journal_error)?,
+    ) {
+      CoverageJournalWindowOutcomeV1::Exact(window) => window,
+      CoverageJournalWindowOutcomeV1::BoundedDiffRequired { reason } | CoverageJournalWindowOutcomeV1::RebuildRequired(reason) => {
+        return Err(soft_journal(format!("soft-mutation window requires authoritative reconciliation: {reason:?}")));
+      }
+    };
+    let artifact = encode_soft_mutation_journal_segment(
+      runtime.shadow_identity.hash_algorithm,
+      &window,
+      CoverageJournalEncodeOptionsV1 {
+        generation: runtime.journal_generation,
+        segment_ordinal: first_publication_sequence,
+        previous_segment: vec![0; runtime.shadow_identity.hash_algorithm.hash_length()],
+        runtime_boot_id: runtime.owner.coordinator_id(),
+      },
+    )
+    .map_err(soft_journal_error)?;
+    Ok(PreparedNativeSoftMutationJournalV1 {
+      lease,
+      artifact,
+      cadence: Arc::clone(&runtime.cadence),
+      owner: Arc::clone(&runtime.owner),
+      _memory: memory,
+    })
+  }
+}
+
+impl PreparedNativeSoftMutationJournalV1<'_> {
+  pub(crate) fn persist(self) -> Result<(), IndexRuntimeCadenceErrorV1> {
+    let Self { lease, artifact, cadence, owner, _memory } = self;
+    let journal = super::index_task::decode_mutation_journal(&artifact.value, owner.hash_algorithm())
+      .map_err(|error| soft_journal(error.to_string()))?;
+    cadence.persist_and_admit_mutation_journal(&artifact, &journal)?;
+    lease.commit().map_err(|error| soft_journal(error.to_string()))?;
+    owner.refresh_soft_hub_observation()?;
+    Ok(())
+  }
 }
 
 impl NativeIndexRuntimeV1 {
@@ -218,6 +339,40 @@ impl NativeIndexRuntimeV1 {
       },
     )?;
     self.cadence.admit_task(request).map_err(Into::into)
+  }
+
+  /// Lease one exact source window. The caller must hold source namespace
+  /// authority so the root and hard-publication frontier cannot move during
+  /// this short capture; semantic authority is loaded later during prepare.
+  pub(crate) fn lease_soft_mutation_journal(
+    &self,
+    source_namespace_root: &[u8],
+    source_publication_sequence: u64,
+  ) -> Result<Option<LeasedNativeSoftMutationJournalV1<'_>>, IndexRuntimeCadenceErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    if !self.owner.has_pending_soft_mutations() {
+      return Ok(None);
+    }
+    let soft = self.owner.soft_mutation_options();
+    let lease = match self.owner.lease_soft_mutations(INDEX_RUNTIME_SOFT_JOURNAL_MAX_RECORDS) {
+      Ok(Some(lease)) => lease,
+      Ok(None) | Err(SoftMutationHubErrorV1::QueueContended) => return Ok(None),
+      Err(error) => return Err(soft_journal(error.to_string())),
+    };
+    if lease.record_count() == 0 {
+      return Err(soft_journal("leased soft-mutation window contains no records"));
+    }
+    let last = lease.drain().notices.last().ok_or_else(|| soft_journal("leased soft-mutation window is empty"))?;
+    if last.publication_sequence > source_publication_sequence {
+      return Err(soft_journal("leased soft-mutation window is ahead of the source hard-publication frontier"));
+    }
+    if lease.queue_exhausted() && last.namespace_root != source_namespace_root {
+      return Err(soft_journal("complete soft-mutation queue does not close over the current source namespace root"));
+    }
+
+    Ok(Some(LeasedNativeSoftMutationJournalV1 { runtime: self, lease, soft_options: soft }))
   }
 }
 
@@ -380,6 +535,7 @@ pub fn install_native_index_runtime_v1(
     registry,
     shadow_identity: request.shadow_identity.clone(),
     semantic_authority: semantic_authority.clone(),
+    journal_generation: request.runtime_publisher.generation,
     cancellation: request.cancellation.clone(),
     cadence,
   });
@@ -775,6 +931,14 @@ fn check_cancellation(cancellation: &CancellationToken) -> Result<(), NativeInde
 
 fn invalid(code: &'static str, message: impl Into<String>) -> NativeIndexRuntimeInstallationErrorV1 {
   NativeIndexRuntimeInstallationErrorV1::Invalid { code, message: message.into() }
+}
+
+fn soft_journal(message: impl Into<String>) -> IndexRuntimeCadenceErrorV1 {
+  IndexRuntimeCadenceErrorV1::SoftJournal(message.into())
+}
+
+fn soft_journal_error(error: CoverageJournalErrorV1) -> IndexRuntimeCadenceErrorV1 {
+  soft_journal(error.to_string())
 }
 
 #[cfg(test)]

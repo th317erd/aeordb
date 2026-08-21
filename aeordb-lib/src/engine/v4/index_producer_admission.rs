@@ -5,8 +5,8 @@ use crate::engine::path_utils::normalize_path;
 
 use super::hash::digest_parts;
 use super::index_producer_coordinator::{
-  IndexProducerAdmissionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerSpillStoreV1,
-  IndexProducerTaskKindV1, IndexProducerTaskRequestV1, INDEX_PRODUCER_SCOPE_BYTES_MAX,
+  INDEX_PRODUCER_SCOPE_BYTES_MAX, IndexProducerAdmissionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1,
+  IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
 };
 use super::index_task::{MutationJournalV1, MutationRecordV1};
 use super::reader::FormatError;
@@ -199,6 +199,29 @@ pub fn admit_mutation_journal_tasks(
   is_cancelled: &dyn Fn() -> bool,
   spill_store: &mut dyn IndexProducerSpillStoreV1,
 ) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexProducerJournalAdmissionErrorV1> {
+  visit_mutation_journal_tasks(hash_algorithm, journal, is_cancelled, |request| producer.admit_or_spill(request, now_ms, spill_store))
+}
+
+pub fn admit_durable_mutation_journal_tasks<Store>(
+  hash_algorithm: HashAlgorithm,
+  producer: &mut IndexProducerCoordinatorV1,
+  journal: &MutationJournalV1<'_>,
+  now_ms: u64,
+  is_cancelled: &dyn Fn() -> bool,
+  store: &mut Store,
+) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexProducerJournalAdmissionErrorV1>
+where
+  Store: IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1,
+{
+  visit_mutation_journal_tasks(hash_algorithm, journal, is_cancelled, |request| producer.admit_durable_or_spill(request, now_ms, store))
+}
+
+fn visit_mutation_journal_tasks(
+  hash_algorithm: HashAlgorithm,
+  journal: &MutationJournalV1<'_>,
+  is_cancelled: &dyn Fn() -> bool,
+  mut admit: impl FnMut(IndexProducerTaskRequestV1<'_>) -> Result<IndexProducerAdmissionV1, IndexProducerCoordinatorErrorV1>,
+) -> Result<IndexProducerJournalAdmissionSummaryV1, IndexProducerJournalAdmissionErrorV1> {
   if is_cancelled() {
     return Err(IndexProducerJournalAdmissionErrorV1::Cancelled);
   }
@@ -210,20 +233,16 @@ pub fn admit_mutation_journal_tasks(
     }
     let record = record?;
     let operation_id = derive_mutation_operation_id(hash_algorithm, record.mutation_id, record.batch_ordinal)?;
-    let admission = producer.admit_or_spill(
-      IndexProducerTaskRequestV1 {
-        operation_id,
-        kind: IndexProducerTaskKindV1::MutationWindow,
-        publication_sequence: record.sequence,
-        namespace_root_before: record.root_before,
-        namespace_root_after: record.root_after,
-        semantic_state_root: journal.semantic_state_root,
-        journal_head: Some(&journal.key),
-        scope: None,
-      },
-      now_ms,
-      spill_store,
-    )?;
+    let admission = admit(IndexProducerTaskRequestV1 {
+      operation_id,
+      kind: IndexProducerTaskKindV1::MutationWindow,
+      publication_sequence: record.sequence,
+      namespace_root_before: record.root_before,
+      namespace_root_after: record.root_after,
+      semantic_state_root: journal.semantic_state_root,
+      journal_head: Some(&journal.key),
+      scope: None,
+    })?;
     match admission {
       IndexProducerAdmissionV1::Queued => increment(&mut summary.queued)?,
       IndexProducerAdmissionV1::Duplicate => increment(&mut summary.duplicates)?,

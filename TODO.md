@@ -1046,7 +1046,7 @@
             - [x] P6-2c-d1: freeze the complete maintenance producer taxonomy and deterministic root/semantic/scope-bound operation identity.
             - [x] P6-2c-d2: make the installed cadence the sole serialized admission and durable-spill boundary for both exact mutation journals and root-pinned maintenance tasks.
             - [x] P6-2c-d3: expose one source-authority-first `StorageEngine` maintenance admission facade that is inert without an installed runtime and reloads current semantic authority.
-            - [ ] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
+            - [x] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
             - [ ] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
@@ -1054,6 +1054,7 @@
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
+        - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
