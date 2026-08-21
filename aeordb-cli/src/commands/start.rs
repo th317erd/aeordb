@@ -734,6 +734,17 @@ fn fail_if_unresolved_emergency_spills(
     if artifact.hot_tail_writes > 0 || artifact.hot_tail_voids > 0 {
       message.push_str(&format!("     hot-tail snapshot: {} writes, {} voids\n", artifact.hot_tail_writes, artifact.hot_tail_voids));
     }
+    if let Some(runtime) = artifact.index_runtime_state.as_ref() {
+      message.push_str(&format!(
+        "     v4 index reconciliation: runtime={}, lifecycle={}, soft={}, producer={}, active={}, frozen={}\n",
+        hex::encode(runtime.runtime_id),
+        runtime.lifecycle,
+        runtime.soft_queued_notices,
+        runtime.producer_pending_tasks.saturating_add(runtime.producer_leased_tasks),
+        runtime.mutation_active_records,
+        runtime.mutation_frozen_records,
+      ));
+    }
   }
   message.push_str("\nRun repair, review the prompt, and then start again:\n");
   message.push_str(&format!("  aeordb verify --repair --force-fix-in-place -D {}\n", database));

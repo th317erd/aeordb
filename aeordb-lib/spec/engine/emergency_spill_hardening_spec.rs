@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::emergency_spill::{
-  EMERGENCY_SPILL_FORMAT, EMERGENCY_SPILL_FORMAT_V2, EmergencySpillApplyReport, EmergencySpillFormatVersion, EmergencySpillLocation,
-  SpillLocationClass, apply_wal_tails_to_database, mark_artifacts_applied, scan_for_database_with_dirs, scan_for_database_with_locations,
+  EMERGENCY_SPILL_FORMAT, EMERGENCY_SPILL_FORMAT_V2, EMERGENCY_SPILL_FORMAT_V3, INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1,
+  EmergencySpillApplyReport, EmergencySpillFormatVersion, EmergencySpillLocation, SpillLocationClass, apply_wal_tails_to_database,
+  mark_artifacts_applied, scan_for_database_with_dirs, scan_for_database_with_locations, update_typed_manifest_latest,
 };
 use aeordb::engine::durability_coordinator::{DurabilityOperation, OsErrorClass};
 
@@ -75,6 +76,225 @@ fn write_v2_artifact(
   });
   fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
   directory
+}
+
+fn write_v3_artifact(base: &Path, database: &Path, runtime_bytes_override: Option<&[u8]>) -> PathBuf {
+  let directory = base.join("v3-artifact");
+  fs::create_dir_all(&directory).unwrap();
+  let workspace = database.parent().unwrap().join("runtime-workspace");
+  let runtime = serde_json::json!({
+    "format": INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1,
+    "database_id": hex::encode(DATABASE_ID),
+    "destination_physical_instance_id": hex::encode([0x52; 16]),
+    "runtime_id": hex::encode([0x53; 16]),
+    "hash_algorithm": 1,
+    "lifecycle": 4,
+    "highest_checkpoint_sequence": 7,
+    "publication_in_flight": false,
+    "soft_queued_notices": 2,
+    "soft_retained_bytes": 128,
+    "soft_reconciliation_required": true,
+    "soft_lost_through_sequence": 43,
+    "producer_pending_tasks": 3,
+    "producer_pending_bytes": 256,
+    "producer_leased_tasks": 0,
+    "mutation_active_records": 4,
+    "mutation_active_bytes": 512,
+    "mutation_frozen_records": 0,
+    "mutation_frozen_bytes": 0,
+    "reconciliation_required": true,
+    "reason": "shutdown_drain_incomplete",
+    "workspace": {
+      "path_encoding": if cfg!(windows) { 2 } else { 1 },
+      "path": workspace.display().to_string(),
+      "path_bytes": hex::encode(native_path_bytes(&workspace)),
+      "workspace_id": hex::encode([0x54; 16]),
+      "selected_head": {
+        "manifest_digest": hex::encode([0x55; 32]),
+        "durable_sequence": 7,
+        "durable_bytes": 4096
+      }
+    }
+  });
+  let runtime_bytes = runtime_bytes_override.map(ToOwned::to_owned).unwrap_or_else(|| serde_json::to_vec_pretty(&runtime).unwrap());
+  fs::write(directory.join("index-runtime-state.json"), &runtime_bytes).unwrap();
+  let incident_id = [0x56; 16];
+  let manifest = serde_json::json!({
+    "format": EMERGENCY_SPILL_FORMAT_V3,
+    "database_id": hex::encode(DATABASE_ID),
+    "incident_id": hex::encode(incident_id),
+    "source_location_class": SpillLocationClass::ConfiguredFallback as u16,
+    "path_encoding": if cfg!(windows) { 2 } else { 1 },
+    "creation_sequence": 1,
+    "first_failure_at_ms": 1_700_000_000_000i64,
+    "latest_failure_at_ms": 1_700_000_000_000i64,
+    "failed_operation": DurabilityOperation::ShutdownFlush.stable_id(),
+    "os_error_class": OsErrorClass::OtherPersistentIo.stable_id(),
+    "os_error_code": -1,
+    "last_selected_header_sequence": 7,
+    "last_durable_write_sequence": 8,
+    "last_durable_publication_sequence": 8,
+    "attempted_at": "2023-11-14T22:13:20Z",
+    "db_path": database.display().to_string(),
+    "db_path_bytes": hex::encode(native_path_bytes(database)),
+    "context": "shutdown",
+    "failure": "injected runtime drain failure",
+    "hash_algorithm": "Blake3_256",
+    "components": [{
+      "kind": "index_runtime_state",
+      "file_name": "index-runtime-state.json",
+      "length": runtime_bytes.len(),
+      "blake3": digest(&runtime_bytes),
+    }],
+    "hot_tail_writes": 0,
+    "hot_tail_voids": 0,
+    "wal_tail_bytes": 0,
+    "wal_tail_truncated": false,
+    "errors": [],
+  });
+  fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+  directory
+}
+
+#[test]
+fn v3_scan_retains_typed_runtime_reconciliation_evidence_and_marks_only_the_exact_manifest() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_v3_artifact(&base, &database, None);
+
+  let artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  assert_eq!(artifacts.len(), 1);
+  assert_eq!(artifacts[0].format_version, EmergencySpillFormatVersion::V3);
+  let runtime = artifacts[0].index_runtime_state.as_ref().expect("typed runtime state");
+  assert_eq!(runtime.database_id, DATABASE_ID);
+  assert_eq!(runtime.destination_physical_instance_id, [0x52; 16]);
+  assert_eq!(runtime.runtime_id, [0x53; 16]);
+  assert_eq!(runtime.highest_checkpoint_sequence, 7);
+  assert_eq!(runtime.soft_queued_notices, 2);
+  assert_eq!(runtime.producer_pending_tasks, 3);
+  assert_eq!(runtime.mutation_active_records, 4);
+  assert!(runtime.reconciliation_required);
+  let workspace = runtime.workspace.as_ref().expect("workspace evidence");
+  assert_eq!(workspace.workspace_id, [0x54; 16]);
+  assert_eq!(workspace.selected_head.as_ref().unwrap().durable_sequence, 7);
+
+  update_typed_manifest_latest(
+    &artifacts[0].manifest_path,
+    artifacts[0].database_id.unwrap(),
+    artifacts[0].incident_id.unwrap(),
+    1_700_000_000_001,
+    "later runtime shutdown failure",
+  )
+  .unwrap();
+  let artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  assert_eq!(artifacts[0].latest_failure_at_ms, 1_700_000_000_001);
+  assert_eq!(artifacts[0].latest_failure.as_deref(), Some("later runtime shutdown failure"));
+
+  let report = EmergencySpillApplyReport { artifact_count: 1, ..EmergencySpillApplyReport::default() };
+  mark_artifacts_applied(&database, &artifacts, &report).unwrap();
+  assert!(scan_for_database_with_locations(&database, &[location(&base)]).unwrap().is_empty());
+
+  let marker_path = base.join("v3-artifact").join("applied.json");
+  let mut marker: serde_json::Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+  marker["manifest_blake3"] = serde_json::json!(hex::encode([0x99; 32]));
+  fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
+  let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+  assert!(error.to_string().contains("does not match"), "{error}");
+}
+
+#[test]
+fn v3_scan_rejects_tampered_or_malformed_runtime_reconciliation_evidence() {
+  for malformed in [false, true] {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("test.aeordb");
+    fs::write(&database, b"abc").unwrap();
+    let base = temp.path().join("spill");
+    fs::create_dir_all(&base).unwrap();
+    let override_bytes = malformed.then_some(br#"{"format":"unknown"}"#.as_slice());
+    let directory = write_v3_artifact(&base, &database, override_bytes);
+    if !malformed {
+      let state_path = directory.join("index-runtime-state.json");
+      let mut tampered = fs::read(&state_path).unwrap();
+      tampered[0] ^= 0x01;
+      fs::write(state_path, tampered).unwrap();
+    }
+
+    let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+    assert!(error.to_string().contains(if malformed { "runtime" } else { "digest" }), "malformed={malformed}: {error}");
+  }
+}
+
+#[test]
+fn v3_scan_rejects_workspace_diagnostic_path_that_disagrees_with_native_bytes() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v3_artifact(&base, &database, None);
+
+  let state_path = directory.join("index-runtime-state.json");
+  let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+  state["workspace"]["path"] = serde_json::json!(database.parent().unwrap().join("different-workspace").display().to_string());
+  let state_bytes = serde_json::to_vec_pretty(&state).unwrap();
+  fs::write(&state_path, &state_bytes).unwrap();
+
+  let manifest_path = directory.join("manifest.json");
+  let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+  manifest["components"][0]["length"] = serde_json::json!(state_bytes.len());
+  manifest["components"][0]["blake3"] = serde_json::json!(digest(&state_bytes));
+  fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+  let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+  assert!(error.to_string().contains("workspace path representations disagree"), "{error}");
+}
+
+#[test]
+fn v3_post_scan_tamper_refuses_replay_and_applied_marker_publication() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v3_artifact(&base, &database, None);
+  let artifacts = scan_for_database_with_locations(&database, &[location(&base)]).unwrap();
+  let state_path = directory.join("index-runtime-state.json");
+  let mut tampered = fs::read(&state_path).unwrap();
+  tampered[0] ^= 0x01;
+  fs::write(&state_path, tampered).unwrap();
+
+  let replay_error = apply_wal_tails_to_database(&database, &artifacts).unwrap_err();
+  assert!(replay_error.to_string().contains("digest"), "{replay_error}");
+  let report = EmergencySpillApplyReport { artifact_count: 1, ..EmergencySpillApplyReport::default() };
+  let marker_error = mark_artifacts_applied(&database, &artifacts, &report).unwrap_err();
+  assert!(marker_error.to_string().contains("digest"), "{marker_error}");
+  assert!(!directory.join("applied.json").exists());
+}
+
+#[test]
+fn frozen_v2_component_limit_and_kind_do_not_expand_when_v3_is_added() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("test.aeordb");
+  fs::write(&database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v2_artifact(&base, "artifact", &database, [0x57; 16], 1_700_000_000_000, 1, b"def");
+  fs::write(directory.join("index-runtime-state.json"), b"{}").unwrap();
+  let manifest_path = directory.join("manifest.json");
+  let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+  manifest["components"].as_array_mut().unwrap().push(serde_json::json!({
+    "kind": "index_runtime_state",
+    "file_name": "index-runtime-state.json",
+    "length": 2,
+    "blake3": digest(b"{}"),
+  }));
+  fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+  let error = scan_for_database_with_locations(&database, &[location(&base)]).unwrap_err();
+  assert!(error.to_string().contains("unknown emergency spill component kind"), "{error}");
 }
 
 #[cfg(unix)]
@@ -225,7 +445,7 @@ fn v2_scan_and_replay_fail_closed_when_component_changes() {
 }
 
 #[test]
-fn replay_propagates_wal_tail_metadata_failures_that_are_not_missing_files() {
+fn replay_rejects_a_caller_substituted_component_path_before_io() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("test.aeordb");
   fs::write(&database, b"abc").unwrap();
@@ -238,11 +458,10 @@ fn replay_propagates_wal_tail_metadata_failures_that_are_not_missing_files() {
   fs::write(&non_directory, b"ordinary file").unwrap();
   artifacts[0].wal_tail_path = Some(non_directory.join("wal-tail.bin"));
 
-  let error = apply_wal_tails_to_database(&database, &artifacts)
-    .expect_err("an operational metadata failure must not be reported as a missing spill component");
+  let error = apply_wal_tails_to_database(&database, &artifacts).expect_err("a caller-substituted component path must fail closed");
 
-  assert!(matches!(error, aeordb::engine::EngineError::IoError(_)), "unexpected replay error: {error}");
-  assert!(!error.to_string().contains("references missing WAL tail"), "operational failure was mislabeled as absence: {error}");
+  assert!(error.to_string().contains("manifest"), "unexpected replay error: {error}");
+  assert_eq!(fs::read(&database).unwrap(), b"abc");
 }
 
 #[test]
@@ -372,6 +591,43 @@ fn v2_replay_refuses_a_symlink_substituted_after_scan() {
 }
 
 #[test]
+fn replay_refuses_an_artifact_scanned_for_a_different_database_before_writing() {
+  let temp = tempfile::tempdir().unwrap();
+  let source_database = temp.path().join("source.aeordb");
+  let target_database = temp.path().join("target.aeordb");
+  fs::write(&source_database, b"abc").unwrap();
+  fs::write(&target_database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  write_v2_artifact(&base, "artifact", &source_database, [0x48; 16], 1_700_000_000_000, 1, b"def");
+  let artifacts = scan_for_database_with_locations(&source_database, &[location(&base)]).unwrap();
+
+  let error = apply_wal_tails_to_database(&target_database, &artifacts).unwrap_err();
+
+  assert!(error.to_string().contains("different database"), "{error}");
+  assert_eq!(fs::read(&target_database).unwrap(), b"abc");
+}
+
+#[test]
+fn marker_refuses_an_artifact_scanned_for_a_different_database_before_publication() {
+  let temp = tempfile::tempdir().unwrap();
+  let source_database = temp.path().join("source.aeordb");
+  let target_database = temp.path().join("target.aeordb");
+  fs::write(&source_database, b"abc").unwrap();
+  fs::write(&target_database, b"abc").unwrap();
+  let base = temp.path().join("spill");
+  fs::create_dir_all(&base).unwrap();
+  let directory = write_v2_artifact(&base, "artifact", &source_database, [0x49; 16], 1_700_000_000_000, 1, b"def");
+  let artifacts = scan_for_database_with_locations(&source_database, &[location(&base)]).unwrap();
+  let report = EmergencySpillApplyReport { artifact_count: 1, ..EmergencySpillApplyReport::default() };
+
+  let error = mark_artifacts_applied(&target_database, &artifacts, &report).unwrap_err();
+
+  assert!(error.to_string().contains("different database"), "{error}");
+  assert!(!directory.join("applied.json").exists());
+}
+
+#[test]
 fn malformed_applied_marker_cannot_hide_v2_evidence() {
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join("test.aeordb");
@@ -405,13 +661,13 @@ fn v2_applied_marker_requires_both_artifact_identities_without_writing_a_marker(
   let mut missing_database_id = artifacts.clone();
   missing_database_id[0].database_id = None;
   let error = mark_artifacts_applied(&database, &missing_database_id, &report).unwrap_err();
-  assert!(error.to_string().contains("database identity"), "{error}");
+  assert!(error.to_string().contains("manifest"), "{error}");
   assert!(!directory.join("applied.json").exists());
 
   let mut missing_incident_id = artifacts;
   missing_incident_id[0].incident_id = None;
   let error = mark_artifacts_applied(&database, &missing_incident_id, &report).unwrap_err();
-  assert!(error.to_string().contains("incident identity"), "{error}");
+  assert!(error.to_string().contains("manifest"), "{error}");
   assert!(!directory.join("applied.json").exists());
 }
 
@@ -429,7 +685,7 @@ fn v2_applied_marker_preflights_the_complete_batch_before_writing() {
   let report = EmergencySpillApplyReport { artifact_count: 2, ..EmergencySpillApplyReport::default() };
 
   let error = mark_artifacts_applied(&database, &artifacts, &report).unwrap_err();
-  assert!(error.to_string().contains("incident identity"), "{error}");
+  assert!(error.to_string().contains("manifest"), "{error}");
   assert!(!first_directory.join("applied.json").exists());
   assert!(!second_directory.join("applied.json").exists());
 }

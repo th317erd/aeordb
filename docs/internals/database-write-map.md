@@ -348,17 +348,22 @@ Caller: StorageEngine::shutdown() / Drop
 Steps:
 1. Reject new operations and wait, with a bounded timeout, for active operations
    and every durability waiter/driver to drain.
-2. Flush dirty indexes through their shared buffer owner.
-3. Lock `kv_writer`; run the same prepare-before-overwrite page flush used by
+2. Close the installed v4 index runtime and drain every bounded exact batch
+   through its existing selector-last cadence. A retryable frozen batch is
+   retried immediately during shutdown; queued soft/producer work or unresolved
+   reconciliation prevents the runtime from claiming `Stopped`.
+3. Flush legacy dirty indexes through their shared buffer owner.
+4. Lock `kv_writer`; run the same prepare-before-overwrite page flush used by
    live writes, then publish any remaining recoverable hot tail.
-4. Release `kv_writer` before recording any serious failure so emergency spill
+5. Release `kv_writer` before recording any serious failure so emergency spill
    can inspect volatile KV state.
-5. Read `hot_tail_offset` and the exact merged entry count.
-6. Publish those values through the inactive A/B header slot using the shared
+6. Read `hot_tail_offset` and the exact merged entry count.
+7. Publish those values through the inactive A/B header slot using the shared
    hard-authority coordinator and read-back.
-7. On any serious failure, latch read-only, preserve first/latest evidence, try
-   emergency spill, and return an error. A repeated blocked shutdown does not
-   start another flush.
+8. On any serious failure, latch read-only, preserve first/latest evidence, try
+   emergency spill, and return an error. If v4 runtime state remains, the spill
+   uses the typed v3 envelope and records an explicit reconciliation obligation.
+   A repeated blocked shutdown does not start another flush.
 ```
 
 ### 4.8 Startup (open_internal)

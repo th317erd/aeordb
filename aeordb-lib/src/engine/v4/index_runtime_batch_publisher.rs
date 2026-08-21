@@ -232,6 +232,10 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     self.workspace.head()
   }
 
+  pub fn workspace_path(&self) -> &Path {
+    self.workspace.workspace_path()
+  }
+
   pub fn runtime_id(&self) -> [u8; 16] {
     self.workspace.identity().runtime_id()
   }

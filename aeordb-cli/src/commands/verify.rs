@@ -630,6 +630,30 @@ fn print_emergency_spill_summary(artifacts: &[EmergencySpillArtifact]) {
     } else {
       println!("     WAL tail:  none recorded");
     }
+    if let Some(runtime) = artifact.index_runtime_state.as_ref() {
+      println!(
+        "     v4 index: runtime={}, lifecycle={}, checkpoint={}, reconciliation={} ({})",
+        hex::encode(runtime.runtime_id),
+        runtime.lifecycle,
+        runtime.highest_checkpoint_sequence,
+        runtime.reconciliation_required,
+        runtime.reason,
+      );
+      println!(
+        "               soft={} ({}), producer={} pending/{} leased, mutations={} active/{} frozen",
+        runtime.soft_queued_notices,
+        format_bytes(runtime.soft_retained_bytes),
+        runtime.producer_pending_tasks,
+        runtime.producer_leased_tasks,
+        runtime.mutation_active_records,
+        runtime.mutation_frozen_records,
+      );
+      if let Some(workspace) = runtime.workspace.as_ref() {
+        println!("               workspace: {}", workspace.path.display());
+      } else {
+        println!("               workspace: unavailable; authoritative reconciliation required");
+      }
+    }
   }
   println!();
   println!("Repair will copy matching WAL-tail bytes into the database, force a WAL-to-EOF KV rebuild, recover reusable gaps, and republish the hot tail.");

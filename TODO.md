@@ -1020,6 +1020,15 @@
                   - [x] Pass exact-source native Darwin and Windows cross-platform gates and record the retained evidence.
                   - [x] Run focused, affected, architecture, suppression, contract, full-workspace, resource, and native-platform gates; record and land c3d.
                 - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
+                  - [x] Add compile-red proofs for one cadence-owned drain, immediate exact frozen-batch retry, multi-batch progress, idempotent stop, and refusal of queued/reconciliation work.
+                  - [x] Invoke that same cadence after engine operation/durability drain and before legacy-index/KV/hot-tail/header shutdown publication.
+                  - [x] Freeze a v3 emergency-spill envelope with a typed, bounded v4 runtime-reconciliation component while preserving exact v1/v2 readers and limits.
+                  - [x] Make startup scanning, catalog seeding, repair, applied markers, tamper/path/identity checks, and later recovery retain the v4 reconciliation obligation.
+                  - [x] Prove no second timer, publisher, selector, checkpoint, spill scanner, repair path, or shutdown authority was introduced.
+                  - [x] Close adversarial artifact-trust gaps before landing c3e.
+                    - [x] Reject any caller-supplied artifact whose typed fields disagree with the exact retained manifest/component bytes.
+                    - [x] Reject foreign-database artifacts before WAL replay, persistent catalog/latch seeding, or applied-marker publication.
+                  - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3e.
                 - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
           - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.

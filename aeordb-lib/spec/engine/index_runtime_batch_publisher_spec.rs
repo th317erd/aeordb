@@ -1104,6 +1104,21 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   assert_eq!(server.matches("tokio::time::interval(std::time::Duration::from_secs(5))").count(), 1);
   assert!(server.contains("engine.flush_index_runtime_if_due_v1()"));
   assert!(!directory_ops.contains("flush_index_runtime_if_due_v1"));
+  let shutdown = include_str!("../../src/engine/storage_engine.rs");
+  let runtime_drain = shutdown.find("self.drain_index_runtime_v1()").expect("shutdown must enter the installed runtime cadence");
+  let legacy_flush = shutdown.rfind("self.flush_index_buffer()").expect("legacy shutdown flush");
+  let kv_flush = shutdown.rfind("kv.flush_for_shutdown()").expect("KV shutdown flush");
+  assert!(runtime_drain < legacy_flush && legacy_flush < kv_flush, "runtime final publication is not ordered before legacy/KV shutdown");
+  assert_eq!(shutdown.matches("self.drain_index_runtime_v1()").count(), 1);
+  assert_eq!(shutdown.matches("fn attempt_emergency_spill(").count(), 1);
+  assert_eq!(shutdown.matches("fn write_emergency_spill_files(").count(), 1);
+  let spill = include_str!("../../src/engine/emergency_spill.rs");
+  assert_eq!(spill.matches("pub fn scan_for_database_with_locations(").count(), 1);
+  assert!(!spill.contains("V4FirstAuthorityPublisher"));
+  let start = include_str!("../../../aeordb-cli/src/commands/start.rs");
+  let verify = include_str!("../../../aeordb-cli/src/commands/verify.rs");
+  assert!(start.contains("emergency_spill::scan_for_database_with_locations"));
+  assert!(verify.contains("emergency_spill::scan_for_database_with_locations"));
   for forbidden in [include_str!("../../src/engine/storage_engine.rs"), include_str!("../../src/engine/v4/index_runtime_owner.rs")] {
     assert!(!forbidden.contains("DurableIndexRuntimeBatchPublisherV1"));
     assert!(!forbidden.contains("recover_index_runtime_dirty_overlay_v1"));

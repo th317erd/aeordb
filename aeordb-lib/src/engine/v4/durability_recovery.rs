@@ -198,6 +198,7 @@ pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencyS
   if artifacts.is_empty() {
     return Err(EngineError::InvalidInput("cannot seed durability recovery without external spill artifacts".to_string()));
   }
+  let ordered_artifacts = validate_and_order_spill_artifacts(engine, artifacts)?;
   let store = V3TransitionControlStore::new(engine);
   let existing_latch = store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[])?;
   let existing_catalog = store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[])?;
@@ -211,17 +212,18 @@ pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencyS
     (_, Some(catalog)) => Some(catalog.database_id),
     (None, None) => None,
   };
-  let artifact_database_id = artifacts.iter().filter_map(|artifact| artifact.database_id).try_fold(None, |selected, candidate| {
-    if candidate == [0; 16] {
-      return Err(EngineError::InvalidInput("external spill artifact contains a zero database identity".to_string()));
-    }
-    match selected {
-      Some(selected) if selected != candidate => {
-        Err(EngineError::InvalidInput("external spill artifacts have different database identities".to_string()))
+  let artifact_database_id =
+    ordered_artifacts.iter().filter_map(|artifact| artifact.database_id).try_fold(None, |selected, candidate| {
+      if candidate == [0; 16] {
+        return Err(EngineError::InvalidInput("external spill artifact contains a zero database identity".to_string()));
       }
-      _ => Ok(Some(candidate)),
-    }
-  })?;
+      match selected {
+        Some(selected) if selected != candidate => {
+          Err(EngineError::InvalidInput("external spill artifacts have different database identities".to_string()))
+        }
+        _ => Ok(Some(candidate)),
+      }
+    })?;
   if matches!((existing_database_id, artifact_database_id), (Some(existing), Some(artifact)) if existing != artifact) {
     return Err(EngineError::InvalidInput(
       "external spill artifacts and persistent recovery controls have different database identities".to_string(),
@@ -231,7 +233,6 @@ pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencyS
   if database_id == [0; 16] {
     return Err(EngineError::InvalidInput("durability recovery database identity is zero".to_string()));
   }
-  let ordered_artifacts = validate_and_order_spill_artifacts(artifacts)?;
   let rows = spill_catalog_rows(&ordered_artifacts)?;
 
   let existing_catalog_body = existing_catalog.as_ref().map(|selected| decode_catalog(engine, selected)).transpose()?;
@@ -338,7 +339,10 @@ pub fn seed_from_external_spills(engine: &StorageEngine, artifacts: &[EmergencyS
   Ok(DurabilityRecoverySeed { database_id, requires_repair: true })
 }
 
-fn validate_and_order_spill_artifacts(artifacts: &[EmergencySpillArtifact]) -> EngineResult<Vec<&EmergencySpillArtifact>> {
+fn validate_and_order_spill_artifacts<'a>(
+  engine: &StorageEngine,
+  artifacts: &'a [EmergencySpillArtifact],
+) -> EngineResult<Vec<&'a EmergencySpillArtifact>> {
   let mut ordered: Vec<_> = artifacts.iter().collect();
   ordered.sort_by(|left, right| {
     left
@@ -349,6 +353,7 @@ fn validate_and_order_spill_artifacts(artifacts: &[EmergencySpillArtifact]) -> E
       .then_with(|| native_path_bytes(&left.manifest_path).cmp(&native_path_bytes(&right.manifest_path)))
   });
   for artifact in &ordered {
+    crate::engine::emergency_spill::validate_artifact_for_database(artifact, engine.database_path())?;
     let typed_fields = [
       artifact.failed_operation.is_some(),
       artifact.os_error_class.is_some(),
@@ -385,12 +390,17 @@ fn validate_and_order_spill_artifacts(artifacts: &[EmergencySpillArtifact]) -> E
     }
     match artifact.format_version {
       crate::engine::emergency_spill::EmergencySpillFormatVersion::V1 => {}
-      crate::engine::emergency_spill::EmergencySpillFormatVersion::V2 => {
+      crate::engine::emergency_spill::EmergencySpillFormatVersion::V2 | crate::engine::emergency_spill::EmergencySpillFormatVersion::V3 => {
         if artifact.database_id.is_none_or(|database_id| database_id == [0; 16])
           || artifact.incident_id.is_none_or(|incident_id| incident_id == [0; 16])
           || artifact.creation_sequence == 0
         {
-          return Err(EngineError::InvalidInput("external v2 spill identity or creation sequence is invalid".to_string()));
+          return Err(EngineError::InvalidInput("external typed spill identity or creation sequence is invalid".to_string()));
+        }
+        if artifact.format_version == crate::engine::emergency_spill::EmergencySpillFormatVersion::V3
+          && artifact.index_runtime_state.is_none()
+        {
+          return Err(EngineError::InvalidInput("external v3 spill is missing index runtime reconciliation evidence".to_string()));
         }
       }
     }

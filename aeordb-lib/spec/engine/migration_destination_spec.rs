@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use aeordb::engine::memory_coordinator::{MemoryPressure, MemoryOwner};
 use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
 use aeordb::engine::request_context::RequestContext;
+use aeordb::engine::emergency_spill::{EMERGENCY_SPILL_FORMAT_V3, EmergencySpillFormatVersion, scan_for_database_with_dirs};
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::contract_generated::CONTRACT_REGISTRY_SHA256;
 use aeordb::engine::v4::migration_destination::{
@@ -800,6 +801,127 @@ fn native_runtime_cadence_installation_rejects_invalid_authority_without_consumi
     .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xe7)), fixture.clock(16, 1_700_000_000_350))
     .unwrap_err();
   assert_eq!(duplicate, NativeIndexRuntimeCadenceInstallationErrorV1::AlreadyInstalled);
+}
+
+#[test]
+fn storage_shutdown_drains_the_installed_runtime_before_completing() {
+  let fixture = RuntimeFixture::new("runtime-shutdown-drain");
+  let runtime_id = [0x6a; 16];
+  let identity = fixture.identity();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(17, 1_700_000_000_360),
+      now_ms: 1_700_000_000_360,
+    },
+  )
+  .unwrap();
+  fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, id(0xea)), fixture.clock(18, 1_700_000_000_370))
+    .unwrap();
+
+  fixture.source.shutdown().unwrap();
+
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().lifecycle, IndexRuntimeLifecycleV1::Stopped);
+  assert_eq!(fixture.source.active_operations_snapshot().active_operations, 0);
+}
+
+#[test]
+fn storage_shutdown_preserves_runtime_reconciliation_when_the_cadence_is_missing() {
+  let fixture = RuntimeFixture::new("runtime-shutdown-spill");
+  let runtime_id = [0x6b; 16];
+  let identity = fixture.identity();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(19, 1_700_000_000_380),
+      now_ms: 1_700_000_000_380,
+    },
+  )
+  .unwrap();
+
+  let error = fixture.source.shutdown().unwrap_err();
+  assert!(error.to_string().contains("cadence"), "{error}");
+  let report = fixture.source.emergency_spill_report().expect("failed shutdown must preserve runtime recovery evidence");
+  assert!(report.succeeded, "spill failed: {:?}", report.errors);
+  let manifest: serde_json::Value = serde_json::from_slice(&fs::read(report.manifest_path.as_ref().unwrap()).unwrap()).unwrap();
+  assert_eq!(manifest.get("format").and_then(serde_json::Value::as_str), Some(EMERGENCY_SPILL_FORMAT_V3));
+
+  let spill_root = fixture._directory.path().join("runtime-shutdown-spill-spill");
+  let artifacts = scan_for_database_with_dirs(&fixture.source_path, &[spill_root]).unwrap();
+  assert_eq!(artifacts.len(), 1);
+  assert_eq!(artifacts[0].format_version, EmergencySpillFormatVersion::V3);
+  let runtime = artifacts[0].index_runtime_state.as_ref().expect("typed runtime reconciliation evidence");
+  assert_eq!(runtime.database_id, fixture.permit.database_id());
+  assert_eq!(runtime.destination_physical_instance_id, fixture.permit.destination_physical_instance_id());
+  assert_eq!(runtime.runtime_id, runtime_id);
+  assert_eq!(runtime.hash_algorithm, fixture.permit.hash_algorithm());
+  assert!(runtime.reconciliation_required);
+  assert_eq!(runtime.reason, "shutdown_drain_incomplete");
+  assert!(runtime.workspace.is_none(), "a missing cadence must not invent workspace authority");
+}
+
+#[test]
+fn storage_shutdown_preserves_the_existing_workspace_when_soft_work_blocks_drain() {
+  let fixture = RuntimeFixture::new("runtime-shutdown-queued-spill");
+  let runtime_id = [0x6c; 16];
+  let workspace_id = id(0xeb);
+  let identity = fixture.identity();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: runtime_id,
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(20, 1_700_000_000_390),
+      now_ms: 1_700_000_000_390,
+    },
+  )
+  .unwrap();
+  fixture
+    .source
+    .install_index_runtime_cadence_v1(cadence_publisher(&fixture, runtime_id, workspace_id), fixture.clock(21, 1_700_000_000_400))
+    .unwrap();
+  DirectoryOps::new(&fixture.source)
+    .store_file_buffered(&RequestContext::system(), "/queued-before-shutdown.json", br#"{"queued":true}"#, Some("application/json"))
+    .unwrap();
+  assert!(fixture.source.index_runtime_snapshot_v1().unwrap().soft_hub.queued_notices > 0);
+
+  let error = fixture.source.shutdown().unwrap_err();
+  assert!(error.to_string().contains("drain is incomplete"), "{error}");
+  let report = fixture.source.emergency_spill_report().expect("failed shutdown must preserve runtime recovery evidence");
+  assert!(report.succeeded, "spill failed: {:?}", report.errors);
+  let spill_root = fixture._directory.path().join("runtime-shutdown-queued-spill-spill");
+  let artifacts = scan_for_database_with_dirs(&fixture.source_path, &[spill_root]).unwrap();
+  let runtime = artifacts[0].index_runtime_state.as_ref().expect("typed runtime reconciliation evidence");
+  assert!(runtime.soft_queued_notices > 0);
+  assert!(runtime.reconciliation_required);
+  let workspace = runtime.workspace.as_ref().expect("the installed cadence workspace must be retained");
+  assert_eq!(workspace.workspace_id, workspace_id);
+  assert!(workspace.path.is_dir());
+  assert!(workspace.selected_head.is_none(), "an unselected workspace must not fabricate a durable selected head");
 }
 
 #[test]

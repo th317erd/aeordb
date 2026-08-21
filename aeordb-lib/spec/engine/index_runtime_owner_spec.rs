@@ -28,6 +28,7 @@ use aeordb::engine::v4::index_runtime_owner::{
   IndexRuntimeMutationWorkRequestV1, IndexRuntimeOwnerOptionsV1, IndexRuntimeOwnerV1, IndexRuntimePublicationErrorClassV1,
   IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1, IndexRuntimeWorkOutcomeV1,
 };
+
 use aeordb::engine::v4::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, IndexRuntimeCadenceV1};
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -36,6 +37,15 @@ use aeordb::engine::v4::index_task::{
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn runtime_lifecycle_wire_ids_are_stable_and_unique() {
+  assert_eq!(IndexRuntimeLifecycleV1::Recovering.stable_id(), 1);
+  assert_eq!(IndexRuntimeLifecycleV1::Running.stable_id(), 2);
+  assert_eq!(IndexRuntimeLifecycleV1::Degraded.stable_id(), 3);
+  assert_eq!(IndexRuntimeLifecycleV1::Draining.stable_id(), 4);
+  assert_eq!(IndexRuntimeLifecycleV1::Stopped.stable_id(), 5);
+}
 
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
@@ -248,6 +258,12 @@ struct IdentityPublisher {
   observed: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
+#[derive(Default)]
+struct ProgressPublisher {
+  calls: u64,
+  records: u64,
+}
+
 impl IndexRuntimeBatchPublisherV1 for BlockingPublisher {
   fn publish(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
     self.entered.send(()).unwrap();
@@ -321,6 +337,20 @@ impl IndexRuntimeBatchPublisherV1 for IdentityPublisher {
   fn publish(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
     self.observed.lock().unwrap().push((batch.batch_id(), batch.attempt_id()));
     Publisher { behavior: self.behavior, calls: 0 }.publish(batch)
+  }
+}
+
+impl IndexRuntimeBatchPublisherV1 for ProgressPublisher {
+  fn publish(&mut self, batch: &FrozenIndexBatchV1) -> Result<IndexRuntimePublicationReceiptV1, IndexRuntimePublicationErrorV1> {
+    self.calls += 1;
+    self.records += batch.records().len() as u64;
+    Ok(IndexRuntimePublicationReceiptV1 {
+      batch_id: batch.batch_id(),
+      attempt_id: batch.attempt_id(),
+      published_records: batch.records().len() as u64,
+      publication_bytes: batch.publication_bytes(),
+      checkpoint_sequence: 10 + self.calls,
+    })
   }
 }
 
@@ -525,6 +555,60 @@ fn one_owner_executes_the_real_worker_and_retries_the_exact_frozen_batch_before_
   owner.begin_draining().unwrap();
   owner.finish_draining().unwrap();
   assert_eq!(owner.snapshot().unwrap().lifecycle, IndexRuntimeLifecycleV1::Stopped);
+}
+
+#[test]
+fn shutdown_drain_bypasses_normal_retry_delay_for_the_exact_frozen_batch() {
+  let owner = owner();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/shutdown-retry.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  execute_one(&owner, &encoded, 101);
+
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let mut retryable = IdentityPublisher { behavior: PublishBehavior::Retryable, observed: Arc::clone(&observed) };
+  assert!(matches!(owner.flush(102, Some(IndexFlushReasonV1::Explicit), false, &mut retryable), Err(IndexRuntimeErrorV1::Publication(_))));
+
+  owner.begin_draining().unwrap();
+  let mut success = IdentityPublisher { behavior: PublishBehavior::Success, observed: Arc::clone(&observed) };
+  assert!(matches!(
+    owner.flush(103, Some(IndexFlushReasonV1::Shutdown), false, &mut success).unwrap(),
+    IndexRuntimeFlushOutcomeV1::Published { records: 4, .. }
+  ));
+  owner.finish_draining().unwrap();
+
+  let observed = observed.lock().unwrap();
+  assert_eq!(observed.len(), 2);
+  assert_eq!(observed[0].0, observed[1].0, "shutdown retry changed the frozen batch identity");
+  assert_ne!(observed[0].1, observed[1].1, "shutdown retry reused a stale in-memory attempt handle");
+}
+
+#[test]
+fn one_cadence_drain_publishes_every_bounded_batch_before_stopping() {
+  let mut bounded = options();
+  bounded.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 262_144, 30_000, 300).unwrap();
+  let owner = Arc::new(IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, memory(), bounded, 1).unwrap());
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let encoded = encoded_journal("/shutdown-multi-batch.json");
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  owner.admit_mutation_journal(&journal, 100, &|| false, &mut Spill).unwrap();
+  execute_one(&owner, &encoded, 101);
+  assert_eq!(owner.cached_snapshot().mutations.active_records, 4);
+
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    ProgressPublisher::default(),
+    CancellationToken::new(),
+    Arc::new(MockClock::new(71, 102)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let drained = cadence.drain_and_stop().unwrap();
+
+  assert!(drained.published_batches > 1, "the bounded test fixture did not exercise the multi-batch loop");
+  assert_eq!(drained.published_records, 4);
+  assert_eq!(drained.highest_checkpoint_sequence, 10 + drained.published_batches);
+  assert_eq!(owner.cached_snapshot().lifecycle, IndexRuntimeLifecycleV1::Stopped);
 }
 
 #[test]

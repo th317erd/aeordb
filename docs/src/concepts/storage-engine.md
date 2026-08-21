@@ -315,6 +315,10 @@ On the first latch, the engine also attempts a best-effort emergency spill outsi
 - `manifest.json` with the failure context, DB path, offsets, counts, and spill errors.
 - `hot-tail.bin` with the current in-memory hot-tail payload: pending KV writes plus the void snapshot.
 - `index-buffer.json` when there are unflushed buffered index mutations.
+- `index-runtime-state.json` when a v4 index runtime cannot complete its
+  graceful drain. This bounded, typed component records runtime identities,
+  queue/memtable counts, reconciliation status, and the existing private
+  workspace head when it can be observed without blocking.
 - `wal-tail.bin` when the engine can copy WAL bytes from the last successfully published hot-tail boundary to the current WAL offset.
 
 Spill destination order is:
@@ -333,7 +337,7 @@ aeordb verify --repair --force-fix-in-place -D /path/to/database.aeordb
 
 Keep any process override that names a non-default spill root in place for both restart and repair. In particular, if an incident was written under `AEORDB_EMERGENCY_SPILL_DIR`, removing that variable also removes the only configured name for that arbitrary directory. Stored/LKG roots and the OS user-data and temp fallback roots remain discoverable without the environment override.
 
-Repair orders matching artifacts by creation time, oldest first, and prompts before replay unless `--yes` is passed. Replay only copies verified WAL-tail bytes back into the database file. The external `hot-tail.bin` and `index-buffer.json` files are reported as evidence, but are not treated as primary data: after the WAL tail is restored, repair forces a WAL-to-EOF KV rebuild, re-derives reusable gaps with the void gap scanner, and publishes a new hot tail. When verify/repair finishes cleanly, each artifact directory receives an `applied.json` marker and future startups ignore it.
+Repair orders matching artifacts by creation time, oldest first, and prompts before replay unless `--yes` is passed. Replay only copies verified WAL-tail bytes back into the database file. The external `hot-tail.bin`, `index-buffer.json`, and `index-runtime-state.json` files are reported as evidence, but are not treated as primary data: after the WAL tail is restored, repair forces a WAL-to-EOF KV rebuild, re-derives reusable gaps with the void gap scanner, and publishes a new hot tail. A v3 runtime component is retained by the persistent spill catalog's exact manifest path and digest so index recovery cannot silently reinterpret it as clean state. When verify/repair finishes cleanly, each artifact directory receives an `applied.json` marker and future startup scanning ignores that external artifact.
 
 The durability latch, spill catalog, and repair phase are also persistent
 deployment authority. A binary that does not understand that authority must not

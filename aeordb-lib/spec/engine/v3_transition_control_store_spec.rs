@@ -4,7 +4,10 @@ use std::sync::{Arc, Barrier};
 
 use aeordb::engine::directory_ops::{DirectoryOps, file_path_hash};
 use aeordb::engine::durability_coordinator::{DurabilityOperation, OsErrorClass};
-use aeordb::engine::emergency_spill::{EmergencySpillArtifact, EmergencySpillFormatVersion, SpillLocationClass};
+use aeordb::engine::emergency_spill::{
+  EMERGENCY_SPILL_FORMAT_V2, EMERGENCY_SPILL_FORMAT_V3, INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1, EmergencySpillArtifact,
+  EmergencySpillLocation, SpillLocationClass, scan_for_database_with_locations,
+};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::v4::control_store::V3TransitionControlStore;
@@ -108,49 +111,134 @@ fn publish_recovery_controls(engine: &StorageEngine, database_id: [u8; 16], acti
   store.publish_mutable(SystemControlKindV1::DurabilityLatch, database_id, &[], &latch).unwrap();
 }
 
-fn spill_artifact(root: &Path, database_id: Option<[u8; 16]>, name: &str, failure_at_ms: i64, sequence: u64) -> EmergencySpillArtifact {
+fn scanned_artifact(root: &Path, database_path: &Path, name: &str) -> EmergencySpillArtifact {
+  scan_for_database_with_locations(
+    database_path,
+    &[EmergencySpillLocation { class: SpillLocationClass::ConfiguredFallback, path: root.to_path_buf() }],
+  )
+  .unwrap()
+  .into_iter()
+  .find(|artifact| artifact.directory.file_name().and_then(|value| value.to_str()) == Some(name))
+  .unwrap()
+}
+
+fn spill_artifact(
+  root: &Path,
+  database_path: &Path,
+  database_id: [u8; 16],
+  name: &str,
+  failure_at_ms: i64,
+  sequence: u64,
+) -> EmergencySpillArtifact {
   let directory = root.join(name);
   fs::create_dir_all(&directory).unwrap();
-  let manifest_path = directory.join("manifest.json");
-  let manifest = format!("spill evidence {name}").into_bytes();
-  fs::write(&manifest_path, &manifest).unwrap();
-  EmergencySpillArtifact {
-    format_version: if database_id.is_some() { EmergencySpillFormatVersion::V2 } else { EmergencySpillFormatVersion::V1 },
-    database_id,
-    incident_id: database_id.map(|_| [sequence as u8; 16]),
-    source_location_class: SpillLocationClass::ConfiguredFallback,
-    path_encoding: if cfg!(windows) { 2 } else { 1 },
-    creation_sequence: sequence,
-    first_failure_at_ms: failure_at_ms,
-    latest_failure_at_ms: failure_at_ms + 1,
-    failed_operation: Some(DurabilityOperation::AuthorityBarrier.stable_id()),
-    os_error_class: Some(OsErrorClass::MediaIo.stable_id()),
-    os_error_code: Some(5),
-    last_selected_header_sequence: Some(7),
-    last_durable_write_sequence: Some(8),
-    last_durable_publication_sequence: Some(8),
-    directory,
-    manifest_path: manifest_path.clone(),
-    manifest_length: manifest.len() as u64,
-    manifest_digest: *blake3::hash(&manifest).as_bytes(),
-    components: Vec::new(),
-    attempted_at: None,
-    sort_millis: failure_at_ms,
-    db_path: None,
-    db_path_native: None,
-    context: Some("authority barrier".to_string()),
-    failure: Some("synthetic EIO".to_string()),
-    first_failure: Some("synthetic EIO".to_string()),
-    latest_failure: Some("synthetic EIO".to_string()),
-    hot_tail_path: None,
-    wal_tail_path: None,
-    hot_tail_writes: 0,
-    hot_tail_voids: 0,
-    wal_tail_copy_start: None,
-    wal_tail_end: None,
-    wal_tail_bytes: 0,
-    wal_tail_truncated: false,
-  }
+  let manifest = serde_json::json!({
+    "format": EMERGENCY_SPILL_FORMAT_V2,
+    "database_id": hex::encode(database_id),
+    "incident_id": hex::encode([sequence as u8; 16]),
+    "source_location_class": SpillLocationClass::ConfiguredFallback as u16,
+    "path_encoding": if cfg!(windows) { 2 } else { 1 },
+    "creation_sequence": sequence,
+    "first_failure_at_ms": failure_at_ms,
+    "latest_failure_at_ms": failure_at_ms + 1,
+    "failed_operation": DurabilityOperation::AuthorityBarrier.stable_id(),
+    "os_error_class": OsErrorClass::MediaIo.stable_id(),
+    "os_error_code": 5,
+    "last_selected_header_sequence": 7,
+    "last_durable_write_sequence": 8,
+    "last_durable_publication_sequence": 8,
+    "attempted_at": chrono::DateTime::from_timestamp_millis(failure_at_ms).unwrap().to_rfc3339(),
+    "db_path": database_path.display().to_string(),
+    "db_path_bytes": hex::encode(native_path(database_path)),
+    "context": "authority barrier",
+    "failure": "synthetic EIO",
+    "first_failure": "synthetic EIO",
+    "latest_failure": "synthetic EIO",
+    "hash_algorithm": "Blake3_256",
+    "components": [],
+    "hot_tail_writes": 0,
+    "hot_tail_voids": 0,
+    "wal_tail_bytes": 0,
+    "wal_tail_truncated": false,
+    "errors": [],
+  });
+  fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+  scanned_artifact(root, database_path, name)
+}
+
+fn v3_spill_artifact(
+  root: &Path,
+  database_path: &Path,
+  database_id: [u8; 16],
+  name: &str,
+  failure_at_ms: i64,
+  sequence: u64,
+) -> EmergencySpillArtifact {
+  let directory = root.join(name);
+  fs::create_dir_all(&directory).unwrap();
+  let runtime = serde_json::json!({
+    "format": INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1,
+    "database_id": hex::encode(database_id),
+    "destination_physical_instance_id": hex::encode([0x61; 16]),
+    "runtime_id": hex::encode([0x62; 16]),
+    "hash_algorithm": 1,
+    "lifecycle": 4,
+    "highest_checkpoint_sequence": 7,
+    "publication_in_flight": false,
+    "soft_queued_notices": 1,
+    "soft_retained_bytes": 64,
+    "soft_reconciliation_required": true,
+    "soft_lost_through_sequence": 9,
+    "producer_pending_tasks": 2,
+    "producer_pending_bytes": 128,
+    "producer_leased_tasks": 0,
+    "mutation_active_records": 3,
+    "mutation_active_bytes": 256,
+    "mutation_frozen_records": 0,
+    "mutation_frozen_bytes": 0,
+    "reconciliation_required": true,
+    "reason": "shutdown_drain_incomplete",
+    "workspace": null,
+  });
+  let component_bytes = serde_json::to_vec_pretty(&runtime).unwrap();
+  fs::write(directory.join("index-runtime-state.json"), &component_bytes).unwrap();
+  let manifest = serde_json::json!({
+    "format": EMERGENCY_SPILL_FORMAT_V3,
+    "database_id": hex::encode(database_id),
+    "incident_id": hex::encode([sequence as u8; 16]),
+    "source_location_class": SpillLocationClass::ConfiguredFallback as u16,
+    "path_encoding": if cfg!(windows) { 2 } else { 1 },
+    "creation_sequence": sequence,
+    "first_failure_at_ms": failure_at_ms,
+    "latest_failure_at_ms": failure_at_ms + 1,
+    "failed_operation": DurabilityOperation::ShutdownFlush.stable_id(),
+    "os_error_class": OsErrorClass::OtherPersistentIo.stable_id(),
+    "os_error_code": -1,
+    "last_selected_header_sequence": 7,
+    "last_durable_write_sequence": 8,
+    "last_durable_publication_sequence": 8,
+    "attempted_at": chrono::DateTime::from_timestamp_millis(failure_at_ms).unwrap().to_rfc3339(),
+    "db_path": database_path.display().to_string(),
+    "db_path_bytes": hex::encode(native_path(database_path)),
+    "context": "shutdown",
+    "failure": "injected runtime drain failure",
+    "first_failure": "injected runtime drain failure",
+    "latest_failure": "injected runtime drain failure",
+    "hash_algorithm": "Blake3_256",
+    "components": [{
+      "kind": "index_runtime_state",
+      "file_name": "index-runtime-state.json",
+      "length": component_bytes.len(),
+      "blake3": blake3::hash(&component_bytes).to_hex().to_string(),
+    }],
+    "hot_tail_writes": 0,
+    "hot_tail_voids": 0,
+    "wal_tail_bytes": 0,
+    "wal_tail_truncated": false,
+    "errors": [],
+  });
+  fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+  scanned_artifact(root, database_path, name)
 }
 
 #[test]
@@ -203,8 +291,8 @@ fn validated_external_spills_seed_one_persistent_recovery_incident() {
   let db_path = temp.path().join("transition-controls-seed.aeordb");
   let database_id = [0x53; 16];
   let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
-  let later = spill_artifact(temp.path(), Some(database_id), "later", 1_725_000_000_010, 10);
-  let earlier = spill_artifact(temp.path(), Some(database_id), "earlier", 1_725_000_000_000, 9);
+  let later = spill_artifact(temp.path(), &db_path, database_id, "later", 1_725_000_000_010, 10);
+  let earlier = spill_artifact(temp.path(), &db_path, database_id, "earlier", 1_725_000_000_000, 9);
 
   let seed = engine.seed_durability_recovery_from_spills(&[later.clone(), earlier.clone()]).unwrap();
 
@@ -231,12 +319,72 @@ fn validated_external_spills_seed_one_persistent_recovery_incident() {
 }
 
 #[test]
+fn v3_runtime_reconciliation_spill_is_retained_by_exact_manifest_identity_in_the_catalog() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-v3-runtime-seed.aeordb");
+  let database_id = [0x59; 16];
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  let artifact = v3_spill_artifact(temp.path(), &db_path, database_id, "runtime-state", 1_725_000_000_020, 11);
+  let expected_path = native_path(&artifact.manifest_path);
+  let expected_digest = artifact.manifest_digest.to_vec();
+
+  engine.seed_durability_recovery_from_spills(&[artifact]).unwrap();
+
+  let catalog =
+    V3TransitionControlStore::new(&engine).load_mutable(SystemControlKindV1::EmergencySpillCatalog, database_id, &[]).unwrap().unwrap();
+  let control = decode_system_control(&catalog.bytes, engine.hash_algo()).unwrap();
+  let body = decode_emergency_spill_catalog_body(control.body, engine.hash_algo()).unwrap();
+  assert_eq!(body.rows.len(), 1);
+  assert_eq!(body.rows[0].native_path, expected_path);
+  assert_eq!(body.rows[0].complete_file_digest, expected_digest);
+  assert_eq!(body.rows[0].creation_sequence, 11);
+  assert!(engine.persistent_durability_recovery().unwrap().blocks_writes);
+}
+
+#[test]
+fn v3_runtime_component_tamper_is_rejected_before_catalog_or_latch_publication() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-v3-runtime-tamper.aeordb");
+  let database_id = [0x5a; 16];
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  let artifact = v3_spill_artifact(temp.path(), &db_path, database_id, "runtime-tamper", 1_725_000_000_021, 12);
+  let component = artifact.components.iter().find(|component| component.kind == "index_runtime_state").unwrap();
+  let mut tampered = fs::read(&component.path).unwrap();
+  tampered[0] ^= 0x01;
+  fs::write(&component.path, tampered).unwrap();
+
+  let error = engine.seed_durability_recovery_from_spills(&[artifact]).unwrap_err();
+
+  assert!(error.to_string().contains("digest"), "{error}");
+  let store = V3TransitionControlStore::new(&engine);
+  assert!(store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[]).unwrap().is_none());
+  assert!(store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[]).unwrap().is_none());
+}
+
+#[test]
+fn v3_runtime_struct_disagreement_is_rejected_before_catalog_or_latch_publication() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-v3-runtime-struct-disagreement.aeordb");
+  let database_id = [0x5b; 16];
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  let mut artifact = v3_spill_artifact(temp.path(), &db_path, database_id, "runtime-struct-disagreement", 1_725_000_000_022, 13);
+  artifact.index_runtime_state.as_mut().unwrap().reason = "caller_substituted_state".to_string();
+
+  let error = engine.seed_durability_recovery_from_spills(&[artifact]).unwrap_err();
+
+  assert!(error.to_string().contains("manifest"), "{error}");
+  let store = V3TransitionControlStore::new(&engine);
+  assert!(store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[]).unwrap().is_none());
+  assert!(store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[]).unwrap().is_none());
+}
+
+#[test]
 fn spill_seeding_rejects_mixed_database_identities_before_writing_controls() {
   let temp = tempfile::tempdir().unwrap();
   let db_path = temp.path().join("transition-controls-seed-mixed.aeordb");
   let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
-  let first = spill_artifact(temp.path(), Some([0x54; 16]), "first", 1_725_000_000_000, 1);
-  let second = spill_artifact(temp.path(), Some([0x55; 16]), "second", 1_725_000_000_001, 2);
+  let first = spill_artifact(temp.path(), &db_path, [0x54; 16], "first", 1_725_000_000_000, 1);
+  let second = spill_artifact(temp.path(), &db_path, [0x55; 16], "second", 1_725_000_000_001, 2);
 
   let error = engine.seed_durability_recovery_from_spills(&[first, second]).unwrap_err();
 
@@ -246,16 +394,34 @@ fn spill_seeding_rejects_mixed_database_identities_before_writing_controls() {
 }
 
 #[test]
-fn spill_seeding_rejects_malformed_typed_evidence_before_writing_controls() {
+fn spill_seeding_rejects_an_artifact_scanned_for_a_different_database_before_writing_controls() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("transition-controls-seed-target.aeordb");
+  let foreign_db_path = temp.path().join("transition-controls-seed-foreign.aeordb");
+  let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+  fs::write(&foreign_db_path, b"foreign database identity anchor").unwrap();
+  let artifact = spill_artifact(temp.path(), &foreign_db_path, [0x5c; 16], "foreign", 1_725_000_000_000, 1);
+
+  let error = engine.seed_durability_recovery_from_spills(&[artifact]).unwrap_err();
+
+  assert!(error.to_string().contains("different database"), "{error}");
+  assert!(engine.persistent_durability_recovery().is_none());
+  let store = V3TransitionControlStore::new(&engine);
+  assert!(store.discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[]).unwrap().is_none());
+  assert!(store.discover_mutable(SystemControlKindV1::DurabilityLatch, &[]).unwrap().is_none());
+}
+
+#[test]
+fn spill_seeding_rejects_caller_substituted_typed_evidence_before_writing_controls() {
   let temp = tempfile::tempdir().unwrap();
   let db_path = temp.path().join("transition-controls-seed-malformed.aeordb");
   let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
-  let mut artifact = spill_artifact(temp.path(), Some([0x58; 16]), "malformed", 1_725_000_000_000, 1);
+  let mut artifact = spill_artifact(temp.path(), &db_path, [0x58; 16], "malformed", 1_725_000_000_000, 1);
   artifact.failed_operation = Some(u16::MAX);
 
   let error = engine.seed_durability_recovery_from_spills(&[artifact]).unwrap_err();
 
-  assert!(error.to_string().contains("failed operation"), "{error}");
+  assert!(error.to_string().contains("manifest"), "{error}");
   assert!(engine.persistent_durability_recovery().is_none());
   assert!(V3TransitionControlStore::new(&engine).discover_mutable(SystemControlKindV1::EmergencySpillCatalog, &[]).unwrap().is_none());
   assert!(V3TransitionControlStore::new(&engine).discover_mutable(SystemControlKindV1::DurabilityLatch, &[]).unwrap().is_none());
@@ -273,7 +439,7 @@ fn a_new_spill_incident_advances_a_cleared_identity_without_reusing_old_rows() {
   }
   let engine = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
   assert!(!engine.persistent_durability_recovery().unwrap().blocks_writes);
-  let artifact = spill_artifact(temp.path(), Some(database_id), "new-incident", 1_725_000_001_000, 20);
+  let artifact = spill_artifact(temp.path(), &db_path, database_id, "new-incident", 1_725_000_001_000, 20);
 
   engine.seed_durability_recovery_from_spills(&[artifact]).unwrap();
 

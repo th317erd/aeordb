@@ -82,3 +82,26 @@ fn poisoned_publisher_lock_fails_closed_without_entering_the_owner() {
   assert_eq!(degraded.degraded.as_ref().unwrap().code, "cadence_publisher_poisoned");
   assert_eq!(degraded.mutations.active_records, 0);
 }
+
+#[test]
+fn graceful_drain_closes_and_stops_the_same_owner_idempotently() {
+  let owner = owner();
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    UnusedPublisher,
+    CancellationToken::new(),
+    Arc::new(MockClock::new(4, 20)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+
+  let first = cadence.drain_and_stop().unwrap();
+  assert_eq!(first.published_batches, 0);
+  assert_eq!(first.published_records, 0);
+  assert_eq!(first.publication_bytes, 0);
+  assert_eq!(first.highest_checkpoint_sequence, 0);
+  assert_eq!(owner.cached_snapshot().lifecycle, IndexRuntimeLifecycleV1::Stopped);
+
+  let repeated = cadence.drain_and_stop().unwrap();
+  assert_eq!(repeated, first);
+  assert_eq!(owner.cached_snapshot().lifecycle, IndexRuntimeLifecycleV1::Stopped);
+}

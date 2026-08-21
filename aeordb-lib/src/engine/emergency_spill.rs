@@ -10,15 +10,21 @@ use crate::engine::native_durability::sync_file_all_native;
 
 pub const EMERGENCY_SPILL_FORMAT: &str = "aeordb-emergency-spill-v1";
 pub const EMERGENCY_SPILL_FORMAT_V2: &str = "aeordb-emergency-spill-v2";
+pub const EMERGENCY_SPILL_FORMAT_V3: &str = "aeordb-emergency-spill-v3";
 pub const EMERGENCY_SPILL_PENDING_FORMAT_V2: &str = "aeordb-emergency-spill-pending-v2";
+pub const EMERGENCY_SPILL_PENDING_FORMAT_V3: &str = "aeordb-emergency-spill-pending-v3";
 pub const EMERGENCY_SPILL_APPLIED_FORMAT: &str = "aeordb-emergency-spill-applied-v1";
 pub const EMERGENCY_SPILL_APPLIED_FORMAT_V2: &str = "aeordb-emergency-spill-applied-v2";
+pub const EMERGENCY_SPILL_APPLIED_FORMAT_V3: &str = "aeordb-emergency-spill-applied-v3";
+pub const INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1: &str = "aeordb-index-runtime-emergency-state-v1";
 pub(crate) const MANIFEST_SIZE_CAP: u64 = 1024 * 1024;
+const INDEX_RUNTIME_STATE_SIZE_CAP: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmergencySpillFormatVersion {
   V1,
   V2,
+  V3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +60,92 @@ pub struct EmergencySpillComponent {
   pub digest: [u8; 32],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmergencyIndexRuntimeSelectedHeadV1 {
+  pub manifest_digest: [u8; 32],
+  pub durable_sequence: u64,
+  pub durable_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmergencyIndexRuntimeWorkspaceV1 {
+  pub path_encoding: u16,
+  pub path: PathBuf,
+  pub workspace_id: [u8; 16],
+  pub selected_head: Option<EmergencyIndexRuntimeSelectedHeadV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmergencyIndexRuntimeStateV1 {
+  pub database_id: [u8; 16],
+  pub destination_physical_instance_id: [u8; 16],
+  pub runtime_id: [u8; 16],
+  pub hash_algorithm: crate::engine::HashAlgorithm,
+  pub lifecycle: u16,
+  pub highest_checkpoint_sequence: u64,
+  pub publication_in_flight: bool,
+  pub soft_queued_notices: u64,
+  pub soft_retained_bytes: u64,
+  pub soft_reconciliation_required: bool,
+  pub soft_lost_through_sequence: Option<u64>,
+  pub producer_pending_tasks: u64,
+  pub producer_pending_bytes: u64,
+  pub producer_leased_tasks: u64,
+  pub mutation_active_records: u64,
+  pub mutation_active_bytes: u64,
+  pub mutation_frozen_records: u64,
+  pub mutation_frozen_bytes: u64,
+  pub reconciliation_required: bool,
+  pub reason: String,
+  pub workspace: Option<EmergencyIndexRuntimeWorkspaceV1>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct EmergencyIndexRuntimeSelectedHeadWireV1 {
+  manifest_digest: String,
+  durable_sequence: u64,
+  durable_bytes: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct EmergencyIndexRuntimeWorkspaceWireV1 {
+  path_encoding: u16,
+  path: String,
+  path_bytes: String,
+  workspace_id: String,
+  selected_head: Option<EmergencyIndexRuntimeSelectedHeadWireV1>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct EmergencyIndexRuntimeStateWireV1 {
+  format: String,
+  database_id: String,
+  destination_physical_instance_id: String,
+  runtime_id: String,
+  hash_algorithm: u16,
+  lifecycle: u16,
+  highest_checkpoint_sequence: u64,
+  publication_in_flight: bool,
+  soft_queued_notices: u64,
+  soft_retained_bytes: u64,
+  soft_reconciliation_required: bool,
+  soft_lost_through_sequence: Option<u64>,
+  producer_pending_tasks: u64,
+  producer_pending_bytes: u64,
+  producer_leased_tasks: u64,
+  mutation_active_records: u64,
+  mutation_active_bytes: u64,
+  mutation_frozen_records: u64,
+  mutation_frozen_bytes: u64,
+  reconciliation_required: bool,
+  reason: String,
+  workspace: Option<EmergencyIndexRuntimeWorkspaceWireV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmergencySpillArtifact {
   pub format_version: EmergencySpillFormatVersion,
   pub database_id: Option<[u8; 16]>,
@@ -75,6 +166,7 @@ pub struct EmergencySpillArtifact {
   pub manifest_length: u64,
   pub manifest_digest: [u8; 32],
   pub components: Vec<EmergencySpillComponent>,
+  pub index_runtime_state: Option<EmergencyIndexRuntimeStateV1>,
   pub attempted_at: Option<String>,
   pub sort_millis: i64,
   pub db_path: Option<String>,
@@ -241,6 +333,10 @@ pub fn apply_wal_tails_to_database(
   let mut report = EmergencySpillApplyReport { artifact_count: artifacts.len(), ..EmergencySpillApplyReport::default() };
 
   for artifact in artifacts {
+    validate_artifact_for_database(artifact, db_path)?;
+  }
+
+  for artifact in artifacts {
     if artifact.hot_tail_path.is_some() {
       report.hot_tail_files_seen += 1;
     }
@@ -267,7 +363,7 @@ pub fn apply_wal_tails_to_database(
       EngineError::InvalidInput(format!("emergency spill manifest {} is missing wal_tail_copy_start", artifact.manifest_path.display()))
     })?;
     let evidence = artifact.components.iter().find(|component| component.kind == "wal_tail");
-    if artifact.format_version == EmergencySpillFormatVersion::V2 && evidence.is_none() {
+    if matches!(artifact.format_version, EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3) && evidence.is_none() {
       return Err(EngineError::InvalidInput(format!(
         "emergency spill manifest {} has WAL bytes without component evidence",
         artifact.manifest_path.display()
@@ -287,13 +383,15 @@ pub fn mark_artifacts_applied(
   artifacts: &[EmergencySpillArtifact],
   report: &EmergencySpillApplyReport,
 ) -> EngineResult<()> {
+  let db_path = db_path.as_ref();
   for artifact in artifacts {
-    if artifact.format_version == EmergencySpillFormatVersion::V2 {
-      required_v2_artifact_identities(artifact)?;
+    validate_artifact_for_database(artifact, db_path)?;
+    if matches!(artifact.format_version, EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3) {
+      required_typed_artifact_identities(artifact)?;
     }
   }
 
-  let db_path = db_path.as_ref().display().to_string();
+  let db_path = db_path.display().to_string();
   for artifact in artifacts {
     let marker = match artifact.format_version {
       EmergencySpillFormatVersion::V1 => serde_json::json!({
@@ -305,7 +403,7 @@ pub fn mark_artifacts_applied(
         "wal_tail_bytes_written": report.wal_tail_bytes_written,
       }),
       EmergencySpillFormatVersion::V2 => {
-        let (database_id, incident_id) = required_v2_artifact_identities(artifact)?;
+        let (database_id, incident_id) = required_typed_artifact_identities(artifact)?;
         serde_json::json!({
           "format": EMERGENCY_SPILL_APPLIED_FORMAT_V2,
           "applied_at": chrono::Utc::now().to_rfc3339(),
@@ -318,6 +416,21 @@ pub fn mark_artifacts_applied(
           "wal_tail_bytes_written": report.wal_tail_bytes_written,
         })
       }
+      EmergencySpillFormatVersion::V3 => {
+        let (database_id, incident_id) = required_typed_artifact_identities(artifact)?;
+        serde_json::json!({
+          "format": EMERGENCY_SPILL_APPLIED_FORMAT_V3,
+          "applied_at": chrono::Utc::now().to_rfc3339(),
+          "db_path": db_path.clone(),
+          "database_id": hex::encode(database_id),
+          "incident_id": hex::encode(incident_id),
+          "manifest_length": artifact.manifest_length,
+          "manifest_blake3": hex::encode(artifact.manifest_digest),
+          "index_runtime_reconciliation_retained": artifact.index_runtime_state.is_some(),
+          "wal_tail_bytes_present": report.wal_tail_bytes_present,
+          "wal_tail_bytes_written": report.wal_tail_bytes_written,
+        })
+      }
     };
     let marker_path = artifact.directory.join("applied.json");
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
@@ -326,12 +439,18 @@ pub fn mark_artifacts_applied(
   Ok(())
 }
 
-fn required_v2_artifact_identities(artifact: &EmergencySpillArtifact) -> EngineResult<([u8; 16], [u8; 16])> {
+fn required_typed_artifact_identities(artifact: &EmergencySpillArtifact) -> EngineResult<([u8; 16], [u8; 16])> {
   let database_id = artifact.database_id.ok_or_else(|| {
-    EngineError::InvalidInput(format!("v2 emergency spill artifact {} is missing its database identity", artifact.manifest_path.display()))
+    EngineError::InvalidInput(format!(
+      "typed emergency spill artifact {} is missing its database identity",
+      artifact.manifest_path.display()
+    ))
   })?;
   let incident_id = artifact.incident_id.ok_or_else(|| {
-    EngineError::InvalidInput(format!("v2 emergency spill artifact {} is missing its incident identity", artifact.manifest_path.display()))
+    EngineError::InvalidInput(format!(
+      "typed emergency spill artifact {} is missing its incident identity",
+      artifact.manifest_path.display()
+    ))
   })?;
   Ok((database_id, incident_id))
 }
@@ -343,9 +462,32 @@ pub fn update_v2_manifest_latest(
   latest_failure_at_ms: i64,
   latest_failure: &str,
 ) -> EngineResult<()> {
+  update_manifest_latest(manifest_path, database_id, incident_id, latest_failure_at_ms, latest_failure, Some(EMERGENCY_SPILL_FORMAT_V2))
+}
+
+pub fn update_typed_manifest_latest(
+  manifest_path: &Path,
+  database_id: [u8; 16],
+  incident_id: [u8; 16],
+  latest_failure_at_ms: i64,
+  latest_failure: &str,
+) -> EngineResult<()> {
+  update_manifest_latest(manifest_path, database_id, incident_id, latest_failure_at_ms, latest_failure, None)
+}
+
+fn update_manifest_latest(
+  manifest_path: &Path,
+  database_id: [u8; 16],
+  incident_id: [u8; 16],
+  latest_failure_at_ms: i64,
+  latest_failure: &str,
+  required_format: Option<&str>,
+) -> EngineResult<()> {
   let bytes = read_small_file_no_follow(manifest_path, MANIFEST_SIZE_CAP)?;
   let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-  if manifest.get("format").and_then(|value| value.as_str()) != Some(EMERGENCY_SPILL_FORMAT_V2)
+  let format = manifest.get("format").and_then(|value| value.as_str());
+  if !matches!(format, Some(EMERGENCY_SPILL_FORMAT_V2) | Some(EMERGENCY_SPILL_FORMAT_V3))
+    || required_format.is_some_and(|required| format != Some(required))
     || required_hex_array::<16>(&manifest, "database_id")? != database_id
     || required_hex_array::<16>(&manifest, "incident_id")? != incident_id
   {
@@ -497,7 +639,10 @@ fn pending_matches_database(pending_path: &Path, source_location_class: SpillLoc
   reject_symlink(pending_path, "emergency spill pending record")?;
   let bytes = read_small_file_no_follow(pending_path, MANIFEST_SIZE_CAP)?;
   let pending: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
-  if pending.get("format").and_then(|value| value.as_str()) != Some(EMERGENCY_SPILL_PENDING_FORMAT_V2) {
+  if !matches!(
+    pending.get("format").and_then(|value| value.as_str()),
+    Some(EMERGENCY_SPILL_PENDING_FORMAT_V2) | Some(EMERGENCY_SPILL_PENDING_FORMAT_V3)
+  ) {
     return Err(EngineError::InvalidInput(format!("invalid emergency spill pending record {}", pending_path.display())));
   }
   let path_encoding = u16::try_from(required_u64(&pending, "path_encoding")?)
@@ -539,7 +684,7 @@ fn manifest_matches_database(manifest_path: &Path, db_path: &Path) -> EngineResu
       Some(path) => Ok(Some(paths_equivalent(Path::new(path), db_path)?)),
       None => Ok(Some(false)),
     },
-    Some(EMERGENCY_SPILL_FORMAT_V2) => {
+    Some(EMERGENCY_SPILL_FORMAT_V2) | Some(EMERGENCY_SPILL_FORMAT_V3) => {
       let path_encoding = u16::try_from(required_u64(&manifest, "path_encoding")?)
         .map_err(|_| EngineError::InvalidInput("emergency spill manifest path encoding overflows u16".to_string()))?;
       let native = required_hex_bytes(&manifest, "db_path_bytes")?;
@@ -557,6 +702,7 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
   let format_version = match manifest.get("format").and_then(|value| value.as_str()) {
     Some(EMERGENCY_SPILL_FORMAT) => EmergencySpillFormatVersion::V1,
     Some(EMERGENCY_SPILL_FORMAT_V2) => EmergencySpillFormatVersion::V2,
+    Some(EMERGENCY_SPILL_FORMAT_V3) => EmergencySpillFormatVersion::V3,
     _ => return Ok(None),
   };
 
@@ -596,7 +742,7 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     EmergencySpillFormatVersion::V1 => {
       (None, None, native_path_encoding(), 0, sort_millis, sort_millis, None, None, None, None, None, None, None, Vec::new())
     }
-    EmergencySpillFormatVersion::V2 => {
+    EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3 => {
       let database_id = required_hex_array::<16>(&manifest, "database_id")?;
       let incident_id = required_hex_array::<16>(&manifest, "incident_id")?;
       if database_id == [0u8; 16] || incident_id == [0u8; 16] {
@@ -625,7 +771,7 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
         return Err(EngineError::InvalidInput("emergency spill latest failure precedes first failure".to_string()));
       }
       let typed_evidence = parse_optional_typed_failure_evidence(&manifest)?;
-      let components = parse_v2_components(&manifest, &directory)?;
+      let components = parse_typed_components(&manifest, &directory, format_version)?;
       (
         Some(database_id),
         Some(incident_id),
@@ -645,15 +791,30 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     }
   };
 
+  let index_runtime_state = match format_version {
+    EmergencySpillFormatVersion::V3 => {
+      let evidence = components
+        .iter()
+        .find(|component| component.kind == "index_runtime_state")
+        .ok_or_else(|| EngineError::InvalidInput("v3 emergency spill manifest is missing index runtime state".to_string()))?;
+      let state = read_index_runtime_state(evidence)?;
+      if manifest.get("hash_algorithm").and_then(serde_json::Value::as_str) != Some(format!("{:?}", state.hash_algorithm).as_str()) {
+        return Err(EngineError::InvalidInput("v3 emergency spill runtime state disagrees with manifest hash identity".to_string()));
+      }
+      Some(state)
+    }
+    EmergencySpillFormatVersion::V1 | EmergencySpillFormatVersion::V2 => None,
+  };
+
   let hot_tail_path = match format_version {
     EmergencySpillFormatVersion::V1 => path_from_manifest_or_default(&manifest, "hot_tail_path", &directory, "hot-tail.bin")?,
-    EmergencySpillFormatVersion::V2 => {
+    EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3 => {
       components.iter().find(|component| component.kind == "hot_tail").map(|component| component.path.clone())
     }
   };
   let wal_tail_path = match format_version {
     EmergencySpillFormatVersion::V1 => path_from_manifest_or_default(&manifest, "wal_tail_path", &directory, "wal-tail.bin")?,
-    EmergencySpillFormatVersion::V2 => {
+    EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3 => {
       components.iter().find(|component| component.kind == "wal_tail").map(|component| component.path.clone())
     }
   };
@@ -664,14 +825,14 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
       optional_u64(&manifest, "hot_tail_voids")?.unwrap_or(0),
       optional_bool(&manifest, "wal_tail_truncated")?.unwrap_or(false),
     ),
-    EmergencySpillFormatVersion::V2 => (
+    EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3 => (
       required_u64(&manifest, "wal_tail_bytes")?,
       required_u64(&manifest, "hot_tail_writes")?,
       required_u64(&manifest, "hot_tail_voids")?,
       required_bool(&manifest, "wal_tail_truncated")?,
     ),
   };
-  if format_version == EmergencySpillFormatVersion::V2 {
+  if matches!(format_version, EmergencySpillFormatVersion::V2 | EmergencySpillFormatVersion::V3) {
     let evidenced = components.iter().find(|component| component.kind == "wal_tail").map(|component| component.length).unwrap_or(0);
     if evidenced != wal_tail_bytes {
       return Err(EngineError::InvalidInput(format!(
@@ -701,6 +862,7 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
     manifest_length,
     manifest_digest,
     components,
+    index_runtime_state,
     attempted_at,
     sort_millis,
     db_path,
@@ -812,6 +974,15 @@ fn artifact_applied(artifact: &EmergencySpillArtifact) -> EngineResult<bool> {
         && marker.get("manifest_length").and_then(|value| value.as_u64()) == Some(artifact.manifest_length)
         && marker_hex_matches(&marker, "manifest_blake3", Some(artifact.manifest_digest))
     }
+    EmergencySpillFormatVersion::V3 => {
+      marker.get("format").and_then(|value| value.as_str()) == Some(EMERGENCY_SPILL_APPLIED_FORMAT_V3)
+        && marker_hex_matches(&marker, "database_id", artifact.database_id)
+        && marker_hex_matches(&marker, "incident_id", artifact.incident_id)
+        && marker.get("manifest_length").and_then(|value| value.as_u64()) == Some(artifact.manifest_length)
+        && marker_hex_matches(&marker, "manifest_blake3", Some(artifact.manifest_digest))
+        && marker.get("index_runtime_reconciliation_retained").and_then(|value| value.as_bool()) == Some(true)
+        && artifact.index_runtime_state.is_some()
+    }
   };
   if !valid {
     return Err(EngineError::InvalidInput(format!("emergency spill applied marker {} does not match its artifact", marker_path.display())));
@@ -873,13 +1044,18 @@ fn required_parent<'a>(path: &'a Path, context: &str) -> EngineResult<&'a Path> 
     .ok_or_else(|| EngineError::InvalidInput(format!("{context} path {} has no containing directory", path.display())))
 }
 
-fn parse_v2_components(manifest: &serde_json::Value, directory: &Path) -> EngineResult<Vec<EmergencySpillComponent>> {
+fn parse_typed_components(
+  manifest: &serde_json::Value,
+  directory: &Path,
+  version: EmergencySpillFormatVersion,
+) -> EngineResult<Vec<EmergencySpillComponent>> {
   let rows = manifest
     .get("components")
     .and_then(|value| value.as_array())
     .ok_or_else(|| EngineError::InvalidInput("v2 emergency spill manifest is missing components".to_string()))?;
-  if rows.len() > 3 {
-    return Err(EngineError::InvalidInput("v2 emergency spill manifest has more than three components".to_string()));
+  let maximum_components = if version == EmergencySpillFormatVersion::V3 { 4 } else { 3 };
+  if rows.len() > maximum_components {
+    return Err(EngineError::InvalidInput(format!("typed emergency spill manifest has more than {maximum_components} components")));
   }
   let mut seen = HashSet::new();
   let mut components = Vec::with_capacity(rows.len());
@@ -892,6 +1068,7 @@ fn parse_v2_components(manifest: &serde_json::Value, directory: &Path) -> Engine
       "hot_tail" => "hot-tail.bin",
       "wal_tail" => "wal-tail.bin",
       "index_buffer" => "index-buffer.json",
+      "index_runtime_state" if version == EmergencySpillFormatVersion::V3 => "index-runtime-state.json",
       _ => return Err(EngineError::InvalidInput(format!("unknown emergency spill component kind {kind}"))),
     };
     if !seen.insert(kind) {
@@ -917,6 +1094,170 @@ fn parse_v2_components(manifest: &serde_json::Value, directory: &Path) -> Engine
     components.push(evidence);
   }
   Ok(components)
+}
+
+fn read_index_runtime_state(evidence: &EmergencySpillComponent) -> EngineResult<EmergencyIndexRuntimeStateV1> {
+  if evidence.length > INDEX_RUNTIME_STATE_SIZE_CAP {
+    return Err(EngineError::InvalidInput(format!("index runtime emergency state exceeds {INDEX_RUNTIME_STATE_SIZE_CAP} bytes")));
+  }
+  let mut file = open_regular_file_no_follow(&evidence.path)?;
+  validate_open_component(&mut file, evidence)?;
+  let mut bytes = Vec::with_capacity(evidence.length as usize);
+  file.read_to_end(&mut bytes)?;
+  let wire: EmergencyIndexRuntimeStateWireV1 =
+    serde_json::from_slice(&bytes).map_err(|error| EngineError::InvalidInput(format!("invalid index runtime emergency state: {error}")))?;
+  if wire.format != INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1 {
+    return Err(EngineError::InvalidInput("invalid index runtime emergency state format".to_string()));
+  }
+  let database_id = decode_hex_array::<16>(&wire.database_id, "index runtime database identity")?;
+  let destination_physical_instance_id =
+    decode_hex_array::<16>(&wire.destination_physical_instance_id, "index runtime destination identity")?;
+  let runtime_id = decode_hex_array::<16>(&wire.runtime_id, "index runtime identity")?;
+  if database_id == [0; 16] || destination_physical_instance_id == [0; 16] || runtime_id == [0; 16] {
+    return Err(EngineError::InvalidInput("index runtime emergency state contains a zero identity".to_string()));
+  }
+  let hash_algorithm = crate::engine::HashAlgorithm::from_u16(wire.hash_algorithm)
+    .ok_or_else(|| EngineError::InvalidInput("index runtime emergency state has an invalid hash algorithm".to_string()))?;
+  if !(1..=5).contains(&wire.lifecycle) || !wire.reconciliation_required || !valid_runtime_reason(&wire.reason) {
+    return Err(EngineError::InvalidInput(
+      "index runtime emergency state has invalid lifecycle, reconciliation, or reason evidence".to_string(),
+    ));
+  }
+  let workspace = wire
+    .workspace
+    .map(|workspace| {
+      let path_bytes = hex::decode(&workspace.path_bytes)
+        .map_err(|error| EngineError::InvalidInput(format!("invalid index runtime workspace path bytes: {error}")))?;
+      let path = path_from_native_bytes(workspace.path_encoding, &path_bytes)?;
+      if !path.is_absolute() || workspace.path.is_empty() {
+        return Err(EngineError::InvalidInput("index runtime workspace path is not absolute or diagnostic path is empty".to_string()));
+      }
+      if workspace.path != path.display().to_string() {
+        return Err(EngineError::InvalidInput("index runtime workspace path representations disagree".to_string()));
+      }
+      let workspace_id = decode_hex_array::<16>(&workspace.workspace_id, "index runtime workspace identity")?;
+      if workspace_id == [0; 16] {
+        return Err(EngineError::InvalidInput("index runtime emergency state contains a zero workspace identity".to_string()));
+      }
+      let selected_head = workspace
+        .selected_head
+        .map(|selected| {
+          let manifest_digest = decode_hex_array::<32>(&selected.manifest_digest, "index runtime workspace manifest digest")?;
+          if manifest_digest == [0; 32] || selected.durable_sequence == 0 || selected.durable_bytes == 0 {
+            return Err(EngineError::InvalidInput("index runtime selected workspace head is not canonical".to_string()));
+          }
+          Ok(EmergencyIndexRuntimeSelectedHeadV1 {
+            manifest_digest,
+            durable_sequence: selected.durable_sequence,
+            durable_bytes: selected.durable_bytes,
+          })
+        })
+        .transpose()?;
+      Ok(EmergencyIndexRuntimeWorkspaceV1 { path_encoding: workspace.path_encoding, path, workspace_id, selected_head })
+    })
+    .transpose()?;
+  Ok(EmergencyIndexRuntimeStateV1 {
+    database_id,
+    destination_physical_instance_id,
+    runtime_id,
+    hash_algorithm,
+    lifecycle: wire.lifecycle,
+    highest_checkpoint_sequence: wire.highest_checkpoint_sequence,
+    publication_in_flight: wire.publication_in_flight,
+    soft_queued_notices: wire.soft_queued_notices,
+    soft_retained_bytes: wire.soft_retained_bytes,
+    soft_reconciliation_required: wire.soft_reconciliation_required,
+    soft_lost_through_sequence: wire.soft_lost_through_sequence,
+    producer_pending_tasks: wire.producer_pending_tasks,
+    producer_pending_bytes: wire.producer_pending_bytes,
+    producer_leased_tasks: wire.producer_leased_tasks,
+    mutation_active_records: wire.mutation_active_records,
+    mutation_active_bytes: wire.mutation_active_bytes,
+    mutation_frozen_records: wire.mutation_frozen_records,
+    mutation_frozen_bytes: wire.mutation_frozen_bytes,
+    reconciliation_required: wire.reconciliation_required,
+    reason: wire.reason,
+    workspace,
+  })
+}
+
+fn valid_runtime_reason(reason: &str) -> bool {
+  !reason.is_empty() && reason.len() <= 128 && reason.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+pub(crate) fn encode_index_runtime_state_v1(state: &EmergencyIndexRuntimeStateV1) -> EngineResult<Vec<u8>> {
+  if state.database_id == [0; 16]
+    || state.destination_physical_instance_id == [0; 16]
+    || state.runtime_id == [0; 16]
+    || !(1..=5).contains(&state.lifecycle)
+    || !state.reconciliation_required
+    || !valid_runtime_reason(&state.reason)
+  {
+    return Err(EngineError::InvalidInput("invalid index runtime emergency state identity or reconciliation evidence".to_string()));
+  }
+  let workspace = state
+    .workspace
+    .as_ref()
+    .map(|workspace| {
+      if workspace.workspace_id == [0; 16]
+        || workspace.path_encoding != native_path_encoding()
+        || !workspace.path.is_absolute()
+        || workspace.path.as_os_str().is_empty()
+      {
+        return Err(EngineError::InvalidInput("invalid index runtime emergency workspace evidence".to_string()));
+      }
+      let selected_head = workspace
+        .selected_head
+        .as_ref()
+        .map(|selected| {
+          if selected.manifest_digest == [0; 32] || selected.durable_sequence == 0 || selected.durable_bytes == 0 {
+            return Err(EngineError::InvalidInput("invalid index runtime selected workspace head".to_string()));
+          }
+          Ok(EmergencyIndexRuntimeSelectedHeadWireV1 {
+            manifest_digest: hex::encode(selected.manifest_digest),
+            durable_sequence: selected.durable_sequence,
+            durable_bytes: selected.durable_bytes,
+          })
+        })
+        .transpose()?;
+      Ok(EmergencyIndexRuntimeWorkspaceWireV1 {
+        path_encoding: workspace.path_encoding,
+        path: workspace.path.display().to_string(),
+        path_bytes: hex::encode(native_path_bytes(&workspace.path)),
+        workspace_id: hex::encode(workspace.workspace_id),
+        selected_head,
+      })
+    })
+    .transpose()?;
+  let wire = EmergencyIndexRuntimeStateWireV1 {
+    format: INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1.to_string(),
+    database_id: hex::encode(state.database_id),
+    destination_physical_instance_id: hex::encode(state.destination_physical_instance_id),
+    runtime_id: hex::encode(state.runtime_id),
+    hash_algorithm: state.hash_algorithm.to_u16(),
+    lifecycle: state.lifecycle,
+    highest_checkpoint_sequence: state.highest_checkpoint_sequence,
+    publication_in_flight: state.publication_in_flight,
+    soft_queued_notices: state.soft_queued_notices,
+    soft_retained_bytes: state.soft_retained_bytes,
+    soft_reconciliation_required: state.soft_reconciliation_required,
+    soft_lost_through_sequence: state.soft_lost_through_sequence,
+    producer_pending_tasks: state.producer_pending_tasks,
+    producer_pending_bytes: state.producer_pending_bytes,
+    producer_leased_tasks: state.producer_leased_tasks,
+    mutation_active_records: state.mutation_active_records,
+    mutation_active_bytes: state.mutation_active_bytes,
+    mutation_frozen_records: state.mutation_frozen_records,
+    mutation_frozen_bytes: state.mutation_frozen_bytes,
+    reconciliation_required: state.reconciliation_required,
+    reason: state.reason.clone(),
+    workspace,
+  };
+  let bytes = serde_json::to_vec_pretty(&wire).map_err(|error| EngineError::JsonParseError(error.to_string()))?;
+  if bytes.len() as u64 > INDEX_RUNTIME_STATE_SIZE_CAP {
+    return Err(EngineError::InvalidInput(format!("index runtime emergency state exceeds {INDEX_RUNTIME_STATE_SIZE_CAP} bytes")));
+  }
+  Ok(bytes)
 }
 
 fn required_u64(manifest: &serde_json::Value, field: &str) -> EngineResult<u64> {
@@ -1020,6 +1361,41 @@ fn validate_artifact_components(artifact: &EmergencySpillArtifact) -> EngineResu
   for component in &artifact.components {
     let mut file = open_regular_file_no_follow(&component.path)?;
     validate_open_component(&mut file, component)?;
+  }
+  Ok(())
+}
+
+pub(crate) fn validate_artifact_evidence(artifact: &EmergencySpillArtifact) -> EngineResult<()> {
+  let manifest = EmergencySpillComponent {
+    kind: "manifest".to_string(),
+    path: artifact.manifest_path.clone(),
+    length: artifact.manifest_length,
+    digest: artifact.manifest_digest,
+  };
+  let mut file = open_regular_file_no_follow(&manifest.path)?;
+  validate_open_component(&mut file, &manifest)?;
+  let retained = parse_manifest(&artifact.manifest_path, artifact.source_location_class)?
+    .ok_or_else(|| EngineError::InvalidInput("emergency spill artifact manifest no longer has a supported format".to_string()))?;
+  if retained != *artifact {
+    return Err(EngineError::InvalidInput(
+      "emergency spill artifact metadata disagrees with its retained manifest or component evidence".to_string(),
+    ));
+  }
+  if artifact.format_version == EmergencySpillFormatVersion::V3
+    && (artifact.index_runtime_state.is_none() || !artifact.components.iter().any(|component| component.kind == "index_runtime_state"))
+  {
+    return Err(EngineError::InvalidInput("v3 emergency spill is missing retained index runtime reconciliation evidence".to_string()));
+  }
+  validate_artifact_components(artifact)
+}
+
+pub(crate) fn validate_artifact_for_database(artifact: &EmergencySpillArtifact, db_path: &Path) -> EngineResult<()> {
+  validate_artifact_evidence(artifact)?;
+  if !artifact_matches_database(artifact, db_path)? {
+    return Err(EngineError::InvalidInput(format!(
+      "emergency spill artifact {} belongs to a different database",
+      artifact.manifest_path.display()
+    )));
   }
   Ok(())
 }
@@ -1267,46 +1643,25 @@ mod tests {
     let db_path = temp_dir.path().join("test.aeordb");
     fs::write(&db_path, b"abcdef").unwrap();
 
-    let tail_path = temp_dir.path().join("wal-tail.bin");
+    let artifact_dir = temp_dir.path().join("artifact");
+    fs::create_dir(&artifact_dir).unwrap();
+    let tail_path = artifact_dir.join("wal-tail.bin");
     fs::write(&tail_path, b"defghi").unwrap();
-
-    let artifact = EmergencySpillArtifact {
-      format_version: EmergencySpillFormatVersion::V1,
-      database_id: None,
-      incident_id: None,
-      source_location_class: SpillLocationClass::ConfiguredFallback,
-      path_encoding: native_path_encoding(),
-      creation_sequence: 0,
-      first_failure_at_ms: 0,
-      latest_failure_at_ms: 0,
-      failed_operation: None,
-      os_error_class: None,
-      os_error_code: None,
-      last_selected_header_sequence: None,
-      last_durable_write_sequence: None,
-      last_durable_publication_sequence: None,
-      directory: temp_dir.path().to_path_buf(),
-      manifest_path: temp_dir.path().join("manifest.json"),
-      manifest_length: 0,
-      manifest_digest: [0; 32],
-      components: Vec::new(),
-      attempted_at: None,
-      sort_millis: 0,
-      db_path: Some(db_path.display().to_string()),
-      db_path_native: None,
-      context: None,
-      failure: None,
-      first_failure: None,
-      latest_failure: None,
-      hot_tail_path: None,
-      wal_tail_path: Some(tail_path),
-      hot_tail_writes: 0,
-      hot_tail_voids: 0,
-      wal_tail_copy_start: Some(3),
-      wal_tail_end: Some(9),
-      wal_tail_bytes: 6,
-      wal_tail_truncated: false,
-    };
+    let manifest_path = artifact_dir.join("manifest.json");
+    let manifest = serde_json::json!({
+      "format": EMERGENCY_SPILL_FORMAT,
+      "attempted_at": "2026-08-19T00:00:00Z",
+      "db_path": db_path.display().to_string(),
+      "wal_tail_path": tail_path.display().to_string(),
+      "wal_tail_copy_start": 3,
+      "wal_tail_end": 9,
+      "wal_tail_bytes": 6,
+      "hot_tail_writes": 0,
+      "hot_tail_voids": 0,
+      "wal_tail_truncated": false,
+    });
+    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let artifact = parse_manifest(&manifest_path, SpillLocationClass::ConfiguredFallback).unwrap().unwrap();
 
     let report = apply_wal_tails_to_database(&db_path, &[artifact]).unwrap();
     assert_eq!(report.wal_tail_bytes_present, 3);

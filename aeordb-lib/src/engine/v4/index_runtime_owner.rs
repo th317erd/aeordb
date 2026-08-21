@@ -64,6 +64,18 @@ pub enum IndexRuntimeLifecycleV1 {
   Stopped,
 }
 
+impl IndexRuntimeLifecycleV1 {
+  pub const fn stable_id(self) -> u16 {
+    match self {
+      Self::Recovering => 1,
+      Self::Running => 2,
+      Self::Degraded => 3,
+      Self::Draining => 4,
+      Self::Stopped => 5,
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRuntimeDegradedStateV1 {
   pub code: &'static str,
@@ -602,7 +614,7 @@ impl IndexRuntimeOwnerV1 {
       if let Some(attempt) = state.publication_in_flight {
         return Err(IndexRuntimeErrorV1::PublicationInProgress { batch_id: attempt.batch_id, attempt_id: attempt.attempt_id });
       }
-      if now_ms < state.publication_retry_not_before_ms {
+      if state.lifecycle != IndexRuntimeLifecycleV1::Draining && now_ms < state.publication_retry_not_before_ms {
         return Ok(IndexRuntimeFlushOutcomeV1::Deferred { retry_at_ms: state.publication_retry_not_before_ms });
       }
       prepare_mutation_drain(&mut state)?;

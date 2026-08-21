@@ -114,6 +114,7 @@ pub struct EmergencySpillReport {
   pub hot_tail_path: Option<String>,
   pub wal_tail_path: Option<String>,
   pub index_buffer_path: Option<String>,
+  pub index_runtime_state_path: Option<String>,
   pub db_path: Option<String>,
   pub hot_tail_writes: usize,
   pub hot_tail_voids: usize,
@@ -125,10 +126,12 @@ pub struct EmergencySpillReport {
   pub wal_tail_end: Option<u64>,
   pub hot_tail_bytes: u64,
   pub index_buffer_bytes: u64,
+  pub index_runtime_state_bytes: u64,
   pub wal_tail_bytes: u64,
   pub manifest_bytes: u64,
   pub total_bytes: u64,
   pub wal_tail_truncated: bool,
+  pub index_runtime_reconciliation_required: bool,
   pub errors: Vec<String>,
 }
 
@@ -145,6 +148,14 @@ struct EmergencyComponentWriter<'a> {
   file: &'a mut std::fs::File,
   hasher: blake3::Hasher,
   length: u64,
+}
+
+struct EmergencySpillWriteInputs<'a> {
+  db_path: &'a Path,
+  wal_source: Option<&'a std::fs::File>,
+  current_offset: u64,
+  hot_tail: Option<&'a crate::engine::hot_tail::HotTailPayload>,
+  index_runtime_state: Option<&'a crate::engine::emergency_spill::EmergencyIndexRuntimeStateV1>,
 }
 
 impl std::io::Write for EmergencyComponentWriter<'_> {
@@ -2140,7 +2151,7 @@ impl StorageEngine {
         }
       };
       if let Some(manifest_path) = manifest_path {
-        let update = crate::engine::emergency_spill::update_v2_manifest_latest(
+        let update = crate::engine::emergency_spill::update_typed_manifest_latest(
           Path::new(&manifest_path),
           failure_state.database_id,
           failure_state.incident_id,
@@ -2239,6 +2250,7 @@ impl StorageEngine {
       hot_tail_path: None,
       wal_tail_path: None,
       index_buffer_path: None,
+      index_runtime_state_path: None,
       db_path: Some(self.database_path.display().to_string()),
       hot_tail_writes: 0,
       hot_tail_voids: 0,
@@ -2250,10 +2262,12 @@ impl StorageEngine {
       wal_tail_end: None,
       hot_tail_bytes: 0,
       index_buffer_bytes: 0,
+      index_runtime_state_bytes: 0,
       wal_tail_bytes: 0,
       manifest_bytes: 0,
       total_bytes: 0,
       wal_tail_truncated: false,
+      index_runtime_reconciliation_required: false,
       errors: Vec::new(),
     }
   }
@@ -2349,6 +2363,7 @@ impl StorageEngine {
     report.hot_tail_voids = payload.as_ref().map_or(0, |payload| payload.voids.len());
     report.wal_tail_original_start = wal_tail_original_start;
     report.wal_tail_end = wal_tail_end;
+    let index_runtime_state = self.index_runtime_emergency_state_v1(failed_operation, &mut report);
 
     let db_label = db_path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| "unknown-db".to_string());
     let dir_name = format!(
@@ -2377,10 +2392,13 @@ impl StorageEngine {
       match self.write_emergency_spill_files(
         &spill_dir,
         location.class,
-        Some(&db_path),
-        wal_source.as_ref(),
-        current_offset,
-        payload.as_ref(),
+        EmergencySpillWriteInputs {
+          db_path: &db_path,
+          wal_source: wal_source.as_ref(),
+          current_offset,
+          hot_tail: payload.as_ref(),
+          index_runtime_state: index_runtime_state.as_ref(),
+        },
         &mut report,
         &mut memory,
       ) {
@@ -2402,32 +2420,36 @@ impl StorageEngine {
     &self,
     spill_dir: &Path,
     source_location_class: crate::engine::emergency_spill::SpillLocationClass,
-    db_path: Option<&Path>,
-    wal_source: Option<&std::fs::File>,
-    current_offset: u64,
-    payload: Option<&crate::engine::hot_tail::HotTailPayload>,
+    inputs: EmergencySpillWriteInputs<'_>,
     report: &mut EmergencySpillReport,
     memory: &mut OperationMemoryBudget,
   ) -> Result<(), String> {
-    let db_path = db_path.ok_or_else(|| "database path unavailable for emergency spill identity".to_string())?;
+    let EmergencySpillWriteInputs { db_path, wal_source, current_offset, hot_tail, index_runtime_state } = inputs;
     report.spill_directory = None;
     report.manifest_path = None;
     report.hot_tail_path = None;
     report.wal_tail_path = None;
     report.index_buffer_path = None;
+    report.index_runtime_state_path = None;
     report.index_pending_mutations = 0;
     report.index_dirty_saves = 0;
     report.index_deletes = 0;
     report.wal_tail_copy_start = None;
     report.hot_tail_bytes = 0;
     report.index_buffer_bytes = 0;
+    report.index_runtime_state_bytes = 0;
     report.wal_tail_bytes = 0;
     report.manifest_bytes = 0;
     report.total_bytes = 0;
     report.wal_tail_truncated = false;
+    report.index_runtime_reconciliation_required = index_runtime_state.is_some();
     let pending_path = spill_dir.join("pending.json");
     let pending = serde_json::json!({
-      "format": crate::engine::emergency_spill::EMERGENCY_SPILL_PENDING_FORMAT_V2,
+      "format": if index_runtime_state.is_some() {
+        crate::engine::emergency_spill::EMERGENCY_SPILL_PENDING_FORMAT_V3
+      } else {
+        crate::engine::emergency_spill::EMERGENCY_SPILL_PENDING_FORMAT_V2
+      },
       "database_id": &report.database_id,
       "incident_id": &report.incident_id,
       "source_location_class": source_location_class as u16,
@@ -2441,7 +2463,7 @@ impl StorageEngine {
     Self::write_durable_file(&pending_path, &pending_bytes)?;
 
     let mut components = Vec::new();
-    if let Some(payload) = payload {
+    if let Some(payload) = hot_tail {
       let hot_tail_path = spill_dir.join("hot-tail.bin");
       let (length, digest) = Self::write_durable_stream(&hot_tail_path, |writer| {
         crate::engine::hot_tail::write_hot_tail_payload(writer, payload, self.hash_algo.hash_length()).map_err(|error| error.to_string())
@@ -2454,6 +2476,20 @@ impl StorageEngine {
       }));
       report.hot_tail_path = Some(hot_tail_path.display().to_string());
       report.hot_tail_bytes = length;
+    }
+
+    if let Some(state) = index_runtime_state {
+      let bytes = crate::engine::emergency_spill::encode_index_runtime_state_v1(state).map_err(|error| error.to_string())?;
+      let path = spill_dir.join("index-runtime-state.json");
+      Self::write_durable_file(&path, &bytes)?;
+      components.push(serde_json::json!({
+        "kind": "index_runtime_state",
+        "file_name": "index-runtime-state.json",
+        "length": bytes.len(),
+        "blake3": blake3::hash(&bytes).to_hex().to_string(),
+      }));
+      report.index_runtime_state_path = Some(path.display().to_string());
+      report.index_runtime_state_bytes = bytes.len() as u64;
     }
 
     match self.index_write_buffer.try_lock() {
@@ -2542,7 +2578,11 @@ impl StorageEngine {
     report.spill_directory = Some(spill_dir.display().to_string());
     let manifest_path = spill_dir.join("manifest.json");
     let manifest = serde_json::json!({
-      "format": crate::engine::emergency_spill::EMERGENCY_SPILL_FORMAT_V2,
+      "format": if report.index_runtime_reconciliation_required {
+        crate::engine::emergency_spill::EMERGENCY_SPILL_FORMAT_V3
+      } else {
+        crate::engine::emergency_spill::EMERGENCY_SPILL_FORMAT_V2
+      },
       "database_id": &report.database_id,
       "incident_id": &report.incident_id,
       "source_location_class": source_location_class as u16,
@@ -2600,6 +2640,7 @@ impl StorageEngine {
     report.total_bytes = report
       .hot_tail_bytes
       .saturating_add(report.index_buffer_bytes)
+      .saturating_add(report.index_runtime_state_bytes)
       .saturating_add(report.wal_tail_bytes)
       .saturating_add(report.manifest_bytes);
     if let Err(error) = std::fs::remove_file(&pending_path) {
@@ -3648,6 +3689,83 @@ impl StorageEngine {
       return Ok(None);
     };
     cadence.flush_if_due().map(Some)
+  }
+
+  fn index_runtime_emergency_state_v1(
+    &self,
+    failed_operation: u16,
+    report: &mut EmergencySpillReport,
+  ) -> Option<crate::engine::emergency_spill::EmergencyIndexRuntimeStateV1> {
+    use crate::engine::emergency_spill::{EmergencyIndexRuntimeSelectedHeadV1, EmergencyIndexRuntimeStateV1, EmergencyIndexRuntimeWorkspaceV1};
+    use crate::engine::v4::index_runtime_owner::IndexRuntimeLifecycleV1;
+
+    let runtime = self.index_runtime_v1.get()?;
+    let snapshot = runtime.owner().cached_snapshot();
+    if snapshot.lifecycle == IndexRuntimeLifecycleV1::Stopped {
+      return None;
+    }
+    let workspace = match runtime.cadence() {
+      Some(cadence) => match cadence.try_emergency_workspace_snapshot() {
+        Ok(workspace) => workspace,
+        Err(error) => {
+          Self::push_spill_error(report, format!("index runtime workspace evidence unavailable during emergency spill: {error}"));
+          None
+        }
+      },
+      None => None,
+    }
+    .map(|workspace| EmergencyIndexRuntimeWorkspaceV1 {
+      path_encoding: crate::engine::emergency_spill::native_path_encoding(),
+      path: workspace.path,
+      workspace_id: workspace.identity.workspace_id(),
+      selected_head: workspace.selected_head.map(|selected| EmergencyIndexRuntimeSelectedHeadV1 {
+        manifest_digest: selected.manifest_digest(),
+        durable_sequence: selected.durable_sequence(),
+        durable_bytes: selected.durable_bytes(),
+      }),
+    });
+    let reason = if failed_operation == DurabilityOperation::ShutdownFlush.stable_id() {
+      "shutdown_drain_incomplete"
+    } else {
+      "durability_failure_with_runtime_state"
+    };
+    Some(EmergencyIndexRuntimeStateV1 {
+      database_id: runtime.shadow_identity().database_id(),
+      destination_physical_instance_id: runtime.shadow_identity().destination_physical_instance_id(),
+      runtime_id: runtime.owner().coordinator_id(),
+      hash_algorithm: runtime.owner().hash_algorithm(),
+      lifecycle: snapshot.lifecycle.stable_id(),
+      highest_checkpoint_sequence: snapshot.highest_checkpoint_sequence,
+      publication_in_flight: snapshot.publication_in_flight,
+      // Rust's supported pointer widths are no wider than this frozen u64 wire field.
+      soft_queued_notices: snapshot.soft_hub.queued_notices as u64,
+      soft_retained_bytes: snapshot.soft_hub.retained_bytes as u64,
+      soft_reconciliation_required: snapshot.soft_hub.reconciliation_required,
+      soft_lost_through_sequence: snapshot.soft_hub.lost_through_sequence,
+      producer_pending_tasks: u64::from(snapshot.producer.pending_tasks),
+      producer_pending_bytes: snapshot.producer.pending_bytes,
+      producer_leased_tasks: u64::from(snapshot.producer.leased_tasks),
+      mutation_active_records: snapshot.mutations.active_records,
+      mutation_active_bytes: snapshot.mutations.active_bytes,
+      mutation_frozen_records: snapshot.mutations.frozen_records,
+      mutation_frozen_bytes: snapshot.mutations.frozen_bytes,
+      reconciliation_required: true,
+      reason: reason.to_string(),
+      workspace,
+    })
+  }
+
+  fn drain_index_runtime_v1(
+    &self,
+  ) -> Result<
+    Option<crate::engine::v4::index_runtime_cadence::IndexRuntimeDrainOutcomeV1>,
+    crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+  > {
+    let Some(runtime) = self.index_runtime_v1.get() else {
+      return Ok(None);
+    };
+    let cadence = runtime.cadence().ok_or(crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::NotInstalled)?;
+    cadence.drain_and_stop().map(Some)
   }
 
   /// Force all buffered index mutations to disk.
@@ -6374,15 +6492,12 @@ impl StorageEngine {
     }
   }
 
-  /// Gracefully shut down the engine: flush all buffers and sync to disk.
-  ///
-  /// This is a best-effort operation. Errors during individual flush steps
-  /// are logged but do not prevent subsequent steps from executing. The
-  /// ordered shutdown sequence is:
-  ///
-  /// 1. Flush the KV write buffer to disk pages
-  /// 2. Flush the hot file buffer (crash-recovery journal)
-  /// 3. Sync the WAL file to ensure all OS-buffered writes are durable
+  /// Gracefully shut down the engine after refusing and draining top-level
+  /// operations. The ordered shutdown drains hard durability work, finalizes
+  /// the installed v4 index cadence, and then flushes legacy indexes, KV,
+  /// hot-tail, WAL, and header authority. Every failure is retained while the
+  /// remaining bounded preservation steps continue; unresolved state latches
+  /// the database read-only and is included in emergency-spill evidence.
   pub fn shutdown(&self) -> EngineResult<()> {
     self.shutdown_with_drain_timeout(self.shutdown_operation_wait_timeout())
   }
@@ -6457,6 +6572,10 @@ impl StorageEngine {
     // after every shutdown resource is released do we latch the engine and
     // preserve the remaining volatile state.
     let mut failures: Vec<(&'static str, String)> = Vec::new();
+
+    if let Err(error) = self.drain_index_runtime_v1() {
+      failures.push(("V4 index runtime drain failed during shutdown", error.to_string()));
+    }
 
     if let Err(e) = self.flush_index_buffer() {
       failures.push(("Index buffer flush failed during shutdown", e.to_string()));

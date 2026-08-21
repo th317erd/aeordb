@@ -220,7 +220,9 @@ fn visible_spill_report(report: EmergencySpillReport, visibility: ConfigurationV
     return value;
   }
   if let Some(object) = value.as_object_mut() {
-    for field in ["spill_directory", "manifest_path", "hot_tail_path", "wal_tail_path", "index_buffer_path", "db_path"] {
+    for field in
+      ["spill_directory", "manifest_path", "hot_tail_path", "wal_tail_path", "index_buffer_path", "index_runtime_state_path", "db_path"]
+    {
       if object.get(field).is_some_and(|value| !value.is_null()) {
         object.insert(field.to_string(), redacted_value());
       }
@@ -305,6 +307,7 @@ mod tests {
       hot_tail_path: Some(SECRET_PATH.to_string()),
       wal_tail_path: Some(SECRET_PATH.to_string()),
       index_buffer_path: Some(SECRET_PATH.to_string()),
+      index_runtime_state_path: Some(SECRET_PATH.to_string()),
       db_path: Some(SECRET_PATH.to_string()),
       hot_tail_writes: 0,
       hot_tail_voids: 0,
@@ -316,10 +319,12 @@ mod tests {
       wal_tail_end: None,
       hot_tail_bytes: 0,
       index_buffer_bytes: 0,
+      index_runtime_state_bytes: 0,
       wal_tail_bytes: 0,
       manifest_bytes: 0,
       total_bytes: 0,
       wal_tail_truncated: false,
+      index_runtime_reconciliation_required: true,
       errors: vec![format!("cleanup failed for {SECRET_PATH}")],
     };
 

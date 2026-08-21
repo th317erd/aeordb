@@ -326,6 +326,10 @@ impl DurableIndexRuntimeWorkspaceV1 {
     self.identity
   }
 
+  pub fn workspace_path(&self) -> &Path {
+    &self.workspace_path
+  }
+
   pub fn head(&self) -> Option<&IndexRuntimeWorkspaceHeadV1> {
     self.head.as_ref()
   }
