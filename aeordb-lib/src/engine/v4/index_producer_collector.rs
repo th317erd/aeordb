@@ -145,6 +145,7 @@ impl IndexParserDeterministicFailureV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexParserOutcomeV1 {
   Parsed(CanonicalConfigValueV1),
+  NotApplicable,
   DeterministicUnindexable(IndexParserDeterministicFailureV1),
 }
 
@@ -194,9 +195,32 @@ pub struct IndexParserExecutionRequestV1<'a> {
   file_record: &'a FileRecord,
   parser_plan: &'a ParserResolutionPlanV1<'a>,
   dependencies: &'a DependencyTableV1<'a>,
+  maximum_document_input_bytes: u64,
+  is_cancelled: &'a dyn Fn() -> bool,
 }
 
 impl IndexParserExecutionRequestV1<'_> {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new<'a>(
+    namespace_root: &'a [u8],
+    record_revision_hash: &'a [u8],
+    file_record: &'a FileRecord,
+    parser_plan: &'a ParserResolutionPlanV1<'a>,
+    dependencies: &'a DependencyTableV1<'a>,
+    maximum_document_input_bytes: u64,
+    is_cancelled: &'a dyn Fn() -> bool,
+  ) -> IndexParserExecutionRequestV1<'a> {
+    IndexParserExecutionRequestV1 {
+      namespace_root,
+      record_revision_hash,
+      file_record,
+      parser_plan,
+      dependencies,
+      maximum_document_input_bytes,
+      is_cancelled,
+    }
+  }
+
   pub fn namespace_root(&self) -> &[u8] {
     self.namespace_root
   }
@@ -219,6 +243,14 @@ impl IndexParserExecutionRequestV1<'_> {
 
   pub fn dependencies(&self) -> &DependencyTableV1<'_> {
     self.dependencies
+  }
+
+  pub const fn maximum_document_input_bytes(&self) -> u64 {
+    self.maximum_document_input_bytes
+  }
+
+  pub const fn is_cancelled(&self) -> &dyn Fn() -> bool {
+    self.is_cancelled
   }
 }
 
@@ -596,19 +628,22 @@ impl IndexProducerCollectorV1 {
     let parser_memory = if definition.parser_plan.kind == ParserPlanKind::None {
       None
     } else {
-      Some(self.reserve_transient(parser_transient_bytes(&definition.parser_plan)?)?)
+      Some(self.reserve_parser_transient(parser_transient_bytes(&definition.parser_plan)?)?)
     };
     let parsed = if definition.parser_plan.kind == ParserPlanKind::None {
       None
     } else {
-      match parser.parse(IndexParserExecutionRequestV1 {
-        namespace_root: document.namespace_root,
-        record_revision_hash: document.record_revision_hash,
-        file_record: document.file_record,
-        parser_plan: &definition.parser_plan,
-        dependencies: &definition.dependencies,
-      }) {
+      match parser.parse(IndexParserExecutionRequestV1::new(
+        document.namespace_root,
+        document.record_revision_hash,
+        document.file_record,
+        &definition.parser_plan,
+        &definition.dependencies,
+        definition.max_document_input_bytes,
+        is_cancelled,
+      )) {
         Ok(IndexParserOutcomeV1::Parsed(value)) => Some(value),
+        Ok(IndexParserOutcomeV1::NotApplicable) => return Ok(SourceEvaluationV1::Missing),
         Ok(IndexParserOutcomeV1::DeterministicUnindexable(failure)) => {
           let reservation = parser_memory.ok_or_else(|| {
             IndexProducerCollectorErrorV1::InvalidRequest("parser produced output for a parser-free ValueStore".to_string())
@@ -929,6 +964,13 @@ impl IndexProducerCollectorV1 {
     self
       .memory
       .reserve(MemoryOwner::Task, bytes, AdmissionClass::Workload)
+      .map_err(|error| IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()))
+  }
+
+  fn reserve_parser_transient(&self, bytes: u64) -> Result<MemoryReservation, IndexProducerCollectorErrorV1> {
+    self
+      .memory
+      .reserve(MemoryOwner::ParserPlugin, bytes, AdmissionClass::Maintenance)
       .map_err(|error| IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()))
   }
 }

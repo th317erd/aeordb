@@ -21,23 +21,61 @@ mod video;
 /// - `Some(Err(msg))` if a native parser claimed it but failed
 /// - `None` if no native parser handles this content type (fall through to WASM)
 pub fn parse_native(data: &[u8], content_type: &str, filename: &str, path: &str, size: u64) -> Option<Result<serde_json::Value, String>> {
-  // Try content-type-based dispatch first
-  if let Some(parser) = parser_for_content_type(content_type) {
-    return Some(parser(data, filename, content_type, size));
-  }
+  legacy_parser(content_type, filename, path).map(|parser| parser(data, filename, content_type, size))
+}
 
-  // Fall back to extension-based dispatch when content type is generic
-  if content_type == "application/octet-stream" || content_type.is_empty() {
-    let extension = extract_extension(filename).or_else(|| extract_extension(path));
+pub(crate) fn native_parser_claims_legacy(content_type: &str, filename: &str, path: &str) -> bool {
+  legacy_parser(content_type, filename, path).is_some()
+}
 
-    if let Some(ext) = extension {
-      if let Some(parser) = parser_for_extension(ext) {
-        return Some(parser(data, filename, content_type, size));
-      }
+/// Parse through the corrected v1 native routing contract.
+///
+/// Routing uses a prevalidated MIME essence and ASCII-lowercased extension,
+/// while parser-visible metadata retains the exact stored content type.
+pub(crate) fn parse_native_corrected(
+  data: &[u8],
+  mime_essence: Option<&str>,
+  extension: Option<&str>,
+  filename: &str,
+  stored_content_type: &str,
+  size: u64,
+) -> Option<Result<serde_json::Value, String>> {
+  corrected_parser(mime_essence, extension).map(|parser| parser(data, filename, stored_content_type, size))
+}
+
+pub(crate) fn native_parser_claims_corrected(mime_essence: Option<&str>, extension: Option<&str>) -> bool {
+  corrected_parser(mime_essence, extension).is_some()
+}
+
+fn corrected_parser(mime_essence: Option<&str>, extension: Option<&str>) -> Option<ParserFn> {
+  if let Some(essence) = mime_essence {
+    if let Some(parser) = parser_for_content_type(essence) {
+      return Some(parser);
+    }
+    if essence != "application/octet-stream" {
+      return None;
     }
   }
+  match extension {
+    Some(extension) => parser_for_extension(extension),
+    None => None,
+  }
+}
 
-  None
+fn legacy_parser(content_type: &str, filename: &str, path: &str) -> Option<ParserFn> {
+  if let Some(parser) = parser_for_content_type(content_type) {
+    return Some(parser);
+  }
+  if content_type != "application/octet-stream" && !content_type.is_empty() {
+    return None;
+  }
+  if let Some(extension) = extract_extension(filename) {
+    return parser_for_extension(extension);
+  }
+  match extract_extension(path) {
+    Some(extension) => parser_for_extension(extension),
+    None => None,
+  }
 }
 
 type ParserFn = fn(&[u8], &str, &str, u64) -> Result<serde_json::Value, String>;
@@ -119,7 +157,10 @@ fn parser_for_extension(ext: &str) -> Option<ParserFn> {
 
 fn extract_extension(name: &str) -> Option<&str> {
   // Get the filename portion (after last /)
-  let filename = name.rsplit('/').next().unwrap_or(name);
+  let filename = match name.rsplit('/').next() {
+    Some(filename) => filename,
+    None => name,
+  };
   let dot_position = filename.rfind('.')?;
   let ext = &filename[dot_position + 1..];
   if ext.is_empty() {

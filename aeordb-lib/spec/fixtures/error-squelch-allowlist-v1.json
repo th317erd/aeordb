@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1516,
+  "maximum_occurrences": 1514,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -5892,26 +5892,6 @@
       "kind": "result_to_option",
       "pattern": "stripped . parse :: < f64 > () . ok ()",
       "review": "format-or-header-probe"
-    },
-    {
-      "id": "esq-v1-c220e3bd36ec24bb1ae3-00",
-      "file": "aeordb-lib/src/engine/native_parsers/mod.rs",
-      "line": 31,
-      "column": 21,
-      "enclosing_item": "parse_native",
-      "kind": "error_recovery",
-      "pattern": "extract_extension (filename) . or_else (| | extract_extension (path))",
-      "review": "ordered-optional-precedence"
-    },
-    {
-      "id": "esq-v1-838add7fd1c6ebeb52f6-00",
-      "file": "aeordb-lib/src/engine/native_parsers/mod.rs",
-      "line": 122,
-      "column": 18,
-      "enclosing_item": "extract_extension",
-      "kind": "default_on_error",
-      "pattern": "name . rsplit ('/') . next () . unwrap_or (name)",
-      "review": "optional-data-default"
     },
     {
       "id": "esq-v1-2ccf91c25572ae6b4d76-00",

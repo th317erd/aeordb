@@ -110,6 +110,7 @@ fn outcome<'a>(report: &'a CollectedIndexProducerReportV1, owner: &[u8]) -> &'a 
 #[derive(Clone)]
 enum ParserBehavior {
   ParsedByRevision { first_revision: Vec<u8>, first: CanonicalConfigValueV1, second: CanonicalConfigValueV1 },
+  NotApplicable,
   Deterministic(IndexParserDeterministicFailureV1),
   DependencyUnavailable,
   HostFailure,
@@ -118,7 +119,7 @@ enum ParserBehavior {
 
 struct Parser {
   calls: AtomicUsize,
-  observed: Mutex<Vec<(Vec<u8>, Vec<u8>, String)>>,
+  observed: Mutex<Vec<(Vec<u8>, Vec<u8>, String, u64, bool)>>,
   behavior: ParserBehavior,
 }
 
@@ -135,12 +136,15 @@ impl IndexParserExecutorV1 for Parser {
       request.namespace_root().to_vec(),
       request.record_revision_hash().to_vec(),
       request.path().to_string(),
+      request.maximum_document_input_bytes(),
+      (request.is_cancelled())(),
     ));
     match &self.behavior {
       ParserBehavior::ParsedByRevision { first_revision, first, second } => {
         let parsed = if request.record_revision_hash() == first_revision { first } else { second };
         Ok(IndexParserOutcomeV1::Parsed(parsed.clone()))
       }
+      ParserBehavior::NotApplicable => Ok(IndexParserOutcomeV1::NotApplicable),
       ParserBehavior::Deterministic(failure) => Ok(IndexParserOutcomeV1::DeterministicUnindexable(failure.clone())),
       ParserBehavior::DependencyUnavailable => {
         Err(IndexParserExecutionErrorV1::dependency_unavailable("parser_dependency_unavailable", "injected exact dependency outage"))
@@ -244,7 +248,10 @@ fn exact_before_after_parsing_replaces_values_and_tombstones_only_removed_postin
   assert_eq!(parser.calls.load(Ordering::SeqCst), 2);
   assert_eq!(
     *parser.observed.lock().unwrap(),
-    vec![(before_root, before_revision, "/messages.json".to_string()), (after_root, after_revision.clone(), "/messages.json".to_string()),]
+    vec![
+      (before_root, before_revision, "/messages.json".to_string(), 64 * 1_024 * 1_024, false),
+      (after_root, after_revision.clone(), "/messages.json".to_string(), 64 * 1_024 * 1_024, false),
+    ]
   );
   let values = outcome(&report, &definitions.value_id);
   assert_eq!(values.mutations.len(), 1, "the new live row replaces the same value order key");
@@ -257,6 +264,32 @@ fn exact_before_after_parsing_replaces_values_and_tombstones_only_removed_postin
   let decoded = postings.mutations.iter().map(|mutation| decode_posting_record(&mutation.encoded_record).unwrap()).collect::<Vec<_>>();
   assert_eq!(decoded.iter().filter(|record| record.tombstone).count(), 1);
   assert_eq!(decoded.iter().filter(|record| !record.tombstone).count(), 1);
+}
+
+#[test]
+fn parser_no_claim_is_an_ordinary_missing_value_without_document_state() {
+  let definitions = definitions("avst-blake3-256-json-corrected-valid.bin", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
+  let root = hash(b"root");
+  let revision = hash(b"revision");
+  let record = file("/messages.unknown", 0x20, 64);
+  let parser = Parser::new(ParserBehavior::NotApplicable);
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let report = collector
+    .collect(
+      scope_bundle(&definitions),
+      IndexCollectorDocumentTransitionV1 { document_ordinal: 15, before: None, after: Some(document(&root, &revision, &record)) },
+      &parser,
+      None,
+      &|| false,
+    )
+    .unwrap();
+
+  assert_eq!(parser.calls.load(Ordering::SeqCst), 1);
+  for owner in [&definitions.value_id, &definitions.field_id] {
+    let owner = outcome(&report, owner);
+    assert!(matches!(owner.disposition, IndexProducerOwnerDispositionV1::Ready));
+    assert!(owner.mutations.is_empty());
+  }
 }
 
 #[test]

@@ -40,6 +40,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
 semver = "1"
+mime = "0.3"
 
 # URL query-string parsing (for ?token= auth)
 form_urlencoded = "1"
@@ -1067,6 +1068,10 @@ path = "spec/engine/index_native_scan_spec.rs"
 [[test]]
 name = "index_native_semantic_source_spec"
 path = "spec/engine/index_native_semantic_source_spec.rs"
+
+[[test]]
+name = "index_native_parser_spec"
+path = "spec/engine/index_native_parser_spec.rs"
 
 [[test]]
 name = "index_semantic_source_spec"

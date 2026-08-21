@@ -1049,7 +1049,11 @@
             - [x] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
             - [ ] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
               - [x] P6-2c-d5a: freeze the bounded root-pinned scan/service contract, task-kind semantics, continuation authority, and architecture falsifiers.
-              - [ ] P6-2c-d5b: add production exact-revision, semantic-catalog, scope-ordinal, and parser adapters without buffering whole indexes or adding a producer path.
+              - [x] P6-2c-d5b: add production exact-revision, semantic-catalog, scope-ordinal, and parser adapters without buffering whole indexes or adding a producer path.
+                - [x] P6-2c-d5b1: bind exact historical FileRecord revisions without consulting mutable HEAD/path authority.
+                - [x] P6-2c-d5b2: page historical maintenance scopes through bounded seekable flat/B-tree scans.
+                - [x] P6-2c-d5b3: bind selected semantic objects and durable scope ordinals through one retained descriptor catalog.
+                - [x] P6-2c-d5b4: execute the frozen parser plan and dependency table against exact verified chunks with bounded input and shared-memory admission.
               - [ ] P6-2c-d5c: collect mutation and maintenance work outside the runtime owner mutex, then validate and complete the exact retained lease under the sole owner.
               - [ ] P6-2c-d5d: recover selected producer tasks and bounded maintenance continuation state into the same coordinator without duplicate execution or a second persistent cursor.
               - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
@@ -1060,6 +1064,7 @@
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
         - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.
+        - [ ] Measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
