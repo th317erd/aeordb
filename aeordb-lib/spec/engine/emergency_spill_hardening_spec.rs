@@ -305,7 +305,8 @@ fn v2_database_identity_uses_raw_native_path_bytes() {
 
   let temp = tempfile::tempdir().unwrap();
   let database = temp.path().join(OsString::from_vec(b"database-\xff.aeordb".to_vec()));
-  fs::write(&database, b"abc").unwrap();
+  // macOS preserves these native bytes in `OsString` but rejects them in a
+  // filesystem syscall. Spill ownership only needs the database identity.
   let base = temp.path().join("spill");
   fs::create_dir_all(&base).unwrap();
   write_v2_artifact(&base, "artifact", &database, [0x33; 16], 1_700_000_000_000, 1, b"def");
