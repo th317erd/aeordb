@@ -238,7 +238,7 @@ pub fn validate_index_maintenance_scan_page_v1(
   request: &IndexMaintenanceScanRequestV1<'_>,
   page: &IndexMaintenanceScanPageV1,
 ) -> Result<(), IndexMaintenanceScanErrorV1> {
-  validate_request(hash_algorithm, request)?;
+  validate_index_maintenance_scan_request_v1(hash_algorithm, request)?;
   if (request.is_cancelled)() {
     return Err(IndexMaintenanceScanErrorV1::Cancelled);
   }
@@ -248,7 +248,7 @@ pub fn validate_index_maintenance_scan_page_v1(
   if page.retained_bytes > request.limits.maximum_retained_bytes {
     return Err(IndexMaintenanceScanErrorV1::InvalidPage("retained bytes exceed the bounded page limit".to_string()));
   }
-  let minimum_retained = page_retained_bytes(page)?;
+  let minimum_retained = index_maintenance_scan_page_retained_bytes_v1(page)?;
   if page.retained_bytes < minimum_retained {
     return Err(IndexMaintenanceScanErrorV1::InvalidPage("declared retained bytes do not cover the returned documents".to_string()));
   }
@@ -284,7 +284,10 @@ pub fn validate_index_maintenance_scan_page_v1(
   }
 }
 
-fn validate_request(hash_algorithm: HashAlgorithm, request: &IndexMaintenanceScanRequestV1<'_>) -> Result<(), IndexMaintenanceScanErrorV1> {
+pub(super) fn validate_index_maintenance_scan_request_v1(
+  hash_algorithm: HashAlgorithm,
+  request: &IndexMaintenanceScanRequestV1<'_>,
+) -> Result<(), IndexMaintenanceScanErrorV1> {
   if request.namespace_root.len() != hash_algorithm.hash_length() || request.namespace_root.iter().all(|byte| *byte == 0) {
     return Err(IndexMaintenanceScanErrorV1::InvalidRequest("namespace root is absent or has the wrong hash width".to_string()));
   }
@@ -327,7 +330,7 @@ fn path_is_within_scope(scope: &str, path: &str) -> bool {
   scope == "/" || path == scope || path.strip_prefix(scope).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn page_retained_bytes(page: &IndexMaintenanceScanPageV1) -> Result<u64, IndexMaintenanceScanErrorV1> {
+pub(super) fn index_maintenance_scan_page_retained_bytes_v1(page: &IndexMaintenanceScanPageV1) -> Result<u64, IndexMaintenanceScanErrorV1> {
   let mut retained = size_of::<IndexMaintenanceScanPageV1>();
   retained = retained
     .checked_add(
