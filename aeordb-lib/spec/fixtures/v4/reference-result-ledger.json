@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p6-2d-c3c-index-runtime-workspace-v1",
+  "tool_revision": "p6-3b-airb-v2-membership-transitions",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -676,6 +676,12 @@
       "result": "pass"
     },
     {
+      "fixture_id": "aiwo-blake3-256-runtime-batch-v2-valid",
+      "expected": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      "observed": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      "result": "pass"
+    },
+    {
       "fixture_id": "aiwo-blake3-256-producer-task-valid",
       "expected": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
       "observed": "index-workspace:object:producer-task:sequence=10:records=1:publications=42..42",
@@ -691,6 +697,12 @@
       "fixture_id": "aiwo-sha512-runtime-batch-valid",
       "expected": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
       "observed": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aiwo-sha512-runtime-batch-v2-valid",
+      "expected": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      "observed": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
       "result": "pass"
     },
     {

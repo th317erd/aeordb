@@ -299,7 +299,7 @@ jq -e --argjson fixture_count "$expected_fixture_count" --argjson route_count "$
 jq -e --arg campaign "$campaign_id" --argjson fixture_count "$expected_fixture_count" '
   .schema_version == 1 and
   .campaign_id == $campaign and
-  .stage == "p6-2d-c3c-index-runtime-workspace" and
+  .stage == "p6-3b-airb-v2-membership-transitions" and
   .reference_tool.production_dependencies == [] and
   .reference_tool.reviewer_status == "pending-owner-review-before-production-writer" and
   .fixture_count == $fixture_count and

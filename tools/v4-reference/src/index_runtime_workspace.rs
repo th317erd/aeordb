@@ -42,8 +42,10 @@ pub fn fixture_cases() -> Vec<IndexRuntimeWorkspaceFixtureCase> {
   let mut cases = Vec::new();
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     let runtime_payload = build_runtime_batch_payload(profile);
+    let runtime_v2_payload = build_runtime_batch_payload_v2(profile);
     let task_payload = build_producer_task_payload(profile);
     let runtime_object = build_object(profile, 1, 9, 2, 40, 41, &runtime_payload);
+    let runtime_v2_object = build_object(profile, 1, 11, 5, 40, 41, &runtime_v2_payload);
     let task_object = build_object(profile, 2, 10, 1, 42, 42, &task_payload);
     let manifest = build_manifest(1, &runtime_object);
     let profile_name = profile.label();
@@ -65,6 +67,15 @@ pub fn fixture_cases() -> Vec<IndexRuntimeWorkspaceFixtureCase> {
       relation: Some("listed-by:index-runtime-workspace-manifest-v1"),
       canonical_key: None,
       bytes: runtime_object,
+    });
+    cases.push(IndexRuntimeWorkspaceFixtureCase {
+      id: leak(format!("aiwo-{profile_name}-runtime-batch-v2-valid")),
+      format: IndexRuntimeWorkspaceFormat::ObjectV1,
+      profile,
+      expected: "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      relation: Some("successor-payload:index-runtime-workspace-object-v1"),
+      canonical_key: None,
+      bytes: runtime_v2_object,
     });
     cases.push(IndexRuntimeWorkspaceFixtureCase {
       id: leak(format!("aiwo-{profile_name}-producer-task-valid")),
@@ -203,6 +214,63 @@ fn build_runtime_batch_payload(profile: HashProfile) -> Vec<u8> {
   bytes
 }
 
+fn build_runtime_batch_payload_v2(profile: HashProfile) -> Vec<u8> {
+  let h = profile.width();
+  let reverse_record_length = 12 + h;
+  let mutation_frame_length = 40 + 3 * h + 12;
+  let transition_frame_length = 48 + h;
+  let mutation_count = 2usize;
+  let transition_count = 3usize;
+  let transitions_start = 64 + mutation_count * mutation_frame_length;
+  let mut bytes = vec![0u8; transitions_start + transition_count * transition_frame_length];
+  bytes[..4].copy_from_slice(b"AIRB");
+  put_u16(&mut bytes, 4, 2);
+  put_u16(&mut bytes, 6, 64);
+  let total_length = bytes.len() as u64;
+  put_u64(&mut bytes, 8, total_length);
+  fill(&mut bytes[16..32], 0x77);
+  put_u64(&mut bytes, 32, 2);
+  put_u16(&mut bytes, 40, 4);
+  put_u32(&mut bytes, 44, mutation_count as u32);
+  put_u32(&mut bytes, 48, transition_count as u32);
+
+  for (ordinal, (file_byte, operation_byte, publication_sequence, operation_kind)) in
+    [(0usize, (0x31, 0x11, 40u64, 2u8)), (1, (0x32, 0x12, 41, 1))]
+  {
+    let start = 64 + ordinal * mutation_frame_length;
+    put_u32(&mut bytes, start, mutation_frame_length as u32);
+    bytes[start + 4] = 2;
+    bytes[start + 5] = operation_kind;
+    put_u16(&mut bytes, start + 6, h as u16);
+    put_u64(&mut bytes, start + 8, publication_sequence);
+    fill(&mut bytes[start + 16..start + 32], operation_byte);
+    put_u32(&mut bytes, start + 32, h as u32);
+    put_u32(&mut bytes, start + 36, reverse_record_length as u32);
+    let index_start = start + 40;
+    let order_start = index_start + h;
+    let record_start = order_start + h;
+    fill(&mut bytes[index_start..order_start], 0x21);
+    fill(&mut bytes[order_start..record_start], file_byte);
+    put_u64(&mut bytes, record_start + 4, 3);
+    fill(&mut bytes[record_start + 12..record_start + reverse_record_length], file_byte);
+  }
+
+  for (ordinal, (owner_byte, owner_class, flags, operation_byte)) in
+    [(0usize, (0x21, 1u8, 0b0011u8, 0x12)), (1, (0x22, 2, 0b0010, 0x22)), (2, (0x23, 3, 0b0110, 0x23))]
+  {
+    let start = transitions_start + ordinal * transition_frame_length;
+    put_u32(&mut bytes, start, transition_frame_length as u32);
+    bytes[start + 4] = owner_class;
+    bytes[start + 5] = flags;
+    put_u16(&mut bytes, start + 6, h as u16);
+    put_u64(&mut bytes, start + 8, 41);
+    fill(&mut bytes[start + 16..start + 32], operation_byte);
+    put_u64(&mut bytes, start + 32, 3);
+    fill(&mut bytes[start + 48..start + 48 + h], owner_byte);
+  }
+  bytes
+}
+
 fn build_producer_task_payload(profile: HashProfile) -> Vec<u8> {
   let h = profile.width();
   let header_length = 56 + 4 * h;
@@ -297,7 +365,18 @@ fn decode_object(profile: HashProfile, bytes: &[u8]) -> Result<String, &'static 
 }
 
 fn decode_runtime_batch_payload(profile: HashProfile, bytes: &[u8]) -> Result<(u64, u64, u64), &'static str> {
-  if bytes.len() < 104 || &bytes[..4] != b"AIRB" || read_u16(bytes, 4)? != 1 || read_u16(bytes, 6)? != 64 {
+  if bytes.len() < 64 || &bytes[..4] != b"AIRB" || read_u16(bytes, 6)? != 64 {
+    return Err("runtime_payload_framing");
+  }
+  match read_u16(bytes, 4)? {
+    1 => decode_runtime_batch_payload_v1(profile, bytes),
+    2 => decode_runtime_batch_payload_v2(profile, bytes),
+    _ => Err("runtime_payload_version"),
+  }
+}
+
+fn decode_runtime_batch_payload_v1(profile: HashProfile, bytes: &[u8]) -> Result<(u64, u64, u64), &'static str> {
+  if bytes.len() < 104 {
     return Err("runtime_payload_framing");
   }
   let count = read_u32(bytes, 44)? as usize;
@@ -367,6 +446,154 @@ fn decode_runtime_batch_payload(profile: HashProfile, bytes: &[u8]) -> Result<(u
     return Err("runtime_payload_trailing");
   }
   Ok((count as u64, minimum, maximum))
+}
+
+fn decode_runtime_batch_payload_v2(profile: HashProfile, bytes: &[u8]) -> Result<(u64, u64, u64), &'static str> {
+  let mutation_count = read_u32(bytes, 44)? as usize;
+  let transition_count = read_u32(bytes, 48)? as usize;
+  if read_u64(bytes, 8)? as usize != bytes.len()
+    || all_zero(&bytes[16..32])
+    || read_u64(bytes, 32)? == 0
+    || !(1..=5).contains(&read_u16(bytes, 40)?)
+    || bytes[42..44].iter().chain(bytes[52..64].iter()).any(|byte| *byte != 0)
+    || transition_count == 0
+    || mutation_count.checked_add(transition_count).is_none_or(|count| count > 1_048_576)
+  {
+    return Err("runtime_v2_payload_header");
+  }
+  let h = profile.width();
+  let minimum_mutation_bytes = mutation_count.checked_mul(40 + h + 2).ok_or("runtime_v2_mutation_count_overflow")?;
+  let minimum_transition_bytes = transition_count.checked_mul(48 + h).ok_or("runtime_v2_transition_count_overflow")?;
+  if minimum_mutation_bytes
+    .checked_add(minimum_transition_bytes)
+    .is_none_or(|minimum| minimum > bytes.len() - 64)
+  {
+    return Err("runtime_v2_count_amplification");
+  }
+  let mut cursor = 64usize;
+  let mut previous_mutation_key: Option<Vec<u8>> = None;
+  let mut minimum = u64::MAX;
+  let mut maximum = 0u64;
+  let mut mutations = Vec::with_capacity(mutation_count);
+  for _ in 0..mutation_count {
+    if cursor.checked_add(40).is_none_or(|fixed_end| fixed_end > bytes.len()) {
+      return Err("runtime_v2_mutation_truncated");
+    }
+    let frame_length = read_u32(bytes, cursor)? as usize;
+    let end = cursor.checked_add(frame_length).ok_or("runtime_v2_mutation_overflow")?;
+    let operation_kind = bytes[cursor + 5];
+    let index_length = read_u16(bytes, cursor + 6)? as usize;
+    let order_length = read_u32(bytes, cursor + 32)? as usize;
+    let record_length = read_u32(bytes, cursor + 36)? as usize;
+    if end > bytes.len()
+      || bytes[cursor + 4] != 2
+      || !matches!(operation_kind, 1 | 2)
+      || index_length != h
+      || order_length != h
+      || record_length != 12 + h
+      || frame_length != 40 + index_length + order_length + record_length
+      || read_u64(bytes, cursor + 8)? == 0
+      || all_zero(&bytes[cursor + 16..cursor + 32])
+    {
+      return Err("runtime_v2_mutation_fields");
+    }
+    let index_start = cursor + 40;
+    let order_start = index_start + h;
+    let record_start = order_start + h;
+    let index_id = &bytes[index_start..order_start];
+    let order_key = &bytes[order_start..record_start];
+    let record = &bytes[record_start..end];
+    let document_ordinal = read_u64(record, 4)?;
+    if all_zero(index_id)
+      || all_zero(order_key)
+      || record[..4].iter().any(|byte| *byte != 0)
+      || document_ordinal == 0
+      || &record[12..] != order_key
+    {
+      return Err("runtime_v2_mutation_record");
+    }
+    let mut key = Vec::with_capacity(1 + 2 * h);
+    key.extend_from_slice(index_id);
+    key.push(bytes[cursor + 4]);
+    key.extend_from_slice(order_key);
+    if previous_mutation_key.as_ref().is_some_and(|previous| previous.as_slice() >= key.as_slice()) {
+      return Err("runtime_v2_mutation_order");
+    }
+    previous_mutation_key = Some(key);
+    let publication = read_u64(bytes, cursor + 8)?;
+    minimum = minimum.min(publication);
+    maximum = maximum.max(publication);
+    mutations.push((index_id.to_vec(), document_ordinal, publication));
+    cursor = end;
+  }
+
+  let mut previous_transition_key: Option<Vec<u8>> = None;
+  let mut transitions = Vec::with_capacity(transition_count);
+  for _ in 0..transition_count {
+    if cursor.checked_add(48).is_none_or(|fixed_end| fixed_end > bytes.len()) {
+      return Err("runtime_v2_transition_truncated");
+    }
+    let frame_length = read_u32(bytes, cursor)? as usize;
+    let end = cursor.checked_add(frame_length).ok_or("runtime_v2_transition_overflow")?;
+    let owner_class = bytes[cursor + 4];
+    let flags = bytes[cursor + 5];
+    let owner_length = read_u16(bytes, cursor + 6)? as usize;
+    let publication = read_u64(bytes, cursor + 8)?;
+    let document_ordinal = read_u64(bytes, cursor + 32)?;
+    let owner_start = cursor + 48;
+    if end > bytes.len()
+      || frame_length != 48 + h
+      || !matches!(owner_class, 1..=3)
+      || flags & !0x0f != 0
+      || owner_length != h
+      || publication == 0
+      || all_zero(&bytes[cursor + 16..cursor + 32])
+      || document_ordinal == 0
+      || bytes[cursor + 40..cursor + 48].iter().any(|byte| *byte != 0)
+    {
+      return Err("runtime_v2_transition_fields");
+    }
+    let before_live = flags & 1 != 0;
+    let after_live = flags & 2 != 0;
+    let before_unindexable = flags & 4 != 0;
+    let after_unindexable = flags & 8 != 0;
+    if (before_live && before_unindexable)
+      || (after_live && after_unindexable)
+      || (owner_class == 1 && (before_unindexable || after_unindexable))
+    {
+      return Err("runtime_v2_transition_state");
+    }
+    let owner_id = &bytes[owner_start..end];
+    if all_zero(owner_id) {
+      return Err("runtime_v2_transition_owner");
+    }
+    let mut key = Vec::with_capacity(h + 8);
+    key.extend_from_slice(owner_id);
+    key.extend_from_slice(&document_ordinal.to_be_bytes());
+    if previous_transition_key.as_ref().is_some_and(|previous| previous.as_slice() >= key.as_slice()) {
+      return Err("runtime_v2_transition_order");
+    }
+    previous_transition_key = Some(key);
+    minimum = minimum.min(publication);
+    maximum = maximum.max(publication);
+    transitions.push((owner_id.to_vec(), owner_class, document_ordinal, publication));
+    cursor = end;
+  }
+  if cursor != bytes.len() {
+    return Err("runtime_v2_payload_trailing");
+  }
+  for (owner_id, document_ordinal, publication) in mutations {
+    let Some((_, owner_class, _, transition_publication)) = transitions
+      .iter()
+      .find(|(transition_owner, _, transition_ordinal, _)| transition_owner == &owner_id && *transition_ordinal == document_ordinal)
+    else {
+      return Err("runtime_v2_mutation_transition_missing");
+    };
+    if *owner_class != 1 || publication > *transition_publication {
+      return Err("runtime_v2_mutation_transition_sequence");
+    }
+  }
+  Ok(((mutation_count + transition_count) as u64, minimum, maximum))
 }
 
 fn decode_producer_task_payload(profile: HashProfile, bytes: &[u8]) -> Result<(u64, u64, u64), &'static str> {

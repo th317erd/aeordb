@@ -3328,8 +3328,9 @@
       "fixed_header_length": 184,
       "object_kind_registry": { "1": "runtime_batch", "2": "producer_task" },
       "body_formula": "184 + nonempty payload B + 4-byte CRC",
-      "runtime_batch_payload": "AIRB magic[4] || schema=1 u16 || header_length=64 u16 || total_length u64 || coordinator_id[16] || batch_id u64 || flush_reason u16 || zero u16 || record_count u32 || zero[16] || strict mutation frames",
-      "runtime_mutation_frame": "frame_length u32 || ordered_role u8 || zero u8 || index_id_length u16 || publication_sequence u64 || operation_id[16] || order_key_length u32 || encoded_record_length u32 || index_id || canonical order_key || exact role-specific encoded record",
+      "runtime_batch_payload": "AIRB v1 remains readable as magic[4] || schema=1 u16 || header_length=64 u16 || total_length u64 || coordinator_id[16] || batch_id u64 || flush_reason u16 || zero u16 || mutation_count u32 || zero[16] || strict v1 mutation frames. AIRB v2 is magic[4] || schema=2 u16 || header_length=64 u16 || total_length u64 || coordinator_id[16] || batch_id u64 || flush_reason u16 || zero u16 || mutation_count u32 || transition_count u32 || zero[12] || strict v2 mutation frames || strict membership-transition frames",
+      "runtime_mutation_frame": "v1: frame_length u32 || ordered_role u8 || zero u8 || index_id_length u16 || publication_sequence u64 || operation_id[16] || order_key_length u32 || encoded_record_length u32 || index_id || canonical order_key || exact role-specific encoded record. v2: byte 5 is mutation operation 1=upsert or 2=remove_existing; remove_existing is legal only for a live ScopeReverse record and removes that exact order key without persisting an illegal reverse tombstone",
+      "runtime_membership_transition_frame_v2": "frame_length u32 || owner_class u8 (1 scope, 2 value, 3 field) || presence_flags u8 (before_live, after_live, before_unindexable, after_unindexable) || owner_id_length u16 || publication_sequence u64 || operation_id[16] || document_ordinal u64 || zero[8] || owner_id H; strict by (owner_id, document_ordinal), mutually exclusive live/unindexable per side, and every mutation binds a same-owner/document transition at an equal-or-newer publication sequence",
       "runtime_mutation_limits": { "records": 1048576, "order_key_bytes": 1048576, "encoded_record_bytes": 4194304 },
       "flush_reason_registry": { "1": "mutation_count", "2": "age", "3": "memory_pressure", "4": "explicit", "5": "shutdown" },
       "producer_task_payload": "AITK magic[4] || schema=1 u16 || header_length=(56+4H) u16 || total_length u64 || operation_id[16] || task_kind u16 || journal-or-scope flags u16 || publication_sequence u64 || hash_width u16 || zero u16 || scope_length u32 || zero u32 || namespace_root_before H || namespace_root_after H || semantic_state_root H || journal_head_or_zero H || canonical UTF-8 scope",
@@ -3337,7 +3338,7 @@
       "producer_task_scope_cap": 16384,
       "hard_cap": 536870912,
       "checksum": "payload BLAKE3 at bytes 152..184 plus CRC-32/ISO-HDLC over header and payload; AIWM additionally binds complete-object BLAKE3 including CRC",
-      "canonical_order": "kind-specific payload order; publication range is nonzero and inclusive; runtime batch payload preserves FrozenIndexBatchV1 order and producer task payload is body-free",
+      "canonical_order": "kind-specific payload order; publication range is nonzero and inclusive; AIRB v1 preserves its strict mutation order; AIRB v2 stores strict mutation order followed by strict owner/document transition order and may carry zero-record transitions; producer task payload is body-free",
       "reserve_zero_ranges": ["flags at 20..24"],
       "malformed_behavior": "reject wrong magic/version/kind/hash algorithm/header or total length, zero identity/sequence/time/count/publication fields, inverted range, empty payload, nonzero flags, payload digest, CRC, trailing bytes, or kind-specific payload mismatch",
       "trailing_behavior": "payload_length consumes every byte before the final CRC",
@@ -3349,8 +3350,8 @@
         { "field": "payload BLAKE3", "role": "external-payload-integrity" },
         { "field": "database hash algorithm", "role": "embedded derived-record validation profile" }
       ],
-      "fixture_ids_32": ["aiwo-blake3-256-runtime-batch-valid", "aiwo-blake3-256-producer-task-valid"],
-      "fixture_ids_64": ["aiwo-sha512-runtime-batch-valid", "aiwo-sha512-producer-task-valid"]
+      "fixture_ids_32": ["aiwo-blake3-256-runtime-batch-valid", "aiwo-blake3-256-runtime-batch-v2-valid", "aiwo-blake3-256-producer-task-valid"],
+      "fixture_ids_64": ["aiwo-sha512-runtime-batch-valid", "aiwo-sha512-runtime-batch-v2-valid", "aiwo-sha512-producer-task-valid"]
     },
     {
       "id": "system-control-v1",
@@ -3702,7 +3703,7 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 24,
-    "fixture_count": 448,
+    "fixture_count": 450,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
     "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, and P6-2d-c3c external index-runtime workspace extensions registered before their first writers"

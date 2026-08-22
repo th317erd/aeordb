@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p6-2d-c3c-index-runtime-workspace",
+  "stage": "p6-3b0-airb-v2",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "175716fff9806da1c70468cececf802d84379e43449ca468b6929120b16bb5c2",
-  "fixture_manifest_sha256": "204b7f27b13fd9bcf24b73cfa2e2a1a706b1d22dab8741b8a6c9a4f3287625f1",
+  "source_sha256": "8db1547c142fbbb94a7c13bb4396900918db3dbde3c6a4cf8eb4df2815c19720",
+  "fixture_manifest_sha256": "f143510f9ad61732460633cfb9a48231dccfff3ec76c214d1f50f965f33b7609",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 24,
-    "fixtures": 448,
+    "fixtures": 450,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,

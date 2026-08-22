@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p6-2d-c3c-index-runtime-workspace",
+  "stage": "p6-3b-airb-v2-membership-transitions",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p6-2d-c3c-index-runtime-workspace-v1",
+    "revision": "p6-3b-airb-v2-membership-transitions",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 448,
+  "fixture_count": 450,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -1693,6 +1693,21 @@
       "relation": "listed-by:index-runtime-workspace-manifest-v1"
     },
     {
+      "id": "aiwo-blake3-256-runtime-batch-v2-valid",
+      "format_id": "index-runtime-workspace-object-v1",
+      "family": "IndexRuntimeWorkspaceObjectV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "index-runtime-workspace-object-v1/aiwo-blake3-256-runtime-batch-v2-valid.bin",
+      "annotated_hex": "index-runtime-workspace-object-v1/aiwo-blake3-256-runtime-batch-v2-valid.hex",
+      "byte_length": 788,
+      "sha256": "27f6f13dd6b79008e77f7b0fb51bd4966fa02c792771b3510e9c8f10da236a1a",
+      "blake3": "bc2c234bc6f5ed6114410cc0e27f0c8a4c9ebb1e075d65f31a474cfea7959637",
+      "canonical_key": null,
+      "expected": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      "relation": "successor-payload:index-runtime-workspace-object-v1"
+    },
+    {
       "id": "aiwo-blake3-256-producer-task-valid",
       "format_id": "index-runtime-workspace-object-v1",
       "family": "IndexRuntimeWorkspaceObjectV1",
@@ -1736,6 +1751,21 @@
       "canonical_key": null,
       "expected": "index-workspace:object:runtime-batch:sequence=9:records=2:publications=40..41",
       "relation": "listed-by:index-runtime-workspace-manifest-v1"
+    },
+    {
+      "id": "aiwo-sha512-runtime-batch-v2-valid",
+      "format_id": "index-runtime-workspace-object-v1",
+      "family": "IndexRuntimeWorkspaceObjectV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "index-runtime-workspace-object-v1/aiwo-sha512-runtime-batch-v2-valid.bin",
+      "annotated_hex": "index-runtime-workspace-object-v1/aiwo-sha512-runtime-batch-v2-valid.hex",
+      "byte_length": 1076,
+      "sha256": "fda8179f252ea9121c60fc353fb73a5de9b150757edeb8e61528a8f7de5dd178",
+      "blake3": "25d17a80e53f9b9fef4760d4d9a34041cfd21b40b37e9f751f3b59cc3e7151e1",
+      "canonical_key": null,
+      "expected": "index-workspace:object:runtime-batch:sequence=11:records=5:publications=40..41",
+      "relation": "successor-payload:index-runtime-workspace-object-v1"
     },
     {
       "id": "aiwo-sha512-producer-task-valid",
