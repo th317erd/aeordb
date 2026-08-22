@@ -718,6 +718,10 @@ name = "v4_active_pointer_spec"
 path = "spec/engine/v4_active_pointer_spec.rs"
 
 [[test]]
+name = "v4_index_generation_publication_spec"
+path = "spec/engine/v4_index_generation_publication_spec.rs"
+
+[[test]]
 name = "v4_root_migration_spec"
 path = "spec/engine/v4_root_migration_spec.rs"
 

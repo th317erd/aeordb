@@ -340,15 +340,49 @@ pub enum ActivePointerSlotObservationV1<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivePointerClosureSelectionV1<'a> {
-  pub selected: Option<&'a ActivePointerV1<'a>>,
-  pub repair_required: bool,
+  selected: Option<&'a ActivePointerV1<'a>>,
+  repair_required: bool,
+}
+
+impl<'a> ActivePointerClosureSelectionV1<'a> {
+  pub fn selected(self) -> Option<&'a ActivePointerV1<'a>> {
+    self.selected
+  }
+
+  pub fn repair_required(self) -> bool {
+    self.repair_required
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivePointerRewritePlanV1<'a> {
-  pub selection: ActivePointerClosureSelectionV1<'a>,
-  pub write_slot: u8,
-  pub next_sequence: u64,
+  expected_kind: ActivePointerKindV1,
+  expected_owner_id: &'a [u8],
+  selection: ActivePointerClosureSelectionV1<'a>,
+  write_slot: u8,
+  next_sequence: u64,
+}
+
+impl<'a> ActivePointerRewritePlanV1<'a> {
+  pub fn expected_kind(self) -> ActivePointerKindV1 {
+    self.expected_kind
+  }
+
+  pub fn expected_owner_id(self) -> &'a [u8] {
+    self.expected_owner_id
+  }
+
+  pub fn selection(self) -> ActivePointerClosureSelectionV1<'a> {
+    self.selection
+  }
+
+  pub fn write_slot(self) -> u8 {
+    self.write_slot
+  }
+
+  pub fn next_sequence(self) -> u64 {
+    self.next_sequence
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,7 +508,7 @@ pub fn select_active_pointer<'a>(left: &'a ActivePointerV1<'a>, right: &'a Activ
     ActivePointerSlotObservationV1::Structural { pointer: left, closure_valid: true },
     ActivePointerSlotObservationV1::Structural { pointer: right, closure_valid: true },
   )?
-  .selected
+  .selected()
   .ok_or_else(|| closure_error("structurally valid active-pointer pair has no closure-valid member"))
 }
 
@@ -491,7 +525,7 @@ pub fn select_closure_valid_active_pointer<'a>(
 
 pub fn plan_active_pointer_rewrite<'a>(
   expected_kind: ActivePointerKindV1,
-  expected_owner_id: &[u8],
+  expected_owner_id: &'a [u8],
   slot_a: ActivePointerSlotObservationV1<'a>,
   slot_b: ActivePointerSlotObservationV1<'a>,
 ) -> FormatResult<ActivePointerRewritePlanV1<'a>> {
@@ -514,7 +548,7 @@ pub fn plan_active_pointer_rewrite<'a>(
     (Some(left), Some(right)) if left.sequence < right.sequence => 0,
     (Some(_), Some(_)) => 1,
   };
-  Ok(ActivePointerRewritePlanV1 { selection, write_slot, next_sequence })
+  Ok(ActivePointerRewritePlanV1 { expected_kind, expected_owner_id, selection, write_slot, next_sequence })
 }
 
 #[derive(Debug, Clone, Copy)]
