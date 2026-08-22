@@ -21,6 +21,7 @@ use aeordb::engine::v4::index_runtime_workspace_store::{
   IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceReopenOptionsV1,
   IndexRuntimeWorkspaceSelectedHeadV1, ReopenedIndexRuntimeWorkspaceV1,
 };
+use aeordb::engine::v4::index_runtime_workspace_rotation::{IndexRuntimeImmutableCoverageProofV1, IndexRuntimeWorkspaceRotationErrorV1};
 use tempfile::{TempDir, tempdir};
 use tokio_util::sync::CancellationToken;
 
@@ -764,6 +765,81 @@ fn producer_tasks_share_the_cumulative_workspace_and_reopen_body_free() {
   assert_eq!(reopened.manifest_sequence(), 2);
   assert_eq!(reopened.runtime_batch_count(), 1);
   assert_eq!(reopened.producer_task_count(), 1);
+}
+
+#[test]
+fn selected_workspace_rotation_inventory_uses_validated_files_and_exact_pending_tasks() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, batch) = batch(&memory);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  workspace.append_runtime_batch([0x55; 16], 100, &batch).unwrap();
+
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"rotation-semantic"]);
+  workspace.append_producer_task([0x71; 16], 101, &producer_task([0x61; 16], 43, &root, &semantic)).unwrap();
+  workspace.append_producer_task([0x72; 16], 102, &producer_task([0x81; 16], 50, &root, &semantic)).unwrap();
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x91; 16],
+    covered_through_publication_sequence: 43,
+  };
+  let reserved_before = memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes;
+
+  let summary = workspace.plan_rotation(7, &root, coverage, &[[0x81; 16]]).unwrap();
+  assert_eq!(summary.observed_objects, 3);
+  assert_eq!(summary.discarded_objects, 2);
+  assert_eq!(summary.retained_runtime_batches, 0);
+  assert_eq!(summary.retained_pending_tasks, 1);
+  assert_eq!(summary.retained_objects(), 1);
+
+  let error = workspace.plan_rotation(7, &root, coverage, &[]).unwrap_err();
+  assert!(matches!(
+    error,
+    aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Rotation(
+      IndexRuntimeWorkspaceRotationErrorV1::UnprovenCompletedTask { operation_id }
+    ) if operation_id == [0x81; 16]
+  ));
+  let owner = memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, reserved_before);
+}
+
+#[test]
+fn selected_workspace_rotation_rejects_unselected_manifest_artifacts() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, batch) = batch(&memory);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  let head = workspace.append_runtime_batch([0x55; 16], 100, &batch).unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x91; 16],
+    covered_through_publication_sequence: 43,
+  };
+  let selected_manifest = fs::read(manifest_path(head.workspace_path(), 1)).unwrap();
+  fs::write(manifest_path(head.workspace_path(), 2), selected_manifest).unwrap();
+
+  let error = workspace.plan_rotation(7, &root, coverage, &[]).unwrap_err();
+  assert!(matches!(
+    error,
+    aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::State(ref context)
+      if context.contains("unselected or missing manifest")
+  ));
 }
 
 #[test]

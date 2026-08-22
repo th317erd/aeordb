@@ -1137,6 +1137,10 @@
           - [x] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
           - [x] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
         - [ ] P6-3d: rotate cumulative runtime workspaces only after immutable coverage proves represented batches/tasks, carrying forward exactly pending work.
+          - [x] P6-3d1: inventory one selected cumulative workspace under explicit object/byte/memory bounds and classify represented runtime batches, completed tasks, unresolved batches, and exact pending tasks against selected immutable coverage.
+          - [ ] P6-3d2: build one side-by-side successor workspace that preserves unresolved runtime-batch bytes and exactly the coordinator's pending task identities without retaining completed history.
+          - [ ] P6-3d3: publish rotation through the existing checkpoint selector, decouple global checkpoint sequence from workspace-local manifest sequence, and recover an exact empty rotated workspace without a synthetic task or batch.
+          - [ ] P6-3d4: prove every object/checkpoint/selector crash prefix, exact retry, cancellation, corruption, pressure, both hash widths, old-head retention, and restart replay bounded by pending work rather than historical completions.
           - [ ] Bound restart replay independently of historical completed task count and preserve selected-chain idempotence across rotation crashes.
         - [ ] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.
           - [ ] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.

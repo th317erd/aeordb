@@ -42,6 +42,10 @@ use super::index_runtime_workspace_payload_v2::{
   validate_index_workspace_runtime_mutation_frame_header_v2, validate_index_workspace_runtime_mutation_transition_v2,
   validate_index_workspace_runtime_transition_frame_header_v2,
 };
+use super::index_runtime_workspace_rotation::{
+  IndexRuntimeImmutableCoverageProofV1, IndexRuntimeWorkspaceRotationEntryV1, IndexRuntimeWorkspaceRotationErrorV1,
+  IndexRuntimeWorkspaceRotationPlannerV1, IndexRuntimeWorkspaceRotationSummaryV1,
+};
 use super::private_workspace::{
   PrivateWorkspaceErrorV1, create_private_directory_synced, ensure_capacity, secure_platform_private_regular_file,
   validate_existing_directory, validate_private_directory, validate_private_directory_readonly, validate_private_regular_file,
@@ -95,6 +99,8 @@ pub enum IndexRuntimeWorkspaceStoreErrorV1 {
   Uncertain { primary: String, reopen: String },
   #[error("index runtime recovered producer-task sink failed ({code}): {context}")]
   RecoveredTaskSink { code: &'static str, context: String },
+  #[error("index runtime workspace rotation failed: {0}")]
+  Rotation(#[source] IndexRuntimeWorkspaceRotationErrorV1),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +373,105 @@ impl DurableIndexRuntimeWorkspaceV1 {
 
   pub fn head(&self) -> Option<&IndexRuntimeWorkspaceHeadV1> {
     self.head.as_ref()
+  }
+
+  pub fn plan_rotation(
+    &self,
+    generation: u64,
+    source_namespace_root: &[u8],
+    coverage: IndexRuntimeImmutableCoverageProofV1<'_>,
+    pending_operation_ids: &[[u8; 16]],
+  ) -> Result<IndexRuntimeWorkspaceRotationSummaryV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&self.cancellation)?;
+    let head = self
+      .head
+      .as_ref()
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::State("an empty workspace has no selected history to rotate".to_string()))?;
+    let inventory = self.scan_object_inventory(None)?;
+    if inventory.count != head.cumulative_object_count {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+        "workspace contains an unselected or missing object and cannot be rotated".to_string(),
+      ));
+    }
+    if self.scan_manifest_inventory()? != head.manifest_sequence() {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+        "workspace contains an unselected or missing manifest and cannot be rotated".to_string(),
+      ));
+    }
+    let is_cancelled = || self.cancellation.is_cancelled();
+    let mut planner = IndexRuntimeWorkspaceRotationPlannerV1::new(
+      self.identity.hash_algorithm,
+      self.identity.runtime_id,
+      generation,
+      source_namespace_root,
+      head.cumulative_object_count,
+      coverage,
+      pending_operation_ids,
+      &is_cancelled,
+    )
+    .map_err(map_rotation_error)?;
+    let mut previous_manifest_digest = [0; 32];
+    let mut cumulative_stored_bytes = 0u64;
+    for sequence in 1..=head.manifest_sequence() {
+      check_cancellation(&self.cancellation)?;
+      let observed = read_manifest(&manifest_path(&self.manifests_path, sequence), &self.cancellation)?;
+      let manifest = observed.manifest;
+      validate_manifest_identity(
+        &manifest,
+        self.identity.database_id,
+        self.identity.destination_physical_instance_id,
+        self.identity.workspace_id,
+        self.identity.runtime_id,
+        sequence,
+      )?;
+      if manifest.previous_manifest_digest != previous_manifest_digest || manifest.cumulative_object_count != sequence {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!("manifest {sequence} is discontinuous during rotation inventory")));
+      }
+      let expected =
+        ExpectedObjectV1::manifest_bound(self.identity, manifest.object_kind, manifest.object_id, sequence, manifest.created_at_ms);
+      let object_path = object_path(self.object_directory(manifest.object_kind), manifest.object_id);
+      let mut captured_task = RotationTaskCaptureV1::default();
+      let object = if manifest.object_kind == IndexWorkspaceObjectKindV1::ProducerTask {
+        validate_object_file_with_recovered_task(&object_path, &expected, &self.cancellation, &self.memory, &mut captured_task)?
+      } else {
+        validate_object_file(&object_path, &expected, &self.cancellation, &self.memory)?
+      };
+      if object.digest != manifest.object_digest || object.stored_bytes != manifest.object_stored_bytes {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!(
+          "manifest {sequence} does not close over its rotation-inventory object"
+        )));
+      }
+      cumulative_stored_bytes = cumulative_stored_bytes
+        .checked_add(object.stored_bytes)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation inventory byte total overflow".to_string()))?;
+      if manifest.cumulative_stored_bytes != cumulative_stored_bytes {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(format!(
+          "manifest {sequence} cumulative bytes are discontinuous during rotation inventory"
+        )));
+      }
+      let entry = match manifest.object_kind {
+        IndexWorkspaceObjectKindV1::RuntimeBatch => IndexRuntimeWorkspaceRotationEntryV1::runtime_batch(
+          sequence,
+          manifest.object_id,
+          object.minimum_publication_sequence,
+          object.maximum_publication_sequence,
+        ),
+        IndexWorkspaceObjectKindV1::ProducerTask => {
+          let (operation_id, publication_sequence) = captured_task.task.ok_or_else(|| {
+            IndexRuntimeWorkspaceStoreErrorV1::State("validated producer task was not observed by rotation inventory".to_string())
+          })?;
+          IndexRuntimeWorkspaceRotationEntryV1::producer_task(sequence, manifest.object_id, operation_id, publication_sequence)
+        }
+      };
+      planner.observe(entry).map_err(map_rotation_error)?;
+      previous_manifest_digest = observed.digest;
+    }
+    if previous_manifest_digest != head.selected.manifest_digest || cumulative_stored_bytes != head.durable_bytes() {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+        "rotation inventory does not terminate at the selected workspace head".to_string(),
+      ));
+    }
+    planner.finish().map_err(map_rotation_error)
   }
 
   pub(super) fn retained_heap_capacity(&self) -> Option<usize> {
@@ -845,6 +950,35 @@ impl DurableIndexRuntimeWorkspaceV1 {
     requested_object_id: [u8; 16],
     requested_kind: IndexWorkspaceObjectKindV1,
   ) -> Result<WorkspaceAppendStateV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    let inventory = self.scan_object_inventory(Some((requested_kind, requested_object_id)))?;
+    let count = inventory.count;
+    let requested_present = inventory.requested_present;
+    let selected_count = self.head.as_ref().map_or(0, |head| head.cumulative_object_count);
+    let exact_selected_retry = self.head.as_ref().is_some_and(|head| {
+      head.latest_object_kind == requested_kind && head.latest_object_id == requested_object_id && count == selected_count
+    });
+    let unselected_count = selected_count
+      .checked_add(1)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace selected object count overflow".to_string()))?;
+    let requested_is_selected_head =
+      self.head.as_ref().is_some_and(|head| head.latest_object_kind == requested_kind && head.latest_object_id == requested_object_id);
+    let exact_unselected_retry = requested_present && !requested_is_selected_head && count == unselected_count;
+    let fresh_append = !requested_present && count == selected_count;
+    if exact_selected_retry || fresh_append {
+      return Ok(WorkspaceAppendStateV1::Clean);
+    }
+    if exact_unselected_retry {
+      return Ok(WorkspaceAppendStateV1::Unselected { kind: requested_kind, object_id: requested_object_id });
+    }
+    Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+      "workspace contains an unselected or conflicting object; only its exact retry is admissible".to_string(),
+    ))
+  }
+
+  fn scan_object_inventory(
+    &self,
+    requested: Option<(IndexWorkspaceObjectKindV1, [u8; 16])>,
+  ) -> Result<WorkspaceObjectInventoryV1, IndexRuntimeWorkspaceStoreErrorV1> {
     let mut count = 0u64;
     let mut requested_present = false;
     for (directory, kind) in [
@@ -885,7 +1019,7 @@ impl DurableIndexRuntimeWorkspaceV1 {
         let mut decoded_id_array = [0u8; 16];
         decoded_id_array.copy_from_slice(&decoded_id);
         let decoded_id = decoded_id_array;
-        if kind == requested_kind && decoded_id == requested_object_id {
+        if requested.is_some_and(|(requested_kind, requested_object_id)| kind == requested_kind && decoded_id == requested_object_id) {
           requested_present = true;
         }
         count = count
@@ -901,26 +1035,55 @@ impl DurableIndexRuntimeWorkspaceV1 {
         }
       }
     }
-    let selected_count = self.head.as_ref().map_or(0, |head| head.cumulative_object_count);
-    let exact_selected_retry = self.head.as_ref().is_some_and(|head| {
-      head.latest_object_kind == requested_kind && head.latest_object_id == requested_object_id && count == selected_count
-    });
-    let unselected_count = selected_count
-      .checked_add(1)
-      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace selected object count overflow".to_string()))?;
-    let requested_is_selected_head =
-      self.head.as_ref().is_some_and(|head| head.latest_object_kind == requested_kind && head.latest_object_id == requested_object_id);
-    let exact_unselected_retry = requested_present && !requested_is_selected_head && count == unselected_count;
-    let fresh_append = !requested_present && count == selected_count;
-    if exact_selected_retry || fresh_append {
-      return Ok(WorkspaceAppendStateV1::Clean);
+    Ok(WorkspaceObjectInventoryV1 { count, requested_present })
+  }
+
+  fn scan_manifest_inventory(&self) -> Result<u64, IndexRuntimeWorkspaceStoreErrorV1> {
+    validate_private_directory(&self.manifests_path, "index runtime manifest inventory directory")?;
+    let entries = fs::read_dir(&self.manifests_path)
+      .map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "workspace manifest inventory", source })?;
+    let mut count = 0u64;
+    for entry in entries {
+      let entry =
+        entry.map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "workspace manifest inventory entry", source })?;
+      let file_type = entry
+        .file_type()
+        .map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "workspace manifest inventory type", source })?;
+      if !file_type.is_file() || file_type.is_symlink() {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Path(format!(
+          "workspace manifest inventory contains a non-regular entry: {}",
+          entry.path().display()
+        )));
+      }
+      let name = entry
+        .file_name()
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("workspace manifest name is not UTF-8".to_string()))?;
+      let encoded_sequence = name
+        .strip_suffix(".aiwm")
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path(format!("workspace manifest name is not canonical: {name}")))?;
+      if encoded_sequence.len() != 16 || !encoded_sequence.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Path(format!("workspace manifest name is not canonical lowercase hex: {name}")));
+      }
+      let sequence = u64::from_str_radix(encoded_sequence, 16)
+        .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Path(format!("workspace manifest name is not hexadecimal: {error}")))?;
+      if sequence == 0 {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Path("workspace manifest sequence is zero".to_string()));
+      }
+      count = count
+        .checked_add(1)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace manifest inventory count overflow".to_string()))?;
+      let inventory_cap = self
+        .options
+        .maximum_object_count
+        .checked_add(1)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace manifest inventory cap overflow".to_string()))?;
+      if count > inventory_cap {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Capacity("workspace manifest inventory exceeds its bounded scan cap".to_string()));
+      }
     }
-    if exact_unselected_retry {
-      return Ok(WorkspaceAppendStateV1::Unselected { kind: requested_kind, object_id: requested_object_id });
-    }
-    Err(IndexRuntimeWorkspaceStoreErrorV1::State(
-      "workspace contains an unselected or conflicting object; only its exact retry is admissible".to_string(),
-    ))
+    Ok(count)
   }
 
   fn enforce_append_capacity(&self, object_bytes: u64, object_already_installed: bool) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
@@ -1281,6 +1444,31 @@ struct ValidatedObjectV1 {
   stored_bytes: u64,
   object_sequence: u64,
   created_at_ms: u64,
+  minimum_publication_sequence: u64,
+  maximum_publication_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkspaceObjectInventoryV1 {
+  count: u64,
+  requested_present: bool,
+}
+
+#[derive(Default)]
+struct RotationTaskCaptureV1 {
+  task: Option<([u8; 16], u64)>,
+}
+
+impl IndexRuntimeRecoveredTaskSinkV1 for RotationTaskCaptureV1 {
+  fn admit_recovered_task(&mut self, task: IndexProducerTaskRequestV1<'_>) -> Result<(), IndexRuntimeRecoveredTaskSinkErrorV1> {
+    if self.task.replace((task.operation_id, task.publication_sequence)).is_some() {
+      return Err(IndexRuntimeRecoveredTaskSinkErrorV1::new(
+        "rotation_task_duplicate_callback",
+        "rotation inventory observed one producer payload more than once",
+      ));
+    }
+    Ok(())
+  }
 }
 
 struct RetainedProducerTaskPayloadV1 {
@@ -1507,6 +1695,8 @@ fn write_object_file(
       stored_bytes,
       object_sequence: header_write.object_sequence,
       created_at_ms: header_write.created_at_ms,
+      minimum_publication_sequence: header_write.minimum_publication_sequence,
+      maximum_publication_sequence: header_write.maximum_publication_sequence,
     })
   })();
   match result {
@@ -1632,6 +1822,8 @@ fn validate_object_file_inner(
     stored_bytes: metadata.len(),
     object_sequence: header.object_sequence,
     created_at_ms: header.created_at_ms,
+    minimum_publication_sequence: header.minimum_publication_sequence,
+    maximum_publication_sequence: header.maximum_publication_sequence,
   })
 }
 
@@ -2395,6 +2587,13 @@ fn validate_canonical_native_path(path: &Path, role: &str) -> Result<(), IndexRu
     return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid(format!("{role} is not a canonical absolute UTF-8 path")));
   }
   Ok(())
+}
+
+fn map_rotation_error(error: IndexRuntimeWorkspaceRotationErrorV1) -> IndexRuntimeWorkspaceStoreErrorV1 {
+  match error {
+    IndexRuntimeWorkspaceRotationErrorV1::Canceled => IndexRuntimeWorkspaceStoreErrorV1::Canceled,
+    error => IndexRuntimeWorkspaceStoreErrorV1::Rotation(error),
+  }
 }
 
 fn check_cancellation(cancellation: &CancellationToken) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
