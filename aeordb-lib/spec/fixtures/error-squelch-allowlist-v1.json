@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1520,
+  "maximum_occurrences": 1523,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -10374,9 +10374,39 @@
       "review": "authority-state-failure"
     },
     {
+      "id": "esq-v1-4c2f1f6dedb00d9352da-00",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_workspace_payload_v2.rs",
+      "line": 838,
+      "column": 3,
+      "enclosing_item": "checked_u16",
+      "kind": "error_conversion",
+      "pattern": "u16 :: try_from (value) . map_err (| _ | length_error (format ! (\"{label} exceeds u16\")))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-4f32fa505c9fdc2d9fca-00",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_workspace_payload_v2.rs",
+      "line": 842,
+      "column": 3,
+      "enclosing_item": "checked_u32",
+      "kind": "error_conversion",
+      "pattern": "u32 :: try_from (value) . map_err (| _ | length_error (format ! (\"{label} exceeds u32\")))",
+      "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-8c196f18829c4d8bf3dc-00",
+      "file": "aeordb-lib/src/engine/v4/index_runtime_workspace_payload_v2.rs",
+      "line": 846,
+      "column": 3,
+      "enclosing_item": "usize_from_u64",
+      "kind": "error_conversion",
+      "pattern": "usize :: try_from (value) . map_err (| _ | length_error (format ! (\"{label} exceeds usize\")))",
+      "review": "typed-format-failure"
+    },
+    {
       "id": "esq-v1-e155f2dc63dd33241104-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_workspace_store.rs",
-      "line": 1315,
+      "line": 1367,
       "column": 16,
       "enclosing_item": "validate_directory_entries",
       "kind": "error_conversion",

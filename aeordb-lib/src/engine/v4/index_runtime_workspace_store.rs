@@ -37,7 +37,8 @@ use super::index_runtime_workspace_payload_v2::{
   IndexWorkspaceRuntimeBatchPlanV2, IndexWorkspaceRuntimeBatchWriteV2, RUNTIME_BATCH_HEADER_LENGTH_V2, RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2,
   RUNTIME_MUTATION_FRAME_LENGTH_V2, decode_index_workspace_runtime_batch_stream_header_v2,
   decode_index_workspace_runtime_mutation_frame_v2, decode_index_workspace_runtime_transition_frame_v2,
-  plan_index_workspace_runtime_batch_payload_v2, stream_index_workspace_runtime_batch_payload_v2,
+  plan_frozen_index_workspace_runtime_batch_payload_v2, plan_index_workspace_runtime_batch_payload_v2,
+  stream_frozen_index_workspace_runtime_batch_payload_v2, stream_index_workspace_runtime_batch_payload_v2,
   validate_index_workspace_runtime_mutation_frame_header_v2, validate_index_workspace_runtime_mutation_transition_v2,
   validate_index_workspace_runtime_transition_frame_header_v2,
 };
@@ -520,6 +521,26 @@ impl DurableIndexRuntimeWorkspaceV1 {
     };
     self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
       write_runtime_object_v2(path, expected, batch, payload_plan, cancellation, memory)
+    })
+  }
+
+  pub fn append_frozen_runtime_batch_v2(
+    &mut self,
+    object_id: [u8; 16],
+    created_at_ms: u64,
+    batch: &FrozenIndexBatchV1,
+  ) -> Result<IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    let payload_plan = plan_frozen_index_workspace_runtime_batch_payload_v2(batch, self.identity.hash_algorithm)?;
+    let plan = WorkspaceObjectPlanV1 {
+      kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      payload_length: payload_plan.payload_length(),
+      logical_record_count: payload_plan.logical_record_count(),
+      minimum_publication_sequence: payload_plan.minimum_publication_sequence(),
+      maximum_publication_sequence: payload_plan.maximum_publication_sequence(),
+      payload_digest: payload_plan.payload_digest(),
+    };
+    self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
+      write_frozen_runtime_object_v2(path, expected, batch, payload_plan, cancellation, memory)
     })
   }
 
@@ -1413,6 +1434,21 @@ fn write_runtime_object_v2(
   })
 }
 
+fn write_frozen_runtime_object_v2(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  batch: &FrozenIndexBatchV1,
+  plan: IndexWorkspaceRuntimeBatchPlanV2,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  write_object_file(path, expected, cancellation, memory, |file, crc, payload_digest, object_digest| {
+    stream_frozen_index_workspace_runtime_batch_payload_v2::<IndexRuntimeWorkspaceStoreErrorV1>(batch, plan, |chunk| {
+      write_hashed(file, chunk, cancellation, crc, object_digest, Some(payload_digest))
+    })
+  })
+}
+
 fn write_buffered_object(
   path: &Path,
   expected: &ExpectedObjectV1,
@@ -1614,7 +1650,7 @@ fn validate_runtime_payload_stream(
   }
   let mut batch_header = [0u8; RUNTIME_BATCH_HEADER_LENGTH];
   read_payload_bytes(file, &mut batch_header, cancellation, crc, payload_digest, object_digest)?;
-  match u16::from_le_bytes(batch_header[4..6].try_into().expect("AIRB schema field has a fixed length")) {
+  match u16::from_le_bytes([batch_header[4], batch_header[5]]) {
     1 => validate_runtime_payload_stream_v1(file, object, cancellation, memory, crc, payload_digest, object_digest, &batch_header),
     2 => validate_runtime_payload_stream_v2(file, object, cancellation, memory, crc, payload_digest, object_digest, &batch_header),
     _ => Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime batch payload schema version is unknown".to_string())),
@@ -1747,9 +1783,9 @@ fn validate_runtime_payload_stream_v2(
     if consumed.checked_add(frame_header.frame_length).is_none_or(|end| end > object.payload_length) {
       return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 mutation frame is outside the declared payload".to_string()));
     }
-    let reservation_bytes = u64::try_from(frame_header.frame_length)
-      .ok()
-      .and_then(|bytes| u64::try_from(frame_header.order_length).ok().and_then(|order| bytes.checked_add(order)))
+    const { assert!(usize::BITS <= u64::BITS) };
+    let reservation_bytes = (frame_header.frame_length as u64)
+      .checked_add(frame_header.order_length as u64)
       .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 mutation reservation overflowed".to_string()))?;
     let frame_reservation = memory
       .reserve(MemoryOwner::IndexDirtyBuffers, reservation_bytes, AdmissionClass::Maintenance)
@@ -2076,10 +2112,11 @@ fn read_runtime_v2_transition_at(
   frame_length: usize,
   frame: &mut [u8],
 ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  const { assert!(usize::BITS <= u64::BITS) };
   let relative = index
     .checked_mul(frame_length)
-    .and_then(|offset| u64::try_from(offset).ok())
-    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition lookup offset overflowed".to_string()))?;
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition lookup offset overflowed".to_string()))?
+    as u64;
   let offset = transitions_offset
     .checked_add(relative)
     .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition lookup offset overflowed".to_string()))?;

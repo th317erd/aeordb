@@ -283,7 +283,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     if self.cancellation.is_cancelled() {
       return Err(cancelled("runtime_batch_cancelled", "runtime batch publication was canceled before workspace append"));
     }
-    if batch.coordinator_id() != self.workspace.identity().runtime_id() || batch.records().is_empty() {
+    if batch.coordinator_id() != self.workspace.identity().runtime_id() || (batch.records().is_empty() && batch.transitions().is_empty()) {
       return Err(corrupt("runtime_batch_identity", "frozen batch does not belong to this workspace runtime"));
     }
     let identity = WorkspacePublicationIdentityV1::RuntimeBatch { batch_id: batch.batch_id() };
@@ -294,7 +294,12 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
 
     let prepared = self.prepare_publication(identity, runtime_batch_object_id(batch))?;
     let object_id = prepared.object_id;
-    let head = self.workspace.append_runtime_batch(object_id, prepared.timestamp_ms, batch).map_err(map_workspace_before_selection)?;
+    let head = if batch.transitions().is_empty() {
+      self.workspace.append_runtime_batch(object_id, prepared.timestamp_ms, batch)
+    } else {
+      self.workspace.append_frozen_runtime_batch_v2(object_id, prepared.timestamp_ms, batch)
+    }
+    .map_err(map_workspace_before_selection)?;
     let selected = self.publish_workspace_head(identity, &head)?;
     Ok(runtime_receipt(batch, &selected))
   }

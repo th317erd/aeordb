@@ -2,15 +2,18 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
 use aeordb::engine::v4::hash::digest_parts;
-use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1};
+use aeordb::engine::v4::index_coordinator::{
+  IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMembershipOwnerClassV1, IndexMembershipStateV1,
+  IndexMutationOperationV1, IndexMutationRequestV1,
+};
 use aeordb::engine::v4::index_maintenance_scan::derive_index_maintenance_document_operation_id_v1;
 use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, PostingRecordV1, encode_posting_record};
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorOptionsV1,
   IndexProducerCoordinatorV1, IndexProducerDurableTaskStoreV1, IndexProducerFallbackModeV1, IndexProducerMaintenanceDocumentRequestV1,
-  IndexProducerMaintenanceProgressV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1, IndexProducerOwnerOutcomeV1,
-  IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1,
-  IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerMaintenanceProgressV1, IndexProducerMembershipTransitionV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1,
+  IndexProducerOwnerOutcomeV1, IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
+  IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_record::{
   CanonicalValueRecordV1, ScopeReverseRecordV1, encode_canonical_value_record, encode_scope_reverse_record,
@@ -57,7 +60,12 @@ fn mutation(owner_id: &[u8], ordinal: u64) -> IndexProducerMutationV1 {
   let file_key = hash(&ordinal.to_le_bytes());
   let encoded =
     encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: ordinal, file_key: &file_key }, HASH_ALGORITHM).unwrap();
-  IndexProducerMutationV1 { owner_id: owner_id.to_vec(), role: OrderedIndexRoleV1::ScopeReverse, encoded_record: encoded }
+  IndexProducerMutationV1 {
+    owner_id: owner_id.to_vec(),
+    role: OrderedIndexRoleV1::ScopeReverse,
+    operation: IndexMutationOperationV1::Upsert,
+    encoded_record: encoded,
+  }
 }
 
 fn value_mutation(owner_id: &[u8], ordinal: u64) -> IndexProducerMutationV1 {
@@ -74,7 +82,12 @@ fn value_mutation(owner_id: &[u8], ordinal: u64) -> IndexProducerMutationV1 {
     HASH_ALGORITHM,
   )
   .unwrap();
-  IndexProducerMutationV1 { owner_id: owner_id.to_vec(), role: OrderedIndexRoleV1::Value, encoded_record: encoded }
+  IndexProducerMutationV1 {
+    owner_id: owner_id.to_vec(),
+    role: OrderedIndexRoleV1::Value,
+    operation: IndexMutationOperationV1::Upsert,
+    encoded_record: encoded,
+  }
 }
 
 fn posting_mutation(owner_id: &[u8], ordinal: u64) -> IndexProducerMutationV1 {
@@ -87,7 +100,12 @@ fn posting_mutation(owner_id: &[u8], ordinal: u64) -> IndexProducerMutationV1 {
     posting_key: b"posting",
   })
   .unwrap();
-  IndexProducerMutationV1 { owner_id: owner_id.to_vec(), role: OrderedIndexRoleV1::Posting, encoded_record: encoded }
+  IndexProducerMutationV1 {
+    owner_id: owner_id.to_vec(),
+    role: OrderedIndexRoleV1::Posting,
+    operation: IndexMutationOperationV1::Upsert,
+    encoded_record: encoded,
+  }
 }
 
 fn mutation_coordinator(memory: MemoryCoordinator) -> IndexCoordinatorV1 {
@@ -813,6 +831,37 @@ fn ready_and_frozen_outcomes_feed_the_single_mutation_coordinator() {
 }
 
 #[test]
+fn authoritative_owner_membership_feeds_one_atomic_semantic_group() {
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  let before = hash(b"before");
+  let after = hash(b"after");
+  let semantic = hash(b"semantic");
+  let journal = hash(b"journal");
+  producer
+    .admit(task([0x33; 16], IndexProducerTaskKindV1::MutationWindow, 7, &before, &after, &semantic, Some(&journal), None), 100)
+    .unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  let owner_id = hash(b"scope-owner");
+  let outcome = IndexProducerOwnerOutcomeV1::ready(owner_id.clone(), vec![mutation(&owner_id, 1)]).with_membership(
+    IndexProducerMembershipTransitionV1 {
+      owner_class: IndexMembershipOwnerClassV1::ScopeCatalog,
+      document_ordinal: 1,
+      before: IndexMembershipStateV1 { live: false, unindexable: false },
+      after: IndexMembershipStateV1 { live: true, unindexable: false },
+    },
+  );
+  producer
+    .complete(&lease, IndexProducerReportV1 { outcomes: vec![outcome] }, &mut mutations, 101, false, &mut SpillStore::default())
+    .unwrap();
+  assert_eq!(mutations.snapshot().active_groups, 1);
+  let batch = mutations.begin_flush(102, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(batch.records().len(), 1);
+  assert_eq!(batch.transitions().len(), 1);
+  assert_eq!(batch.transitions()[0].document_ordinal(), 1);
+}
+
+#[test]
 fn mixed_operational_failure_retries_without_losing_successful_index_work() {
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
   let mut mutations = mutation_coordinator(memory(500_000));
@@ -999,8 +1048,12 @@ fn malformed_or_oversized_reports_fail_before_mutating_either_coordinator() {
   assert_eq!(producer.snapshot().leased_tasks, 1);
 
   let id = hash(b"index");
-  let malformed_record =
-    IndexProducerMutationV1 { owner_id: id.clone(), role: OrderedIndexRoleV1::ScopeReverse, encoded_record: b"bad".to_vec() };
+  let malformed_record = IndexProducerMutationV1 {
+    owner_id: id.clone(),
+    role: OrderedIndexRoleV1::ScopeReverse,
+    operation: IndexMutationOperationV1::Upsert,
+    encoded_record: b"bad".to_vec(),
+  };
   let later_malformed =
     IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(id.clone(), vec![mutation(&id, 1), malformed_record])] };
   assert!(matches!(
@@ -1019,6 +1072,7 @@ fn malformed_or_oversized_reports_fail_before_mutating_either_coordinator() {
         evidence_hash: None,
       },
       mutations: vec![mutation(&id, 1)],
+      membership: None,
     }],
   };
   assert!(matches!(
@@ -1090,7 +1144,12 @@ fn outcome_state_classes_are_validated_against_their_frozen_registries() {
   ];
   for (ordinal, disposition) in invalid.into_iter().enumerate() {
     let report = IndexProducerReportV1 {
-      outcomes: vec![IndexProducerOwnerOutcomeV1 { owner_id: owner_id.clone(), disposition, mutations: vec![mutation(&owner_id, 1)] }],
+      outcomes: vec![IndexProducerOwnerOutcomeV1 {
+        owner_id: owner_id.clone(),
+        disposition,
+        mutations: vec![mutation(&owner_id, 1)],
+        membership: None,
+      }],
     };
     assert!(matches!(
       producer.complete(&lease, report, &mut mutations, ordinal as u64 + 2, false, &mut SpillStore::default()),

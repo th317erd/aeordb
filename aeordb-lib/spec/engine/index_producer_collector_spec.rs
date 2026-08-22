@@ -7,6 +7,7 @@ use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
+use aeordb::engine::v4::index_coordinator::{IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1};
 use aeordb::engine::v4::index_page::{OrderedIndexRoleV1, decode_posting_record};
 use aeordb::engine::v4::index_producer_collector::{
   CollectedIndexProducerReportV1, IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentTransitionV1, IndexCollectorDocumentV1,
@@ -16,7 +17,8 @@ use aeordb::engine::v4::index_producer_collector::{
 };
 use aeordb::engine::v4::index_producer_coordinator::{IndexProducerOwnerDispositionV1, IndexProducerOwnerOutcomeV1};
 use aeordb::engine::v4::index_record::{
-  decode_canonical_value_record, decode_document_state_record, decode_scope_document_record, DocumentStateOwnerV1,
+  DocumentStateOwnerV1, decode_canonical_value_record, decode_document_state_record, decode_scope_document_record,
+  decode_scope_reverse_record,
 };
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
@@ -188,6 +190,10 @@ fn metadata_create_emits_exact_scope_value_and_posting_records_without_parser_wo
   assert_eq!(parser.calls.load(Ordering::SeqCst), 0);
   let scope = outcome(&report, &definitions.scope_id);
   assert!(matches!(scope.disposition, IndexProducerOwnerDispositionV1::Ready));
+  let scope_membership = scope.membership.expect("scope membership");
+  assert_eq!(scope_membership.owner_class, IndexMembershipOwnerClassV1::ScopeCatalog);
+  assert_eq!(scope_membership.before, IndexMembershipStateV1 { live: false, unindexable: false });
+  assert_eq!(scope_membership.after, IndexMembershipStateV1 { live: true, unindexable: false });
   assert_eq!(scope.mutations.len(), 2);
   let scope_record = scope.mutations.iter().find(|mutation| mutation.role == OrderedIndexRoleV1::ScopeOrdinal).unwrap();
   let scope_record = decode_scope_document_record(&scope_record.encoded_record, HASH_ALGORITHM).unwrap();
@@ -196,6 +202,7 @@ fn metadata_create_emits_exact_scope_value_and_posting_records_without_parser_wo
   assert_eq!(scope_record.path, "/doc.json");
 
   let value = outcome(&report, &definitions.value_id);
+  assert_eq!(value.membership.unwrap().after, IndexMembershipStateV1 { live: true, unindexable: false });
   assert_eq!(value.mutations.len(), 1);
   let value_record = decode_canonical_value_record(&value.mutations[0].encoded_record, HASH_ALGORITHM).unwrap();
   assert_eq!(value_record.document_ordinal, 7);
@@ -206,6 +213,7 @@ fn metadata_create_emits_exact_scope_value_and_posting_records_without_parser_wo
   );
 
   let field = outcome(&report, &definitions.field_id);
+  assert_eq!(field.membership.unwrap().after, IndexMembershipStateV1 { live: true, unindexable: false });
   assert_eq!(field.mutations.len(), 1);
   let posting = decode_posting_record(&field.mutations[0].encoded_record).unwrap();
   assert!(!posting.tombstone);
@@ -213,6 +221,70 @@ fn metadata_create_emits_exact_scope_value_and_posting_records_without_parser_wo
   assert!(memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes > 0);
   drop(report);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn in_scope_path_move_emits_explicit_old_reverse_removal_and_new_reverse_upsert() {
+  let definitions = definitions("avst-blake3-256-metadata-hash-corrected-valid.bin", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
+  let root = hash(b"root");
+  let before_revision = hash(b"before-revision");
+  let after_revision = hash(b"after-revision");
+  let before_record = file("/old.json", 0x20, 64);
+  let after_record = file("/new.json", 0x21, 65);
+  let parser = Parser::new(ParserBehavior::DependencyUnavailable);
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+
+  let report = collector
+    .collect(
+      scope_bundle(&definitions),
+      IndexCollectorDocumentTransitionV1 {
+        document_ordinal: 9,
+        before: Some(document(&root, &before_revision, &before_record)),
+        after: Some(document(&root, &after_revision, &after_record)),
+      },
+      &parser,
+      None,
+      &|| false,
+    )
+    .unwrap();
+  let scope = outcome(&report, &definitions.scope_id);
+  let reverse = scope.mutations.iter().filter(|mutation| mutation.role == OrderedIndexRoleV1::ScopeReverse).collect::<Vec<_>>();
+  assert_eq!(reverse.len(), 2);
+  let removed = reverse.iter().find(|mutation| mutation.operation == IndexMutationOperationV1::RemoveExisting).unwrap();
+  let inserted = reverse.iter().find(|mutation| mutation.operation == IndexMutationOperationV1::Upsert).unwrap();
+  let removed = decode_scope_reverse_record(&removed.encoded_record, HASH_ALGORITHM).unwrap();
+  let inserted = decode_scope_reverse_record(&inserted.encoded_record, HASH_ALGORITHM).unwrap();
+  assert_eq!(removed.file_key, aeordb::engine::v4::hash::digest_parts(HASH_ALGORITHM, &[b"file:", before_record.path.as_bytes()]));
+  assert_eq!(inserted.file_key, aeordb::engine::v4::hash::digest_parts(HASH_ALGORITHM, &[b"file:", after_record.path.as_bytes()]));
+  assert_eq!(scope.membership.unwrap().before, IndexMembershipStateV1 { live: true, unindexable: false });
+  assert_eq!(scope.membership.unwrap().after, IndexMembershipStateV1 { live: true, unindexable: false });
+}
+
+#[test]
+fn in_scope_departure_removes_the_exact_reverse_key_and_marks_membership_absent() {
+  let definitions = definitions("avst-blake3-256-metadata-hash-corrected-valid.bin", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
+  let root = hash(b"root");
+  let revision = hash(b"before-revision");
+  let before_record = file("/departed.json", 0x20, 64);
+  let parser = Parser::new(ParserBehavior::DependencyUnavailable);
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+
+  let report = collector
+    .collect(
+      scope_bundle(&definitions),
+      IndexCollectorDocumentTransitionV1 { document_ordinal: 9, before: Some(document(&root, &revision, &before_record)), after: None },
+      &parser,
+      None,
+      &|| false,
+    )
+    .unwrap();
+  let scope = outcome(&report, &definitions.scope_id);
+  assert_eq!(scope.membership.unwrap().before, IndexMembershipStateV1 { live: true, unindexable: false });
+  assert_eq!(scope.membership.unwrap().after, IndexMembershipStateV1 { live: false, unindexable: false });
+  let removed = scope.mutations.iter().find(|mutation| mutation.role == OrderedIndexRoleV1::ScopeReverse).expect("scope reverse departure");
+  assert_eq!(removed.operation, IndexMutationOperationV1::RemoveExisting);
+  let removed = decode_scope_reverse_record(&removed.encoded_record, HASH_ALGORITHM).unwrap();
+  assert_eq!(removed.file_key, aeordb::engine::v4::hash::digest_parts(HASH_ALGORITHM, &[b"file:", before_record.path.as_bytes()]));
 }
 
 #[test]

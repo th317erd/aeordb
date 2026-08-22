@@ -1042,6 +1042,10 @@ name = "index_coordinator_spec"
 path = "spec/engine/index_coordinator_spec.rs"
 
 [[test]]
+name = "index_coordinator_group_spec"
+path = "spec/engine/index_coordinator_group_spec.rs"
+
+[[test]]
 name = "index_coordinator_recovery_spec"
 path = "spec/engine/index_coordinator_recovery_spec.rs"
 

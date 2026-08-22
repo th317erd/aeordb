@@ -1458,7 +1458,7 @@ fn shutdown_drain_bypasses_normal_retry_delay_for_the_exact_frozen_batch() {
 #[test]
 fn one_cadence_drain_publishes_every_bounded_batch_before_stopping() {
   let mut bounded = options();
-  bounded.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 262_144, 30_000, 300).unwrap();
+  bounded.mutations = IndexCoordinatorOptionsV1::new(4 * 1_024 * 1_024, 262_144, 30_000, 800).unwrap();
   let owner = Arc::new(IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, memory(), bounded, 1).unwrap());
   owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
   let encoded = encoded_journal("/shutdown-multi-batch.json");

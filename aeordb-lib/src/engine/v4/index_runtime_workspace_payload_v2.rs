@@ -8,7 +8,9 @@ use std::cmp::Ordering;
 
 use crate::engine::HashAlgorithm;
 
-use super::index_coordinator::IndexFlushReasonV1;
+use super::index_coordinator::{
+  FrozenIndexBatchV1, IndexFlushReasonV1, IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1,
+};
 use super::index_page::{OrderedIndexRoleV1, decode_ordered_record, ordered_record_order_key};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
@@ -22,55 +24,9 @@ const RUNTIME_ORDER_KEY_LIMIT_V2: usize = 1_024 * 1_024;
 const RUNTIME_ENCODED_RECORD_LIMIT_V2: usize = 4 * 1_024 * 1_024;
 const RUNTIME_PAYLOAD_LIMIT_V2: usize = 512 * 1_024 * 1_024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum IndexWorkspaceMutationOperationV2 {
-  Upsert = 1,
-  RemoveExisting = 2,
-}
-
-impl IndexWorkspaceMutationOperationV2 {
-  pub const fn id(self) -> u8 {
-    self as u8
-  }
-
-  pub const fn from_id(id: u8) -> Option<Self> {
-    match id {
-      1 => Some(Self::Upsert),
-      2 => Some(Self::RemoveExisting),
-      _ => None,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum IndexWorkspaceOwnerClassV2 {
-  ScopeCatalog = 1,
-  ValueStore = 2,
-  FieldIndex = 3,
-}
-
-impl IndexWorkspaceOwnerClassV2 {
-  pub const fn id(self) -> u8 {
-    self as u8
-  }
-
-  pub const fn from_id(id: u8) -> Option<Self> {
-    match id {
-      1 => Some(Self::ScopeCatalog),
-      2 => Some(Self::ValueStore),
-      3 => Some(Self::FieldIndex),
-      _ => None,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IndexWorkspaceMembershipStateV2 {
-  pub live: bool,
-  pub unindexable: bool,
-}
+pub type IndexWorkspaceMutationOperationV2 = IndexMutationOperationV1;
+pub type IndexWorkspaceOwnerClassV2 = IndexMembershipOwnerClassV1;
+pub type IndexWorkspaceMembershipStateV2 = IndexMembershipStateV1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexWorkspaceRuntimeMutationWriteV2<'a> {
@@ -200,13 +156,48 @@ pub fn encode_index_workspace_runtime_batch_payload_v2(request: &IndexWorkspaceR
 pub(crate) fn plan_index_workspace_runtime_batch_payload_v2(
   request: &IndexWorkspaceRuntimeBatchWriteV2<'_>,
 ) -> FormatResult<IndexWorkspaceRuntimeBatchPlanV2> {
-  validate_batch_identity(request)?;
-  let hash_algorithm = request.hash_algorithm;
-  let logical_count = request
-    .mutations
-    .len()
-    .checked_add(request.transitions.len())
-    .ok_or_else(|| length_error("AIRB v2 logical record count overflowed"))?;
+  plan_runtime_batch_sources_v2(
+    request.hash_algorithm,
+    request.coordinator_id,
+    request.batch_id,
+    request.reason,
+    request.mutations.len(),
+    request.transitions.len(),
+    |index| request.mutations[index],
+    |index| request.transitions[index],
+  )
+}
+
+pub(crate) fn plan_frozen_index_workspace_runtime_batch_payload_v2(
+  batch: &FrozenIndexBatchV1,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<IndexWorkspaceRuntimeBatchPlanV2> {
+  plan_runtime_batch_sources_v2(
+    hash_algorithm,
+    batch.coordinator_id(),
+    batch.batch_id(),
+    batch.reason(),
+    batch.records().len(),
+    batch.transitions().len(),
+    |index| frozen_mutation(batch, index),
+    |index| frozen_transition(batch, index),
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_runtime_batch_sources_v2<'a>(
+  hash_algorithm: HashAlgorithm,
+  coordinator_id: [u8; 16],
+  batch_id: u64,
+  reason: IndexFlushReasonV1,
+  mutation_count: usize,
+  transition_count: usize,
+  mutation_at: impl Fn(usize) -> IndexWorkspaceRuntimeMutationWriteV2<'a>,
+  transition_at: impl Fn(usize) -> IndexWorkspaceMembershipTransitionWriteV2<'a>,
+) -> FormatResult<IndexWorkspaceRuntimeBatchPlanV2> {
+  validate_batch_identity(coordinator_id, batch_id, transition_count)?;
+  let logical_count =
+    mutation_count.checked_add(transition_count).ok_or_else(|| length_error("AIRB v2 logical record count overflowed"))?;
   if logical_count > RUNTIME_LOGICAL_RECORD_LIMIT_V2 {
     return Err(amplification_error("AIRB v2 logical record count exceeds its fixed cap"));
   }
@@ -214,9 +205,10 @@ pub(crate) fn plan_index_workspace_runtime_batch_payload_v2(
   let mut total_length = RUNTIME_BATCH_HEADER_LENGTH_V2;
   let mut minimum_publication_sequence = u64::MAX;
   let mut maximum_publication_sequence = 0u64;
-  for (index, mutation) in request.mutations.iter().enumerate() {
-    validate_mutation(mutation, hash_algorithm)?;
-    if index > 0 && compare_mutations(&request.mutations[index - 1], mutation) != Ordering::Less {
+  for index in 0..mutation_count {
+    let mutation = mutation_at(index);
+    validate_mutation(&mutation, hash_algorithm)?;
+    if index > 0 && compare_mutations(&mutation_at(index - 1), &mutation) != Ordering::Less {
       return Err(ordering_error("AIRB v2 mutations are not in strict canonical order"));
     }
     total_length = total_length
@@ -226,9 +218,10 @@ pub(crate) fn plan_index_workspace_runtime_batch_payload_v2(
     minimum_publication_sequence = minimum_publication_sequence.min(mutation.publication_sequence);
     maximum_publication_sequence = maximum_publication_sequence.max(mutation.publication_sequence);
   }
-  for (index, transition) in request.transitions.iter().enumerate() {
-    validate_transition(transition, hash_algorithm)?;
-    if index > 0 && compare_transitions(&request.transitions[index - 1], transition) != Ordering::Less {
+  for index in 0..transition_count {
+    let transition = transition_at(index);
+    validate_transition(&transition, hash_algorithm)?;
+    if index > 0 && compare_transitions(&transition_at(index - 1), &transition) != Ordering::Less {
       return Err(ordering_error("AIRB v2 membership transitions are not in strict canonical order"));
     }
     total_length = total_length
@@ -238,30 +231,32 @@ pub(crate) fn plan_index_workspace_runtime_batch_payload_v2(
     minimum_publication_sequence = minimum_publication_sequence.min(transition.publication_sequence);
     maximum_publication_sequence = maximum_publication_sequence.max(transition.publication_sequence);
   }
-  validate_mutation_transition_closure_write(request)?;
+  validate_mutation_transition_closure_sources(hash_algorithm, mutation_count, transition_count, &mutation_at, &transition_at)?;
 
   let mut header = [0u8; RUNTIME_BATCH_HEADER_LENGTH_V2];
   header[..4].copy_from_slice(RUNTIME_BATCH_MAGIC);
   put_u16(&mut header, 4, RUNTIME_BATCH_SCHEMA_VERSION_V2);
   put_u16(&mut header, 6, RUNTIME_BATCH_HEADER_LENGTH_V2 as u16);
   put_u64(&mut header, 8, total_length as u64);
-  header[16..32].copy_from_slice(&request.coordinator_id);
-  put_u64(&mut header, 32, request.batch_id);
-  put_u16(&mut header, 40, request.reason.id());
-  put_u32(&mut header, 44, checked_u32(request.mutations.len(), "AIRB v2 mutation count")?);
-  put_u32(&mut header, 48, checked_u32(request.transitions.len(), "AIRB v2 transition count")?);
+  header[16..32].copy_from_slice(&coordinator_id);
+  put_u64(&mut header, 32, batch_id);
+  put_u16(&mut header, 40, reason.id());
+  put_u32(&mut header, 44, checked_u32(mutation_count, "AIRB v2 mutation count")?);
+  put_u32(&mut header, 48, checked_u32(transition_count, "AIRB v2 transition count")?);
 
   let mut digest = blake3::Hasher::new();
   digest.update(&header);
-  for mutation in request.mutations {
-    let frame = mutation_frame_header(mutation)?;
+  for index in 0..mutation_count {
+    let mutation = mutation_at(index);
+    let frame = mutation_frame_header(&mutation)?;
     digest.update(&frame);
     digest.update(mutation.index_id);
     digest.update(mutation.order_key);
     digest.update(mutation.encoded_record);
   }
-  for transition in request.transitions {
-    let frame = transition_frame_header(transition)?;
+  for index in 0..transition_count {
+    let transition = transition_at(index);
+    let frame = transition_frame_header(&transition)?;
     digest.update(&frame);
     digest.update(transition.owner_id);
   }
@@ -278,21 +273,62 @@ pub(crate) fn plan_index_workspace_runtime_batch_payload_v2(
 pub(crate) fn stream_index_workspace_runtime_batch_payload_v2<E>(
   request: &IndexWorkspaceRuntimeBatchWriteV2<'_>,
   plan: IndexWorkspaceRuntimeBatchPlanV2,
+  emit: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E>
+where
+  E: From<FormatError>,
+{
+  stream_runtime_batch_sources_v2(
+    request.mutations.len(),
+    request.transitions.len(),
+    |index| request.mutations[index],
+    |index| request.transitions[index],
+    plan,
+    emit,
+  )
+}
+
+pub(crate) fn stream_frozen_index_workspace_runtime_batch_payload_v2<E>(
+  batch: &FrozenIndexBatchV1,
+  plan: IndexWorkspaceRuntimeBatchPlanV2,
+  emit: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E>
+where
+  E: From<FormatError>,
+{
+  stream_runtime_batch_sources_v2(
+    batch.records().len(),
+    batch.transitions().len(),
+    |index| frozen_mutation(batch, index),
+    |index| frozen_transition(batch, index),
+    plan,
+    emit,
+  )
+}
+
+fn stream_runtime_batch_sources_v2<'a, E>(
+  mutation_count: usize,
+  transition_count: usize,
+  mutation_at: impl Fn(usize) -> IndexWorkspaceRuntimeMutationWriteV2<'a>,
+  transition_at: impl Fn(usize) -> IndexWorkspaceMembershipTransitionWriteV2<'a>,
+  plan: IndexWorkspaceRuntimeBatchPlanV2,
   mut emit: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E>
 where
   E: From<FormatError>,
 {
   emit(&plan.header)?;
-  for mutation in request.mutations {
-    let frame = mutation_frame_header(mutation).map_err(E::from)?;
+  for index in 0..mutation_count {
+    let mutation = mutation_at(index);
+    let frame = mutation_frame_header(&mutation).map_err(E::from)?;
     emit(&frame)?;
     emit(mutation.index_id)?;
     emit(mutation.order_key)?;
     emit(mutation.encoded_record)?;
   }
-  for transition in request.transitions {
-    let frame = transition_frame_header(transition).map_err(E::from)?;
+  for index in 0..transition_count {
+    let transition = transition_at(index);
+    let frame = transition_frame_header(&transition).map_err(E::from)?;
     emit(&frame)?;
     emit(transition.owner_id)?;
   }
@@ -384,8 +420,8 @@ pub(crate) fn decode_index_workspace_runtime_batch_stream_header_v2(
   Ok(IndexWorkspaceRuntimeBatchStreamHeaderV2 { coordinator_id, batch_id, reason, mutation_count, transition_count })
 }
 
-fn validate_batch_identity(request: &IndexWorkspaceRuntimeBatchWriteV2<'_>) -> FormatResult<()> {
-  if request.coordinator_id == [0; 16] || request.batch_id == 0 || request.transitions.is_empty() {
+fn validate_batch_identity(coordinator_id: [u8; 16], batch_id: u64, transition_count: usize) -> FormatResult<()> {
+  if coordinator_id == [0; 16] || batch_id == 0 || transition_count == 0 {
     return Err(closure_error("AIRB v2 identity or transition count is invalid"));
   }
   Ok(())
@@ -443,15 +479,21 @@ fn validate_membership_states(
   Ok(())
 }
 
-fn validate_mutation_transition_closure_write(request: &IndexWorkspaceRuntimeBatchWriteV2<'_>) -> FormatResult<()> {
-  for mutation in request.mutations {
-    let decoded = decode_ordered_record(mutation.encoded_record, request.hash_algorithm, mutation.role)?;
-    let position = request.transitions.partition_point(|transition| {
-      compare_transition_key(transition.owner_id, transition.document_ordinal, mutation.index_id, decoded.document_ordinal).is_lt()
-    });
-    let Some(transition) = request.transitions.get(position) else {
+fn validate_mutation_transition_closure_sources<'a>(
+  hash_algorithm: HashAlgorithm,
+  mutation_count: usize,
+  transition_count: usize,
+  mutation_at: &impl Fn(usize) -> IndexWorkspaceRuntimeMutationWriteV2<'a>,
+  transition_at: &impl Fn(usize) -> IndexWorkspaceMembershipTransitionWriteV2<'a>,
+) -> FormatResult<()> {
+  for mutation_index in 0..mutation_count {
+    let mutation = mutation_at(mutation_index);
+    let decoded = decode_ordered_record(mutation.encoded_record, hash_algorithm, mutation.role)?;
+    let position = partition_transition_sources(transition_count, transition_at, mutation.index_id, decoded.document_ordinal);
+    if position == transition_count {
       return Err(closure_error("AIRB v2 mutation has no owner/document membership transition"));
-    };
+    }
+    let transition = transition_at(position);
     if transition.owner_id != mutation.index_id
       || transition.document_ordinal != decoded.document_ordinal
       || transition.owner_class.id() != mutation.role.owner_class()
@@ -461,6 +503,52 @@ fn validate_mutation_transition_closure_write(request: &IndexWorkspaceRuntimeBat
     }
   }
   Ok(())
+}
+
+fn partition_transition_sources<'a>(
+  transition_count: usize,
+  transition_at: &impl Fn(usize) -> IndexWorkspaceMembershipTransitionWriteV2<'a>,
+  owner_id: &[u8],
+  document_ordinal: u64,
+) -> usize {
+  let mut left = 0usize;
+  let mut right = transition_count;
+  while left < right {
+    let middle = left + (right - left) / 2;
+    let transition = transition_at(middle);
+    if compare_transition_key(transition.owner_id, transition.document_ordinal, owner_id, document_ordinal).is_lt() {
+      left = middle + 1;
+    } else {
+      right = middle;
+    }
+  }
+  left
+}
+
+fn frozen_mutation(batch: &FrozenIndexBatchV1, index: usize) -> IndexWorkspaceRuntimeMutationWriteV2<'_> {
+  let mutation = &batch.records()[index];
+  IndexWorkspaceRuntimeMutationWriteV2 {
+    index_id: mutation.index_id(),
+    role: mutation.role(),
+    operation: mutation.operation(),
+    publication_sequence: mutation.publication_sequence(),
+    operation_id: mutation.operation_id(),
+    order_key: mutation.order_key(),
+    encoded_record: mutation.encoded_record(),
+  }
+}
+
+fn frozen_transition(batch: &FrozenIndexBatchV1, index: usize) -> IndexWorkspaceMembershipTransitionWriteV2<'_> {
+  let transition = &batch.transitions()[index];
+  IndexWorkspaceMembershipTransitionWriteV2 {
+    owner_id: transition.owner_id(),
+    owner_class: transition.owner_class(),
+    publication_sequence: transition.publication_sequence(),
+    operation_id: transition.operation_id(),
+    document_ordinal: transition.document_ordinal(),
+    before: transition.before(),
+    after: transition.after(),
+  }
 }
 
 fn validate_mutation_transition_closure(
@@ -761,28 +849,27 @@ fn usize_from_u64(value: u64, label: &'static str) -> FormatResult<usize> {
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
   let end = offset.checked_add(2).ok_or_else(|| length_error("u16 field offset overflowed"))?;
   let field = bytes.get(offset..end).ok_or_else(|| length_error("u16 field is truncated"))?;
-  Ok(u16::from_le_bytes(field.try_into().map_err(|_| length_error("u16 field length changed"))?))
+  Ok(u16::from_le_bytes([field[0], field[1]]))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
   let end = offset.checked_add(4).ok_or_else(|| length_error("u32 field offset overflowed"))?;
   let field = bytes.get(offset..end).ok_or_else(|| length_error("u32 field is truncated"))?;
-  Ok(u32::from_le_bytes(field.try_into().map_err(|_| length_error("u32 field length changed"))?))
+  Ok(u32::from_le_bytes([field[0], field[1], field[2], field[3]]))
 }
 
 fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
   let end = offset.checked_add(8).ok_or_else(|| length_error("u64 field offset overflowed"))?;
   let field = bytes.get(offset..end).ok_or_else(|| length_error("u64 field is truncated"))?;
-  Ok(u64::from_le_bytes(field.try_into().map_err(|_| length_error("u64 field length changed"))?))
+  Ok(u64::from_le_bytes([field[0], field[1], field[2], field[3], field[4], field[5], field[6], field[7]]))
 }
 
 fn array_at<const N: usize>(bytes: &[u8], offset: usize) -> FormatResult<[u8; N]> {
   let end = offset.checked_add(N).ok_or_else(|| length_error("array field offset overflowed"))?;
-  bytes
-    .get(offset..end)
-    .ok_or_else(|| length_error("array field is truncated"))?
-    .try_into()
-    .map_err(|_| length_error("array field length changed"))
+  let field = bytes.get(offset..end).ok_or_else(|| length_error("array field is truncated"))?;
+  let mut value = [0u8; N];
+  value.copy_from_slice(field);
+  Ok(value)
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

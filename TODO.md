@@ -1105,8 +1105,12 @@
           - [ ] P6-3b0: close the frozen-batch semantic gap before manifest application.
             - [x] Freeze and independently fixture an AIRB v2 payload that preserves explicit upsert/remove mutation operations and exact per-owner/document live/unindexable transitions while retaining AIRB v1 readers.
               - [x] Stream AIRB v2 workspace writes and bounded two-pass reopen validation without materializing the payload or owner-wide transition state.
-            - [ ] Route scope-reverse departure/move through the explicit remove operation; never invent an illegal persisted reverse tombstone.
-            - [ ] Retain completed owner/document groups atomically through coordinator freeze/retry/restore so a publication batch cannot split the records needed by one aggregate transition.
+            - [x] Route scope-reverse departure/move through the explicit remove operation; never invent an illegal persisted reverse tombstone.
+            - [x] Retain completed owner/document groups atomically through coordinator freeze/retry/restore so a publication batch cannot split the records needed by one aggregate transition.
+              - [x] Add one domain-level mutation operation and owner/document transition contract shared by collector, coordinator, workspace persistence, and manifest application.
+              - [x] Admit one complete semantic group transactionally; reject mixed grouped/legacy state and leave no bytes or records behind on malformed, pressure, or publication-bound refusal.
+              - [x] Freeze, retry, complete, and restore only whole groups, composing a failed frozen transition with any newer active successor.
+              - [x] Preserve transition-only groups and strict canonical mutation/transition publication without payload-sized staging.
             - [ ] Prove distinct-document manifest counters and reverse-map removal without owner-wide scans, stale counters, or whole-index buffering.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
           - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.

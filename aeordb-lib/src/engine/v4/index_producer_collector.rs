@@ -13,10 +13,12 @@ use super::contract_generated::stable_reason_v1;
 use super::dependency::DependencyTableV1;
 use super::field_definition::decode_field_index_definition;
 use super::hash::digest_parts;
+use super::index_coordinator::{IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1};
 use super::index_definition_runtime::{CompiledIndexDocumentV1, IndexDefinitionErrorClassV1, IndexDefinitionErrorV1, IndexDefinitionRuntimeV1};
 use super::index_page::{OrderedIndexRoleV1, PostingRecordV1, encode_posting_record};
 use super::index_producer_coordinator::{
-  IndexProducerFallbackModeV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1, IndexProducerOwnerOutcomeV1, IndexProducerReportV1,
+  IndexProducerFallbackModeV1, IndexProducerMembershipTransitionV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1,
+  IndexProducerOwnerOutcomeV1, IndexProducerReportV1,
 };
 use super::index_record::{
   CanonicalValueRecordV1, DocumentStateOwnerV1, DocumentStateRecordV1, ScopeDocumentRecordV1, ScopeReverseRecordV1,
@@ -408,6 +410,12 @@ impl IndexProducerCollectorV1 {
 
     let mut scope_outcome = report.outcome(scope_bundle.expected_scope_id, IndexProducerOwnerDispositionV1::Ready)?;
     self.collect_scope_mutations(report, &mut scope_outcome, transition, before_in_scope, after_in_scope)?;
+    scope_outcome.membership = Some(IndexProducerMembershipTransitionV1 {
+      owner_class: IndexMembershipOwnerClassV1::ScopeCatalog,
+      document_ordinal: transition.document_ordinal,
+      before: IndexMembershipStateV1 { live: before_in_scope, unindexable: false },
+      after: IndexMembershipStateV1 { live: after_in_scope, unindexable: false },
+    });
     report.push_outcome(scope_outcome)?;
 
     for value in &scope_bundle.value_stores {
@@ -523,10 +531,33 @@ impl IndexProducerCollectorV1 {
     )
     .map_err(encoding)?;
     report.push_admitted_mutation(outcome, OrderedIndexRoleV1::ScopeOrdinal, ordinal_admission, ordinal)?;
-    if after_in_scope {
+    let before_file_key = transition
+      .before
+      .filter(|_| before_in_scope)
+      .map(|before| digest_parts(self.hash_algorithm, &[b"file:", before.file_record.path.as_bytes()]));
+    let after_file_key = transition
+      .after
+      .filter(|_| after_in_scope)
+      .map(|after| digest_parts(self.hash_algorithm, &[b"file:", after.file_record.path.as_bytes()]));
+    if let Some(before_file_key) = before_file_key.as_ref().filter(|before| after_file_key.as_ref() != Some(*before)) {
       let reverse_admission = report.admit_mutation(outcome, 12 + self.hash_algorithm.hash_length())?;
       let reverse = encode_scope_reverse_record(
-        &ScopeReverseRecordV1 { document_ordinal: transition.document_ordinal, file_key: &file_key },
+        &ScopeReverseRecordV1 { document_ordinal: transition.document_ordinal, file_key: before_file_key },
+        self.hash_algorithm,
+      )
+      .map_err(encoding)?;
+      report.push_admitted_mutation_with_operation(
+        outcome,
+        OrderedIndexRoleV1::ScopeReverse,
+        IndexMutationOperationV1::RemoveExisting,
+        reverse_admission,
+        reverse,
+      )?;
+    }
+    if let Some(after_file_key) = after_file_key {
+      let reverse_admission = report.admit_mutation(outcome, 12 + self.hash_algorithm.hash_length())?;
+      let reverse = encode_scope_reverse_record(
+        &ScopeReverseRecordV1 { document_ordinal: transition.document_ordinal, file_key: &after_file_key },
         self.hash_algorithm,
       )
       .map_err(encoding)?;
@@ -605,10 +636,23 @@ impl IndexProducerCollectorV1 {
     let value_disposition = source_disposition(&before, &after, self.hash_algorithm, self.options.retry_after_ms);
     let mut value_outcome = report.outcome(value.expected_value_store_id, value_disposition)?;
     self.collect_value_mutations(report, &mut value_outcome, transition, &before, &after)?;
+    value_outcome.membership = source_membership(&before, &after).map(|(before, after)| IndexProducerMembershipTransitionV1 {
+      owner_class: IndexMembershipOwnerClassV1::ValueStore,
+      document_ordinal: transition.document_ordinal,
+      before,
+      after,
+    });
     report.push_outcome(value_outcome)?;
 
     for field in &value.field_indexes {
-      self.collect_field_index(report, value, field, transition, &before, &after, is_cancelled)?;
+      self.collect_field_index(
+        report,
+        value,
+        field,
+        transition,
+        SourceEvaluationTransitionV1 { before: &before, after: &after },
+        is_cancelled,
+      )?;
     }
     Ok(())
   }
@@ -767,10 +811,10 @@ impl IndexProducerCollectorV1 {
     value: &IndexCollectorValueStoreDefinitionV1<'_>,
     field: &IndexCollectorFieldDefinitionV1<'_>,
     transition: IndexCollectorDocumentTransitionV1<'_>,
-    before_source: &SourceEvaluationV1,
-    after_source: &SourceEvaluationV1,
+    source: SourceEvaluationTransitionV1<'_>,
     is_cancelled: &dyn Fn() -> bool,
   ) -> Result<(), IndexProducerCollectorErrorV1> {
+    let SourceEvaluationTransitionV1 { before: before_source, after: after_source } = source;
     if let SourceEvaluationV1::Retryable(reason) = before_source {
       report.push_retryable(field.expected_index_id, *reason, self.options.retry_after_ms)?;
       return Ok(());
@@ -818,6 +862,12 @@ impl IndexProducerCollectorV1 {
     let disposition = field_disposition(&before, &after, self.hash_algorithm);
     let mut outcome = report.outcome(field.expected_index_id, disposition)?;
     self.collect_field_mutations(report, &mut outcome, transition, &before, &after)?;
+    outcome.membership = field_membership(&before, &after).map(|(before, after)| IndexProducerMembershipTransitionV1 {
+      owner_class: IndexMembershipOwnerClassV1::FieldIndex,
+      document_ordinal: transition.document_ordinal,
+      before,
+      after,
+    });
     report.push_outcome(outcome)
   }
 
@@ -975,6 +1025,12 @@ impl IndexProducerCollectorV1 {
   }
 }
 
+#[derive(Clone, Copy)]
+struct SourceEvaluationTransitionV1<'a> {
+  before: &'a SourceEvaluationV1,
+  after: &'a SourceEvaluationV1,
+}
+
 enum SourceEvaluationV1 {
   Missing,
   Values { values: Vec<Vec<u8>>, _reservation: MemoryReservation },
@@ -1049,7 +1105,7 @@ impl ReportBuilderV1 {
       IndexProducerOwnerDispositionV1::Ready => 0,
     };
     self.grow((size_of::<IndexProducerOwnerOutcomeV1>() + owner_id.len() + evidence_bytes) as u64)?;
-    Ok(IndexProducerOwnerOutcomeV1 { owner_id: owner_id.to_vec(), disposition, mutations: Vec::new() })
+    Ok(IndexProducerOwnerOutcomeV1 { owner_id: owner_id.to_vec(), disposition, mutations: Vec::new(), membership: None })
   }
 
   fn push_outcome(&mut self, outcome: IndexProducerOwnerOutcomeV1) -> Result<(), IndexProducerCollectorErrorV1> {
@@ -1109,6 +1165,17 @@ impl ReportBuilderV1 {
     admission: MutationAdmissionV1,
     encoded_record: Vec<u8>,
   ) -> Result<(), IndexProducerCollectorErrorV1> {
+    self.push_admitted_mutation_with_operation(outcome, role, IndexMutationOperationV1::Upsert, admission, encoded_record)
+  }
+
+  fn push_admitted_mutation_with_operation(
+    &mut self,
+    outcome: &mut IndexProducerOwnerOutcomeV1,
+    role: OrderedIndexRoleV1,
+    operation: IndexMutationOperationV1,
+    admission: MutationAdmissionV1,
+    encoded_record: Vec<u8>,
+  ) -> Result<(), IndexProducerCollectorErrorV1> {
     if encoded_record.len() != admission.encoded_length {
       return Err(IndexProducerCollectorErrorV1::Encoding(format!(
         "encoded mutation length {} differs from admitted length {}",
@@ -1117,7 +1184,7 @@ impl ReportBuilderV1 {
       )));
     }
     outcome.mutations.try_reserve(1).map_err(|error| IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()))?;
-    outcome.mutations.push(IndexProducerMutationV1 { owner_id: outcome.owner_id.clone(), role, encoded_record });
+    outcome.mutations.push(IndexProducerMutationV1 { owner_id: outcome.owner_id.clone(), role, operation, encoded_record });
     Ok(())
   }
 
@@ -1234,6 +1301,34 @@ fn source_values(value: &SourceEvaluationV1) -> Option<&[Vec<u8>]> {
   match value {
     SourceEvaluationV1::Values { values, .. } => Some(values),
     _ => None,
+  }
+}
+
+fn source_membership(before: &SourceEvaluationV1, after: &SourceEvaluationV1) -> Option<(IndexMembershipStateV1, IndexMembershipStateV1)> {
+  Some((source_membership_state(before)?, source_membership_state(after)?))
+}
+
+fn source_membership_state(value: &SourceEvaluationV1) -> Option<IndexMembershipStateV1> {
+  match value {
+    SourceEvaluationV1::Missing => Some(IndexMembershipStateV1 { live: false, unindexable: false }),
+    SourceEvaluationV1::Values { values, .. } => Some(IndexMembershipStateV1 { live: !values.is_empty(), unindexable: false }),
+    SourceEvaluationV1::Frozen(_) => Some(IndexMembershipStateV1 { live: false, unindexable: true }),
+    SourceEvaluationV1::Retryable(_) | SourceEvaluationV1::Degraded => None,
+  }
+}
+
+fn field_membership(before: &FieldEvaluationV1, after: &FieldEvaluationV1) -> Option<(IndexMembershipStateV1, IndexMembershipStateV1)> {
+  Some((field_membership_state(before)?, field_membership_state(after)?))
+}
+
+fn field_membership_state(value: &FieldEvaluationV1) -> Option<IndexMembershipStateV1> {
+  match value {
+    FieldEvaluationV1::Missing => Some(IndexMembershipStateV1 { live: false, unindexable: false }),
+    FieldEvaluationV1::Values { compiled, .. } => {
+      Some(IndexMembershipStateV1 { live: compiled.values.iter().any(|value| !value.postings.is_empty()), unindexable: false })
+    }
+    FieldEvaluationV1::Frozen(_) => Some(IndexMembershipStateV1 { live: false, unindexable: true }),
+    FieldEvaluationV1::Degraded => None,
   }
 }
 

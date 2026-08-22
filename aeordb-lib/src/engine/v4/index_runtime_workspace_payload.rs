@@ -131,6 +131,7 @@ pub(super) fn plan_index_workspace_runtime_batch_payload_v1(
   if batch.coordinator_id() == [0; 16]
     || batch.batch_id() == 0
     || batch.records().is_empty()
+    || !batch.transitions().is_empty()
     || batch.records().len() > RUNTIME_RECORD_LIMIT
   {
     return Err(closure_error("runtime batch identity or record count is invalid"));
@@ -140,6 +141,9 @@ pub(super) fn plan_index_workspace_runtime_batch_payload_v1(
   let mut minimum_publication_sequence = u64::MAX;
   let mut maximum_publication_sequence = 0u64;
   for record in batch.records() {
+    if record.operation() != super::index_coordinator::IndexMutationOperationV1::Upsert {
+      return Err(closure_error("AIRB v1 cannot encode explicit mutation operations"));
+    }
     validate_runtime_mutation(record, hash_algorithm)?;
     if previous.is_some_and(|prior| compare_runtime_mutations(prior, record) != Ordering::Less) {
       return Err(ordering_error("runtime batch records are not in strict canonical order"));

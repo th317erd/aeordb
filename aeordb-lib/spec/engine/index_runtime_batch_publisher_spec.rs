@@ -12,7 +12,9 @@ use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, Pr
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_coordinator::{
-  FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1,
+  FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexGroupMutationRequestV1,
+  IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMembershipTransitionRequestV1, IndexMutationGroupRequestV1,
+  IndexMutationOperationV1, IndexMutationRequestV1,
 };
 use aeordb::engine::v4::index_coordinator_recovery::{
   IndexCheckpointRootV1, IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
@@ -36,6 +38,9 @@ use aeordb::engine::v4::index_runtime_batch_publisher::{
 use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeBatchPublisherV1, IndexRuntimePublicationErrorClassV1};
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
+};
+use aeordb::engine::v4::index_runtime_workspace::{
+  IndexWorkspaceRuntimeBatchPayload, decode_index_workspace_runtime_batch_payload, decode_index_workspace_object_v1,
 };
 use aeordb::engine::v4::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1,
@@ -317,6 +322,113 @@ fn cumulative_runtime_batches_publish_truthful_external_heads_selector_last() {
   assert_eq!(external.durable_sequence, 2);
   assert!(external.durable_bytes > 0);
   assert!(Path::new(external.path).is_absolute());
+}
+
+#[test]
+fn transition_only_semantic_batch_publishes_and_reopens_as_airb_v2() {
+  let (mut fixture, legacy) = Fixture::new(SelectorBehavior::Commit);
+  fixture.coordinator.complete_failure(&legacy, 1_011).unwrap();
+  drop(legacy);
+  fixture.coordinator = coordinator(&memory());
+  let owner = digest_parts(ALGORITHM, &[b"transition-only-owner"]);
+  fixture
+    .coordinator
+    .admit_group(
+      IndexMutationGroupRequestV1 {
+        transition: IndexMembershipTransitionRequestV1 {
+          owner_id: &owner,
+          owner_class: IndexMembershipOwnerClassV1::ValueStore,
+          publication_sequence: 41,
+          operation_id: [0x73; 16],
+          document_ordinal: 7,
+          before: IndexMembershipStateV1 { live: false, unindexable: false },
+          after: IndexMembershipStateV1 { live: false, unindexable: true },
+        },
+        mutations: &[],
+      },
+      1_012,
+    )
+    .unwrap();
+  let batch = fixture.coordinator.begin_flush(1_013, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+
+  let receipt = fixture.publisher.publish(&batch).unwrap();
+  assert_eq!(receipt.published_records, 0);
+  let object_path = fs::read_dir(fixture.workspace_path.join("objects/runtime")).unwrap().next().unwrap().unwrap().path();
+  let bytes = fs::read(object_path).unwrap();
+  let object = decode_index_workspace_object_v1(&bytes).unwrap();
+  let IndexWorkspaceRuntimeBatchPayload::V2(payload) = decode_index_workspace_runtime_batch_payload(object.payload, ALGORITHM).unwrap()
+  else {
+    panic!("semantic group was persisted with a lossy AIRB version");
+  };
+  assert!(payload.mutations.is_empty());
+  assert_eq!(payload.transitions.len(), 1);
+  assert_eq!(payload.transitions[0].after, IndexMembershipStateV1 { live: false, unindexable: true });
+}
+
+#[test]
+fn semantic_remove_and_upsert_publish_from_the_frozen_batch_without_descriptor_staging() {
+  let (mut fixture, legacy) = Fixture::new(SelectorBehavior::Commit);
+  drop(legacy);
+  fixture.coordinator = coordinator(&memory());
+  let owner = digest_parts(ALGORITHM, &[b"scope-owner"]);
+  let old_file = digest_parts(ALGORITHM, &[b"old-file"]);
+  let new_file = digest_parts(ALGORITHM, &[b"new-file"]);
+  let old_record = encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: 7, file_key: &old_file }, ALGORITHM).unwrap();
+  let new_record = encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: 7, file_key: &new_file }, ALGORITHM).unwrap();
+  let mutations = [
+    IndexGroupMutationRequestV1 {
+      operation: IndexMutationOperationV1::RemoveExisting,
+      mutation: IndexMutationRequestV1 {
+        index_id: &owner,
+        role: OrderedIndexRoleV1::ScopeReverse,
+        publication_sequence: 41,
+        operation_id: [0x73; 16],
+        encoded_record: &old_record,
+      },
+    },
+    IndexGroupMutationRequestV1 {
+      operation: IndexMutationOperationV1::Upsert,
+      mutation: IndexMutationRequestV1 {
+        index_id: &owner,
+        role: OrderedIndexRoleV1::ScopeReverse,
+        publication_sequence: 41,
+        operation_id: [0x73; 16],
+        encoded_record: &new_record,
+      },
+    },
+  ];
+  fixture
+    .coordinator
+    .admit_group(
+      IndexMutationGroupRequestV1 {
+        transition: IndexMembershipTransitionRequestV1 {
+          owner_id: &owner,
+          owner_class: IndexMembershipOwnerClassV1::ScopeCatalog,
+          publication_sequence: 41,
+          operation_id: [0x73; 16],
+          document_ordinal: 7,
+          before: IndexMembershipStateV1 { live: true, unindexable: false },
+          after: IndexMembershipStateV1 { live: true, unindexable: false },
+        },
+        mutations: &mutations,
+      },
+      1_012,
+    )
+    .unwrap();
+  let batch = fixture.coordinator.begin_flush(1_013, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  fixture.publisher.publish(&batch).unwrap();
+
+  let object_path = fs::read_dir(fixture.workspace_path.join("objects/runtime")).unwrap().next().unwrap().unwrap().path();
+  let bytes = fs::read(object_path).unwrap();
+  let object = decode_index_workspace_object_v1(&bytes).unwrap();
+  let IndexWorkspaceRuntimeBatchPayload::V2(payload) = decode_index_workspace_runtime_batch_payload(object.payload, ALGORITHM).unwrap()
+  else {
+    panic!("grouped semantic mutations were persisted with a lossy AIRB version");
+  };
+  assert_eq!(payload.mutations.len(), 2);
+  assert!(payload.mutations.iter().any(|mutation| mutation.operation == IndexMutationOperationV1::RemoveExisting));
+  assert!(payload.mutations.iter().any(|mutation| mutation.operation == IndexMutationOperationV1::Upsert));
+  assert_eq!(payload.transitions.len(), 1);
 }
 
 #[test]

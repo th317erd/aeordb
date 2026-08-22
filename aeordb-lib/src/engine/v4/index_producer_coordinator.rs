@@ -8,7 +8,10 @@ use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, Memor
 use crate::engine::path_utils::normalize_path;
 
 use super::contract_generated::stable_reason_v1;
-use super::index_coordinator::{IndexCoordinatorErrorV1, IndexCoordinatorV1, IndexMutationRequestV1};
+use super::index_coordinator::{
+  IndexCoordinatorErrorV1, IndexCoordinatorV1, IndexGroupMutationRequestV1, IndexMembershipOwnerClassV1, IndexMembershipStateV1,
+  IndexMembershipTransitionRequestV1, IndexMutationGroupRequestV1, IndexMutationOperationV1, IndexMutationRequestV1,
+};
 use super::index_maintenance_scan::{
   IndexMaintenanceScanLimitsV1, IndexMaintenanceScanRequestV1, IndexProducerServiceModeV1,
   derive_index_maintenance_document_operation_id_v1, index_producer_service_mode_v1, validate_index_maintenance_scan_request_v1,
@@ -190,7 +193,16 @@ pub enum IndexProducerFallbackModeV1 {
 pub struct IndexProducerMutationV1 {
   pub owner_id: Vec<u8>,
   pub role: OrderedIndexRoleV1,
+  pub operation: IndexMutationOperationV1,
   pub encoded_record: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexProducerMembershipTransitionV1 {
+  pub owner_class: IndexMembershipOwnerClassV1,
+  pub document_ordinal: u64,
+  pub before: IndexMembershipStateV1,
+  pub after: IndexMembershipStateV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,11 +218,12 @@ pub struct IndexProducerOwnerOutcomeV1 {
   pub owner_id: Vec<u8>,
   pub disposition: IndexProducerOwnerDispositionV1,
   pub mutations: Vec<IndexProducerMutationV1>,
+  pub membership: Option<IndexProducerMembershipTransitionV1>,
 }
 
 impl IndexProducerOwnerOutcomeV1 {
   pub fn ready(owner_id: Vec<u8>, mutations: Vec<IndexProducerMutationV1>) -> Self {
-    Self { owner_id, disposition: IndexProducerOwnerDispositionV1::Ready, mutations }
+    Self { owner_id, disposition: IndexProducerOwnerDispositionV1::Ready, mutations, membership: None }
   }
 
   pub fn frozen_unindexable(
@@ -220,7 +233,12 @@ impl IndexProducerOwnerOutcomeV1 {
     evidence_hash: Option<Vec<u8>>,
     mutations: Vec<IndexProducerMutationV1>,
   ) -> Self {
-    Self { owner_id, disposition: IndexProducerOwnerDispositionV1::FrozenUnindexable { stage, reason, evidence_hash }, mutations }
+    Self {
+      owner_id,
+      disposition: IndexProducerOwnerDispositionV1::FrozenUnindexable { stage, reason, evidence_hash },
+      mutations,
+      membership: None,
+    }
   }
 
   pub fn retryable(
@@ -234,6 +252,7 @@ impl IndexProducerOwnerOutcomeV1 {
       owner_id,
       disposition: IndexProducerOwnerDispositionV1::Retryable { stable_reason, retry_after_ms, fallback_mode, evidence_hash },
       mutations: Vec::new(),
+      membership: None,
     }
   }
 
@@ -244,7 +263,17 @@ impl IndexProducerOwnerOutcomeV1 {
     evidence_hash: Option<Vec<u8>>,
     mutations: Vec<IndexProducerMutationV1>,
   ) -> Self {
-    Self { owner_id, disposition: IndexProducerOwnerDispositionV1::Degraded { stable_reason, fallback_mode, evidence_hash }, mutations }
+    Self {
+      owner_id,
+      disposition: IndexProducerOwnerDispositionV1::Degraded { stable_reason, fallback_mode, evidence_hash },
+      mutations,
+      membership: None,
+    }
+  }
+
+  pub fn with_membership(mut self, membership: IndexProducerMembershipTransitionV1) -> Self {
+    self.membership = Some(membership);
+    self
   }
 }
 
@@ -999,7 +1028,58 @@ impl IndexProducerCoordinatorV1 {
     now_ms: u64,
   ) -> Result<(), IndexProducerCoordinatorErrorV1> {
     for outcome in &report.outcomes {
+      if let Some(membership) = outcome.membership {
+        const { assert!(usize::BITS <= u64::BITS) };
+        let requested_bytes = outcome
+          .mutations
+          .len()
+          .checked_mul(std::mem::size_of::<IndexGroupMutationRequestV1<'_>>())
+          .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("semantic group request bytes"))? as u64;
+        let _reservation = self
+          .memory
+          .reserve(MemoryOwner::Task, requested_bytes, AdmissionClass::Workload)
+          .map_err(|error| memory_error(requested_bytes, self.options.max_pending_bytes, error))?;
+        let mut mutations = Vec::new();
+        mutations.try_reserve_exact(outcome.mutations.len()).map_err(|source| {
+          IndexProducerCoordinatorErrorV1::Allocation(format!("cannot reserve semantic group request slots: {source}"))
+        })?;
+        for mutation in &outcome.mutations {
+          mutations.push(IndexGroupMutationRequestV1 {
+            operation: mutation.operation,
+            mutation: IndexMutationRequestV1 {
+              index_id: &mutation.owner_id,
+              role: mutation.role,
+              publication_sequence,
+              operation_id,
+              encoded_record: &mutation.encoded_record,
+            },
+          });
+        }
+        mutation_coordinator
+          .admit_group(
+            IndexMutationGroupRequestV1 {
+              transition: IndexMembershipTransitionRequestV1 {
+                owner_id: &outcome.owner_id,
+                owner_class: membership.owner_class,
+                publication_sequence,
+                operation_id,
+                document_ordinal: membership.document_ordinal,
+                before: membership.before,
+                after: membership.after,
+              },
+              mutations: &mutations,
+            },
+            now_ms,
+          )
+          .map_err(|source| IndexProducerCoordinatorErrorV1::MutationAdmission { owner_id: hex::encode(&outcome.owner_id), source })?;
+        continue;
+      }
       for mutation in &outcome.mutations {
+        if mutation.operation != IndexMutationOperationV1::Upsert {
+          return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+            "an explicit remove mutation requires an owner/document membership transition".to_string(),
+          ));
+        }
         mutation_coordinator
           .admit(
             IndexMutationRequestV1 {
@@ -1154,6 +1234,36 @@ impl IndexProducerCoordinatorV1 {
     for outcome in &report.outcomes {
       validate_hash(&outcome.owner_id, hash_width, "outcome owner ID")?;
       validate_disposition(&outcome.disposition, hash_width)?;
+      if let Some(membership) = outcome.membership {
+        if membership.document_ordinal == 0
+          || (membership.before.live && membership.before.unindexable)
+          || (membership.after.live && membership.after.unindexable)
+          || (membership.owner_class == IndexMembershipOwnerClassV1::ScopeCatalog
+            && (membership.before.unindexable || membership.after.unindexable))
+        {
+          return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+            "owner/document membership transition is incomplete or contradictory".to_string(),
+          ));
+        }
+        match outcome.disposition {
+          IndexProducerOwnerDispositionV1::Ready if membership.after.unindexable => {
+            return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+              "ready owner outcome cannot retain an unindexable after-state".to_string(),
+            ));
+          }
+          IndexProducerOwnerDispositionV1::FrozenUnindexable { .. } if !membership.after.unindexable => {
+            return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+              "frozen owner outcome requires an unindexable after-state".to_string(),
+            ));
+          }
+          IndexProducerOwnerDispositionV1::Retryable { .. } | IndexProducerOwnerDispositionV1::Degraded { .. } => {
+            return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+              "non-authoritative owner outcome cannot advance membership".to_string(),
+            ));
+          }
+          _ => {}
+        }
+      }
       if matches!(outcome.disposition, IndexProducerOwnerDispositionV1::Retryable { .. }) && !outcome.mutations.is_empty() {
         return Err(IndexProducerCoordinatorErrorV1::InvalidReport("a retryable owner outcome cannot claim emitted mutations".to_string()));
       }
@@ -1173,8 +1283,24 @@ impl IndexProducerCoordinatorV1 {
             "NVT tiles are publication artifacts rather than ordered producer mutations".to_string(),
           ));
         }
-        decode_ordered_record(&mutation.encoded_record, self.hash_algorithm, mutation.role)
+        let decoded = decode_ordered_record(&mutation.encoded_record, self.hash_algorithm, mutation.role)
           .map_err(|source| IndexProducerCoordinatorErrorV1::InvalidReport(format!("malformed ordered mutation record: {source}")))?;
+        if mutation.operation == IndexMutationOperationV1::RemoveExisting
+          && (mutation.role != OrderedIndexRoleV1::ScopeReverse || decoded.tombstone)
+        {
+          return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+            "remove-existing is legal only for a live scope-reverse record".to_string(),
+          ));
+        }
+        if let Some(membership) = outcome.membership {
+          if decoded.document_ordinal != membership.document_ordinal || mutation.role.owner_class() != membership.owner_class.id() {
+            return Err(IndexProducerCoordinatorErrorV1::InvalidReport(
+              "mutation owner/document identity disagrees with its membership transition".to_string(),
+            ));
+          }
+        } else if mutation.operation != IndexMutationOperationV1::Upsert {
+          return Err(IndexProducerCoordinatorErrorV1::InvalidReport("explicit remove mutation has no membership transition".to_string()));
+        }
         mutation_count =
           mutation_count.checked_add(1).ok_or(IndexProducerCoordinatorErrorV1::InvalidReport("mutation count overflow".to_string()))?;
         report_bytes = report_bytes
