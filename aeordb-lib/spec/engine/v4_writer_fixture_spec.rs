@@ -10,8 +10,8 @@ use aeordb::engine::v4::gc::{
   GcArtifactKindV1, ImmutableGcArtifactWriteV1, checked_immutable_gc_artifact_encoded_length, encode_immutable_gc_artifact,
 };
 use aeordb::engine::v4::index_artifact::{
-  ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, checked_immutable_index_artifact_encoded_length,
-  encode_immutable_index_artifact,
+  ActivePointerWriteV1, ImmutableIndexArtifactKindV1, ImmutableIndexArtifactWriteV1, checked_immutable_index_artifact_encoded_length,
+  decode_active_pointer, encode_active_pointer, encode_immutable_index_artifact,
 };
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::{CompressionAlgorithm, HashAlgorithm};
@@ -101,6 +101,75 @@ fn immutable_index_artifact_writer_matches_every_independent_fixture_and_key() {
 
   assert_eq!(immutable_count, 54);
   assert_eq!(mutable_pointer_count, 12);
+}
+
+#[test]
+fn active_pointer_writer_matches_every_independent_fixture_and_key() {
+  let manifest = fixture_manifest();
+  let mut pointer_count = 0;
+
+  for fixture in manifest["fixtures"].as_array().unwrap() {
+    if fixture["family"].as_str() != Some("IndexArtifactV1") {
+      continue;
+    }
+    let expected = fixture_bytes(fixture);
+    let algorithm = fixture_hash_algorithm(fixture);
+    let Ok(pointer) = decode_active_pointer(&expected, algorithm) else {
+      continue;
+    };
+    let encoded = encode_active_pointer(&ActivePointerWriteV1 {
+      kind: pointer.kind,
+      hash_algorithm: algorithm,
+      generation: pointer.generation,
+      owner_id: pointer.owner_id,
+      slot: pointer.slot,
+      sequence: pointer.sequence,
+      target_manifest_hash: pointer.target_manifest_hash,
+    })
+    .unwrap();
+
+    assert_eq!(encoded.value, expected, "fixture {}", fixture["id"]);
+    assert_eq!(hex::encode(encoded.key), fixture["canonical_key"].as_str().unwrap(), "fixture {}", fixture["id"]);
+    pointer_count += 1;
+  }
+
+  assert_eq!(pointer_count, 12);
+}
+
+#[test]
+fn active_pointer_writer_rejects_every_malformed_field_without_partial_bytes() {
+  let expected = fixture_bytes(
+    fixture_manifest()["fixtures"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|fixture| fixture["id"].as_str() == Some("aidx-blake3-256-field-index-pointer-a"))
+      .unwrap(),
+  );
+  let pointer = decode_active_pointer(&expected, HashAlgorithm::Blake3_256).unwrap();
+  let owner = pointer.owner_id.to_vec();
+  let target = pointer.target_manifest_hash.to_vec();
+  for malformed in [
+    pointer_request(pointer.kind, 0, &owner, 0, 1, &target),
+    pointer_request(pointer.kind, 1, &[], 0, 1, &target),
+    pointer_request(pointer.kind, 1, &[0; 32], 0, 1, &target),
+    pointer_request(pointer.kind, 1, &owner[..31], 0, 1, &target),
+    pointer_request(pointer.kind, 1, &owner, 0, 0, &target),
+    pointer_request(pointer.kind, 1, &owner, 0, 1, &[]),
+    pointer_request(pointer.kind, 1, &owner, 0, 1, &[0; 32]),
+    pointer_request(pointer.kind, 1, &owner, 0, 1, &target[..31]),
+  ] {
+    assert_eq!(encode_active_pointer(&malformed).unwrap_err().class(), MalformedInputClass::IdentityKeyOrGenerationMismatch);
+  }
+  assert_eq!(
+    encode_active_pointer(&pointer_request(pointer.kind, 1, &owner, 2, 1, &target)).unwrap_err().class(),
+    MalformedInputClass::NoncanonicalBooleanOrOptionalPresence
+  );
+
+  let max_sequence = encode_active_pointer(&pointer_request(pointer.kind, u64::MAX, &owner, 1, u64::MAX, &target)).unwrap();
+  let decoded = decode_active_pointer(&max_sequence.value, HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(decoded.generation, u64::MAX);
+  assert_eq!(decoded.sequence, u64::MAX);
 }
 
 #[test]
@@ -517,6 +586,17 @@ fn fixture_hash_algorithm(fixture: &serde_json::Value) -> HashAlgorithm {
     "sha512" => HashAlgorithm::Sha512,
     other => panic!("unexpected fixture hash algorithm {other}"),
   }
+}
+
+fn pointer_request<'a>(
+  kind: aeordb::engine::v4::index_artifact::ActivePointerKindV1,
+  generation: u64,
+  owner_id: &'a [u8],
+  slot: u8,
+  sequence: u64,
+  target_manifest_hash: &'a [u8],
+) -> ActivePointerWriteV1<'a> {
+  ActivePointerWriteV1 { kind, hash_algorithm: HashAlgorithm::Blake3_256, generation, owner_id, slot, sequence, target_manifest_hash }
 }
 
 fn artifact_envelope_fields(value: &[u8]) -> (u16, u64, &[u8], &[u8]) {

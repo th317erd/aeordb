@@ -1095,8 +1095,25 @@
             - [ ] Run focused producer/runtime/namespace gates before affected, architecture, suppression, static, broad, resource, real-world, and native qualification.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
           - [x] Project the lock-free cached runtime state through shared observability, `/system/stats`, root metrics SSE, Prometheus, and bounded public health without exposing degraded context to non-root callers.
-          - [ ] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
+          - [x] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
+        - [ ] P6-3a: implement the frozen A/B active-pointer writer, deterministic rewrite planner, shallow closure selection, and storage-neutral soft/hard publication contract.
+          - [ ] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.
+          - [ ] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
+          - [ ] Freeze dependency-before-manifest-before-pointer ordering and the distinct soft/hard durability receipts before connecting first authority.
+        - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
+          - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
+          - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
+        - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
+          - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
+          - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
+        - [ ] P6-3d: rotate cumulative runtime workspaces only after immutable coverage proves represented batches/tasks, carrying forward exactly pending work.
+          - [ ] Bound restart replay independently of historical completed task count and preserve selected-chain idempotence across rotation crashes.
+        - [ ] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.
+          - [ ] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.
+          - [ ] Keep NVT hints disposable and preserve exact Posting-directory fallback for absent, stale, corrupt, or pressure-refused hints.
+        - [ ] P6-3f: integrate migration-qualified activation, lifecycle/metrics/cache eviction, restart, shutdown, and legacy query compatibility removal at the coordinated cutover.
+          - [ ] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, and no second writer, timer, selector, cache, or query authority survives.
         - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
         - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.

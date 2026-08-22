@@ -9946,7 +9946,7 @@
     {
       "id": "esq-v1-a28f6e7883c522a78290-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 524,
+      "line": 610,
       "column": 6,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -9956,7 +9956,7 @@
     {
       "id": "esq-v1-23c0c5c76c2da038f4d8-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 532,
+      "line": 618,
       "column": 21,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -9966,7 +9966,7 @@
     {
       "id": "esq-v1-0195be9fa48347affbf6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 582,
+      "line": 668,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -9976,7 +9976,7 @@
     {
       "id": "esq-v1-a4e65f0b3cb6397e41a1-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 587,
+      "line": 673,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -9986,7 +9986,7 @@
     {
       "id": "esq-v1-8011b0945b21bcbcdcd6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 592,
+      "line": 678,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",

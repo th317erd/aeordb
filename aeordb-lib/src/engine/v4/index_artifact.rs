@@ -169,6 +169,23 @@ pub enum ActivePointerKindV1 {
   ScopeCatalog,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivePointerWriteV1<'a> {
+  pub kind: ActivePointerKindV1,
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub owner_id: &'a [u8],
+  pub slot: u8,
+  pub sequence: u64,
+  pub target_manifest_hash: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedActivePointerV1 {
+  pub key: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
 impl ActivePointerKindV1 {
   pub fn id(self) -> u16 {
     match self {
@@ -194,6 +211,75 @@ impl ActivePointerKindV1 {
       _ => None,
     }
   }
+}
+
+/// Encode one complete stable A/B active pointer without publishing it.
+pub fn encode_active_pointer(request: &ActivePointerWriteV1<'_>) -> FormatResult<EncodedActivePointerV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.generation == 0
+    || request.sequence == 0
+    || request.owner_id.len() != hash_width
+    || request.owner_id.iter().all(|byte| *byte == 0)
+    || request.target_manifest_hash.len() != hash_width
+    || request.target_manifest_hash.iter().all(|byte| *byte == 0)
+  {
+    return Err(identity_error("active-pointer generation, sequence, owner, or target disagrees with the database hash profile"));
+  }
+  if request.slot > 1 {
+    return Err(error(
+      MalformedInputClass::NoncanonicalBooleanOrOptionalPresence,
+      "index_pointer_slot",
+      format!("slot {} is not A/B", request.slot),
+    ));
+  }
+
+  let identity_length = hash_width.checked_add(1).ok_or_else(|| length_error("active-pointer identity length overflow"))?;
+  let body_length = hash_width.checked_add(8).ok_or_else(|| length_error("active-pointer body length overflow"))?;
+  let total_length = INDEX_ENVELOPE_LENGTH
+    .checked_add(identity_length)
+    .and_then(|length| length.checked_add(body_length))
+    .and_then(|length| length.checked_add(4))
+    .ok_or_else(|| length_error("active-pointer total length overflow"))?;
+  let identity_length_u16 = checked_index_u16(identity_length, "active-pointer identity length exceeds u16")?;
+  let body_length_u32 = checked_index_u32(body_length, "active-pointer body length exceeds u32")?;
+  let total_length_u32 = checked_index_u32(total_length, "active-pointer total length exceeds u32")?;
+
+  let mut value = Vec::new();
+  value.try_reserve_exact(total_length).map_err(|source| {
+    error(MalformedInputClass::AllocationAmplification, "index_pointer_allocation", format!("active-pointer allocation failed: {source}"))
+  })?;
+  value.resize(total_length, 0);
+  value[..4].copy_from_slice(b"AIDX");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&request.kind.id().to_le_bytes());
+  value[8..10].copy_from_slice(&(INDEX_ENVELOPE_LENGTH as u16).to_le_bytes());
+  value[12..16].copy_from_slice(&total_length_u32.to_le_bytes());
+  value[16..18].copy_from_slice(&identity_length_u16.to_le_bytes());
+  value[20..24].copy_from_slice(&body_length_u32.to_le_bytes());
+  value[24..32].copy_from_slice(&request.generation.to_le_bytes());
+
+  let owner_end = INDEX_ENVELOPE_LENGTH + hash_width;
+  let identity_end = owner_end + 1;
+  let sequence_end = identity_end + 8;
+  let body_end = sequence_end + hash_width;
+  value[INDEX_ENVELOPE_LENGTH..owner_end].copy_from_slice(request.owner_id);
+  value[owner_end] = request.slot;
+  value[identity_end..sequence_end].copy_from_slice(&request.sequence.to_le_bytes());
+  value[sequence_end..body_end].copy_from_slice(request.target_manifest_hash);
+  let checksum = crc32fast::hash(&value[..body_end]);
+  value[body_end..].copy_from_slice(&checksum.to_le_bytes());
+
+  let decoded = decode_active_pointer(&value, request.hash_algorithm)?;
+  if decoded.kind != request.kind
+    || decoded.generation != request.generation
+    || decoded.owner_id != request.owner_id
+    || decoded.slot != request.slot
+    || decoded.sequence != request.sequence
+    || decoded.target_manifest_hash != request.target_manifest_hash
+  {
+    return Err(closure_error("encoded active pointer disagrees with its request"));
+  }
+  Ok(EncodedActivePointerV1 { key: decoded.key, value })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
