@@ -10506,7 +10506,7 @@
     {
       "id": "esq-v1-e155f2dc63dd33241104-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_workspace_store.rs",
-      "line": 1555,
+      "line": 1839,
       "column": 16,
       "enclosing_item": "validate_directory_entries",
       "kind": "error_conversion",

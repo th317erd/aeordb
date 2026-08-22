@@ -129,6 +129,14 @@ fn batch_for(
   memory: &MemoryCoordinator,
   algorithm: HashAlgorithm,
 ) -> (IndexCoordinatorV1, aeordb::engine::v4::index_coordinator::FrozenIndexBatchV1) {
+  batch_at(memory, algorithm, 41)
+}
+
+fn batch_at(
+  memory: &MemoryCoordinator,
+  algorithm: HashAlgorithm,
+  first_publication_sequence: u64,
+) -> (IndexCoordinatorV1, aeordb::engine::v4::index_coordinator::FrozenIndexBatchV1) {
   let options = IndexCoordinatorOptionsV1::new(1024 * 1024, 8, 1_000, 1024 * 1024).unwrap();
   let mut coordinator = IndexCoordinatorV1::new([0x77; 16], algorithm, memory.clone(), options, 1_000).unwrap();
   for ordinal in 1..=2u64 {
@@ -141,7 +149,7 @@ fn batch_for(
         IndexMutationRequestV1 {
           index_id: &index_id,
           role: OrderedIndexRoleV1::ScopeReverse,
-          publication_sequence: 40 + ordinal,
+          publication_sequence: first_publication_sequence + ordinal - 1,
           operation_id: [0x50 + ordinal as u8; 16],
           encoded_record: &encoded_record,
         },
@@ -843,6 +851,184 @@ fn selected_workspace_rotation_rejects_unselected_manifest_artifacts() {
 }
 
 #[test]
+fn rotation_successor_streams_only_unresolved_batches_and_exact_pending_tasks() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_represented_coordinator, represented) = batch_at(&memory, ALGORITHM, 10);
+  let (_unresolved_coordinator, unresolved) = batch_at(&memory, ALGORITHM, 50);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  workspace.append_runtime_batch([0x51; 16], 100, &represented).unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"rotation-semantic"]);
+  workspace.append_producer_task([0x52; 16], 101, &producer_task([0x61; 16], 20, &root, &semantic)).unwrap();
+  workspace.append_runtime_batch([0x53; 16], 102, &unresolved).unwrap();
+  workspace.append_producer_task([0x54; 16], 103, &producer_task([0x81; 16], 60, &root, &semantic)).unwrap();
+  let predecessor = workspace.head().unwrap().selected_descriptor();
+  let unresolved_source = fs::read(object_path(workspace.workspace_path(), [0x53; 16])).unwrap();
+  let pending_source = fs::read(producer_object_path(workspace.workspace_path(), [0x54; 16])).unwrap();
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x91; 16],
+    covered_through_publication_sequence: 45,
+  };
+  let reserved_before_rotation = memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes;
+
+  let rotated = workspace.build_rotation_successor(9, 7, &root, coverage, &[[0x81; 16]]).unwrap();
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes, reserved_before_rotation);
+  assert_eq!(rotated.rotation_sequence(), 9);
+  assert_eq!(rotated.predecessor_selected(), &predecessor);
+  assert_ne!(rotated.successor_workspace().workspace_path(), workspace.workspace_path());
+  assert!(rotated
+    .successor_workspace()
+    .workspace_path()
+    .ends_with(format!("{}-r0000000000000009", hex::encode(identity().workspace_id()))));
+  let summary = rotated.summary();
+  assert_eq!(summary.observed_objects, 4);
+  assert_eq!(summary.discarded_objects, 2);
+  assert_eq!(summary.retained_runtime_batches, 1);
+  assert_eq!(summary.retained_pending_tasks, 1);
+  let successor_head = rotated.successor_workspace().head().unwrap();
+  assert_eq!(successor_head.manifest_sequence(), 2);
+  assert_eq!(successor_head.runtime_batch_count(), 1);
+  assert_eq!(successor_head.producer_task_count(), 1);
+
+  let unresolved_target = fs::read(object_path(rotated.successor_workspace().workspace_path(), [0x53; 16])).unwrap();
+  let pending_target = fs::read(producer_object_path(rotated.successor_workspace().workspace_path(), [0x54; 16])).unwrap();
+  assert_eq!(fs::read(object_path(workspace.workspace_path(), [0x53; 16])).unwrap(), unresolved_source);
+  assert_eq!(fs::read(producer_object_path(workspace.workspace_path(), [0x54; 16])).unwrap(), pending_source);
+  let unresolved_source = decode_index_workspace_object_v1(&unresolved_source).unwrap();
+  let unresolved_target = decode_index_workspace_object_v1(&unresolved_target).unwrap();
+  assert_eq!(unresolved_source.payload, unresolved_target.payload);
+  assert_eq!(unresolved_source.object_sequence, 3);
+  assert_eq!(unresolved_target.object_sequence, 1);
+  let pending_source = decode_index_workspace_object_v1(&pending_source).unwrap();
+  let pending_target = decode_index_workspace_object_v1(&pending_target).unwrap();
+  assert_eq!(pending_source.payload, pending_target.payload);
+  assert_eq!(pending_source.object_sequence, 4);
+  assert_eq!(pending_target.object_sequence, 2);
+
+  let selected = successor_head.selected_descriptor();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  drop(rotated);
+  fs::remove_file(manifest_path(&successor_path, 2)).unwrap();
+  let retried = workspace.build_rotation_successor(9, 7, &root, coverage, &[[0x81; 16]]).unwrap();
+  assert_eq!(retried.successor_workspace().head().unwrap().selected_descriptor(), selected);
+  let mut recovered = RecoveredTasks::default();
+  let reopened = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 8 * 1024 * 1024, 16),
+    CancellationToken::new(),
+    &memory,
+    &mut recovered,
+  )
+  .unwrap();
+  assert_eq!(reopened.head().unwrap().manifest_sequence(), 2);
+  assert_eq!(recovered.tasks.len(), 1);
+  assert_eq!(recovered.tasks[0].0, [0x81; 16]);
+  drop(reopened);
+
+  let rotated_workspace = retried.into_successor_workspace();
+  assert!(rotated_workspace.build_rotation_successor(9, 7, &root, coverage, &[[0x81; 16]]).is_err());
+  assert!(rotated_workspace.build_rotation_successor(8, 7, &root, coverage, &[[0x81; 16]]).is_err());
+  let next = rotated_workspace.build_rotation_successor(10, 7, &root, coverage, &[[0x81; 16]]).unwrap();
+  assert!(next.successor_workspace().workspace_path().ends_with(format!("{}-r000000000000000a", hex::encode(identity().workspace_id()))));
+}
+
+#[test]
+fn rotation_successor_represents_an_empty_clean_workspace_without_a_synthetic_object() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, represented) = batch_at(&memory, ALGORITHM, 10);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  workspace.append_runtime_batch([0x51; 16], 100, &represented).unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x91; 16],
+    covered_through_publication_sequence: 20,
+  };
+
+  assert!(workspace.build_rotation_successor(0, 7, &root, coverage, &[]).is_err());
+  let rotated = workspace.build_rotation_successor(10, 7, &root, coverage, &[]).unwrap();
+  assert_eq!(rotated.summary().retained_objects(), 0);
+  assert!(rotated.successor_workspace().head().is_none());
+  assert_eq!(fs::read_dir(rotated.successor_workspace().workspace_path().join("manifests")).unwrap().count(), 0);
+  assert_eq!(fs::read_dir(rotated.successor_workspace().workspace_path().join("objects/runtime")).unwrap().count(), 0);
+  assert_eq!(fs::read_dir(rotated.successor_workspace().workspace_path().join("objects/tasks")).unwrap().count(), 0);
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  drop(rotated);
+
+  let retried = workspace.build_rotation_successor(10, 7, &root, coverage, &[]).unwrap();
+  assert_eq!(retried.successor_workspace().workspace_path(), successor_path);
+  assert!(retried.successor_workspace().head().is_none());
+}
+
+#[test]
+fn rotation_successor_conflicts_and_cancellation_never_mutate_the_predecessor() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, unresolved) = batch_at(&memory, ALGORITHM, 50);
+  let cancellation = CancellationToken::new();
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), cancellation.clone(), &memory)
+      .unwrap();
+  workspace.append_runtime_batch([0x51; 16], 100, &unresolved).unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x91; 16],
+    covered_through_publication_sequence: 45,
+  };
+  let source_path = object_path(workspace.workspace_path(), [0x51; 16]);
+  let source_before = fs::read(&source_path).unwrap();
+  let rotated = workspace.build_rotation_successor(9, 7, &root, coverage, &[]).unwrap();
+  let target_path = object_path(rotated.successor_workspace().workspace_path(), [0x51; 16]);
+  let mut corrupt_target = fs::read(&target_path).unwrap();
+  corrupt_target[200] ^= 0xff;
+  fs::write(&target_path, corrupt_target).unwrap();
+  drop(rotated);
+
+  assert!(workspace.build_rotation_successor(9, 7, &root, coverage, &[]).is_err());
+  assert_eq!(fs::read(&source_path).unwrap(), source_before);
+  cancellation.cancel();
+  assert!(matches!(
+    workspace.build_rotation_successor(10, 7, &root, coverage, &[]),
+    Err(aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Canceled)
+  ));
+  let expected_canceled_path =
+    workspace.workspace_path().parent().unwrap().join(format!("{}-r000000000000000a", hex::encode(identity().workspace_id())));
+  assert!(!expected_canceled_path.exists());
+  assert_eq!(fs::read(source_path).unwrap(), source_before);
+}
+
+#[test]
 fn producer_task_write_obeys_memory_admission_before_installing_files() {
   let directory = tempdir().unwrap();
   let database = database_file(directory.path());
@@ -1394,6 +1580,15 @@ fn production_store_uses_streaming_codecs_and_has_no_live_activation_caller() {
     .map(|(preflight, _)| preflight)
     .unwrap();
   assert!(!preflight.contains("read_dir"), "the successful append preflight must not rescan the workspace inventory");
+  let rotation_copy = store
+    .split_once("fn copy_revalidated_payload")
+    .and_then(|(_, remainder)| remainder.split_once("fn write_object_file"))
+    .map(|(copy, _)| copy)
+    .unwrap();
+  assert!(rotation_copy.contains("[0u8; IO_CHUNK_BYTES]"));
+  assert!(rotation_copy.contains("write_hashed"));
+  assert!(!rotation_copy.contains("fs::read"));
+  assert!(!rotation_copy.contains("read_to_end"));
 
   let storage_engine = include_str!("../../src/engine/storage_engine.rs");
   let runtime_owner = include_str!("../../src/engine/v4/index_runtime_owner.rs");

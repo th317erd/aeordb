@@ -43,8 +43,8 @@ use super::index_runtime_workspace_payload_v2::{
   validate_index_workspace_runtime_transition_frame_header_v2,
 };
 use super::index_runtime_workspace_rotation::{
-  IndexRuntimeImmutableCoverageProofV1, IndexRuntimeWorkspaceRotationEntryV1, IndexRuntimeWorkspaceRotationErrorV1,
-  IndexRuntimeWorkspaceRotationPlannerV1, IndexRuntimeWorkspaceRotationSummaryV1,
+  IndexRuntimeImmutableCoverageProofV1, IndexRuntimeWorkspaceRotationDispositionV1, IndexRuntimeWorkspaceRotationEntryV1,
+  IndexRuntimeWorkspaceRotationErrorV1, IndexRuntimeWorkspaceRotationPlannerV1, IndexRuntimeWorkspaceRotationSummaryV1,
 };
 use super::private_workspace::{
   PrivateWorkspaceErrorV1, create_private_directory_synced, ensure_capacity, secure_platform_private_regular_file,
@@ -345,6 +345,35 @@ pub struct DurableIndexRuntimeWorkspaceV1 {
   append_state: WorkspaceAppendStateV1,
 }
 
+pub struct IndexRuntimeWorkspaceRotationSuccessorV1 {
+  rotation_sequence: u64,
+  predecessor_selected: IndexRuntimeWorkspaceSelectedHeadV1,
+  summary: IndexRuntimeWorkspaceRotationSummaryV1,
+  successor_workspace: DurableIndexRuntimeWorkspaceV1,
+}
+
+impl IndexRuntimeWorkspaceRotationSuccessorV1 {
+  pub const fn rotation_sequence(&self) -> u64 {
+    self.rotation_sequence
+  }
+
+  pub fn predecessor_selected(&self) -> &IndexRuntimeWorkspaceSelectedHeadV1 {
+    &self.predecessor_selected
+  }
+
+  pub const fn summary(&self) -> IndexRuntimeWorkspaceRotationSummaryV1 {
+    self.summary
+  }
+
+  pub fn successor_workspace(&self) -> &DurableIndexRuntimeWorkspaceV1 {
+    &self.successor_workspace
+  }
+
+  pub fn into_successor_workspace(self) -> DurableIndexRuntimeWorkspaceV1 {
+    self.successor_workspace
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceAppendStateV1 {
   Clean,
@@ -360,6 +389,14 @@ struct WorkspaceObjectPlanV1 {
   minimum_publication_sequence: u64,
   maximum_publication_sequence: u64,
   payload_digest: [u8; 32],
+}
+
+struct RotationValidatedSourceV1 {
+  object_path: PathBuf,
+  expected: ExpectedObjectV1,
+  validated: ValidatedObjectV1,
+  plan: WorkspaceObjectPlanV1,
+  manifest: IndexWorkspaceManifestV1,
 }
 
 impl DurableIndexRuntimeWorkspaceV1 {
@@ -381,6 +418,38 @@ impl DurableIndexRuntimeWorkspaceV1 {
     source_namespace_root: &[u8],
     coverage: IndexRuntimeImmutableCoverageProofV1<'_>,
     pending_operation_ids: &[[u8; 16]],
+  ) -> Result<IndexRuntimeWorkspaceRotationSummaryV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    self.walk_rotation_inventory(generation, source_namespace_root, coverage, pending_operation_ids, |_| Ok(()))
+  }
+
+  pub fn build_rotation_successor(
+    &self,
+    rotation_sequence: u64,
+    generation: u64,
+    source_namespace_root: &[u8],
+    coverage: IndexRuntimeImmutableCoverageProofV1<'_>,
+    pending_operation_ids: &[[u8; 16]],
+  ) -> Result<IndexRuntimeWorkspaceRotationSuccessorV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    let predecessor_selected = self
+      .head
+      .as_ref()
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::State("an empty workspace has no selected history to rotate".to_string()))?
+      .selected_descriptor();
+    let mut successor_workspace = self.open_rotation_successor(rotation_sequence)?;
+    let summary = self.walk_rotation_inventory(generation, source_namespace_root, coverage, pending_operation_ids, |source| {
+      successor_workspace.append_rotation_source(source)
+    })?;
+    successor_workspace.validate_rotation_successor_inventory(summary.retained_objects())?;
+    Ok(IndexRuntimeWorkspaceRotationSuccessorV1 { rotation_sequence, predecessor_selected, summary, successor_workspace })
+  }
+
+  fn walk_rotation_inventory(
+    &self,
+    generation: u64,
+    source_namespace_root: &[u8],
+    coverage: IndexRuntimeImmutableCoverageProofV1<'_>,
+    pending_operation_ids: &[[u8; 16]],
+    mut retain: impl FnMut(RotationValidatedSourceV1) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1>,
   ) -> Result<IndexRuntimeWorkspaceRotationSummaryV1, IndexRuntimeWorkspaceStoreErrorV1> {
     check_cancellation(&self.cancellation)?;
     let head = self
@@ -449,6 +518,14 @@ impl DurableIndexRuntimeWorkspaceV1 {
           "manifest {sequence} cumulative bytes are discontinuous during rotation inventory"
         )));
       }
+      let plan = WorkspaceObjectPlanV1 {
+        kind: manifest.object_kind,
+        payload_length: object.payload_length,
+        logical_record_count: object.logical_record_count,
+        minimum_publication_sequence: object.minimum_publication_sequence,
+        maximum_publication_sequence: object.maximum_publication_sequence,
+        payload_digest: object.payload_digest,
+      };
       let entry = match manifest.object_kind {
         IndexWorkspaceObjectKindV1::RuntimeBatch => IndexRuntimeWorkspaceRotationEntryV1::runtime_batch(
           sequence,
@@ -463,7 +540,16 @@ impl DurableIndexRuntimeWorkspaceV1 {
           IndexRuntimeWorkspaceRotationEntryV1::producer_task(sequence, manifest.object_id, operation_id, publication_sequence)
         }
       };
-      planner.observe(entry).map_err(map_rotation_error)?;
+      let disposition = planner.observe(entry).map_err(map_rotation_error)?;
+      if disposition != IndexRuntimeWorkspaceRotationDispositionV1::DiscardRepresented {
+        retain(RotationValidatedSourceV1 {
+          object_path,
+          expected: ExpectedObjectV1::exact(self.identity, manifest.object_id, sequence, manifest.created_at_ms, plan),
+          validated: object,
+          plan,
+          manifest,
+        })?;
+      }
       previous_manifest_digest = observed.digest;
     }
     if previous_manifest_digest != head.selected.manifest_digest || cumulative_stored_bytes != head.durable_bytes() {
@@ -472,6 +558,201 @@ impl DurableIndexRuntimeWorkspaceV1 {
       ));
     }
     planner.finish().map_err(map_rotation_error)
+  }
+
+  fn open_rotation_successor(&self, rotation_sequence: u64) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&self.cancellation)?;
+    let workspace_path = rotation_successor_path(&self.workspace_path, rotation_sequence)?;
+    if workspace_path == self.workspace_path {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid(
+        "rotation successor path must differ from its selected predecessor".to_string(),
+      ));
+    }
+    let parent = workspace_path
+      .parent()
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("rotation successor has no parent directory".to_string()))?;
+    validate_private_directory(parent, "index runtime rotation parent")?;
+    ensure_capacity(parent, 0, self.options.minimum_free_bytes)?;
+    ensure_private_directory_synced(&workspace_path, parent, "index runtime rotation successor")?;
+    validate_directory_entries(&workspace_path, &[MANIFEST_DIRECTORY, "objects"], "index runtime rotation successor")?;
+    let manifests_path = workspace_path.join(MANIFEST_DIRECTORY);
+    let objects_path = workspace_path.join("objects");
+    ensure_private_directory_synced(&manifests_path, &workspace_path, "index runtime rotation manifest directory")?;
+    ensure_private_directory_synced(&objects_path, &workspace_path, "index runtime rotation object directory")?;
+    validate_directory_entries(
+      &objects_path,
+      &[RUNTIME_OBJECT_DIRECTORY, PRODUCER_OBJECT_DIRECTORY],
+      "index runtime rotation object directory",
+    )?;
+    let runtime_objects_path = objects_path.join(RUNTIME_OBJECT_DIRECTORY);
+    let producer_objects_path = objects_path.join(PRODUCER_OBJECT_DIRECTORY);
+    ensure_private_directory_synced(&runtime_objects_path, &objects_path, "index runtime rotation batch directory")?;
+    ensure_private_directory_synced(&producer_objects_path, &objects_path, "index runtime rotation producer-task directory")?;
+    Ok(Self {
+      identity: self.identity,
+      options: self.options.clone(),
+      cancellation: self.cancellation.clone(),
+      memory: self.memory.clone(),
+      workspace_path,
+      manifests_path,
+      runtime_objects_path,
+      producer_objects_path,
+      head: None,
+      append_state: WorkspaceAppendStateV1::ReconcileInventory,
+    })
+  }
+
+  fn append_rotation_source(&mut self, source: RotationValidatedSourceV1) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&self.cancellation)?;
+    let sequence = self.head.as_ref().map_or(Ok(1), |head| {
+      head
+        .manifest_sequence()
+        .checked_add(1)
+        .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor sequence overflow".to_string()))
+    })?;
+    let target_object_path = object_path(self.object_directory(source.manifest.object_kind), source.manifest.object_id);
+    let target_manifest_path = manifest_path(&self.manifests_path, sequence);
+    let object_present = path_present(&target_object_path)?;
+    let manifest_present = path_present(&target_manifest_path)?;
+    let object_bytes = object_stored_bytes(source.plan.payload_length)?;
+    if object_bytes != source.validated.stored_bytes {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+        "rotation source stored bytes disagree with its validated payload plan".to_string(),
+      ));
+    }
+    self.enforce_rotation_append_capacity(object_bytes, object_present, manifest_present)?;
+    let target_expected =
+      ExpectedObjectV1::exact(self.identity, source.manifest.object_id, sequence, source.manifest.created_at_ms, source.plan);
+    let object = write_reframed_object(
+      &target_object_path,
+      &target_expected,
+      &source.object_path,
+      &source.expected,
+      source.validated,
+      &self.cancellation,
+      &self.memory,
+    )?;
+    let previous_digest = self.head.as_ref().map_or([0; 32], |head| head.selected.manifest_digest);
+    let previous_count = self.head.as_ref().map_or(0, |head| head.cumulative_object_count);
+    let previous_bytes = self.head.as_ref().map_or(0, IndexRuntimeWorkspaceHeadV1::durable_bytes);
+    let cumulative_object_count = previous_count
+      .checked_add(1)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor object count overflow".to_string()))?;
+    let cumulative_stored_bytes = previous_bytes
+      .checked_add(object.stored_bytes)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor byte total overflow".to_string()))?;
+    let manifest = encode_index_workspace_manifest_v1(&IndexWorkspaceManifestWriteV1 {
+      database_id: self.identity.database_id,
+      destination_physical_instance_id: self.identity.destination_physical_instance_id,
+      workspace_id: self.identity.workspace_id,
+      runtime_id: self.identity.runtime_id,
+      manifest_sequence: sequence,
+      previous_manifest_digest: previous_digest,
+      object_kind: source.manifest.object_kind,
+      object_id: source.manifest.object_id,
+      object_digest: object.digest,
+      object_stored_bytes: object.stored_bytes,
+      cumulative_object_count,
+      cumulative_stored_bytes,
+      created_at_ms: source.manifest.created_at_ms,
+    })?;
+    write_immutable_bytes(&target_manifest_path, &manifest, &self.cancellation)?;
+    let manifest_digest = index_workspace_manifest_digest_v1(&manifest)?;
+    let observed_manifest = read_manifest(&target_manifest_path, &self.cancellation)?;
+    if observed_manifest.digest != manifest_digest || observed_manifest.manifest != decode_index_workspace_manifest_v1(&manifest)? {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+        "rotation successor manifest readback disagrees with its retained object".to_string(),
+      ));
+    }
+    if let Some(previous) = &self.head {
+      let observed_previous = read_manifest(&manifest_path(&self.manifests_path, previous.manifest_sequence()), &self.cancellation)?;
+      if observed_previous.digest != previous.selected.manifest_digest {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+          "rotation successor predecessor manifest changed during construction".to_string(),
+        ));
+      }
+    }
+    let selected = IndexRuntimeWorkspaceSelectedHeadV1::new(
+      self.workspace_path.clone(),
+      self.identity.workspace_id,
+      manifest_digest,
+      sequence,
+      cumulative_stored_bytes,
+    )?;
+    self.head = Some(IndexRuntimeWorkspaceHeadV1 {
+      selected,
+      identity: self.identity,
+      cumulative_object_count,
+      runtime_batch_count: increment_kind_count(
+        self.head.as_ref().map_or(0, |head| head.runtime_batch_count),
+        source.manifest.object_kind == IndexWorkspaceObjectKindV1::RuntimeBatch,
+        "rotation successor runtime-batch count overflow",
+      )?,
+      producer_task_count: increment_kind_count(
+        self.head.as_ref().map_or(0, |head| head.producer_task_count),
+        source.manifest.object_kind == IndexWorkspaceObjectKindV1::ProducerTask,
+        "rotation successor producer-task count overflow",
+      )?,
+      latest_object_kind: source.manifest.object_kind,
+      latest_object_id: source.manifest.object_id,
+      latest_object_digest: object.digest,
+      latest_object_stored_bytes: object.stored_bytes,
+      created_at_ms: object.created_at_ms,
+    });
+    Ok(())
+  }
+
+  fn enforce_rotation_append_capacity(
+    &self,
+    object_bytes: u64,
+    object_present: bool,
+    manifest_present: bool,
+  ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+    let prior_objects = self.head.as_ref().map_or(0, |head| head.cumulative_object_count);
+    if prior_objects >= self.options.maximum_object_count {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor object-count cap is exhausted".to_string()));
+    }
+    let prior_bytes = self.head.as_ref().map_or(0, IndexRuntimeWorkspaceHeadV1::durable_bytes);
+    let manifest_count = prior_objects
+      .checked_add(1)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor manifest count overflow".to_string()))?;
+    let manifest_bytes = manifest_count
+      .checked_mul(INDEX_WORKSPACE_MANIFEST_LENGTH_V1 as u64)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor manifest bytes overflow".to_string()))?;
+    let projected = prior_bytes
+      .checked_add(object_bytes)
+      .and_then(|bytes| bytes.checked_add(manifest_bytes))
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor projected bytes overflow".to_string()))?;
+    if projected > self.options.maximum_stored_bytes {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!(
+        "rotation successor projected bytes {projected} exceed cap {}",
+        self.options.maximum_stored_bytes
+      )));
+    }
+    let additional_object_bytes = if object_present { 0 } else { object_bytes };
+    let additional_manifest_bytes = if manifest_present { 0 } else { INDEX_WORKSPACE_MANIFEST_LENGTH_V1 as u64 };
+    let additional_bytes = additional_object_bytes
+      .checked_add(additional_manifest_bytes)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation successor allocation bytes overflow".to_string()))?;
+    ensure_capacity(&self.workspace_path, additional_bytes, self.options.minimum_free_bytes)?;
+    Ok(())
+  }
+
+  fn validate_rotation_successor_inventory(&mut self, expected_count: u64) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+    let objects = self.scan_object_inventory(None)?.count;
+    let manifests = self.scan_manifest_inventory()?;
+    if objects != expected_count || manifests != expected_count {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!(
+        "rotation successor inventory is not exact: expected {expected_count}, observed {objects} objects and {manifests} manifests"
+      )));
+    }
+    if self.head.as_ref().map_or(0, |head| head.cumulative_object_count) != expected_count {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+        "rotation successor in-memory head does not match its exact physical inventory".to_string(),
+      ));
+    }
+    self.append_state = WorkspaceAppendStateV1::Clean;
+    Ok(())
   }
 
   pub(super) fn retained_heap_capacity(&self) -> Option<usize> {
@@ -1444,8 +1725,11 @@ struct ValidatedObjectV1 {
   stored_bytes: u64,
   object_sequence: u64,
   created_at_ms: u64,
+  payload_length: usize,
+  logical_record_count: u64,
   minimum_publication_sequence: u64,
   maximum_publication_sequence: u64,
+  payload_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1592,6 +1876,45 @@ fn manifest_path(directory: &Path, sequence: u64) -> PathBuf {
   directory.join(format!("{sequence:016x}.aiwm"))
 }
 
+fn rotation_successor_path(predecessor: &Path, rotation_sequence: u64) -> Result<PathBuf, IndexRuntimeWorkspaceStoreErrorV1> {
+  if rotation_sequence == 0 {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid("rotation sequence must be nonzero".to_string()));
+  }
+  validate_canonical_native_path(predecessor, "rotation predecessor path")?;
+  let parent = predecessor
+    .parent()
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("rotation predecessor has no parent directory".to_string()))?;
+  let predecessor_name = predecessor
+    .file_name()
+    .and_then(|name| name.to_str())
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("rotation predecessor name is not canonical UTF-8".to_string()))?;
+  let rotation_suffix = predecessor_name.len().checked_sub(18).and_then(|split| {
+    let suffix = predecessor_name.get(split..)?;
+    (suffix.starts_with("-r")
+      && suffix[2..].len() == 16
+      && suffix[2..].bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some((split, &suffix[2..]))
+  });
+  let (base_name, predecessor_rotation_sequence) = if let Some((split, encoded_sequence)) = rotation_suffix {
+    let sequence = u64::from_str_radix(encoded_sequence, 16)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Path(format!("rotation predecessor sequence is invalid: {error}")))?;
+    (&predecessor_name[..split], Some(sequence))
+  } else {
+    (predecessor_name, None)
+  };
+  if base_name.is_empty() {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Path("rotation predecessor has no canonical base name".to_string()));
+  }
+  if predecessor_rotation_sequence.is_some_and(|selected| rotation_sequence <= selected) {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid(
+      "rotation successor sequence must advance beyond its selected predecessor".to_string(),
+    ));
+  }
+  let successor = parent.join(format!("{base_name}-r{rotation_sequence:016x}"));
+  validate_canonical_native_path(&successor, "rotation successor path")?;
+  Ok(successor)
+}
+
 fn write_runtime_object(
   path: &Path,
   expected: &ExpectedObjectV1,
@@ -1649,6 +1972,106 @@ fn write_buffered_object(
   })
 }
 
+fn write_reframed_object(
+  target_path: &Path,
+  target_expected: &ExpectedObjectV1,
+  source_path: &Path,
+  source_expected: &ExpectedObjectV1,
+  source_validated: ValidatedObjectV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  write_object_file(
+    target_path,
+    target_expected,
+    cancellation,
+    memory,
+    |target, target_crc, target_payload_digest, target_object_digest| {
+      copy_revalidated_payload(
+        target,
+        target_crc,
+        target_payload_digest,
+        target_object_digest,
+        source_path,
+        source_expected,
+        source_validated,
+        cancellation,
+      )
+    },
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_revalidated_payload(
+  target: &mut fs::File,
+  target_crc: &mut crc32fast::Hasher,
+  target_payload_digest: &mut blake3::Hasher,
+  target_object_digest: &mut blake3::Hasher,
+  source_path: &Path,
+  source_expected: &ExpectedObjectV1,
+  source_validated: ValidatedObjectV1,
+  cancellation: &CancellationToken,
+) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  check_cancellation(cancellation)?;
+  let mut source = open_regular_file_no_follow(source_path).map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Path(error.to_string()))?;
+  validate_private_regular_file(source_path, &source, "rotation source workspace object")?;
+  let source_metadata =
+    source.metadata().map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "rotation source metadata", source })?;
+  if source_metadata.len() != source_validated.stored_bytes {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("rotation source length changed after semantic validation".to_string()));
+  }
+  let actual_length = usize::try_from(source_metadata.len())
+    .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("rotation source length exceeds usize: {error}")))?;
+  let mut header_bytes = [0u8; INDEX_WORKSPACE_OBJECT_HEADER_LENGTH_V1];
+  read_exact_cancellable(&mut source, &mut header_bytes, cancellation, "rotation source object header")?;
+  let header = decode_index_workspace_object_header_v1(&header_bytes, actual_length)?;
+  validate_object_header(&header, source_expected)?;
+  let mut source_crc = crc32fast::Hasher::new();
+  source_crc.update(&header_bytes);
+  let mut source_payload_digest = blake3::Hasher::new();
+  let mut source_object_digest = blake3::Hasher::new();
+  source_object_digest.update(&header_bytes);
+  let mut remaining = header.payload_length;
+  let mut buffer = [0u8; IO_CHUNK_BYTES];
+  while remaining != 0 {
+    check_cancellation(cancellation)?;
+    let chunk_length = remaining.min(buffer.len());
+    let chunk = &mut buffer[..chunk_length];
+    read_exact_cancellable(&mut source, chunk, cancellation, "rotation source object payload")?;
+    source_crc.update(chunk);
+    source_payload_digest.update(chunk);
+    source_object_digest.update(chunk);
+    write_hashed(target, chunk, cancellation, target_crc, target_object_digest, Some(target_payload_digest))?;
+    remaining = remaining
+      .checked_sub(chunk_length)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("rotation source payload count underflow".to_string()))?;
+  }
+  let mut checksum = [0u8; 4];
+  read_exact_cancellable(&mut source, &mut checksum, cancellation, "rotation source object checksum")?;
+  if source_crc.finalize() != u32::from_le_bytes(checksum) {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("rotation source checksum changed after semantic validation".to_string()));
+  }
+  source_object_digest.update(&checksum);
+  check_cancellation(cancellation)?;
+  let mut trailing = [0u8; 1];
+  if source
+    .read(&mut trailing)
+    .map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "rotation source trailing-byte check", source })?
+    != 0
+  {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("rotation source grew after semantic validation".to_string()));
+  }
+  let final_metadata =
+    source.metadata().map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "rotation source final metadata", source })?;
+  if final_metadata.len() != source_validated.stored_bytes
+    || *source_payload_digest.finalize().as_bytes() != source_validated.payload_digest
+    || *source_object_digest.finalize().as_bytes() != source_validated.digest
+  {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("rotation source changed while its payload was copied".to_string()));
+  }
+  Ok(())
+}
+
 fn write_object_file(
   path: &Path,
   expected: &ExpectedObjectV1,
@@ -1695,8 +2118,11 @@ fn write_object_file(
       stored_bytes,
       object_sequence: header_write.object_sequence,
       created_at_ms: header_write.created_at_ms,
+      payload_length: header_write.payload_length,
+      logical_record_count: header_write.logical_record_count,
       minimum_publication_sequence: header_write.minimum_publication_sequence,
       maximum_publication_sequence: header_write.maximum_publication_sequence,
+      payload_digest: header_write.payload_digest,
     })
   })();
   match result {
@@ -1822,8 +2248,11 @@ fn validate_object_file_inner(
     stored_bytes: metadata.len(),
     object_sequence: header.object_sequence,
     created_at_ms: header.created_at_ms,
+    payload_length: header.payload_length,
+    logical_record_count: header.logical_record_count,
     minimum_publication_sequence: header.minimum_publication_sequence,
     maximum_publication_sequence: header.maximum_publication_sequence,
+    payload_digest: header.payload_digest,
   })
 }
 
