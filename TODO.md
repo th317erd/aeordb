@@ -1102,6 +1102,12 @@
           - [x] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
           - [x] Freeze dependency-before-manifest-before-pointer ordering and the distinct soft/hard durability receipts before connecting first authority.
         - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
+          - [ ] P6-3b0: close the frozen-batch semantic gap before manifest application.
+            - [x] Freeze and independently fixture an AIRB v2 payload that preserves explicit upsert/remove mutation operations and exact per-owner/document live/unindexable transitions while retaining AIRB v1 readers.
+              - [x] Stream AIRB v2 workspace writes and bounded two-pass reopen validation without materializing the payload or owner-wide transition state.
+            - [ ] Route scope-reverse departure/move through the explicit remove operation; never invent an illegal persisted reverse tombstone.
+            - [ ] Retain completed owner/document groups atomically through coordinator freeze/retry/restore so a publication batch cannot split the records needed by one aggregate transition.
+            - [ ] Prove distinct-document manifest counters and reverse-map removal without owner-wide scans, stale counters, or whole-index buffering.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
           - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
           - [x] Add one bounded multi-mutation page COW path and make the single-mutation API delegate to it.

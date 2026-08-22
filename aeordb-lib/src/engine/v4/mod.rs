@@ -80,6 +80,7 @@ pub mod index_runtime_installation;
 pub mod index_runtime_owner;
 pub mod index_runtime_workspace;
 mod index_runtime_workspace_payload;
+pub mod index_runtime_workspace_payload_v2;
 pub mod index_runtime_workspace_store;
 pub mod index_scope_ordinal_authority;
 pub mod index_scope_ordinal_checkpoint;

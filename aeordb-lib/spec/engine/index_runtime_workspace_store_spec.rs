@@ -9,7 +9,12 @@ use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
 use aeordb::engine::v4::index_producer_coordinator::{IndexProducerTaskKindV1, IndexProducerTaskRequestV1};
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
 use aeordb::engine::v4::index_runtime_workspace::{
-  decode_index_workspace_manifest_v1, decode_index_workspace_object_v1, decode_index_workspace_producer_task_payload_v1,
+  IndexWorkspaceRuntimeBatchPayload, decode_index_workspace_manifest_v1, decode_index_workspace_object_v1,
+  decode_index_workspace_producer_task_payload_v1, decode_index_workspace_runtime_batch_payload,
+};
+use aeordb::engine::v4::index_runtime_workspace_payload_v2::{
+  IndexWorkspaceMembershipStateV2, IndexWorkspaceMembershipTransitionWriteV2, IndexWorkspaceMutationOperationV2,
+  IndexWorkspaceOwnerClassV2, IndexWorkspaceRuntimeBatchWriteV2, IndexWorkspaceRuntimeMutationWriteV2,
 };
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeRecoveredTaskSinkErrorV1, IndexRuntimeRecoveredTaskSinkV1, IndexRuntimeWorkspaceHeadV1,
@@ -145,6 +150,62 @@ fn batch_for(
   }
   let frozen = coordinator.begin_flush(1_010, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
   (coordinator, frozen)
+}
+
+fn v2_batch(algorithm: HashAlgorithm) -> IndexWorkspaceRuntimeBatchWriteV2<'static> {
+  let width = algorithm.hash_length();
+  let owner = leaked(vec![0x21; width]);
+  let old_key = leaked(vec![0x31; width]);
+  let new_key = leaked(vec![0x32; width]);
+  let old_record =
+    leaked(encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: 3, file_key: old_key }, algorithm).unwrap());
+  let new_record =
+    leaked(encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: 3, file_key: new_key }, algorithm).unwrap());
+  let mutations = leaked_values(vec![
+    IndexWorkspaceRuntimeMutationWriteV2 {
+      index_id: owner,
+      role: OrderedIndexRoleV1::ScopeReverse,
+      operation: IndexWorkspaceMutationOperationV2::RemoveExisting,
+      publication_sequence: 40,
+      operation_id: [0x11; 16],
+      order_key: old_key,
+      encoded_record: old_record,
+    },
+    IndexWorkspaceRuntimeMutationWriteV2 {
+      index_id: owner,
+      role: OrderedIndexRoleV1::ScopeReverse,
+      operation: IndexWorkspaceMutationOperationV2::Upsert,
+      publication_sequence: 41,
+      operation_id: [0x12; 16],
+      order_key: new_key,
+      encoded_record: new_record,
+    },
+  ]);
+  let transitions = leaked_values(vec![IndexWorkspaceMembershipTransitionWriteV2 {
+    owner_id: owner,
+    owner_class: IndexWorkspaceOwnerClassV2::ScopeCatalog,
+    publication_sequence: 41,
+    operation_id: [0x12; 16],
+    document_ordinal: 3,
+    before: IndexWorkspaceMembershipStateV2 { live: true, unindexable: false },
+    after: IndexWorkspaceMembershipStateV2 { live: true, unindexable: false },
+  }]);
+  IndexWorkspaceRuntimeBatchWriteV2 {
+    hash_algorithm: algorithm,
+    coordinator_id: [0x77; 16],
+    batch_id: 2,
+    reason: IndexFlushReasonV1::Explicit,
+    mutations,
+    transitions,
+  }
+}
+
+fn leaked(bytes: Vec<u8>) -> &'static [u8] {
+  Box::leak(bytes.into_boxed_slice())
+}
+
+fn leaked_values<T>(values: Vec<T>) -> &'static [T] {
+  Box::leak(values.into_boxed_slice())
 }
 
 fn populated_two(
@@ -558,6 +619,96 @@ fn private_runtime_workspace_appends_and_reopens_one_exact_streamed_head() {
     assert_eq!(fs::metadata(manifest_path(&workspace_path, 1)).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(fs::metadata(object_path(&workspace_path, [0x55; 16])).unwrap().permissions().mode() & 0o777, 0o600);
   }
+}
+
+#[test]
+fn private_runtime_workspace_streams_and_reopens_v2_batches_for_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let directory = tempdir().unwrap();
+    let database = database_file(directory.path());
+    let scratch = directory.path().join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let memory = memory(16 * 1024 * 1024);
+    let batch = v2_batch(algorithm);
+    let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+      &database,
+      identity_for(algorithm),
+      options(scratch, 8 * 1024 * 1024, 16),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    let head = workspace.append_runtime_batch_v2([0x91; 16], 1_725_000_000_123, &batch).unwrap();
+    let retry = workspace.append_runtime_batch_v2([0x91; 16], 1_725_000_000_123, &batch).unwrap();
+    assert_eq!(retry.selected_descriptor(), head.selected_descriptor());
+
+    let object = fs::read(object_path(head.workspace_path(), [0x91; 16])).unwrap();
+    let object = decode_index_workspace_object_v1(&object).unwrap();
+    assert!(matches!(
+      decode_index_workspace_runtime_batch_payload(object.payload, algorithm).unwrap(),
+      IndexWorkspaceRuntimeBatchPayload::V2(_)
+    ));
+    let reopened = ReopenedIndexRuntimeWorkspaceV1::open(
+      head.workspace_path(),
+      identity_for(algorithm).database_id(),
+      identity_for(algorithm).destination_physical_instance_id(),
+      algorithm,
+      head.selected_descriptor(),
+      IndexRuntimeWorkspaceReopenOptionsV1::new(8 * 1024 * 1024, 16).unwrap(),
+      CancellationToken::new(),
+      &memory,
+    )
+    .unwrap();
+    assert_eq!(reopened.runtime_batch_count(), 1);
+  }
+}
+
+#[test]
+fn runtime_v2_workspace_rejects_hash_profile_drift_before_installing_artifacts() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  assert!(workspace.append_runtime_batch_v2([0x91; 16], 101, &v2_batch(HashAlgorithm::Sha512)).is_err());
+  assert_eq!(fs::read_dir(workspace.workspace_path().join("manifests")).unwrap().count(), 0);
+  assert_eq!(fs::read_dir(workspace.workspace_path().join("objects/runtime")).unwrap().count(), 0);
+}
+
+#[test]
+fn runtime_v2_reopen_rejects_unbound_mutation_after_all_integrity_fields_are_repaired() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let batch = v2_batch(ALGORITHM);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  let head = workspace.append_runtime_batch_v2([0x91; 16], 101, &batch).unwrap();
+  drop(workspace);
+
+  let path = object_path(head.workspace_path(), [0x91; 16]);
+  let mut object = fs::read(&path).unwrap();
+  let first_mutation = 184 + 64;
+  let second_mutation = first_mutation + u32::from_le_bytes(object[first_mutation..first_mutation + 4].try_into().unwrap()) as usize;
+  let first_transition = second_mutation + u32::from_le_bytes(object[second_mutation..second_mutation + 4].try_into().unwrap()) as usize;
+  object[first_transition + 48] ^= 0x80;
+  repair_object_integrity(&mut object);
+  fs::write(path, &object).unwrap();
+  let selected = select_rewritten_head_object(&head, &object);
+  let error = match reopen(&head, selected, &memory) {
+    Ok(_) => panic!("accepted a runtime v2 mutation with no matching transition"),
+    Err(error) => error,
+  };
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Format(_)));
+  let owner = memory.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().clone();
+  assert_eq!(owner.reserved_bytes, 0);
+  assert_eq!(owner.active_reservations, 0);
 }
 
 #[test]
@@ -1157,6 +1308,7 @@ fn widest_hash_profile_streams_and_reopens_without_format_drift() {
 fn production_store_uses_streaming_codecs_and_has_no_live_activation_caller() {
   let store = include_str!("../../src/engine/v4/index_runtime_workspace_store.rs");
   assert!(store.contains("stream_index_workspace_runtime_batch_payload_v1"));
+  assert!(store.contains("stream_index_workspace_runtime_batch_payload_v2"));
   assert!(!store.contains("encode_index_workspace_runtime_batch_payload_v1"));
   assert!(!store.contains("encode_index_workspace_object_v1"));
   assert!(store.contains("object_already_installed"));

@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
@@ -32,6 +32,14 @@ use super::index_runtime_workspace_payload::{
   encode_index_workspace_producer_task_payload_v1, index_workspace_producer_task_payload_bounds_v1,
   plan_index_workspace_producer_task_payload_v1, plan_index_workspace_runtime_batch_payload_v1,
   stream_index_workspace_runtime_batch_payload_v1, validate_index_workspace_runtime_mutation_frame_header_v1,
+};
+use super::index_runtime_workspace_payload_v2::{
+  IndexWorkspaceRuntimeBatchPlanV2, IndexWorkspaceRuntimeBatchWriteV2, RUNTIME_BATCH_HEADER_LENGTH_V2, RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2,
+  RUNTIME_MUTATION_FRAME_LENGTH_V2, decode_index_workspace_runtime_batch_stream_header_v2,
+  decode_index_workspace_runtime_mutation_frame_v2, decode_index_workspace_runtime_transition_frame_v2,
+  plan_index_workspace_runtime_batch_payload_v2, stream_index_workspace_runtime_batch_payload_v2,
+  validate_index_workspace_runtime_mutation_frame_header_v2, validate_index_workspace_runtime_mutation_transition_v2,
+  validate_index_workspace_runtime_transition_frame_header_v2,
 };
 use super::private_workspace::{
   PrivateWorkspaceErrorV1, create_private_directory_synced, ensure_capacity, secure_platform_private_regular_file,
@@ -489,6 +497,29 @@ impl DurableIndexRuntimeWorkspaceV1 {
     };
     self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
       write_runtime_object(path, expected, batch, payload_plan, cancellation, memory)
+    })
+  }
+
+  pub fn append_runtime_batch_v2(
+    &mut self,
+    object_id: [u8; 16],
+    created_at_ms: u64,
+    batch: &IndexWorkspaceRuntimeBatchWriteV2<'_>,
+  ) -> Result<IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceStoreErrorV1> {
+    if batch.hash_algorithm != self.identity.hash_algorithm {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Invalid("runtime v2 batch hash algorithm disagrees with its workspace".to_string()));
+    }
+    let payload_plan = plan_index_workspace_runtime_batch_payload_v2(batch)?;
+    let plan = WorkspaceObjectPlanV1 {
+      kind: IndexWorkspaceObjectKindV1::RuntimeBatch,
+      payload_length: payload_plan.payload_length(),
+      logical_record_count: payload_plan.logical_record_count(),
+      minimum_publication_sequence: payload_plan.minimum_publication_sequence(),
+      maximum_publication_sequence: payload_plan.maximum_publication_sequence(),
+      payload_digest: payload_plan.payload_digest(),
+    };
+    self.append_object(object_id, created_at_ms, plan, |path, expected, cancellation, memory| {
+      write_runtime_object_v2(path, expected, batch, payload_plan, cancellation, memory)
     })
   }
 
@@ -1367,6 +1398,21 @@ fn write_runtime_object(
   })
 }
 
+fn write_runtime_object_v2(
+  path: &Path,
+  expected: &ExpectedObjectV1,
+  batch: &IndexWorkspaceRuntimeBatchWriteV2<'_>,
+  plan: IndexWorkspaceRuntimeBatchPlanV2,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+) -> Result<ValidatedObjectV1, IndexRuntimeWorkspaceStoreErrorV1> {
+  write_object_file(path, expected, cancellation, memory, |file, crc, payload_digest, object_digest| {
+    stream_index_workspace_runtime_batch_payload_v2::<IndexRuntimeWorkspaceStoreErrorV1>(batch, plan, |chunk| {
+      write_hashed(file, chunk, cancellation, crc, object_digest, Some(payload_digest))
+    })
+  })
+}
+
 fn write_buffered_object(
   path: &Path,
   expected: &ExpectedObjectV1,
@@ -1563,15 +1609,39 @@ fn validate_runtime_payload_stream(
   payload_digest: &mut blake3::Hasher,
   object_digest: &mut blake3::Hasher,
 ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  if object.payload_length < RUNTIME_BATCH_HEADER_LENGTH {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime batch payload is shorter than its fixed header".to_string()));
+  }
   let mut batch_header = [0u8; RUNTIME_BATCH_HEADER_LENGTH];
   read_payload_bytes(file, &mut batch_header, cancellation, crc, payload_digest, object_digest)?;
-  let decoded_header = decode_index_workspace_runtime_batch_stream_header_v1(&batch_header, object.hash_algorithm, object.payload_length)?;
+  match u16::from_le_bytes(batch_header[4..6].try_into().expect("AIRB schema field has a fixed length")) {
+    1 => validate_runtime_payload_stream_v1(file, object, cancellation, memory, crc, payload_digest, object_digest, &batch_header),
+    2 => validate_runtime_payload_stream_v2(file, object, cancellation, memory, crc, payload_digest, object_digest, &batch_header),
+    _ => Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime batch payload schema version is unknown".to_string())),
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_payload_stream_v1(
+  file: &mut fs::File,
+  object: &IndexWorkspaceObjectHeaderV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  crc: &mut crc32fast::Hasher,
+  payload_digest: &mut blake3::Hasher,
+  object_digest: &mut blake3::Hasher,
+  batch_header: &[u8; RUNTIME_BATCH_HEADER_LENGTH],
+) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  let decoded_header = decode_index_workspace_runtime_batch_stream_header_v1(batch_header, object.hash_algorithm, object.payload_length)?;
   let mut consumed = RUNTIME_BATCH_HEADER_LENGTH;
   let mut prior_key: Option<(Vec<u8>, MemoryReservation)> = None;
   let mut minimum_publication_sequence = u64::MAX;
   let mut maximum_publication_sequence = 0u64;
   for _ in 0..decoded_header.record_count {
     check_cancellation(cancellation)?;
+    if consumed.checked_add(RUNTIME_MUTATION_FRAME_LENGTH).is_none_or(|end| end > object.payload_length) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime mutation fixed header is outside the declared payload".to_string()));
+    }
     let mut fixed = [0u8; RUNTIME_MUTATION_FRAME_LENGTH];
     read_payload_bytes(file, &mut fixed, cancellation, crc, payload_digest, object_digest)?;
     let (frame_length, order_length) = validate_index_workspace_runtime_mutation_frame_header_v1(&fixed, object.hash_algorithm)?;
@@ -1643,6 +1713,177 @@ fn validate_runtime_payload_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn validate_runtime_payload_stream_v2(
+  file: &mut fs::File,
+  object: &IndexWorkspaceObjectHeaderV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  crc: &mut crc32fast::Hasher,
+  payload_digest: &mut blake3::Hasher,
+  object_digest: &mut blake3::Hasher,
+  batch_header: &[u8; RUNTIME_BATCH_HEADER_LENGTH_V2],
+) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  let decoded_header = decode_index_workspace_runtime_batch_stream_header_v2(batch_header, object.hash_algorithm, object.payload_length)?;
+  let payload_after_header =
+    file.stream_position().map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "runtime v2 payload position", source })?;
+  let payload_start = payload_after_header
+    .checked_sub(RUNTIME_BATCH_HEADER_LENGTH_V2 as u64)
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 payload start underflowed".to_string()))?;
+  let mut consumed = RUNTIME_BATCH_HEADER_LENGTH_V2;
+  let mut prior_mutation_key: Option<(Vec<u8>, MemoryReservation)> = None;
+  let mut minimum_publication_sequence = u64::MAX;
+  let mut maximum_publication_sequence = 0u64;
+
+  for _ in 0..decoded_header.mutation_count {
+    check_cancellation(cancellation)?;
+    if consumed.checked_add(RUNTIME_MUTATION_FRAME_LENGTH_V2).is_none_or(|end| end > object.payload_length) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+        "runtime v2 mutation fixed header is outside the declared payload".to_string(),
+      ));
+    }
+    let mut fixed = [0u8; RUNTIME_MUTATION_FRAME_LENGTH_V2];
+    read_payload_bytes(file, &mut fixed, cancellation, crc, payload_digest, object_digest)?;
+    let frame_header = validate_index_workspace_runtime_mutation_frame_header_v2(&fixed, object.hash_algorithm)?;
+    if consumed.checked_add(frame_header.frame_length).is_none_or(|end| end > object.payload_length) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 mutation frame is outside the declared payload".to_string()));
+    }
+    let reservation_bytes = u64::try_from(frame_header.frame_length)
+      .ok()
+      .and_then(|bytes| u64::try_from(frame_header.order_length).ok().and_then(|order| bytes.checked_add(order)))
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 mutation reservation overflowed".to_string()))?;
+    let frame_reservation = memory
+      .reserve(MemoryOwner::IndexDirtyBuffers, reservation_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let mut frame = Vec::new();
+    frame
+      .try_reserve_exact(frame_header.frame_length)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 mutation allocation failed: {error}")))?;
+    frame.resize(frame_header.frame_length, 0);
+    frame[..RUNTIME_MUTATION_FRAME_LENGTH_V2].copy_from_slice(&fixed);
+    read_payload_bytes(file, &mut frame[RUNTIME_MUTATION_FRAME_LENGTH_V2..], cancellation, crc, payload_digest, object_digest)?;
+    let mutation = decode_index_workspace_runtime_mutation_frame_v2(&frame, object.hash_algorithm)?;
+    if let Some((prior, _reservation)) = &prior_mutation_key {
+      if compare_previous_runtime_sort_key_v2(prior, object.hash_algorithm.hash_length(), &mutation)? != Ordering::Less {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 mutations are not in strict canonical order".to_string()));
+      }
+    }
+    let key_length = mutation
+      .index_id
+      .len()
+      .checked_add(1)
+      .and_then(|length| length.checked_add(mutation.order_key.len()))
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 prior-key length overflowed".to_string()))?;
+    let key_reservation = memory
+      .reserve(
+        MemoryOwner::IndexDirtyBuffers,
+        u64::try_from(key_length)
+          .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 prior-key length exceeds u64: {error}")))?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let mut key = Vec::new();
+    key
+      .try_reserve_exact(key_length)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 prior-key allocation failed: {error}")))?;
+    key.extend_from_slice(mutation.index_id);
+    key.push(mutation.role.id());
+    key.extend_from_slice(mutation.order_key);
+    minimum_publication_sequence = minimum_publication_sequence.min(mutation.publication_sequence);
+    maximum_publication_sequence = maximum_publication_sequence.max(mutation.publication_sequence);
+    prior_mutation_key = Some((key, key_reservation));
+    drop(frame_reservation);
+    consumed = consumed
+      .checked_add(frame_header.frame_length)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 consumed-byte total overflowed".to_string()))?;
+  }
+
+  let transitions_start = consumed;
+  let mut prior_transition: Option<(Vec<u8>, u64, MemoryReservation)> = None;
+  for _ in 0..decoded_header.transition_count {
+    check_cancellation(cancellation)?;
+    if consumed.checked_add(RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2).is_none_or(|end| end > object.payload_length) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+        "runtime v2 transition fixed header is outside the declared payload".to_string(),
+      ));
+    }
+    let mut fixed = [0u8; RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2];
+    read_payload_bytes(file, &mut fixed, cancellation, crc, payload_digest, object_digest)?;
+    let frame_length = validate_index_workspace_runtime_transition_frame_header_v2(&fixed, object.hash_algorithm)?;
+    if consumed.checked_add(frame_length).is_none_or(|end| end > object.payload_length) {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 transition frame is outside the declared payload".to_string()));
+    }
+    let frame_reservation = memory
+      .reserve(
+        MemoryOwner::IndexDirtyBuffers,
+        u64::try_from(frame_length)
+          .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 transition length exceeds u64: {error}")))?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let mut frame = Vec::new();
+    frame
+      .try_reserve_exact(frame_length)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 transition allocation failed: {error}")))?;
+    frame.resize(frame_length, 0);
+    frame[..RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2].copy_from_slice(&fixed);
+    read_payload_bytes(file, &mut frame[RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2..], cancellation, crc, payload_digest, object_digest)?;
+    let transition = decode_index_workspace_runtime_transition_frame_v2(&frame, object.hash_algorithm)?;
+    if let Some((prior_owner, prior_ordinal, _reservation)) = &prior_transition {
+      if prior_owner.as_slice().cmp(transition.owner_id).then(prior_ordinal.cmp(&transition.document_ordinal)) != Ordering::Less {
+        return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 transitions are not in strict canonical order".to_string()));
+      }
+    }
+    let owner_reservation = memory
+      .reserve(
+        MemoryOwner::IndexDirtyBuffers,
+        u64::try_from(transition.owner_id.len())
+          .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 owner width exceeds u64: {error}")))?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let mut owner_id = Vec::new();
+    owner_id
+      .try_reserve_exact(transition.owner_id.len())
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 transition owner allocation failed: {error}")))?;
+    owner_id.extend_from_slice(transition.owner_id);
+    prior_transition = Some((owner_id, transition.document_ordinal, owner_reservation));
+    minimum_publication_sequence = minimum_publication_sequence.min(transition.publication_sequence);
+    maximum_publication_sequence = maximum_publication_sequence.max(transition.publication_sequence);
+    drop(frame_reservation);
+    consumed = consumed
+      .checked_add(frame_length)
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 consumed-byte total overflowed".to_string()))?;
+  }
+
+  let logical_record_count = decoded_header
+    .mutation_count
+    .checked_add(decoded_header.transition_count)
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 logical record count overflowed".to_string()))?;
+  if consumed != object.payload_length
+    || logical_record_count as u64 != object.logical_record_count
+    || minimum_publication_sequence != object.minimum_publication_sequence
+    || maximum_publication_sequence != object.maximum_publication_sequence
+  {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format(
+      "runtime v2 payload count, bytes, or publication bounds do not close over its object".to_string(),
+    ));
+  }
+  drop(prior_mutation_key);
+  drop(prior_transition);
+
+  validate_runtime_v2_closure_second_pass(
+    file,
+    object,
+    cancellation,
+    memory,
+    payload_start,
+    transitions_start,
+    decoded_header.mutation_count,
+    decoded_header.transition_count,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_producer_payload_stream(
   file: &mut fs::File,
   object: &IndexWorkspaceObjectHeaderV1,
@@ -1688,6 +1929,167 @@ fn compare_previous_runtime_sort_key(
   let role = super::index_page::OrderedIndexRoleV1::from_id(bytes[hash_width])
     .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("prior runtime sort-key role is unknown".to_string()))?;
   Ok(bytes[..hash_width].cmp(current.index_id).then(role.id().cmp(&current.role.id())).then(bytes[hash_width + 1..].cmp(current.order_key)))
+}
+
+fn compare_previous_runtime_sort_key_v2(
+  bytes: &[u8],
+  hash_width: usize,
+  current: &super::index_runtime_workspace_payload_v2::IndexWorkspaceRuntimeMutationV2<'_>,
+) -> Result<Ordering, IndexRuntimeWorkspaceStoreErrorV1> {
+  if bytes.len() <= hash_width {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("prior runtime v2 sort key is truncated".to_string()));
+  }
+  let role = super::index_page::OrderedIndexRoleV1::from_id(bytes[hash_width])
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Format("prior runtime v2 sort-key role is unknown".to_string()))?;
+  Ok(bytes[..hash_width].cmp(current.index_id).then(role.id().cmp(&current.role.id())).then(bytes[hash_width + 1..].cmp(current.order_key)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_v2_closure_second_pass(
+  file: &mut fs::File,
+  object: &IndexWorkspaceObjectHeaderV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  payload_start: u64,
+  transitions_start: usize,
+  mutation_count: usize,
+  transition_count: usize,
+) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  let payload_end = payload_start
+    .checked_add(
+      u64::try_from(object.payload_length)
+        .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 payload length exceeds u64: {error}")))?,
+    )
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 payload-end offset overflowed".to_string()))?;
+  let transitions_offset = payload_start
+    .checked_add(
+      u64::try_from(transitions_start)
+        .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 transition offset exceeds u64: {error}")))?,
+    )
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition offset overflowed".to_string()))?;
+  let transition_frame_length = RUNTIME_MEMBERSHIP_FRAME_LENGTH_V2
+    .checked_add(object.hash_algorithm.hash_length())
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition frame length overflowed".to_string()))?;
+  let transition_reservation = memory
+    .reserve(
+      MemoryOwner::IndexDirtyBuffers,
+      u64::try_from(transition_frame_length)
+        .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 transition length exceeds u64: {error}")))?,
+      AdmissionClass::Maintenance,
+    )
+    .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+  let mut transition_frame = Vec::new();
+  transition_frame
+    .try_reserve_exact(transition_frame_length)
+    .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 transition lookup allocation failed: {error}")))?;
+  transition_frame.resize(transition_frame_length, 0);
+  let mut mutation_offset = payload_start
+    .checked_add(RUNTIME_BATCH_HEADER_LENGTH_V2 as u64)
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 mutation offset overflowed".to_string()))?;
+
+  for _ in 0..mutation_count {
+    check_cancellation(cancellation)?;
+    seek_workspace_object(file, mutation_offset, "runtime v2 mutation closure seek")?;
+    let mut fixed = [0u8; RUNTIME_MUTATION_FRAME_LENGTH_V2];
+    read_exact_cancellable(file, &mut fixed, cancellation, "runtime v2 mutation closure header")?;
+    let frame_header = validate_index_workspace_runtime_mutation_frame_header_v2(&fixed, object.hash_algorithm)?;
+    let frame_reservation = memory
+      .reserve(
+        MemoryOwner::IndexDirtyBuffers,
+        u64::try_from(frame_header.frame_length)
+          .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 mutation length exceeds u64: {error}")))?,
+        AdmissionClass::Maintenance,
+      )
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Memory(Box::new(error)))?;
+    let mut frame = Vec::new();
+    frame
+      .try_reserve_exact(frame_header.frame_length)
+      .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Allocation(format!("runtime v2 closure mutation allocation failed: {error}")))?;
+    frame.resize(frame_header.frame_length, 0);
+    frame[..RUNTIME_MUTATION_FRAME_LENGTH_V2].copy_from_slice(&fixed);
+    read_exact_cancellable(file, &mut frame[RUNTIME_MUTATION_FRAME_LENGTH_V2..], cancellation, "runtime v2 mutation closure frame")?;
+    let mutation = decode_index_workspace_runtime_mutation_frame_v2(&frame, object.hash_algorithm)?;
+    let transition = find_runtime_v2_transition(
+      file,
+      cancellation,
+      object.hash_algorithm,
+      transitions_offset,
+      transition_count,
+      &mut transition_frame,
+      mutation.index_id,
+      mutation.document_ordinal,
+    )?;
+    validate_index_workspace_runtime_mutation_transition_v2(&mutation, &transition)?;
+    drop(frame_reservation);
+    mutation_offset = mutation_offset
+      .checked_add(
+        u64::try_from(frame_header.frame_length)
+          .map_err(|error| IndexRuntimeWorkspaceStoreErrorV1::Capacity(format!("runtime v2 mutation length exceeds u64: {error}")))?,
+      )
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 mutation offset overflowed".to_string()))?;
+  }
+  drop(transition_reservation);
+  seek_workspace_object(file, payload_end, "runtime v2 payload-end restore")?;
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_runtime_v2_transition<'a>(
+  file: &mut fs::File,
+  cancellation: &CancellationToken,
+  hash_algorithm: HashAlgorithm,
+  transitions_offset: u64,
+  transition_count: usize,
+  frame: &'a mut [u8],
+  owner_id: &[u8],
+  document_ordinal: u64,
+) -> Result<super::index_runtime_workspace_payload_v2::IndexWorkspaceMembershipTransitionV2<'a>, IndexRuntimeWorkspaceStoreErrorV1> {
+  let frame_length = frame.len();
+  let mut lower = 0usize;
+  let mut upper = transition_count;
+  while lower < upper {
+    check_cancellation(cancellation)?;
+    let middle = lower + (upper - lower) / 2;
+    read_runtime_v2_transition_at(file, cancellation, transitions_offset, middle, frame_length, frame)?;
+    let transition = decode_index_workspace_runtime_transition_frame_v2(frame, hash_algorithm)?;
+    match transition.owner_id.cmp(owner_id).then(transition.document_ordinal.cmp(&document_ordinal)) {
+      Ordering::Less => lower = middle + 1,
+      Ordering::Equal | Ordering::Greater => upper = middle,
+    }
+  }
+  if lower == transition_count {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 mutation has no owner/document membership transition".to_string()));
+  }
+  read_runtime_v2_transition_at(file, cancellation, transitions_offset, lower, frame_length, frame)?;
+  let transition = decode_index_workspace_runtime_transition_frame_v2(frame, hash_algorithm)?;
+  if transition.owner_id != owner_id || transition.document_ordinal != document_ordinal {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::Format("runtime v2 mutation has no owner/document membership transition".to_string()));
+  }
+  Ok(transition)
+}
+
+fn read_runtime_v2_transition_at(
+  file: &mut fs::File,
+  cancellation: &CancellationToken,
+  transitions_offset: u64,
+  index: usize,
+  frame_length: usize,
+  frame: &mut [u8],
+) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  let relative = index
+    .checked_mul(frame_length)
+    .and_then(|offset| u64::try_from(offset).ok())
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition lookup offset overflowed".to_string()))?;
+  let offset = transitions_offset
+    .checked_add(relative)
+    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Capacity("runtime v2 transition lookup offset overflowed".to_string()))?;
+  seek_workspace_object(file, offset, "runtime v2 transition lookup seek")?;
+  read_exact_cancellable(file, frame, cancellation, "runtime v2 transition lookup")
+}
+
+fn seek_workspace_object(file: &mut fs::File, offset: u64, operation: &'static str) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  file.seek(SeekFrom::Start(offset)).map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation, source })?;
+  Ok(())
 }
 
 fn validate_object_header(

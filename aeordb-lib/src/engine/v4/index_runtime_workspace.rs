@@ -8,6 +8,35 @@ use crate::engine::HashAlgorithm;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
 pub use super::index_runtime_workspace_payload::*;
+pub use super::index_runtime_workspace_payload_v2::*;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexWorkspaceRuntimeBatchPayload<'a> {
+  V1(IndexWorkspaceRuntimeBatchPayloadV1<'a>),
+  V2(IndexWorkspaceRuntimeBatchPayloadV2<'a>),
+}
+
+pub fn decode_index_workspace_runtime_batch_payload(
+  bytes: &[u8],
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<IndexWorkspaceRuntimeBatchPayload<'_>> {
+  if bytes.len() < 6 || &bytes[..4] != b"AIRB" {
+    return Err(format_error(
+      MalformedInputClass::UnknownMagicOrVersion,
+      "index_runtime_batch_version",
+      "runtime batch payload magic or schema version is unknown",
+    ));
+  }
+  match u16_at(bytes, 4) {
+    1 => decode_index_workspace_runtime_batch_payload_v1(bytes, hash_algorithm).map(IndexWorkspaceRuntimeBatchPayload::V1),
+    2 => decode_index_workspace_runtime_batch_payload_v2(bytes, hash_algorithm).map(IndexWorkspaceRuntimeBatchPayload::V2),
+    _ => Err(format_error(
+      MalformedInputClass::UnknownMagicOrVersion,
+      "index_runtime_batch_version",
+      "runtime batch payload schema version is unknown",
+    )),
+  }
+}
 
 const MANIFEST_MAGIC: &[u8; 4] = b"AIWM";
 const MANIFEST_SCHEMA_VERSION: u16 = 1;

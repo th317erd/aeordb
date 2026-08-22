@@ -1114,6 +1114,10 @@ name = "index_runtime_workspace_spec"
 path = "spec/engine/index_runtime_workspace_spec.rs"
 
 [[test]]
+name = "index_runtime_workspace_payload_v2_spec"
+path = "spec/engine/index_runtime_workspace_payload_v2_spec.rs"
+
+[[test]]
 name = "index_runtime_workspace_store_spec"
 path = "spec/engine/index_runtime_workspace_store_spec.rs"
 

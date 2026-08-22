@@ -6,7 +6,9 @@ use crate::engine::path_utils::normalize_path;
 use super::index_coordinator::{FrozenIndexBatchV1, IndexFlushReasonV1, PublishedIndexMutationV1};
 use super::index_page::{OrderedIndexRoleV1, decode_ordered_record, ordered_record_order_key};
 use super::index_producer_coordinator::{IndexProducerTaskKindV1, IndexProducerTaskRequestV1};
-use super::index_runtime_workspace::IndexWorkspaceObjectKindV1;
+use super::index_runtime_workspace::{
+  IndexWorkspaceObjectKindV1, IndexWorkspaceRuntimeBatchPayload, decode_index_workspace_runtime_batch_payload,
+};
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
 const RUNTIME_BATCH_MAGIC: &[u8; 4] = b"AIRB";
@@ -506,15 +508,37 @@ pub(super) fn validate_index_workspace_object_payload_v1(
 ) -> FormatResult<()> {
   match kind {
     IndexWorkspaceObjectKindV1::RuntimeBatch => {
-      let decoded = decode_index_workspace_runtime_batch_payload_v1(payload, hash_algorithm)?;
-      let decoded_count = decoded.records.len() as u64;
-      let Some(first) = decoded.records.first() else {
-        return Err(closure_error("runtime object payload is empty"));
+      let decoded = decode_index_workspace_runtime_batch_payload(payload, hash_algorithm)?;
+      let (decoded_count, decoded_minimum, decoded_maximum) = match decoded {
+        IndexWorkspaceRuntimeBatchPayload::V1(decoded) => {
+          let Some(first) = decoded.records.first() else {
+            return Err(closure_error("runtime object payload is empty"));
+          };
+          let (minimum, maximum) =
+            decoded.records.iter().skip(1).fold((first.publication_sequence, first.publication_sequence), |(minimum, maximum), record| {
+              (minimum.min(record.publication_sequence), maximum.max(record.publication_sequence))
+            });
+          (decoded.records.len() as u64, minimum, maximum)
+        }
+        IndexWorkspaceRuntimeBatchPayload::V2(decoded) => {
+          let count = decoded
+            .mutations
+            .len()
+            .checked_add(decoded.transitions.len())
+            .ok_or_else(|| closure_error("runtime v2 object logical record count overflowed"))? as u64;
+          let mut sequences = decoded
+            .mutations
+            .iter()
+            .map(|mutation| mutation.publication_sequence)
+            .chain(decoded.transitions.iter().map(|transition| transition.publication_sequence));
+          let Some(first) = sequences.next() else {
+            return Err(closure_error("runtime v2 object payload is empty"));
+          };
+          let (minimum, maximum) =
+            sequences.fold((first, first), |(minimum, maximum), sequence| (minimum.min(sequence), maximum.max(sequence)));
+          (count, minimum, maximum)
+        }
       };
-      let (decoded_minimum, decoded_maximum) =
-        decoded.records.iter().skip(1).fold((first.publication_sequence, first.publication_sequence), |(minimum, maximum), record| {
-          (minimum.min(record.publication_sequence), maximum.max(record.publication_sequence))
-        });
       if decoded_count != logical_record_count
         || decoded_minimum != minimum_publication_sequence
         || decoded_maximum != maximum_publication_sequence
