@@ -125,6 +125,29 @@ impl ManifestChain {
 
     Self { scope_owner: scope_fixture.owner_id.to_vec(), field_owner: field_fixture.owner_id.to_vec(), scope, value, field, nvt }
   }
+
+  fn scope_successor(&self, algorithm: HashAlgorithm) -> EncodedImmutableIndexArtifactV1 {
+    let manifest = decode_index_manifest(&self.scope.value, algorithm).unwrap();
+    let IndexManifestBodyV1::ScopeCatalog(body) = manifest.details else {
+      panic!("scope manifest kind");
+    };
+    let source_root = vec![0xa7; algorithm.hash_length()];
+    let coverage_epoch = body.coverage.coverage_epoch_id.to_vec();
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: manifest.generation.checked_add(1).unwrap(),
+      owner_id: manifest.owner_id,
+      body: IndexManifestBodyV1::ScopeCatalog(ScopeCatalogManifestBodyV1 {
+        coverage: CoverageVersionV1 {
+          source_namespace_root: &source_root,
+          coverage_epoch_id: &coverage_epoch,
+          coverage_publication_sequence: body.coverage.coverage_publication_sequence.checked_add(1).unwrap(),
+        },
+        ..body
+      }),
+    })
+    .unwrap()
+  }
 }
 
 #[derive(Default)]
@@ -617,13 +640,72 @@ fn nvt_absence_staleness_or_source_failure_cannot_remove_field_coverage() {
 #[test]
 fn registry_architecture_delegates_selection_and_never_loads_or_publishes_index_pages() {
   let source = include_str!("../../src/engine/v4/index_coverage_registry.rs");
+  let planner = include_str!("../../src/engine/v4/index_coverage_planner.rs");
+  let partial = include_str!("../../src/engine/v4/index_partial_acceleration.rs");
   assert_eq!(source.matches(".load_index_active_pointer_pair(").count(), 1);
+  assert_eq!(planner.matches("pub fn plan_selected_index_coverage_v1").count(), 1);
+  assert_eq!(partial.matches("pub fn execute_partial_index_acceleration_v1").count(), 1);
   assert!(!source.contains("publish_index_active_pointer"));
   assert!(!source.contains("encode_active_pointer"));
   assert!(!source.contains("decode_ordered_page"));
   assert!(!source.contains("decode_artifact_directory"));
+  assert!(!source.contains("execute_partial_index_acceleration_v1"));
+  assert!(!planner.contains("IndexCoverageRegistryV1"));
+  assert!(!partial.contains("IndexCoverageRegistryV1"));
   assert!(!source.contains("std::thread::spawn"));
   assert!(!source.contains("tokio::spawn"));
+}
+
+#[test]
+fn selected_generation_replacement_retains_in_flight_readers_and_reconstructs_after_restart_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let database_id = [0x11; 16];
+    let chain = ManifestChain::new(algorithm);
+    let successor = chain.scope_successor(algorithm);
+    let coordinator = memory(16 * 1_024 * 1_024);
+    let coverage_registry = registry(algorithm, database_id, Arc::clone(&coordinator));
+    let requests =
+      [request(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, chain.scope_owner.clone(), IndexCoverageGenerationHealthV1::Healthy)];
+
+    let mut initial_source = FakeSource::new(algorithm, database_id);
+    initial_source.insert_artifact(&chain.scope);
+    initial_source.set_stable_pair(ActivePointerKindV1::ScopeCatalog, &chain.scope, false);
+    let in_flight = coverage_registry.refresh(&mut initial_source, &requests, &CancellationToken::new()).unwrap();
+    let IndexCoverageRegistrySelectionV1::Selected(initial) = in_flight.entries()[0].selection() else {
+      panic!("initial selected generation");
+    };
+
+    let mut successor_source = FakeSource::new(algorithm, database_id);
+    successor_source.insert_artifact(&successor);
+    let successor_pair = successor_source.pointer_pair(ActivePointerKindV1::ScopeCatalog, &successor, 8, false);
+    successor_source.set_pair_responses(
+      ActivePointerKindV1::ScopeCatalog,
+      &chain.scope_owner,
+      [Ok(successor_pair.clone()), Ok(successor_pair)],
+    );
+    let current = coverage_registry.refresh(&mut successor_source, &requests, &CancellationToken::new()).unwrap();
+    let IndexCoverageRegistrySelectionV1::Selected(replacement) = current.entries()[0].selection() else {
+      panic!("replacement selected generation");
+    };
+    assert_eq!(initial.manifest_hash(), chain.scope.key);
+    assert_eq!(replacement.manifest_hash(), successor.key);
+    assert_eq!(replacement.generation(), initial.generation() + 1);
+    assert_ne!(replacement.source_namespace_root(), initial.source_namespace_root());
+    let overlap = coordinator.snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes;
+    assert!(overlap >= in_flight.retained_bytes() + current.retained_bytes());
+    let expected_entries = current.entries().to_vec();
+    drop(in_flight);
+    assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes, current.retained_bytes());
+
+    let restart_coordinator = memory(16 * 1_024 * 1_024);
+    let reopened = registry(algorithm, database_id, restart_coordinator);
+    let mut restart_source = FakeSource::new(algorithm, database_id);
+    restart_source.insert_artifact(&successor);
+    let restart_pair = restart_source.pointer_pair(ActivePointerKindV1::ScopeCatalog, &successor, 8, false);
+    restart_source.set_pair_responses(ActivePointerKindV1::ScopeCatalog, &chain.scope_owner, [Ok(restart_pair.clone()), Ok(restart_pair)]);
+    let reconstructed = reopened.refresh(&mut restart_source, &requests, &CancellationToken::new()).unwrap();
+    assert_eq!(reconstructed.entries(), expected_entries);
+  }
 }
 
 #[test]

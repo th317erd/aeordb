@@ -1142,13 +1142,13 @@
           - [x] P6-3d3: publish rotation through the existing checkpoint selector, decouple global checkpoint sequence from workspace-local manifest sequence, and recover an exact empty rotated workspace without a synthetic task or batch.
           - [x] P6-3d4: prove every object/checkpoint/selector crash prefix, exact retry, cancellation, corruption, pressure, both hash widths, old-head retention, and restart replay bounded by pending work rather than historical completions.
           - [x] Bound restart replay independently of historical completed task count and preserve selected-chain idempotence across rotation crashes.
-        - [ ] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.
+        - [x] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.
           - [x] P6-3e1: freeze a storage-neutral coverage-planning contract for exact selected roots, compatible partial roots, degraded generations, authoritative fallback, and content-only historical views.
           - [x] P6-3e2: load closure-valid selected ScopeCatalog/FieldIndex/FieldNvt generations into one bounded immutable registry without retaining pages or creating a second selector.
           - [x] P6-3e3: require an exact changed-document complement plus candidate recheck/dedupe proof before partial acceleration, and keep Posting-directory fallback authoritative when NVT is absent or unusable.
-          - [ ] P6-3e4: prove restart, selected-pointer change, corruption, cancellation, pressure, both hash widths, in-flight generation retention, and registry/planner architecture uniqueness.
-          - [ ] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.
-          - [ ] Keep NVT hints disposable and preserve exact Posting-directory fallback for absent, stale, corrupt, or pressure-refused hints.
+          - [x] P6-3e4: prove restart, selected-pointer change, corruption, cancellation, pressure, both hash widths, in-flight generation retention, and registry/planner architecture uniqueness.
+          - [x] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.
+          - [x] Keep NVT hints disposable and preserve exact Posting-directory fallback for absent, stale, corrupt, or pressure-refused hints.
         - [ ] P6-3f: integrate migration-qualified activation, lifecycle/metrics/cache eviction, restart, shutdown, and legacy query compatibility removal at the coordinated cutover.
           - [ ] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, and no second writer, timer, selector, cache, or query authority survives.
         - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
