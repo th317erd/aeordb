@@ -24,6 +24,7 @@ pub const INDEX_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 32 * 1_024 * 1_024;
 pub const INDEX_DIRECTORY_TARGET_BYTES_V1: usize = 64 * 1_024;
 pub const INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1: usize = 64 * 1_024 * 1_024;
 pub const INDEX_DIRECTORY_MAXIMUM_AFFECTED_PATHS_V1: usize = 4;
+pub const INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1: usize = 4_095;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexPageLayoutV1 {
@@ -235,6 +236,23 @@ pub struct IndexCopyOnWriteClosureRequestV1<'a> {
   pub directory_plan: &'a ArtifactDirectoryMutationPlanV1,
   pub page_layout: IndexPageLayoutV1,
   pub directory_layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexCopyOnWriteCompositeStepV1<'a> {
+  pub closure: &'a IndexCopyOnWriteClosureSummaryV1,
+  pub applied_mutations: &'a [OrderedPageMutationKindV1<'a>],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexCopyOnWriteCompositeClosureRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub initial_next_page_id: u64,
+  pub source_root_key: &'a [u8],
+  pub applied_mutations: &'a [OrderedPageMutationKindV1<'a>],
+  pub steps: &'a [IndexCopyOnWriteCompositeStepV1<'a>],
+  pub maximum_workspace_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -901,6 +919,272 @@ pub fn validate_index_copy_on_write_closure_v1(
     retained_encoded_bytes,
     _validated: IndexCopyOnWriteClosureSealV1,
   })
+}
+
+pub fn validate_index_copy_on_write_composite_closure_v1(
+  request: &IndexCopyOnWriteCompositeClosureRequestV1<'_>,
+) -> FormatResult<IndexCopyOnWriteClosureSummaryV1> {
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.generation == 0 || request.source_root_key.len() != hash_width || request.source_root_key.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("index_cow_composite_identity", "composite closure generation or source-root identity is invalid"));
+  }
+  if request.steps.is_empty() || request.steps.len() > INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1 {
+    return Err(amplification_error(
+      "index_cow_composite_step_count",
+      format!("{} composite steps are outside 1..={INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1}", request.steps.len()),
+    ));
+  }
+  if request.applied_mutations.is_empty()
+    || request.maximum_workspace_bytes == 0
+    || request.maximum_workspace_bytes > INDEX_DIRECTORY_COPY_ON_WRITE_WORKSPACE_BYTES_V1
+  {
+    return Err(amplification_error(
+      "index_cow_composite_workspace",
+      "composite mutation closure has no mutations or an invalid workspace bound",
+    ));
+  }
+
+  let first =
+    request.steps.first().ok_or_else(|| closure_error("index_cow_composite_step_count", "composite closure has no first step"))?;
+  let owner_id = first.closure.owner_id.as_slice();
+  let role = first.closure.role;
+  let mut expected_source_root = request.source_root_key;
+  let mut previous_generation = 0u64;
+  let mut next_page_id = request.initial_next_page_id;
+  let mut page_artifact_count = 0usize;
+  let mut directory_artifact_count = 0usize;
+  let mut source_page_bytes = 0usize;
+  let mut directory_path_bytes = 0usize;
+  let mut page_artifact_bytes = 0usize;
+  let mut directory_artifact_bytes = 0usize;
+  let mut retained_encoded_bytes = 0usize;
+  for (step_index, step) in request.steps.iter().enumerate() {
+    let closure = step.closure;
+    if closure.owner_id.as_slice() != owner_id
+      || closure.role != role
+      || closure.source_root_key.as_slice() != expected_source_root
+      || closure.generation <= previous_generation
+      || closure.generation > request.generation
+      || closure.initial_next_page_id != next_page_id
+      || closure.mutation_commitment.is_none()
+    {
+      return Err(closure_error(
+        "index_cow_composite_step_chain",
+        format!("composite step {step_index} breaks owner, role, root, generation, PageID, or mutation authority"),
+      ));
+    }
+    if step_index + 1 < request.steps.len() && closure.root_key.is_none() {
+      return Err(closure_error("index_cow_composite_retired_intermediate", "an intermediate composite step retires the role root"));
+    }
+    if previous_generation != 0
+      && closure.generation
+        != previous_generation
+          .checked_add(1)
+          .ok_or_else(|| arithmetic_error("index_cow_composite_step_generation", "composite step generation overflowed"))?
+    {
+      return Err(identity_error(
+        "index_cow_composite_step_generation",
+        format!("composite step {step_index} does not immediately follow its predecessor generation"),
+      ));
+    }
+    if let Some(root_key) = closure.root_key.as_deref() {
+      expected_source_root = root_key;
+    }
+    previous_generation = closure.generation;
+    next_page_id = closure.next_page_id;
+    page_artifact_count = checked_composite_add(page_artifact_count, closure.page_artifact_count, "page artifact count")?;
+    directory_artifact_count =
+      checked_composite_add(directory_artifact_count, closure.directory_artifact_count, "directory artifact count")?;
+    source_page_bytes = checked_composite_add(source_page_bytes, closure.source_page_bytes, "source page bytes")?;
+    directory_path_bytes = checked_composite_add(directory_path_bytes, closure.directory_path_bytes, "directory path bytes")?;
+    page_artifact_bytes = checked_composite_add(page_artifact_bytes, closure.page_artifact_bytes, "page artifact bytes")?;
+    directory_artifact_bytes =
+      checked_composite_add(directory_artifact_bytes, closure.directory_artifact_bytes, "directory artifact bytes")?;
+    retained_encoded_bytes = checked_composite_add(retained_encoded_bytes, closure.retained_encoded_bytes, "retained encoded bytes")?;
+  }
+  if previous_generation != request.generation {
+    return Err(identity_error(
+      "index_cow_composite_generation",
+      "final composite step generation does not equal the requested successor generation",
+    ));
+  }
+  let publication_artifact_bytes = page_artifact_bytes
+    .checked_add(directory_artifact_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_composite_artifact_bytes", "composite publication artifact bytes overflowed"))?;
+  if publication_artifact_bytes > request.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_composite_artifact_bytes",
+      format!("composite publication artifacts exceed the {}-byte workspace bound", request.maximum_workspace_bytes),
+    ));
+  }
+  let mutation_commitment = validate_composite_mutation_partition(request, role, publication_artifact_bytes)?;
+  let final_closure =
+    request.steps.last().ok_or_else(|| closure_error("index_cow_composite_step_count", "composite closure has no final step"))?.closure;
+  Ok(IndexCopyOnWriteClosureSummaryV1 {
+    owner_id: copy_fallible_bytes(owner_id, "composite closure owner")?,
+    role,
+    generation: request.generation,
+    source_root_key: copy_fallible_bytes(request.source_root_key, "composite source root")?,
+    root_key: final_closure.root_key.as_deref().map(|root_key| copy_fallible_bytes(root_key, "composite successor root")).transpose()?,
+    live_count: final_closure.live_count,
+    tombstone_count: final_closure.tombstone_count,
+    page_count: final_closure.page_count,
+    logical_bytes: final_closure.logical_bytes,
+    minimum_page_id: final_closure.minimum_page_id,
+    maximum_page_id: final_closure.maximum_page_id,
+    initial_next_page_id: request.initial_next_page_id,
+    next_page_id: final_closure.next_page_id,
+    mutation_commitment: Some(mutation_commitment),
+    page_artifact_count,
+    directory_artifact_count,
+    source_page_bytes,
+    directory_path_bytes,
+    page_artifact_bytes,
+    directory_artifact_bytes,
+    retained_encoded_bytes,
+    _validated: IndexCopyOnWriteClosureSealV1,
+  })
+}
+
+#[derive(Debug)]
+struct CompositeMutationV1<'a> {
+  order_key: Vec<u8>,
+  encoded: &'a [u8],
+  kind_tag: u8,
+}
+
+fn validate_composite_mutation_partition(
+  request: &IndexCopyOnWriteCompositeClosureRequestV1<'_>,
+  role: OrderedIndexRoleV1,
+  publication_artifact_bytes: usize,
+) -> FormatResult<Vec<u8>> {
+  let total_step_mutations = request.steps.iter().try_fold(0usize, |count, step| {
+    count
+      .checked_add(step.applied_mutations.len())
+      .ok_or_else(|| arithmetic_error("index_cow_composite_mutation_count", "composite mutation count overflowed"))
+  })?;
+  if total_step_mutations != request.applied_mutations.len() {
+    return Err(closure_error(
+      "index_cow_composite_mutation_count",
+      "composite step mutation count does not equal the frozen role mutation count",
+    ));
+  }
+  let metadata_bytes = total_step_mutations
+    .checked_mul(size_of::<CompositeMutationV1<'_>>())
+    .ok_or_else(|| arithmetic_error("index_cow_composite_mutation_workspace", "composite mutation metadata bytes overflowed"))?;
+  let mut workspace_bytes = publication_artifact_bytes
+    .checked_add(metadata_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_composite_mutation_workspace", "composite workspace bytes overflowed"))?;
+  if workspace_bytes > request.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_composite_mutation_workspace",
+      format!("composite artifacts and mutation metadata exceed the {}-byte workspace bound", request.maximum_workspace_bytes),
+    ));
+  }
+  let mut union: Vec<CompositeMutationV1<'_>> = Vec::new();
+  union
+    .try_reserve_exact(total_step_mutations)
+    .map_err(|source| amplification_error("index_cow_composite_mutation_workspace", format!("mutation reservation failed: {source}")))?;
+  let mut maximum_order_key_bytes = 0usize;
+  for (step_index, step) in request.steps.iter().enumerate() {
+    if step.applied_mutations.is_empty() {
+      return Err(closure_error("index_cow_composite_step_mutations", format!("composite step {step_index} has no mutations")));
+    }
+    let mut commitment = IndexMutationCommitmentV1::new(request.hash_algorithm);
+    let step_start = union.len();
+    for mutation in step.applied_mutations {
+      let order_key = validate_composite_mutation(request.hash_algorithm, role, *mutation)?;
+      if union
+        .get(step_start..)
+        .and_then(|mutations| mutations.last())
+        .is_some_and(|previous| previous.order_key.as_slice() >= order_key.as_slice())
+      {
+        return Err(order_error(
+          "index_cow_composite_step_order",
+          format!("composite step {step_index} mutations are not in strict frozen byte order"),
+        ));
+      }
+      workspace_bytes = workspace_bytes
+        .checked_add(order_key.len())
+        .ok_or_else(|| arithmetic_error("index_cow_composite_mutation_workspace", "composite mutation key bytes overflowed"))?;
+      if workspace_bytes > request.maximum_workspace_bytes {
+        return Err(amplification_error(
+          "index_cow_composite_mutation_workspace",
+          format!("composite mutation keys exceed the {}-byte workspace bound", request.maximum_workspace_bytes),
+        ));
+      }
+      maximum_order_key_bytes = maximum_order_key_bytes.max(order_key.len());
+      commitment.push(*mutation)?;
+      union.push(CompositeMutationV1 { order_key, encoded: mutation.encoded_record(), kind_tag: mutation.commitment_tag() });
+    }
+    let observed_commitment = commitment.finish();
+    if step.closure.mutation_commitment.as_deref() != Some(observed_commitment.as_slice()) {
+      return Err(closure_error(
+        "index_cow_composite_step_commitment",
+        format!("composite step {step_index} mutations disagree with its sealed commitment"),
+      ));
+    }
+  }
+  workspace_bytes = workspace_bytes
+    .checked_add(maximum_order_key_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_composite_mutation_workspace", "composite validation key bytes overflowed"))?;
+  if workspace_bytes > request.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_composite_mutation_workspace",
+      format!("composite validation key exceeds the {}-byte workspace bound", request.maximum_workspace_bytes),
+    ));
+  }
+  union.sort_unstable_by(|left, right| left.order_key.cmp(&right.order_key));
+  if union.windows(2).any(|pair| pair[0].order_key.as_slice() >= pair[1].order_key.as_slice()) {
+    return Err(order_error("index_cow_composite_partition_overlap", "composite steps overlap or repeat one frozen mutation key"));
+  }
+
+  let mut full_commitment = IndexMutationCommitmentV1::new(request.hash_algorithm);
+  let mut previous_order_key: Option<Vec<u8>> = None;
+  let mut partition_matches = true;
+  for (mutation_index, mutation) in request.applied_mutations.iter().enumerate() {
+    let order_key = validate_composite_mutation(request.hash_algorithm, role, *mutation)?;
+    if previous_order_key.as_ref().is_some_and(|previous| previous.as_slice() >= order_key.as_slice()) {
+      return Err(order_error("index_cow_composite_frozen_order", "composite frozen role mutations are not in strict byte order"));
+    }
+    let observed = union
+      .get(mutation_index)
+      .ok_or_else(|| closure_error("index_cow_composite_partition_missing", "composite mutation partition ended early"))?;
+    partition_matches &=
+      observed.order_key == order_key && observed.kind_tag == mutation.commitment_tag() && observed.encoded == mutation.encoded_record();
+    full_commitment.push(*mutation)?;
+    previous_order_key = Some(order_key);
+  }
+  if !partition_matches {
+    return Err(closure_error(
+      "index_cow_composite_partition_mismatch",
+      "composite mutation steps do not exactly partition the frozen role mutations",
+    ));
+  }
+  Ok(full_commitment.finish())
+}
+
+fn validate_composite_mutation(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  mutation: OrderedPageMutationKindV1<'_>,
+) -> FormatResult<Vec<u8>> {
+  let decoded = decode_ordered_record(mutation.encoded_record(), hash_algorithm, role)?;
+  if mutation.expects_tombstone() != decoded.tombstone
+    || (mutation.removes_existing() && (role != OrderedIndexRoleV1::ScopeReverse || decoded.tombstone))
+  {
+    return Err(closure_error(
+      "index_cow_composite_mutation_kind",
+      "composite mutation kind disagrees with its exact ordered record or role",
+    ));
+  }
+  ordered_record_order_key(&decoded)
+}
+
+fn checked_composite_add(current: usize, additional: usize, context: &'static str) -> FormatResult<usize> {
+  current
+    .checked_add(additional)
+    .ok_or_else(|| arithmetic_error("index_cow_composite_accounting", format!("composite {context} overflowed")))
 }
 
 #[derive(Debug)]

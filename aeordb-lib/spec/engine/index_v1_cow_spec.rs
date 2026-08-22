@@ -1,10 +1,11 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_copy_on_write::{
-  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, OrderedPageCompactionWindowRequestV1,
-  OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, TombstoneDropProofV1,
-  compact_ordered_page_window_v1, default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_batch_v1,
-  mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1, validate_index_copy_on_write_closure_v1,
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, IndexCopyOnWriteCompositeClosureRequestV1,
+  IndexCopyOnWriteCompositeStepV1, OrderedPageCompactionWindowRequestV1, OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1,
+  OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1, default_index_directory_layout_v1,
+  default_index_page_layout_v1, mutate_ordered_page_batch_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  validate_index_copy_on_write_closure_v1, validate_index_copy_on_write_composite_closure_v1,
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
@@ -1833,6 +1834,409 @@ fn cow_mutation_binding_preserves_frozen_byte_order_while_replaying_semantic_ord
     })
     .unwrap_err();
     assert_eq!(error.code(), "index_cow_mutation_binding_frozen_order");
+  }
+}
+
+#[test]
+fn cow_composite_closure_chains_bounded_roots_and_exact_mutation_partitions() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let source_page =
+      posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, &[posting_record(2, 2, 16, false), posting_record(512, 512, 16, false)]);
+    let source_root = leaf_directory(
+      hash_algorithm,
+      &owner_id,
+      7,
+      &[&source_page],
+      PhysicalHintV1 { wal_offset: 400, total_length: 500, write_sequence: 6 },
+    );
+    let inserted_256 = posting_record(256, 256, 16, false);
+    let first_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted_256)];
+    let first_page_plan = mutate_ordered_page_batch_v1(&OrderedPageBatchMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source_page,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      mutations: &first_mutations,
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+    let first_directories = [&source_root[..]];
+    let first_paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &first_directories }];
+    let first_directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &first_page_plan,
+      paths: &first_paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let source_pages = [&source_page[..]];
+    let first_summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 40,
+      applied_mutations: Some(&first_mutations),
+      source_pages: &source_pages,
+      paths: &first_paths,
+      page_plan: &first_page_plan,
+      directory_plan: &first_directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+
+    let first_output_page = &first_page_plan.replacements[0].artifacts[0].value;
+    let first_output_root = &first_directory_plan.artifacts.last().unwrap().value;
+    let inserted_1 = posting_record(1, 1, 16, false);
+    let second_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted_1)];
+    let second_page_plan = mutate_ordered_page_batch_v1(&OrderedPageBatchMutationRequestV1 {
+      hash_algorithm,
+      source_page: first_output_page,
+      next_posting_page: None,
+      generation: 9,
+      next_page_id: 40,
+      mutations: &second_mutations,
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    let first_output_key = decode_ordered_page(first_output_page, hash_algorithm).unwrap().key;
+    let second_directories = [first_output_root.as_slice()];
+    let second_paths = [ArtifactDirectoryPathV1 { source_page_key: &first_output_key, directories: &second_directories }];
+    let second_directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 9,
+      page_plan: &second_page_plan,
+      paths: &second_paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let second_source_pages = [first_output_page.as_slice()];
+    let second_summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 9,
+      initial_next_page_id: 40,
+      applied_mutations: Some(&second_mutations),
+      source_pages: &second_source_pages,
+      paths: &second_paths,
+      page_plan: &second_page_plan,
+      directory_plan: &second_directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+
+    let steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    let applied_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted_256), OrderedPageMutationKindV1::UpsertLive(&inserted_1)];
+    let source_root_key = decode_artifact_directory(&source_root, hash_algorithm).unwrap().key;
+    let request = IndexCopyOnWriteCompositeClosureRequestV1 {
+      hash_algorithm,
+      generation: 9,
+      initial_next_page_id: 40,
+      source_root_key: &source_root_key,
+      applied_mutations: &applied_mutations,
+      steps: &steps,
+      maximum_workspace_bytes: 64 * 1_024 * 1_024,
+    };
+    let summary = validate_index_copy_on_write_composite_closure_v1(&request).unwrap();
+    assert_eq!(summary.source_root_key, source_root_key);
+    assert_eq!(summary.root_key, second_summary.root_key);
+    assert_eq!(summary.generation, 9);
+    assert_eq!(summary.live_count, 4);
+    assert_eq!(summary.page_artifact_count, 2);
+    assert_eq!(summary.directory_artifact_count, 2);
+    assert_eq!(summary.mutation_commitment.as_ref().map(Vec::len), Some(hash_algorithm.hash_length()));
+
+    let substituted_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &first_mutations },
+    ];
+    let error = validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+      steps: &substituted_steps,
+      ..request
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "index_cow_composite_step_commitment");
+
+    for invalid_request in [
+      IndexCopyOnWriteCompositeClosureRequestV1 { generation: 0, ..request },
+      IndexCopyOnWriteCompositeClosureRequestV1 { source_root_key: &source_root_key[..source_root_key.len() - 1], ..request },
+    ] {
+      assert_eq!(validate_index_copy_on_write_composite_closure_v1(&invalid_request).unwrap_err().code(), "index_cow_composite_identity");
+    }
+    let zero_root = vec![0u8; hash_algorithm.hash_length()];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        source_root_key: &zero_root,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_identity"
+    );
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &[], ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_step_count"
+    );
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { applied_mutations: &[], ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_workspace"
+    );
+
+    let mut wrong_owner = first_summary.clone();
+    wrong_owner.owner_id[0] ^= 0x80;
+    let wrong_owner_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &wrong_owner, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        steps: &wrong_owner_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut wrong_role = first_summary.clone();
+    wrong_role.role = OrderedIndexRoleV1::ScopeOrdinal;
+    let wrong_role_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &wrong_role, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &wrong_role_steps, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut wrong_root = second_summary.clone();
+    wrong_root.source_root_key[0] ^= 0x80;
+    let wrong_root_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &wrong_root, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &wrong_root_steps, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut wrong_page_id = second_summary.clone();
+    wrong_page_id.initial_next_page_id += 1;
+    let wrong_page_id_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &wrong_page_id, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        steps: &wrong_page_id_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut generation_gap = second_summary.clone();
+    generation_gap.generation = 10;
+    let generation_gap_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &generation_gap, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        generation: 10,
+        steps: &generation_gap_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_step_generation"
+    );
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { generation: 10, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_generation"
+    );
+
+    let mut generation_regression = second_summary.clone();
+    generation_regression.generation = first_summary.generation;
+    let regression_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &generation_regression, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &regression_steps, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut missing_commitment = first_summary.clone();
+    missing_commitment.mutation_commitment = None;
+    let missing_commitment_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &missing_commitment, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        steps: &missing_commitment_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_step_chain"
+    );
+
+    let mut retired_intermediate = first_summary.clone();
+    retired_intermediate.root_key = None;
+    let retired_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &retired_intermediate, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &retired_steps, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_retired_intermediate"
+    );
+
+    let mut overlapping_second = second_summary.clone();
+    overlapping_second.mutation_commitment.clone_from(&first_summary.mutation_commitment);
+    let overlapping_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
+      IndexCopyOnWriteCompositeStepV1 { closure: &overlapping_second, applied_mutations: &first_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        steps: &overlapping_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_partition_overlap"
+    );
+
+    let empty_first_step = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &[] },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        applied_mutations: &second_mutations,
+        steps: &empty_first_step,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_step_mutations"
+    );
+
+    let wrong_kind_first = [OrderedPageMutationKindV1::TombstoneExisting(&inserted_256)];
+    let wrong_kind_all = [OrderedPageMutationKindV1::TombstoneExisting(&inserted_256), OrderedPageMutationKindV1::UpsertLive(&inserted_1)];
+    let wrong_kind_steps = [
+      IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &wrong_kind_first },
+      IndexCopyOnWriteCompositeStepV1 { closure: &second_summary, applied_mutations: &second_mutations },
+    ];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        applied_mutations: &wrong_kind_all,
+        steps: &wrong_kind_steps,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_mutation_kind"
+    );
+
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        applied_mutations: &first_mutations,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_mutation_count"
+    );
+    let unexpected_5 = posting_record(5, 5, 16, false);
+    let mismatched_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted_256), OrderedPageMutationKindV1::UpsertLive(&unexpected_5)];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        applied_mutations: &mismatched_mutations,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_partition_mismatch"
+    );
+    let reversed_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted_1), OrderedPageMutationKindV1::UpsertLive(&inserted_256)];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        applied_mutations: &reversed_mutations,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_frozen_order"
+    );
+
+    let artifact_bytes = first_summary
+      .page_artifact_bytes
+      .checked_add(first_summary.directory_artifact_bytes)
+      .and_then(|bytes| bytes.checked_add(second_summary.page_artifact_bytes))
+      .and_then(|bytes| bytes.checked_add(second_summary.directory_artifact_bytes))
+      .unwrap();
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        maximum_workspace_bytes: artifact_bytes,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_mutation_workspace"
+    );
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+        maximum_workspace_bytes: 1,
+        ..request
+      })
+      .unwrap_err()
+      .code(),
+      "index_cow_composite_artifact_bytes"
+    );
+    for invalid_workspace in [0, 64 * 1_024 * 1_024 + 1] {
+      assert_eq!(
+        validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+          maximum_workspace_bytes: invalid_workspace,
+          ..request
+        })
+        .unwrap_err()
+        .code(),
+        "index_cow_composite_workspace"
+      );
+    }
+
+    let too_many_steps = vec![IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations }; 4_096];
+    assert_eq!(
+      validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 { steps: &too_many_steps, ..request })
+        .unwrap_err()
+        .code(),
+      "index_cow_composite_step_count"
+    );
   }
 }
 

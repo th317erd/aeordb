@@ -1120,6 +1120,7 @@
           - [x] Add one bounded multi-mutation page COW path and make the single-mutation API delegate to it.
           - [x] Traverse selected roots through a sparse immutable-artifact source plus bounded successor overlay; never materialize an owner-wide page set.
           - [x] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
+          - [x] Chain more-than-four-path role rewrites through one bounded composite COW transcript with exact root, generation, PageID, mutation-partition, and combined workspace closure.
           - [ ] Close absent-root bootstrap, idempotent no-op mutations, and mutation sets spanning more than four page paths in the full sparse applicator.
           - [ ] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
