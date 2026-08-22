@@ -131,6 +131,7 @@ pub fn spawn_metrics_pulse(
           "memory": runtime.memory,
           "durability": runtime.durability,
           "configuration": runtime.configuration,
+          "index_runtime": runtime.index_runtime,
       });
 
       let event = EngineEvent::new(EVENT_METRICS, "system", payload);

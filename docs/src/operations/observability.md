@@ -13,6 +13,26 @@ AeorDB exposes one bounded runtime snapshot through several operator surfaces:
 
 Stats, Prometheus, administrative SSE, CLI status, and the Dashboard use the same runtime-observability producer. Collection is bounded by fixed owner/property registries and bounded diagnostic arrays. It does not scan WAL entries, KV pages, file bodies, or index files, and it does not evict caches.
 
+## Index Runtime
+
+`index_runtime` is a lock-free cached view of the migration-qualified v4 index
+runtime. It reports lifecycle state, recovered scope/checkpoint progress,
+publication activity, soft mutation queue and reconciliation evidence,
+producer task/retry/spill counts, and active/frozen mutation batches. Ordinary
+v3 operation reports `state: "inactive"`; this is not a failure.
+
+The Prometheus projection uses fixed series and bounded lifecycle labels:
+`aeordb_index_runtime_installed`, `aeordb_index_runtime_state`,
+`aeordb_index_runtime_pending_tasks`,
+`aeordb_index_runtime_pending_task_bytes`,
+`aeordb_index_runtime_queued_mutations`,
+`aeordb_index_runtime_mutation_bytes`,
+`aeordb_index_runtime_reconciliation_required`, and
+`aeordb_index_runtime_publication_in_flight`. It never uses operation IDs,
+paths, errors, or degradation text as labels. Root stats and metrics SSE retain
+bounded degradation context; non-root stats replace that context with
+`"<redacted>"`. Public health exposes only the resulting aggregate status.
+
 ## Garbage Collection
 
 `health.gc` is absent until the process observes its first GC run. After that,

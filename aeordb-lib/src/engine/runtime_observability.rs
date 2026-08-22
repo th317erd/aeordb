@@ -13,8 +13,70 @@ pub struct RuntimeObservabilitySnapshot {
   pub memory: EngineMemoryStats,
   pub durability: DurabilityObservabilitySnapshot,
   pub configuration: ConfigurationObservabilitySnapshot,
+  pub index_runtime: IndexRuntimeObservabilitySnapshot,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub gc: Option<crate::engine::gc_run_status::GcRunStatusSnapshotV1>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeObservabilitySnapshot {
+  pub installed: bool,
+  pub state: &'static str,
+  pub recovered_scopes: u32,
+  pub highest_checkpoint_sequence: u64,
+  pub publication_in_flight: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub degraded: Option<IndexRuntimeDegradedObservability>,
+  pub soft_mutations: IndexRuntimeSoftMutationObservability,
+  pub producer: IndexRuntimeProducerObservability,
+  pub mutations: IndexRuntimeMutationObservability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeDegradedObservability {
+  pub code: &'static str,
+  pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeSoftMutationObservability {
+  pub admission_closed: bool,
+  pub queued_notices: usize,
+  pub retained_bytes: usize,
+  pub maximum_notices: usize,
+  pub maximum_retained_bytes: usize,
+  pub maximum_notice_bytes: usize,
+  pub latest_queued_publication_sequence: Option<u64>,
+  pub reconciliation_required: bool,
+  pub lost_through_sequence: Option<u64>,
+  pub loss_reasons: Vec<&'static str>,
+  pub dropped_notices: u64,
+  pub loss_epoch: u64,
+  pub reconciled_loss_epoch: u64,
+  pub losses_in_flight: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeProducerObservability {
+  pub pending_tasks: u32,
+  pub pending_bytes: u64,
+  pub leased_tasks: u32,
+  pub completed_tasks: u64,
+  pub scheduled_retries: u64,
+  pub spilled_tasks: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeMutationObservability {
+  pub state: &'static str,
+  pub active_records: u64,
+  pub active_mutations: u64,
+  pub active_bytes: u64,
+  pub frozen_records: u64,
+  pub frozen_mutations: u64,
+  pub frozen_bytes: u64,
+  pub successful_flushes: u64,
+  pub restored_flushes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,8 +159,128 @@ pub fn collect_runtime_observability(
       runtime: configuration_envelope(&configuration, ConfigurationFamily::Runtime, visibility),
       lifecycle: configuration_envelope(&configuration, ConfigurationFamily::Lifecycle, visibility),
     },
+    index_runtime: index_runtime_observability(engine, visibility),
     gc: (visibility == ConfigurationVisibility::Root).then(|| engine.gc_run_status()).flatten(),
   })
+}
+
+fn index_runtime_observability(engine: &StorageEngine, visibility: ConfigurationVisibility) -> IndexRuntimeObservabilitySnapshot {
+  let Some(snapshot) = engine.index_runtime_snapshot_v1() else {
+    return IndexRuntimeObservabilitySnapshot {
+      installed: false,
+      state: "inactive",
+      recovered_scopes: 0,
+      highest_checkpoint_sequence: 0,
+      publication_in_flight: false,
+      degraded: None,
+      soft_mutations: IndexRuntimeSoftMutationObservability {
+        admission_closed: false,
+        queued_notices: 0,
+        retained_bytes: 0,
+        maximum_notices: 0,
+        maximum_retained_bytes: 0,
+        maximum_notice_bytes: 0,
+        latest_queued_publication_sequence: None,
+        reconciliation_required: false,
+        lost_through_sequence: None,
+        loss_reasons: Vec::new(),
+        dropped_notices: 0,
+        loss_epoch: 0,
+        reconciled_loss_epoch: 0,
+        losses_in_flight: 0,
+      },
+      producer: IndexRuntimeProducerObservability {
+        pending_tasks: 0,
+        pending_bytes: 0,
+        leased_tasks: 0,
+        completed_tasks: 0,
+        scheduled_retries: 0,
+        spilled_tasks: 0,
+      },
+      mutations: IndexRuntimeMutationObservability {
+        state: "inactive",
+        active_records: 0,
+        active_mutations: 0,
+        active_bytes: 0,
+        frozen_records: 0,
+        frozen_mutations: 0,
+        frozen_bytes: 0,
+        successful_flushes: 0,
+        restored_flushes: 0,
+      },
+    };
+  };
+
+  let soft = &snapshot.soft_hub;
+  let producer = &snapshot.producer;
+  let mutations = &snapshot.mutations;
+  IndexRuntimeObservabilitySnapshot {
+    installed: true,
+    state: snapshot.lifecycle.stable_name(),
+    recovered_scopes: snapshot.recovered_scopes,
+    highest_checkpoint_sequence: snapshot.highest_checkpoint_sequence,
+    publication_in_flight: snapshot.publication_in_flight,
+    degraded: snapshot.degraded.as_ref().map(|degraded| IndexRuntimeDegradedObservability {
+      code: degraded.code,
+      context: if visibility == ConfigurationVisibility::Root { degraded.context.clone() } else { "<redacted>".to_string() },
+    }),
+    soft_mutations: IndexRuntimeSoftMutationObservability {
+      admission_closed: soft.admission_closed,
+      queued_notices: soft.queued_notices,
+      retained_bytes: soft.retained_bytes,
+      maximum_notices: soft.maximum_notices,
+      maximum_retained_bytes: soft.maximum_retained_bytes,
+      maximum_notice_bytes: soft.maximum_notice_bytes,
+      latest_queued_publication_sequence: soft.latest_queued_publication_sequence,
+      reconciliation_required: soft.reconciliation_required,
+      lost_through_sequence: soft.lost_through_sequence,
+      loss_reasons: soft.loss_reasons.iter().map(|reason| soft_mutation_loss_reason_name(*reason)).collect(),
+      dropped_notices: soft.dropped_notices,
+      loss_epoch: soft.loss_epoch,
+      reconciled_loss_epoch: soft.reconciled_loss_epoch,
+      losses_in_flight: soft.losses_in_flight,
+    },
+    producer: IndexRuntimeProducerObservability {
+      pending_tasks: producer.pending_tasks,
+      pending_bytes: producer.pending_bytes,
+      leased_tasks: producer.leased_tasks,
+      completed_tasks: producer.completed_tasks,
+      scheduled_retries: producer.scheduled_retries,
+      spilled_tasks: producer.spilled_tasks,
+    },
+    mutations: IndexRuntimeMutationObservability {
+      state: index_coordinator_lifecycle_name(mutations.lifecycle),
+      active_records: mutations.active_records,
+      active_mutations: mutations.active_mutations,
+      active_bytes: mutations.active_bytes,
+      frozen_records: mutations.frozen_records,
+      frozen_mutations: mutations.frozen_mutations,
+      frozen_bytes: mutations.frozen_bytes,
+      successful_flushes: mutations.successful_flushes,
+      restored_flushes: mutations.restored_flushes,
+    },
+  }
+}
+
+fn soft_mutation_loss_reason_name(reason: crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1) -> &'static str {
+  use crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1;
+  match reason {
+    SoftMutationLossReasonV1::InvalidNotice => "invalid_notice",
+    SoftMutationLossReasonV1::QueueContended => "queue_contended",
+    SoftMutationLossReasonV1::QueueFull => "queue_full",
+    SoftMutationLossReasonV1::NoticeTooLarge => "notice_too_large",
+    SoftMutationLossReasonV1::AllocationFailed => "allocation_failed",
+    SoftMutationLossReasonV1::QueueUnavailable => "queue_unavailable",
+  }
+}
+
+fn index_coordinator_lifecycle_name(lifecycle: crate::engine::v4::index_coordinator::IndexCoordinatorLifecycleV1) -> &'static str {
+  use crate::engine::v4::index_coordinator::IndexCoordinatorLifecycleV1;
+  match lifecycle {
+    IndexCoordinatorLifecycleV1::Running => "running",
+    IndexCoordinatorLifecycleV1::Draining => "draining",
+    IndexCoordinatorLifecycleV1::Stopped => "stopped",
+  }
 }
 
 fn durability_observability(

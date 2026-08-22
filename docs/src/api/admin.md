@@ -946,6 +946,48 @@ Authentication is required. Share-link tokens are rejected. Root callers receive
   "configuration": {
     "runtime": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } },
     "lifecycle": { "config": {}, "status": { "valid": true, "degraded": false, "sources": {} } }
+  },
+  "index_runtime": {
+    "installed": true,
+    "state": "running",
+    "recovered_scopes": 4,
+    "highest_checkpoint_sequence": 18,
+    "publication_in_flight": false,
+    "soft_mutations": {
+      "admission_closed": false,
+      "queued_notices": 12,
+      "retained_bytes": 49152,
+      "maximum_notices": 4096,
+      "maximum_retained_bytes": 8388608,
+      "maximum_notice_bytes": 262144,
+      "latest_queued_publication_sequence": 4521,
+      "reconciliation_required": false,
+      "lost_through_sequence": null,
+      "loss_reasons": [],
+      "dropped_notices": 0,
+      "loss_epoch": 0,
+      "reconciled_loss_epoch": 0,
+      "losses_in_flight": 0
+    },
+    "producer": {
+      "pending_tasks": 3,
+      "pending_bytes": 8192,
+      "leased_tasks": 0,
+      "completed_tasks": 240,
+      "scheduled_retries": 1,
+      "spilled_tasks": 0
+    },
+    "mutations": {
+      "state": "running",
+      "active_records": 1200,
+      "active_mutations": 3200,
+      "active_bytes": 1048576,
+      "frozen_records": 0,
+      "frozen_mutations": 0,
+      "frozen_bytes": 0,
+      "successful_flushes": 14,
+      "restored_flushes": 0
+    }
   }
 }
 ```
@@ -968,8 +1010,16 @@ without double-counting `--auth self`.
 | `memory` | Process probes, memory policy/pressure, per-owner observations and reservations, and bounded cache diagnostics |
 | `durability` | Hard frontier, waiter depth, last completed barrier, grouping policy, read-only latch, spill evidence, and repair state |
 | `configuration` | Complete runtime/lifecycle envelopes: active and desired values, exact sources, validity, degradation, and pending activation |
+| `index_runtime` | Lock-free cached v4 lifecycle, soft-journal pressure/loss, producer queue/retry/spill, mutation batch, and publication state |
 
 The response is bounded by fixed owner/property registries and bounded diagnostic arrays. Collection does not evict caches or otherwise mutate storage policy. Poll at a monitoring cadence rather than treating it as a hot data-plane endpoint.
+
+`index_runtime.state` is `inactive` until a migration-qualified v4 runtime is
+installed. The other lifecycle states are `recovering`, `running`, `degraded`,
+`draining`, and `stopped`. A degraded record includes a stable `code` and a
+bounded `context`; non-root stats retain the code but replace the context with
+`"<redacted>"`. Collection reads the runtime's lock-free cached snapshot and
+never waits for parser, index publication, or worker ownership.
 
 `health.gc` is omitted before the first run, for all non-root callers, and
 after process restart until another run begins. The root projection retains
@@ -1012,6 +1062,11 @@ Public health check endpoint. No authentication required. Once the database is r
   "version": "0.9.5"
 }
 ```
+
+An installed v4 index runtime in `degraded`, `draining`, or `stopped` state
+degrades the aggregate status without exposing its state or diagnostics on this
+public route. Authenticated operators can inspect `index_runtime` through
+`GET /system/stats`.
 
 During startup, clean opens, dirty startup, or WAL/KV recovery, AeorDB binds HTTP before the storage engine is ready. In that state, `/system/health` still returns `200 OK` with startup progress:
 

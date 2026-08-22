@@ -111,6 +111,9 @@ async fn test_metrics_pulse_payload_structure() {
   assert!(durability["spill"].is_object());
   assert!(durability["repair"].is_object());
 
+  assert_eq!(payload["index_runtime"]["state"], "inactive");
+  assert_eq!(payload["index_runtime"]["installed"], false);
+
   for family in &["runtime", "lifecycle"] {
     assert!(payload["configuration"][family]["config"].is_object());
     assert!(payload["configuration"][family]["status"]["sources"].is_object());

@@ -213,6 +213,14 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     "aeordb_index_cache_max_bytes",
     "aeordb_index_mutation_buffer_max_bytes",
     "aeordb_index_publication_batch_max_bytes",
+    "aeordb_index_runtime_installed",
+    "aeordb_index_runtime_state",
+    "aeordb_index_runtime_pending_tasks",
+    "aeordb_index_runtime_pending_task_bytes",
+    "aeordb_index_runtime_queued_mutations",
+    "aeordb_index_runtime_mutation_bytes",
+    "aeordb_index_runtime_reconciliation_required",
+    "aeordb_index_runtime_publication_in_flight",
     "aeordb_gc_run_active",
     "aeordb_gc_run_progress_ratio",
     "aeordb_gc_run_state",
@@ -221,6 +229,7 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     assert!(output.contains(metric), "metrics should contain {metric}, got:\n{output}");
   }
   assert!(output.contains("aeordb_gc_run_state{state=\"complete\"} 1"));
+  assert!(output.contains("aeordb_index_runtime_state{state=\"inactive\"} 1"));
   assert!(!output.contains(&run_id), "Prometheus output must not use run IDs as high-cardinality labels");
 }
 

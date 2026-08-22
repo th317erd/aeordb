@@ -119,6 +119,7 @@ pub fn record_memory_metrics(memory: &EngineMemoryStats) {
 
 pub fn record_runtime_metrics(runtime: &RuntimeObservabilitySnapshot) {
   record_memory_metrics(&runtime.memory);
+  record_index_runtime_metrics(&runtime.index_runtime);
   let durability = &runtime.durability;
   metrics::gauge!(definitions::DURABILITY_HARD_FRONTIER).set(durability.frontier.hard_frontier as f64);
   metrics::gauge!(definitions::DURABILITY_NEXT_SEQUENCE).set(durability.frontier.next_sequence as f64);
@@ -141,6 +142,21 @@ pub fn record_runtime_metrics(runtime: &RuntimeObservabilitySnapshot) {
   record_gc_metrics(runtime.gc.as_ref());
   record_configuration_family("runtime", &runtime.configuration.runtime);
   record_configuration_family("lifecycle", &runtime.configuration.lifecycle);
+}
+
+fn record_index_runtime_metrics(runtime: &crate::engine::runtime_observability::IndexRuntimeObservabilitySnapshot) {
+  metrics::gauge!(definitions::INDEX_RUNTIME_INSTALLED).set(bool_gauge(runtime.installed));
+  for state in ["inactive", "recovering", "running", "degraded", "draining", "stopped"] {
+    metrics::gauge!(definitions::INDEX_RUNTIME_STATE, "state" => state).set(bool_gauge(runtime.state == state));
+  }
+  metrics::gauge!(definitions::INDEX_RUNTIME_PENDING_TASKS).set(runtime.producer.pending_tasks as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_PENDING_TASK_BYTES).set(runtime.producer.pending_bytes as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_QUEUED_MUTATIONS)
+    .set(runtime.mutations.active_mutations.saturating_add(runtime.mutations.frozen_mutations) as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_MUTATION_BYTES)
+    .set(runtime.mutations.active_bytes.saturating_add(runtime.mutations.frozen_bytes) as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_RECONCILIATION_REQUIRED).set(bool_gauge(runtime.soft_mutations.reconciliation_required));
+  metrics::gauge!(definitions::INDEX_RUNTIME_PUBLICATION_IN_FLIGHT).set(bool_gauge(runtime.publication_in_flight));
 }
 
 fn record_gc_metrics(gc: Option<&crate::engine::GcRunStatusSnapshotV1>) {

@@ -49,7 +49,13 @@ fn make_peer_config(node_id: u64) -> PeerConfig {
 
 fn make_health_checks(engine: HealthStatus, disk: HealthStatus, sync: HealthStatus, auth: HealthStatus) -> HealthChecks {
   HealthChecks {
-    engine: EngineHealth { status: engine, entry_count: 0, db_file_size_bytes: 0, durability_failure: None },
+    engine: EngineHealth {
+      status: engine,
+      entry_count: 0,
+      db_file_size_bytes: 0,
+      durability_failure: None,
+      index_runtime_state: "inactive",
+    },
     disk: DiskHealth { status: disk, available_bytes: 0, total_bytes: 0, usage_percent: 0.0 },
     sync: SyncHealth { status: sync, active_peers: 0, failing_peers: 0, details: None },
     auth: AuthHealth { status: auth, mode: "standalone".to_string(), signing_key_present: true },
@@ -67,8 +73,24 @@ fn test_engine_health_returns_healthy() {
   let db_path_str = db_path.to_str().unwrap();
   let health = check_engine(&engine, db_path_str);
   assert_eq!(health.status, HealthStatus::Healthy);
+  assert_eq!(health.index_runtime_state, "inactive");
   // Fresh engine should have a non-zero WAL file on disk.
   assert!(health.db_file_size_bytes > 0);
+}
+
+#[test]
+fn public_health_uses_the_shared_engine_operating_status_policy() {
+  let source = include_str!("../../src/server/routes.rs");
+  let health_handler = source
+    .split("pub async fn health_check")
+    .nth(1)
+    .and_then(|tail| tail.split("// ---------------------------------------------------------------------------").next())
+    .expect("public health handler source");
+  assert!(
+    health_handler.contains("engine_operating_status(&state.engine)"),
+    "public health must include cached index-runtime state through the shared engine policy"
+  );
+  assert!(!health_handler.contains("durability_failure()"), "public health must not retain a durability-only duplicate policy");
 }
 
 #[test]
@@ -488,6 +510,7 @@ fn test_full_health_check_serializes_to_json() {
   // Verify key fields exist and have correct serde rename_all = lowercase.
   assert_eq!(json["status"], "healthy");
   assert!(json["checks"]["engine"]["entry_count"].is_number());
+  assert_eq!(json["checks"]["engine"]["index_runtime_state"], "inactive");
   assert!(json["checks"]["disk"]["usage_percent"].is_number());
   assert!(json["checks"]["sync"]["active_peers"].is_number());
   assert!(json["checks"]["auth"]["mode"].is_string());

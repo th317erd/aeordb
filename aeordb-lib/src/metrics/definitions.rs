@@ -110,6 +110,14 @@ pub const INDEX_CACHE_EVICTED_INDEXES: &str = "aeordb_index_cache_evicted_indexe
 pub const INDEX_CACHE_EVICTED_BYTES: &str = "aeordb_index_cache_evicted_bytes";
 pub const INDEX_CACHE_ENTRIES: &str = "aeordb_index_cache_entries";
 pub const INDEX_CACHE_VALUES: &str = "aeordb_index_cache_values";
+pub const INDEX_RUNTIME_INSTALLED: &str = "aeordb_index_runtime_installed";
+pub const INDEX_RUNTIME_STATE: &str = "aeordb_index_runtime_state";
+pub const INDEX_RUNTIME_PENDING_TASKS: &str = "aeordb_index_runtime_pending_tasks";
+pub const INDEX_RUNTIME_PENDING_TASK_BYTES: &str = "aeordb_index_runtime_pending_task_bytes";
+pub const INDEX_RUNTIME_QUEUED_MUTATIONS: &str = "aeordb_index_runtime_queued_mutations";
+pub const INDEX_RUNTIME_MUTATION_BYTES: &str = "aeordb_index_runtime_mutation_bytes";
+pub const INDEX_RUNTIME_RECONCILIATION_REQUIRED: &str = "aeordb_index_runtime_reconciliation_required";
+pub const INDEX_RUNTIME_PUBLICATION_IN_FLIGHT: &str = "aeordb_index_runtime_publication_in_flight";
 pub const DIRECTORY_CACHE_ESTIMATED_BYTES: &str = "aeordb_directory_cache_estimated_bytes";
 pub const DIRECTORY_CACHE_ENTRIES: &str = "aeordb_directory_cache_entries";
 

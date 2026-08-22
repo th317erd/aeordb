@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
+use aeordb::engine::configuration_observability::ConfigurationVisibility;
+use aeordb::engine::health::{HealthStatus, check_engine};
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy, MemoryPressure};
 use aeordb::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity};
 use aeordb::engine::query_engine::QueryBuilder;
@@ -991,6 +993,11 @@ fn native_runtime_activation_preserves_legacy_query_results_and_cached_observabi
   let cached = fixture.source.index_runtime_snapshot_v1().expect("installed runtime cached snapshot");
   assert_eq!(cached.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(cached.highest_checkpoint_sequence, 0);
+  let observed = fixture.source.runtime_observability_snapshot(ConfigurationVisibility::Root).unwrap();
+  assert_eq!(observed.index_runtime.state, "running");
+  assert!(observed.index_runtime.installed);
+  assert_eq!(observed.index_runtime.producer.pending_tasks, cached.producer.pending_tasks);
+  assert_eq!(observed.index_runtime.mutations.active_bytes, cached.mutations.active_bytes);
 }
 
 #[test]
@@ -2079,6 +2086,18 @@ fn selected_checkpoint_damage_installs_one_typed_degraded_runtime_instead_of_rem
     absent.source.index_runtime_snapshot_v1().unwrap().degraded.as_ref().unwrap().code,
     "native_index_checkpoint_selection_missing"
   );
+  let root_observation = absent.source.runtime_observability_snapshot(ConfigurationVisibility::Root).unwrap();
+  let redacted_observation = absent.source.runtime_observability_snapshot(ConfigurationVisibility::Redacted).unwrap();
+  assert_eq!(root_observation.index_runtime.state, "degraded");
+  assert!(!root_observation.index_runtime.degraded.as_ref().unwrap().context.is_empty());
+  assert_eq!(redacted_observation.index_runtime.degraded.as_ref().unwrap().context, "<redacted>");
+  assert_eq!(
+    redacted_observation.index_runtime.degraded.as_ref().unwrap().code,
+    root_observation.index_runtime.degraded.as_ref().unwrap().code
+  );
+  let health = check_engine(&absent.source, absent.source_path.to_str().unwrap());
+  assert_eq!(health.status, HealthStatus::Degraded);
+  assert_eq!(health.index_runtime_state, "degraded");
 
   let missing = RuntimeFixture::new("runtime-selected-missing-journal");
   let missing_semantic = publish_complete_semantic_authority(&missing, 1);

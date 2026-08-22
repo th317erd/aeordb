@@ -383,9 +383,11 @@ async fn test_stats_has_enhanced_structure() {
   let json = body_json(response.into_body()).await;
 
   // Top-level sections must be present
-  for section in &["identity", "counts", "sizes", "throughput", "health", "memory", "durability", "configuration"] {
+  for section in &["identity", "counts", "sizes", "throughput", "health", "memory", "durability", "configuration", "index_runtime"] {
     assert!(json.get(section).is_some(), "Expected top-level section '{}' to be present in stats response", section,);
   }
+  assert_eq!(json["index_runtime"]["state"], "inactive");
+  assert_eq!(json["index_runtime"]["installed"], false);
 
   // Identity fields
   let identity = &json["identity"];

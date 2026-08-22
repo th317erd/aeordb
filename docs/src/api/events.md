@@ -119,7 +119,7 @@ Each event is a JSON object with:
 | `tasks_cancelled` | A running task cancellation was observed | `{"task_id": "...", "task_type": "..."}` |
 | `gc_status` | Root-only immediate GC phase/terminal status | Bounded GC status object, with optional `task_id` |
 | `heartbeat` | Clock synchronization pulse (every 15s) | `{"intent_time", "construct_time", "node_id"}` |
-| `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration"}` |
+| `metrics` | Root-only administrative runtime snapshot (every 15s) | `{"counts", "sizes", "throughput", "health", "memory", "durability", "configuration", "index_runtime"}` |
 
 Coordinator-owned namespace mutations add these acknowledgement fields to
 entry and version relationship payloads only after the exact hard publication

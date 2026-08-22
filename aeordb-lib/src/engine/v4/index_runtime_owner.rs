@@ -84,6 +84,16 @@ impl IndexRuntimeLifecycleV1 {
       Self::Stopped => 5,
     }
   }
+
+  pub const fn stable_name(self) -> &'static str {
+    match self {
+      Self::Recovering => "recovering",
+      Self::Running => "running",
+      Self::Degraded => "degraded",
+      Self::Draining => "draining",
+      Self::Stopped => "stopped",
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

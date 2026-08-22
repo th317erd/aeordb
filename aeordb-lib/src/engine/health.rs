@@ -37,6 +37,7 @@ pub struct EngineHealth {
   pub db_file_size_bytes: u64,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub durability_failure: Option<String>,
+  pub index_runtime_state: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,14 +75,37 @@ pub fn check_engine(engine: &StorageEngine, db_path: &str) -> EngineHealth {
     Err(_) => (0, false),
   };
   let durability_failure = engine.durability_failure();
-  let status = if durability_failure.is_some() {
+  let index_runtime = engine.index_runtime_snapshot_v1();
+  let index_runtime_state = index_runtime.as_ref().map_or("inactive", |snapshot| snapshot.lifecycle.stable_name());
+  let operating_status =
+    classify_engine_operating_status(durability_failure.is_some(), index_runtime.as_ref().map(|snapshot| snapshot.lifecycle));
+  let status = if operating_status == HealthStatus::Healthy && !metadata_available { HealthStatus::Degraded } else { operating_status };
+  EngineHealth { status, entry_count, db_file_size_bytes, durability_failure, index_runtime_state }
+}
+
+pub(crate) fn engine_operating_status(engine: &StorageEngine) -> HealthStatus {
+  let index_runtime = engine.index_runtime_snapshot_v1();
+  classify_engine_operating_status(engine.durability_failure().is_some(), index_runtime.as_ref().map(|snapshot| snapshot.lifecycle))
+}
+
+fn classify_engine_operating_status(
+  durability_failed: bool,
+  index_runtime: Option<crate::engine::v4::index_runtime_owner::IndexRuntimeLifecycleV1>,
+) -> HealthStatus {
+  if durability_failed {
     HealthStatus::Unhealthy
-  } else if metadata_available {
-    HealthStatus::Healthy
-  } else {
+  } else if index_runtime.is_some_and(|lifecycle| {
+    matches!(
+      lifecycle,
+      crate::engine::v4::index_runtime_owner::IndexRuntimeLifecycleV1::Degraded
+        | crate::engine::v4::index_runtime_owner::IndexRuntimeLifecycleV1::Draining
+        | crate::engine::v4::index_runtime_owner::IndexRuntimeLifecycleV1::Stopped
+    )
+  }) {
     HealthStatus::Degraded
-  };
-  EngineHealth { status, entry_count, db_file_size_bytes, durability_failure }
+  } else {
+    HealthStatus::Healthy
+  }
 }
 
 /// Check disk health for the partition containing the database file.

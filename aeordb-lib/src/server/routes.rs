@@ -28,15 +28,15 @@ use crate::engine::system_store;
 
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
   let disk = crate::engine::health::check_disk(&state.db_path);
-  let engine_unhealthy = state.engine.durability_failure().is_some();
-  let status = if engine_unhealthy {
+  let engine_status = crate::engine::health::engine_operating_status(&state.engine);
+  let status = if engine_status == crate::engine::health::HealthStatus::Unhealthy
+    || disk.status == crate::engine::health::HealthStatus::Unhealthy
+  {
     crate::engine::health::HealthStatus::Unhealthy
+  } else if engine_status == crate::engine::health::HealthStatus::Degraded || disk.status == crate::engine::health::HealthStatus::Degraded {
+    crate::engine::health::HealthStatus::Degraded
   } else {
-    match disk.status {
-      crate::engine::health::HealthStatus::Unhealthy => crate::engine::health::HealthStatus::Unhealthy,
-      crate::engine::health::HealthStatus::Degraded => crate::engine::health::HealthStatus::Degraded,
-      crate::engine::health::HealthStatus::Healthy => crate::engine::health::HealthStatus::Healthy,
-    }
+    crate::engine::health::HealthStatus::Healthy
   };
   // SECURITY: Only expose the top-level status publicly. Detailed checks
   // (engine stats, disk info, peer counts, auth mode) leak internal state

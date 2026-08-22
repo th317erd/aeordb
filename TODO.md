@@ -1094,6 +1094,8 @@
             - [x] Close the existing cancellation, retry exhaustion, spill recovery, mixed-owner, and duplicate-delivery matrix through one reviewed evidence inventory.
             - [ ] Run focused producer/runtime/namespace gates before affected, architecture, suppression, static, broad, resource, real-world, and native qualification.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
+          - [x] Project the lock-free cached runtime state through shared observability, `/system/stats`, root metrics SSE, Prometheus, and bounded public health without exposing degraded context to non-root callers.
+          - [ ] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
         - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.

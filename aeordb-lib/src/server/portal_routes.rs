@@ -302,6 +302,7 @@ pub struct EnhancedStats {
   pub memory: crate::engine::storage_engine::EngineMemoryStats,
   pub durability: crate::engine::runtime_observability::DurabilityObservabilitySnapshot,
   pub configuration: crate::engine::runtime_observability::ConfigurationObservabilitySnapshot,
+  pub index_runtime: crate::engine::runtime_observability::IndexRuntimeObservabilitySnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -504,6 +505,7 @@ fn get_stats_inner(
     memory: runtime.memory,
     durability: runtime.durability,
     configuration: runtime.configuration,
+    index_runtime: runtime.index_runtime,
   };
 
   Ok(Json(stats))
