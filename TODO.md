@@ -1098,8 +1098,8 @@
           - [x] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
         - [ ] P6-3a: implement the frozen A/B active-pointer writer, deterministic rewrite planner, shallow closure selection, and storage-neutral soft/hard publication contract.
-          - [ ] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.
-          - [ ] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
+          - [x] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.
+          - [x] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
           - [ ] Freeze dependency-before-manifest-before-pointer ordering and the distinct soft/hard durability receipts before connecting first authority.
         - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.

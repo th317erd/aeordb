@@ -331,6 +331,26 @@ pub struct ActivePointerV1<'a> {
   pub key: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivePointerSlotObservationV1<'a> {
+  Missing,
+  StructurallyInvalid,
+  Structural { pointer: &'a ActivePointerV1<'a>, closure_valid: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivePointerClosureSelectionV1<'a> {
+  pub selected: Option<&'a ActivePointerV1<'a>>,
+  pub repair_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivePointerRewritePlanV1<'a> {
+  pub selection: ActivePointerClosureSelectionV1<'a>,
+  pub write_slot: u8,
+  pub next_sequence: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexManifestV1<'a> {
   pub kind: IndexManifestKindV1,
@@ -448,24 +468,108 @@ pub fn decode_active_pointer(value: &[u8], hash_algorithm: HashAlgorithm) -> For
 }
 
 pub fn select_active_pointer<'a>(left: &'a ActivePointerV1<'a>, right: &'a ActivePointerV1<'a>) -> FormatResult<&'a ActivePointerV1<'a>> {
-  if left.kind != right.kind || left.owner_id != right.owner_id || left.slot == right.slot {
-    return Err(closure_error("active-pointer pair does not describe opposite slots for one owner and kind"));
+  select_closure_valid_active_pointer(
+    left.kind,
+    left.owner_id,
+    ActivePointerSlotObservationV1::Structural { pointer: left, closure_valid: true },
+    ActivePointerSlotObservationV1::Structural { pointer: right, closure_valid: true },
+  )?
+  .selected
+  .ok_or_else(|| closure_error("structurally valid active-pointer pair has no closure-valid member"))
+}
+
+pub fn select_closure_valid_active_pointer<'a>(
+  expected_kind: ActivePointerKindV1,
+  expected_owner_id: &[u8],
+  slot_a: ActivePointerSlotObservationV1<'a>,
+  slot_b: ActivePointerSlotObservationV1<'a>,
+) -> FormatResult<ActivePointerClosureSelectionV1<'a>> {
+  let slot_a = validate_active_pointer_observation(expected_kind, expected_owner_id, 0, slot_a)?;
+  let slot_b = validate_active_pointer_observation(expected_kind, expected_owner_id, 1, slot_b)?;
+  select_validated_active_pointer_pair(slot_a, slot_b)
+}
+
+pub fn plan_active_pointer_rewrite<'a>(
+  expected_kind: ActivePointerKindV1,
+  expected_owner_id: &[u8],
+  slot_a: ActivePointerSlotObservationV1<'a>,
+  slot_b: ActivePointerSlotObservationV1<'a>,
+) -> FormatResult<ActivePointerRewritePlanV1<'a>> {
+  let slot_a = validate_active_pointer_observation(expected_kind, expected_owner_id, 0, slot_a)?;
+  let slot_b = validate_active_pointer_observation(expected_kind, expected_owner_id, 1, slot_b)?;
+  let selection = select_validated_active_pointer_pair(slot_a, slot_b)?;
+  let maximum_sequence = match (slot_a.pointer, slot_b.pointer) {
+    (None, None) => None,
+    (Some(pointer), None) | (None, Some(pointer)) => Some(pointer.sequence),
+    (Some(left), Some(right)) => Some(left.sequence.max(right.sequence)),
+  };
+  let next_sequence = match maximum_sequence {
+    None => 1,
+    Some(sequence) => sequence.checked_add(1).ok_or_else(|| length_error("active-pointer publication sequence is exhausted"))?,
+  };
+  let write_slot = match (slot_a.pointer, slot_b.pointer) {
+    (None, _) => 0,
+    (Some(_), None) => 1,
+    (Some(left), Some(right)) if left.sequence == right.sequence => 1,
+    (Some(left), Some(right)) if left.sequence < right.sequence => 0,
+    (Some(_), Some(_)) => 1,
+  };
+  Ok(ActivePointerRewritePlanV1 { selection, write_slot, next_sequence })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidatedActivePointerSlotV1<'a> {
+  pointer: Option<&'a ActivePointerV1<'a>>,
+  closure_valid: bool,
+}
+
+fn validate_active_pointer_observation<'a>(
+  expected_kind: ActivePointerKindV1,
+  expected_owner_id: &[u8],
+  expected_slot: u8,
+  observation: ActivePointerSlotObservationV1<'a>,
+) -> FormatResult<ValidatedActivePointerSlotV1<'a>> {
+  if expected_owner_id.is_empty() || expected_owner_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("active-pointer expected owner is empty or all zero"));
   }
-  if left.sequence > right.sequence {
-    Ok(left)
-  } else if right.sequence > left.sequence {
-    Ok(right)
-  } else if left.target_manifest_hash != right.target_manifest_hash {
-    Err(error(
-      MalformedInputClass::AmbiguousEqualSequenceSelector,
-      "index_pointer_ambiguous",
-      "equal pointer sequences select different manifests",
-    ))
-  } else if left.slot == 0 {
-    Ok(left)
-  } else {
-    Ok(right)
+  let ActivePointerSlotObservationV1::Structural { pointer, closure_valid } = observation else {
+    return Ok(ValidatedActivePointerSlotV1 { pointer: None, closure_valid: false });
+  };
+  if pointer.kind != expected_kind || pointer.owner_id != expected_owner_id || pointer.slot != expected_slot {
+    return Err(closure_error("active-pointer observation has a foreign kind, owner, or slot"));
   }
+  if pointer.generation == 0
+    || pointer.sequence == 0
+    || pointer.target_manifest_hash.len() != expected_owner_id.len()
+    || pointer.target_manifest_hash.iter().all(|byte| *byte == 0)
+  {
+    return Err(identity_error("structural active-pointer observation has an invalid generation, sequence, or target"));
+  }
+  Ok(ValidatedActivePointerSlotV1 { pointer: Some(pointer), closure_valid })
+}
+
+fn select_validated_active_pointer_pair<'a>(
+  slot_a: ValidatedActivePointerSlotV1<'a>,
+  slot_b: ValidatedActivePointerSlotV1<'a>,
+) -> FormatResult<ActivePointerClosureSelectionV1<'a>> {
+  let repair_required = match (slot_a.pointer, slot_b.pointer) {
+    (Some(left), Some(right)) if left.sequence == right.sequence && left.target_manifest_hash != right.target_manifest_hash => {
+      return Err(error(
+        MalformedInputClass::AmbiguousEqualSequenceSelector,
+        "index_pointer_ambiguous",
+        "equal pointer sequences select different manifests",
+      ));
+    }
+    (Some(left), Some(right)) => left.sequence == right.sequence,
+    _ => false,
+  };
+  let selected = match (slot_a.pointer.filter(|_| slot_a.closure_valid), slot_b.pointer.filter(|_| slot_b.closure_valid)) {
+    (None, None) => None,
+    (Some(pointer), None) | (None, Some(pointer)) => Some(pointer),
+    (Some(left), Some(right)) if left.sequence >= right.sequence => Some(left),
+    (Some(_), Some(right)) => Some(right),
+  };
+  Ok(ActivePointerClosureSelectionV1 { selected, repair_required })
 }
 
 pub fn decode_index_manifest(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<IndexManifestV1<'_>> {
