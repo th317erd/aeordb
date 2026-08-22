@@ -943,11 +943,15 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
     ("delete_files_batch_with_kind", "execute_optional_namespace_mutation"),
     ("delete_directory", "execute_namespace_mutation"),
     ("create_directory", "execute_namespace_mutation"),
+    ("migrate_file_record_to_current_version", "migrate_file_record_to_current_version_with_memory"),
     ("migrate_file_record_to_current_version_inner", "execute_optional_namespace_mutation"),
     ("ensure_root_directory", "execute_optional_namespace_mutation"),
-    ("rebuild_directory_tree", "store_rebuilt_directory"),
-    ("repair_directory_index_from_path_records", "store_rebuilt_directory"),
-    ("repair_stale_dir_key", "execute_optional_namespace_mutation"),
+    ("rebuild_directory_tree", "rebuild_directory_tree_unrouted"),
+    ("rebuild_directory_tree_unrouted", "store_rebuilt_directory"),
+    ("repair_directory_index_from_path_records", "repair_directory_index_from_path_records_unrouted"),
+    ("repair_directory_index_from_path_records_unrouted", "store_rebuilt_directory"),
+    ("repair_stale_dir_key", "repair_stale_dir_key_unrouted"),
+    ("repair_stale_dir_key_unrouted", "execute_optional_namespace_mutation"),
     ("store_rebuilt_directory", "execute_namespace_mutation"),
     ("delete_file_with_indexing", "delete_file("),
     ("store_symlink", "execute_namespace_mutation"),
@@ -974,7 +978,7 @@ fn wave_one_entrypoints_cannot_reintroduce_split_namespace_authority() {
     }
   }
 
-  let stale_locator_repair = method_source(&source, "repair_stale_dir_key");
+  let stale_locator_repair = method_source(&source, "repair_stale_dir_key_unrouted");
   assert!(
     !stale_locator_repair.contains("self.engine.store_entry("),
     "stale directory-locator repair must not bypass shared maintenance authority"

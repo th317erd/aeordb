@@ -164,7 +164,7 @@ impl IndexSink for IndexManager<'_> {
     values: &[Vec<u8>],
     file_key: &[u8],
   ) -> EngineResult<()> {
-    IndexManager::update_index(self, parent, field_name, field_config, values, file_key)
+    IndexManager::update_index_unrouted(self, parent, field_name, field_config, values, file_key)
   }
 }
 
@@ -177,7 +177,7 @@ impl IndexSink for IndexWriteBuffer<'_> {
     values: &[Vec<u8>],
     file_key: &[u8],
   ) -> EngineResult<()> {
-    IndexWriteBuffer::update_index(self, parent, field_name, field_config, values, file_key)
+    IndexWriteBuffer::update_index_unrouted(self, parent, field_name, field_config, values, file_key)
   }
 }
 
@@ -192,6 +192,11 @@ impl<'a> IndexingPipeline<'a> {
 
   /// Run the indexing pipeline for a stored file.
   pub fn run(&self, _ctx: &RequestContext, path: &str, data: &[u8], content_type: Option<&str>) -> EngineResult<()> {
+    let applicable = self.run_unrouted_with_outcome(path, data, content_type)?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
+  }
+
+  pub(crate) fn run_unrouted_with_outcome(&self, path: &str, data: &[u8], content_type: Option<&str>) -> EngineResult<bool> {
     let mut index_manager = IndexManager::new(self.engine);
     self.run_with_sink(path, data, content_type, &mut index_manager, None)
   }
@@ -206,6 +211,17 @@ impl<'a> IndexingPipeline<'a> {
     content_type: Option<&str>,
     cancellation: &CancellationToken,
   ) -> EngineResult<()> {
+    let applicable = self.run_unrouted_with_cancellation(path, data, content_type, cancellation)?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
+  }
+
+  pub(crate) fn run_unrouted_with_cancellation(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    cancellation: &CancellationToken,
+  ) -> EngineResult<bool> {
     let mut index_manager = IndexManager::new(self.engine);
     self.run_with_sink(path, data, content_type, &mut index_manager, Some(cancellation))
   }
@@ -223,7 +239,8 @@ impl<'a> IndexingPipeline<'a> {
     content_type: Option<&str>,
     index_buffer: &mut IndexWriteBuffer<'_>,
   ) -> EngineResult<()> {
-    self.run_with_sink(path, data, content_type, index_buffer, None)
+    let applicable = self.run_buffered_unrouted_with_outcome(path, data, content_type, index_buffer, None)?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
   }
 
   /// Buffered indexing with cooperative cancellation for maintenance tasks.
@@ -236,7 +253,19 @@ impl<'a> IndexingPipeline<'a> {
     index_buffer: &mut IndexWriteBuffer<'_>,
     cancellation: &CancellationToken,
   ) -> EngineResult<()> {
-    self.run_with_sink(path, data, content_type, index_buffer, Some(cancellation))
+    let applicable = self.run_buffered_unrouted_with_outcome(path, data, content_type, index_buffer, Some(cancellation))?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
+  }
+
+  pub(crate) fn run_buffered_unrouted_with_outcome(
+    &self,
+    path: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    index_buffer: &mut IndexWriteBuffer<'_>,
+    cancellation: Option<&CancellationToken>,
+  ) -> EngineResult<bool> {
+    self.run_with_sink(path, data, content_type, index_buffer, cancellation)
   }
 
   fn run_with_sink<S: IndexSink>(
@@ -246,15 +275,15 @@ impl<'a> IndexingPipeline<'a> {
     content_type: Option<&str>,
     index_sink: &mut S,
     cancellation: Option<&CancellationToken>,
-  ) -> EngineResult<()> {
+  ) -> EngineResult<bool> {
     if !self.path_is_indexable(path)? {
-      return Ok(());
+      return Ok(false);
     }
 
     let normalized = normalize_path(path);
     let (config, config_dir) = match self.find_config_for_path(&normalized)? {
       Some(pair) => pair,
-      None => return Ok(()),
+      None => return Ok(false),
     };
 
     let ct = content_type.unwrap_or("application/octet-stream");
@@ -268,7 +297,7 @@ impl<'a> IndexingPipeline<'a> {
     let registry_parser = if explicit_parser.is_none() { self.lookup_parser_by_content_type(content_type)? } else { None };
     let content_fields: Vec<&IndexFieldConfig> = config.indexes.iter().filter(|field| !field.name.starts_with('@')).collect();
     if content_fields.is_empty() && explicit_parser.is_none() && registry_parser.is_none() {
-      return Ok(());
+      return Ok(true);
     }
 
     let mut memory = PipelineMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
@@ -286,7 +315,7 @@ impl<'a> IndexingPipeline<'a> {
       &mut memory,
     )?
     else {
-      return Ok(());
+      return Ok(true);
     };
 
     for field_config in content_fields {
@@ -301,7 +330,7 @@ impl<'a> IndexingPipeline<'a> {
       }
     }
 
-    Ok(())
+    Ok(true)
   }
 
   fn parse_index_document(
@@ -376,17 +405,34 @@ impl<'a> IndexingPipeline<'a> {
   /// by chunk/batch commit paths that have already stored a FileRecord but do
   /// not have the full file bytes in memory.
   pub fn run_metadata_only(&self, _ctx: &RequestContext, path: &str) -> EngineResult<()> {
+    let applicable = self.run_metadata_only_unrouted_with_outcome(path)?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
+  }
+
+  pub(crate) fn run_metadata_only_unrouted_with_outcome(&self, path: &str) -> EngineResult<bool> {
     let mut index_manager = IndexManager::new(self.engine);
-    self.run_metadata_only_with_sink(path, &mut index_manager).map(|_| ())
+    self.run_metadata_only_with_sink(path, &mut index_manager)
   }
 
   /// Update only @-prefixed metadata indexes using a buffered writer.
   pub fn run_metadata_only_buffered(&self, _ctx: &RequestContext, path: &str, index_buffer: &mut IndexWriteBuffer<'_>) -> EngineResult<()> {
-    self.run_metadata_only_with_sink(path, index_buffer).map(|_| ())
+    let applicable = self.run_metadata_only_buffered_unrouted_with_outcome(path, index_buffer)?;
+    self.admit_explicit_legacy_mutation_if_applicable(path, applicable)
   }
 
-  pub(crate) fn run_metadata_only_buffered_with_outcome(&self, path: &str, index_buffer: &mut IndexWriteBuffer<'_>) -> EngineResult<bool> {
+  pub(crate) fn run_metadata_only_buffered_unrouted_with_outcome(
+    &self,
+    path: &str,
+    index_buffer: &mut IndexWriteBuffer<'_>,
+  ) -> EngineResult<bool> {
     self.run_metadata_only_with_sink(path, index_buffer)
+  }
+
+  fn admit_explicit_legacy_mutation_if_applicable(&self, path: &str, applicable: bool) -> EngineResult<()> {
+    if applicable {
+      self.engine.admit_explicit_legacy_index_mutation_v1(&normalize_path(path))?;
+    }
+    Ok(())
   }
 
   fn run_metadata_only_with_sink<S: IndexSink>(&self, path: &str, index_sink: &mut S) -> EngineResult<bool> {

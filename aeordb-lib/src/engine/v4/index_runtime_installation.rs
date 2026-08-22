@@ -43,7 +43,7 @@ use super::index_runtime_cadence::{
   IndexRuntimeCadenceErrorV1, IndexRuntimeProducerServiceLimitsV1, IndexRuntimeProducerServiceSourcesV1, NativeIndexRuntimeCadenceV1,
 };
 use super::index_producer_admission::{
-  IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceClassV1, IndexProducerMaintenanceIntentV1, build_maintenance_task,
+  IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceIntentV1, IndexProducerMaintenanceTargetV1, build_maintenance_task,
 };
 use super::index_producer_coordinator::IndexProducerAdmissionV1;
 use super::index_runtime_dirty_overlay_recovery::{
@@ -416,29 +416,57 @@ impl NativeIndexRuntimeV1 {
     )
   }
 
-  pub(crate) fn admit_maintenance_task(
+  pub(crate) fn admit_maintenance_tasks(
     &self,
     source_operation_id: [u8; 16],
-    class: IndexProducerMaintenanceClassV1,
     publication_sequence: u64,
     namespace_root: &[u8],
-    scope: &str,
-  ) -> Result<IndexProducerAdmissionV1, NativeIndexRuntimeTaskAdmissionErrorV1> {
+    targets: &[IndexProducerMaintenanceTargetV1<'_>],
+  ) -> Result<Vec<IndexProducerAdmissionV1>, NativeIndexRuntimeTaskAdmissionErrorV1> {
+    if targets.is_empty() || targets.len() > 8 {
+      return Err(NativeIndexRuntimeTaskAdmissionErrorV1::Invalid {
+        code: "native_index_maintenance_batch",
+        message: "maintenance admission batch must contain between one and eight targets".to_string(),
+      });
+    }
+    for (target_index, target) in targets.iter().enumerate() {
+      if targets[..target_index].iter().any(|prior| prior.class == target.class && prior.scope == target.scope) {
+        return Err(NativeIndexRuntimeTaskAdmissionErrorV1::Invalid {
+          code: "native_index_maintenance_batch_duplicate",
+          message: format!("maintenance target {} duplicates an earlier class/scope pair", target_index + 1),
+        });
+      }
+    }
     let semantic_authority = self.publisher.load_selected_semantic_authority()?;
     validate_selected_semantic_authority_identity(&self.shadow_identity, &semantic_authority)
       .map_err(|(code, message)| NativeIndexRuntimeTaskAdmissionErrorV1::Invalid { code, message: message.to_string() })?;
-    let request = build_maintenance_task(
-      self.shadow_identity.hash_algorithm,
-      IndexProducerMaintenanceIntentV1 {
-        source_operation_id,
-        class,
-        publication_sequence,
-        namespace_root,
-        semantic_state_root: &semantic_authority.semantic_state.object_id,
-        scope,
-      },
-    )?;
-    self.cadence.admit_task(request).map_err(Into::into)
+    let mut requests = Vec::new();
+    requests.try_reserve_exact(targets.len()).map_err(|error| NativeIndexRuntimeTaskAdmissionErrorV1::Invalid {
+      code: "native_index_maintenance_batch",
+      message: format!("maintenance request allocation failed: {error}"),
+    })?;
+    for target in targets {
+      requests.push(build_maintenance_task(
+        self.shadow_identity.hash_algorithm,
+        IndexProducerMaintenanceIntentV1 {
+          source_operation_id,
+          class: target.class,
+          publication_sequence,
+          namespace_root,
+          semantic_state_root: &semantic_authority.semantic_state.object_id,
+          scope: target.scope,
+        },
+      )?);
+    }
+    let mut outcomes = Vec::new();
+    outcomes.try_reserve_exact(requests.len()).map_err(|error| NativeIndexRuntimeTaskAdmissionErrorV1::Invalid {
+      code: "native_index_maintenance_batch",
+      message: format!("maintenance outcome allocation failed: {error}"),
+    })?;
+    for request in requests {
+      outcomes.push(self.cadence.admit_task(request)?);
+    }
+    Ok(outcomes)
   }
 
   /// Lease one exact source window. The caller must hold source namespace

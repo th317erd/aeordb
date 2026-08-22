@@ -1091,6 +1091,18 @@ impl<'a> IndexWriteBuffer<'a> {
     field_values: &[Vec<u8>],
     file_key: &[u8],
   ) -> EngineResult<()> {
+    self.update_index_unrouted(parent, field_name, field_config, field_values, file_key)?;
+    self.manager.admit_explicit_legacy_mutation(parent)
+  }
+
+  pub(crate) fn update_index_unrouted(
+    &mut self,
+    parent: &str,
+    field_name: &str,
+    field_config: &IndexFieldConfig,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+  ) -> EngineResult<()> {
     self.manager.update_index_with_options(parent, field_name, field_config, field_values, file_key, Some(self.options))?;
     self.pending_mutations += 1;
     self.total_mutations += 1;
@@ -1788,6 +1800,18 @@ impl<'a> IndexManager<'a> {
     IndexManager { engine }
   }
 
+  fn admit_explicit_legacy_mutation(&self, scope: &str) -> EngineResult<()> {
+    self.engine.admit_explicit_legacy_index_mutation_v1(&normalize_path(scope))
+  }
+
+  fn admit_configuration_retirement(&self, scope: &str) -> EngineResult<()> {
+    self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::ConfigurationRetirement,
+      &normalize_path(scope),
+      "legacy index configuration retirement",
+    )
+  }
+
   /// Build the index file path for a field at a given path (old format, no strategy).
   fn index_file_path_legacy(path: &str, field_name: &str) -> String {
     let base = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
@@ -2076,6 +2100,11 @@ impl<'a> IndexManager<'a> {
 
   /// Buffer an index save to `.indexes/{field_name}.{strategy}.idx` at the given path.
   pub fn save_index(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
+    self.save_index_unrouted(path, index)?;
+    self.admit_explicit_legacy_mutation(path)
+  }
+
+  pub(crate) fn save_index_unrouted(&self, path: &str, index: &FieldIndex) -> EngineResult<()> {
     self.engine.ensure_writable()?;
     let strategy = index.converter.strategy();
     let key = Self::buffer_key(path, &index.field_name, strategy);
@@ -2117,6 +2146,11 @@ impl<'a> IndexManager<'a> {
 
   /// Delete an index for a field and strategy at the given path.
   pub fn delete_index(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
+    self.delete_index_unrouted(path, field_name, strategy)?;
+    self.admit_explicit_legacy_mutation(path)
+  }
+
+  pub(crate) fn delete_index_unrouted(&self, path: &str, field_name: &str, strategy: &str) -> EngineResult<()> {
     self.engine.ensure_writable()?;
     let key = Self::buffer_key(path, field_name, strategy);
     let exists_in_buffer = {
@@ -2135,6 +2169,11 @@ impl<'a> IndexManager<'a> {
 
   /// Delete an index using the legacy path format (no strategy).
   pub fn delete_index_legacy(&self, path: &str, field_name: &str) -> EngineResult<()> {
+    self.delete_index_legacy_unrouted(path, field_name)?;
+    self.admit_explicit_legacy_mutation(path)
+  }
+
+  pub(crate) fn delete_index_legacy_unrouted(&self, path: &str, field_name: &str) -> EngineResult<()> {
     self.engine.ensure_writable()?;
     let ctx = RequestContext::system();
     let index_path = Self::index_file_path_legacy(path, field_name);
@@ -2146,6 +2185,12 @@ impl<'a> IndexManager<'a> {
   /// current index config. This retires indexes removed by config changes so a
   /// reindex does not keep carrying obsolete cached or on-disk index files.
   pub fn delete_indexes_not_in_config(&self, path: &str, config: &PathIndexConfig) -> EngineResult<usize> {
+    let deleted = self.delete_indexes_not_in_config_unrouted(path, config)?;
+    self.admit_configuration_retirement(path)?;
+    Ok(deleted)
+  }
+
+  pub(crate) fn delete_indexes_not_in_config_unrouted(&self, path: &str, config: &PathIndexConfig) -> EngineResult<usize> {
     let parent = normalize_path(path);
     let mut desired = HashSet::new();
 
@@ -2163,9 +2208,9 @@ impl<'a> IndexManager<'a> {
       }
 
       let delete_result = if let Some((field_name, strategy)) = Self::split_index_name(&index_name) {
-        self.delete_index(&parent, field_name, strategy)
+        self.delete_index_unrouted(&parent, field_name, strategy)
       } else {
-        self.delete_index_legacy(&parent, &index_name)
+        self.delete_index_legacy_unrouted(&parent, &index_name)
       };
 
       match delete_result {
@@ -2191,6 +2236,18 @@ impl<'a> IndexManager<'a> {
 
   /// Update one field/strategy index through the shared buffered write path.
   pub fn update_index(
+    &self,
+    parent: &str,
+    field_name: &str,
+    field_config: &IndexFieldConfig,
+    field_values: &[Vec<u8>],
+    file_key: &[u8],
+  ) -> EngineResult<()> {
+    self.update_index_unrouted(parent, field_name, field_config, field_values, file_key)?;
+    self.admit_explicit_legacy_mutation(parent)
+  }
+
+  pub(crate) fn update_index_unrouted(
     &self,
     parent: &str,
     field_name: &str,
@@ -2236,9 +2293,14 @@ impl<'a> IndexManager<'a> {
   /// Remove a file hash from an index name returned by `list_indexes`, using
   /// the same buffered mutation path as inserts and saves.
   pub fn remove_file_from_index_name(&self, parent: &str, index_name: &str, file_key: &[u8]) -> EngineResult<()> {
+    self.remove_file_from_index_name_unrouted(parent, index_name, file_key)?;
+    self.admit_explicit_legacy_mutation(parent)
+  }
+
+  pub(crate) fn remove_file_from_index_name_unrouted(&self, parent: &str, index_name: &str, file_key: &[u8]) -> EngineResult<()> {
     self.engine.ensure_writable()?;
     if let Some((field_name, strategy)) = Self::split_index_name(index_name) {
-      self.remove_file_from_index(parent, field_name, strategy, file_key)
+      self.remove_file_from_index_unrouted(parent, field_name, strategy, file_key)
     } else {
       let Some(index) = self.load_index(parent, index_name)? else {
         return Ok(());
@@ -2254,6 +2316,17 @@ impl<'a> IndexManager<'a> {
   }
 
   pub fn remove_file_from_index(&self, parent: &str, field_name: &str, strategy: &str, file_key: &[u8]) -> EngineResult<()> {
+    self.remove_file_from_index_unrouted(parent, field_name, strategy, file_key)?;
+    self.admit_explicit_legacy_mutation(parent)
+  }
+
+  pub(crate) fn remove_file_from_index_unrouted(
+    &self,
+    parent: &str,
+    field_name: &str,
+    strategy: &str,
+    file_key: &[u8],
+  ) -> EngineResult<()> {
     self.engine.ensure_writable()?;
     let key = Self::buffer_key(parent, field_name, strategy);
     let needs_load = {

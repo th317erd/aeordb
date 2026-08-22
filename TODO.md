@@ -1077,7 +1077,11 @@
                 - [ ] Prove focused journal, cadence, installed-runtime, restart, retry, corruption, pressure, reservation-release, and timer-uniqueness behavior before affected, architecture, suppression, contract, broad, resource, real-filesystem, and native-platform gates.
                   - [x] Pass the exact-commit Linux and macOS arm64 matrices and preserve their resource/log evidence.
                   - [ ] Pass the exact-commit Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
-            - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
+            - [x] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
+              - [x] P6-2c-d6a: route post-commit legacy metadata mutation and delete cleanup through root-pinned maintenance admission without changing hard-write acknowledgement.
+              - [x] P6-2c-d6b: route task-worker configuration retirement, reindex, and forced legacy migration through one exact task-operation admission boundary.
+              - [x] P6-2c-d6c: route online repair and remaining explicit maintenance callers; prove inactive-runtime compatibility and failure direction.
+              - [x] P6-2c-d6d: audit every direct v3 writer and record the sole retained legacy query-compatibility surface before d7 removes the standalone queue.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.

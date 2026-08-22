@@ -13,6 +13,7 @@ use super::reader::FormatError;
 
 const MUTATION_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:mutation-operation:v1\0";
 const MAINTENANCE_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:maintenance-operation:v1\0";
+const IMPLICIT_MAINTENANCE_SOURCE_DOMAIN_V1: &[u8] = b"aeordb:index-producer:implicit-maintenance-source:v1\0";
 
 #[derive(Debug, Clone, Copy)]
 pub struct IndexProducerMaintenanceIntentV1<'a> {
@@ -21,6 +22,12 @@ pub struct IndexProducerMaintenanceIntentV1<'a> {
   pub publication_sequence: u64,
   pub namespace_root: &'a [u8],
   pub semantic_state_root: &'a [u8],
+  pub scope: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexProducerMaintenanceTargetV1<'a> {
+  pub class: IndexProducerMaintenanceClassV1,
   pub scope: &'a str,
 }
 
@@ -140,13 +147,7 @@ pub fn build_maintenance_task<'a>(
       return Err(maintenance_invalid(format!("{role} must be a nonzero complete database hash")));
     }
   }
-  if intent.scope.is_empty()
-    || !intent.scope.starts_with('/')
-    || intent.scope.len() > INDEX_PRODUCER_SCOPE_BYTES_MAX
-    || normalize_path(intent.scope) != intent.scope
-  {
-    return Err(maintenance_invalid("scope must be a nonempty canonical absolute path within the fixed bound"));
-  }
+  validate_maintenance_scope(intent.scope)?;
   let class = intent.class.id().to_le_bytes();
   let kind = intent.class.task_kind();
   let kind_id = kind.id().to_le_bytes();
@@ -185,6 +186,33 @@ pub fn build_maintenance_task<'a>(
     journal_head: None,
     scope: Some(intent.scope),
   })
+}
+
+pub fn derive_implicit_maintenance_source_operation_id(
+  hash_algorithm: HashAlgorithm,
+  class: IndexProducerMaintenanceClassV1,
+  scope: &str,
+) -> Result<[u8; 16], IndexProducerMaintenanceAdmissionErrorV1> {
+  validate_maintenance_scope(scope)?;
+  let class = class.id().to_le_bytes();
+  let scope_length =
+    u64::try_from(scope.len()).map_err(|error| maintenance_invalid(format!("scope length does not fit u64: {error}")))?.to_le_bytes();
+  let digest = digest_parts(hash_algorithm, &[IMPLICIT_MAINTENANCE_SOURCE_DOMAIN_V1, &class, &scope_length, scope.as_bytes()]);
+  let operation_prefix =
+    digest.get(..16).ok_or_else(|| maintenance_invalid(format!("implicit source operation digest has only {} bytes", digest.len())))?;
+  let mut operation_id = [0u8; 16];
+  operation_id.copy_from_slice(operation_prefix);
+  if operation_id == [0; 16] {
+    return Err(maintenance_invalid("derived implicit source operation identity is all zeroes"));
+  }
+  Ok(operation_id)
+}
+
+fn validate_maintenance_scope(scope: &str) -> Result<(), IndexProducerMaintenanceAdmissionErrorV1> {
+  if scope.is_empty() || !scope.starts_with('/') || scope.len() > INDEX_PRODUCER_SCOPE_BYTES_MAX || normalize_path(scope) != scope {
+    return Err(maintenance_invalid("scope must be a nonempty canonical absolute path within the fixed bound"));
+  }
+  Ok(())
 }
 
 fn maintenance_invalid(message: impl Into<String>) -> IndexProducerMaintenanceAdmissionErrorV1 {

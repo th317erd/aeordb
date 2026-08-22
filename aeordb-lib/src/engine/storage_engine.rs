@@ -1307,13 +1307,74 @@ impl StorageEngine {
     Option<crate::engine::v4::index_producer_coordinator::IndexProducerAdmissionV1>,
     crate::engine::v4::index_runtime_installation::NativeIndexRuntimeTaskAdmissionErrorV1,
   > {
+    let outcomes = self.admit_index_maintenance_tasks_v1(
+      source_operation_id,
+      &[crate::engine::v4::index_producer_admission::IndexProducerMaintenanceTargetV1 { class, scope }],
+    )?;
+    match outcomes {
+      None => Ok(None),
+      Some(mut outcomes) if outcomes.len() == 1 => Ok(outcomes.pop()),
+      Some(outcomes) => Err(crate::engine::v4::index_runtime_installation::NativeIndexRuntimeTaskAdmissionErrorV1::Invalid {
+        code: "native_index_maintenance_single_outcome",
+        message: format!("single maintenance admission returned {} outcomes", outcomes.len()),
+      }),
+    }
+  }
+
+  pub fn admit_index_maintenance_tasks_v1(
+    &self,
+    source_operation_id: [u8; 16],
+    targets: &[crate::engine::v4::index_producer_admission::IndexProducerMaintenanceTargetV1<'_>],
+  ) -> Result<
+    Option<Vec<crate::engine::v4::index_producer_coordinator::IndexProducerAdmissionV1>>,
+    crate::engine::v4::index_runtime_installation::NativeIndexRuntimeTaskAdmissionErrorV1,
+  > {
     let Some(runtime) = self.index_runtime_v1.get() else {
       return Ok(None);
     };
     let _source_authority = self.direct_hard_authority_guard()?;
     let namespace_root = self.head_hash()?;
     let publication_sequence = self.durability_snapshot()?.hard_frontier;
-    runtime.admit_maintenance_task(source_operation_id, class, publication_sequence, &namespace_root, scope).map(Some)
+    runtime.admit_maintenance_tasks(source_operation_id, publication_sequence, &namespace_root, targets).map(Some)
+  }
+
+  pub(crate) fn admit_explicit_legacy_index_mutation_v1(&self, scope: &str) -> EngineResult<()> {
+    self.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::ExplicitLegacyMutation,
+      scope,
+      "explicit legacy index mutation",
+    )
+  }
+
+  pub(crate) fn admit_implicit_index_maintenance_v1(
+    &self,
+    class: crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1,
+    scope: &str,
+    operation: &str,
+  ) -> EngineResult<()> {
+    let source_operation_id =
+      crate::engine::v4::index_producer_admission::derive_implicit_maintenance_source_operation_id(self.hash_algo(), class, scope)
+        .map_err(|error| EngineError::InvalidInput(format!("{operation} has invalid v4 maintenance authority: {error}")))?;
+    self
+      .admit_index_maintenance_task_v1(source_operation_id, class, scope)
+      .map(|_| ())
+      .map_err(|error| EngineError::DurabilityFailure(format!("{operation} v4 maintenance admission failed: {error}")))
+  }
+
+  pub fn repair_kv_and_admit_index_maintenance_v1(&self, source_operation_id: [u8; 16]) -> EngineResult<()> {
+    self.rebuild_kv_unrouted()?;
+    self.admit_repair_index_maintenance_v1(source_operation_id, "KV repair")
+  }
+
+  pub(crate) fn admit_repair_index_maintenance_v1(&self, source_operation_id: [u8; 16], operation: &str) -> EngineResult<()> {
+    self
+      .admit_index_maintenance_task_v1(
+        source_operation_id,
+        crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+        "/",
+      )
+      .map(|_| ())
+      .map_err(|error| EngineError::DurabilityFailure(format!("{operation} v4 maintenance admission failed: {error}")))
   }
 
   pub(crate) fn begin_index_runtime_installation_v1(
@@ -3644,10 +3705,15 @@ impl StorageEngine {
   /// hot-tail snapshot.
   pub fn recover_after_emergency_spill_replay(&self) -> EngineResult<()> {
     let _operation = self.write_operation_guard("recover_after_emergency_spill_replay")?;
-    self.rebuild_kv()?;
+    self.rebuild_kv_unrouted()?;
     self.recover_voids_via_gap_scan()?;
     self.sync_voids_to_kv_writer()?;
-    self.force_hot_tail_flush()
+    self.force_hot_tail_flush()?;
+    self.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      "/",
+      "emergency spill recovery",
+    )
   }
 
   /// Force an immediate hot tail flush. Used by GC sweep after registering
@@ -5795,10 +5861,28 @@ impl StorageEngine {
   /// every entry in the `.aeordb` file. Corrupt entries are skipped with a
   /// warning. The rebuilt KV store is swapped in atomically.
   pub fn rebuild_kv(&self) -> EngineResult<()> {
-    self.rebuild_kv_with_progress(None)
+    self.rebuild_kv_unrouted()?;
+    self.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      "/",
+      "KV rebuild",
+    )
   }
 
   pub fn rebuild_kv_with_progress(&self, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<()> {
+    self.rebuild_kv_with_progress_unrouted(progress_callback)?;
+    self.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      "/",
+      "KV rebuild",
+    )
+  }
+
+  pub(crate) fn rebuild_kv_unrouted(&self) -> EngineResult<()> {
+    self.rebuild_kv_with_progress_unrouted(None)
+  }
+
+  pub(crate) fn rebuild_kv_with_progress_unrouted(&self, progress_callback: Option<EngineStartupProgressCallback>) -> EngineResult<()> {
     self.rebuild_kv_with_progress_boundary(progress_callback, KvRebuildScanBoundary::PhysicalEof)
   }
 

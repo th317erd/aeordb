@@ -41,7 +41,7 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerTaskKindV1,
   IndexProducerTaskRequestV1,
 };
-use aeordb::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1;
+use aeordb::engine::v4::index_producer_admission::{IndexProducerMaintenanceClassV1, IndexProducerMaintenanceTargetV1};
 use aeordb::engine::v4::index_producer_source::IndexSemanticScopeLimitsV1;
 use aeordb::engine::v4::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
@@ -66,7 +66,10 @@ use aeordb::engine::v4::index_task::{
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, decode_namespace_root, encode_semantic_state_object};
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
 use aeordb::engine::v4::{database_header::DATABASE_HEADER_V4_DATA_OFFSET, hash::digest_parts};
-use aeordb::engine::{DirectoryOps, HashAlgorithm, MockClock, StorageEngine, VirtualClock};
+use aeordb::engine::{
+  DirectoryOps, HashAlgorithm, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexingPipeline, MockClock, StorageEngine,
+  VirtualClock,
+};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -392,6 +395,26 @@ impl RuntimeFixture {
 
   fn clock(&self, node_id: u64, now_ms: u64) -> Arc<dyn VirtualClock> {
     Arc::new(MockClock::new(node_id, now_ms))
+  }
+
+  fn install_content_only_runtime(&self, coordinator_id: [u8; 16], workspace_id: [u8; 16], now_ms: u64) {
+    install_native_index_runtime_v1(
+      &self.source,
+      NativeIndexRuntimeInstallationRequestV1 {
+        coordinator_id,
+        shadow_identity: &self.identity(),
+        publisher: self.destination.shared_publisher(),
+        retirement_owner: self.retirement(),
+        operation_descriptors: &[],
+        runtime_options: runtime_options(),
+        recovery_options: native_recovery_options(),
+        runtime_publisher: runtime_publisher_options(self, workspace_id),
+        cancellation: &self.cancellation,
+        clock: self.clock(79, now_ms),
+        now_ms,
+      },
+    )
+    .unwrap();
   }
 }
 
@@ -968,6 +991,317 @@ fn native_runtime_activation_preserves_legacy_query_results_and_cached_observabi
   let cached = fixture.source.index_runtime_snapshot_v1().expect("installed runtime cached snapshot");
   assert_eq!(cached.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(cached.highest_checkpoint_sequence, 0);
+}
+
+#[test]
+fn post_commit_legacy_index_mutations_admit_root_pinned_v4_maintenance_tasks() {
+  let fixture = RuntimeFixture::new("runtime-post-commit-maintenance-routing");
+  let ops = DirectoryOps::new(&fixture.source);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  ops
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+  fixture.install_content_only_runtime(id(0x81), id(0x82), 1_700_000_000_810);
+  let baseline = fixture.source.index_runtime_snapshot_v1().unwrap();
+
+  ops.store_file_with_indexing(&RequestContext::system(), "/legacy/routed.json", br#"{"route":"v4"}"#, Some("application/json")).unwrap();
+  let after_write = fixture.source.index_runtime_snapshot_v1().unwrap();
+  assert!(
+    after_write.soft_hub.queued_notices > baseline.soft_hub.queued_notices,
+    "the user publication must retain its independent soft notice"
+  );
+  assert_eq!(
+    after_write.producer.pending_tasks,
+    baseline.producer.pending_tasks + 1,
+    "the direct legacy metadata mutation must enter maintenance admission once"
+  );
+
+  ops.delete_file(&RequestContext::system(), "/legacy/routed.json").unwrap();
+  let after_delete = fixture.source.index_runtime_snapshot_v1().unwrap();
+  assert!(
+    after_delete.soft_hub.queued_notices > after_write.soft_hub.queued_notices,
+    "the delete publication must retain its independent soft notice"
+  );
+  assert_eq!(
+    after_delete.producer.pending_tasks,
+    baseline.producer.pending_tasks + 2,
+    "legacy delete cleanup must enter maintenance admission once"
+  );
+}
+
+#[test]
+fn explicit_legacy_index_wrapper_does_not_admit_when_no_configuration_applies() {
+  let fixture = RuntimeFixture::new("runtime-no-applicable-legacy-index");
+  fixture.install_content_only_runtime(id(0x83), id(0x84), 1_700_000_000_820);
+  let baseline = fixture.source.index_runtime_snapshot_v1().unwrap();
+
+  DirectoryOps::new(&fixture.source)
+    .store_file_with_indexing(&RequestContext::system(), "/plain/no-index.json", br#"{"index":false}"#, Some("application/json"))
+    .unwrap();
+
+  let after = fixture.source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(after.producer.pending_tasks, baseline.producer.pending_tasks);
+  assert!(after.soft_hub.queued_notices > baseline.soft_hub.queued_notices);
+}
+
+#[test]
+fn public_legacy_index_mutation_boundaries_cannot_bypass_v4_maintenance_admission() {
+  let fixture = RuntimeFixture::new("runtime-public-legacy-maintenance-routing");
+  let ops = DirectoryOps::new(&fixture.source);
+  let field = IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None };
+  let config = PathIndexConfig { parser: None, parser_memory_limit: None, logging: false, glob: None, indexes: vec![field.clone()] };
+  ops
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+  let contents = br#"{"route":"public-pipeline"}"#;
+  ops.store_file_buffered(&RequestContext::system(), "/legacy/public.json", contents, Some("application/json")).unwrap();
+  ops.store_file_buffered(&RequestContext::system(), "/legacy/buffered.json", contents, Some("application/json")).unwrap();
+  fixture.install_content_only_runtime(id(0x91), id(0x92), 1_700_000_000_860);
+  let baseline = fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks;
+
+  IndexingPipeline::new(&fixture.source).run(&RequestContext::system(), "/legacy/public.json", contents, Some("application/json")).unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 1);
+
+  let mut buffer = IndexWriteBuffer::new(&fixture.source, IndexWriteBufferOptions::default());
+  IndexingPipeline::new(&fixture.source)
+    .run_buffered(&RequestContext::system(), "/legacy/buffered.json", contents, Some("application/json"), &mut buffer)
+    .unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 2);
+
+  buffer.update_index("/legacy", "@hash", &field, &[b"buffer-direct".to_vec()], &[0x93; 32]).unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 3);
+
+  IndexManager::new(&fixture.source).update_index("/legacy/direct", "@hash", &field, &[b"direct".to_vec()], &[0x94; 32]).unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 4);
+
+  assert_eq!(IndexManager::new(&fixture.source).delete_indexes_not_in_config("/legacy", &config).unwrap(), 0);
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 5);
+  assert_eq!(IndexManager::new(&fixture.source).delete_indexes_not_in_config("/legacy", &config).unwrap(), 0);
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 5);
+  assert!(!ops.migrate_file_record_to_current_version("/legacy/public.json").unwrap());
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 6);
+  assert!(!ops.migrate_file_record_to_current_version("/legacy/public.json").unwrap());
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, baseline + 6);
+  assert!(!ops.repair_stale_dir_key("/legacy").unwrap());
+  assert_eq!(
+    fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks,
+    baseline + 7,
+    "successful no-op retries must preserve their original maintenance intent"
+  );
+  assert!(!ops.repair_stale_dir_key("/legacy").unwrap());
+  assert_eq!(
+    fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks,
+    baseline + 7,
+    "successful no-op retries must collapse against their exact retained task"
+  );
+}
+
+#[test]
+fn public_legacy_pipeline_surfaces_v4_admission_failure_after_preserving_legacy_mutation() {
+  let fixture = RuntimeFixture::new("runtime-public-legacy-maintenance-failure");
+  let ops = DirectoryOps::new(&fixture.source);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  ops
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+  let contents = br#"{"route":"failed-admission"}"#;
+  ops.store_file_buffered(&RequestContext::system(), "/legacy/failure.json", contents, Some("application/json")).unwrap();
+  fixture.install_content_only_runtime(id(0x95), id(0x96), 1_700_000_000_870);
+  fixture.cancellation.cancel();
+
+  let error = IndexingPipeline::new(&fixture.source)
+    .run(&RequestContext::system(), "/legacy/failure.json", contents, Some("application/json"))
+    .unwrap_err();
+  assert!(matches!(error, aeordb::engine::EngineError::DurabilityFailure(_)), "unexpected error: {error}");
+  assert!(IndexManager::new(&fixture.source).load_index("/legacy", "@hash").unwrap().is_some());
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 0);
+}
+
+#[test]
+fn post_commit_maintenance_admission_failure_cannot_reverse_legacy_write_or_delete() {
+  let fixture = RuntimeFixture::new("runtime-post-commit-admission-failure");
+  let ops = DirectoryOps::new(&fixture.source);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  ops
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+  fixture.install_content_only_runtime(id(0x85), id(0x86), 1_700_000_000_830);
+  fixture.cancellation.cancel();
+
+  ops
+    .store_file_with_indexing(&RequestContext::system(), "/legacy/durable.json", br#"{"durable":true}"#, Some("application/json"))
+    .expect("maintenance cancellation is recoverable-soft after the file commit");
+  assert_eq!(ops.read_file_buffered("/legacy/durable.json").unwrap(), br#"{"durable":true}"#);
+  ops
+    .delete_file(&RequestContext::system(), "/legacy/durable.json")
+    .expect("maintenance cancellation is recoverable-soft after the delete commit");
+  assert!(matches!(ops.read_file_buffered("/legacy/durable.json"), Err(aeordb::engine::EngineError::NotFound(_))));
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 0);
+}
+
+#[test]
+fn maintenance_batch_admission_uses_one_stable_operation_and_retries_as_exact_duplicates() {
+  let fixture = RuntimeFixture::new("runtime-maintenance-batch-admission");
+  DirectoryOps::new(&fixture.source).store_file_buffered(&RequestContext::system(), "/seed.txt", b"seed", Some("text/plain")).unwrap();
+  fixture.install_content_only_runtime(id(0x87), id(0x88), 1_700_000_000_840);
+  let targets = [
+    IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::ConfigurationRetirement, scope: "/configured" },
+    IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::LegacyMigration, scope: "/requested" },
+    IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::Reindex, scope: "/requested" },
+  ];
+
+  assert_eq!(fixture.source.admit_index_maintenance_tasks_v1(id(0x89), &targets).unwrap(), Some(vec![IndexProducerAdmissionV1::Queued; 3]));
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 3);
+  assert_eq!(
+    fixture.source.admit_index_maintenance_tasks_v1(id(0x89), &targets).unwrap(),
+    Some(vec![IndexProducerAdmissionV1::Duplicate; 3])
+  );
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 3);
+
+  let duplicate_targets = [
+    IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::Repair, scope: "/duplicate" },
+    IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::Repair, scope: "/duplicate" },
+  ];
+  assert!(fixture.source.admit_index_maintenance_tasks_v1(id(0x8a), &duplicate_targets).is_err());
+  assert_eq!(
+    fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks,
+    3,
+    "malformed batches must fail before admitting their first target"
+  );
+  assert!(fixture.source.admit_index_maintenance_tasks_v1(id(0x8b), &[]).is_err());
+  let too_many = [IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::Repair, scope: "/bounded" }; 9];
+  assert!(fixture.source.admit_index_maintenance_tasks_v1(id(0x8c), &too_many).is_err());
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 3);
+}
+
+#[test]
+fn online_kv_repair_admits_one_root_pinned_repair_task_after_rebuild() {
+  let fixture = RuntimeFixture::new("runtime-online-repair-admission");
+  DirectoryOps::new(&fixture.source)
+    .store_file_buffered(&RequestContext::system(), "/repair-seed.txt", b"seed", Some("text/plain"))
+    .unwrap();
+  fixture.install_content_only_runtime(id(0x8a), id(0x8b), 1_700_000_000_850);
+
+  fixture.source.repair_kv_and_admit_index_maintenance_v1(id(0x8c)).unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
+}
+
+#[test]
+fn public_kv_rebuild_cannot_bypass_root_pinned_repair_admission() {
+  let fixture = RuntimeFixture::new("runtime-public-kv-rebuild-admission");
+  DirectoryOps::new(&fixture.source)
+    .store_file_buffered(&RequestContext::system(), "/repair-public.txt", b"seed", Some("text/plain"))
+    .unwrap();
+  fixture.install_content_only_runtime(id(0x8d), id(0x8e), 1_700_000_000_855);
+
+  fixture.source.rebuild_kv().unwrap();
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
+}
+
+#[test]
+fn public_directory_rebuild_cannot_bypass_root_pinned_repair_admission() {
+  let fixture = RuntimeFixture::new("runtime-public-directory-rebuild-admission");
+  let operations = DirectoryOps::new(&fixture.source);
+  operations.store_file_buffered(&RequestContext::system(), "/repair/tree/file.txt", b"seed", Some("text/plain")).unwrap();
+  fixture.install_content_only_runtime(id(0x8f), id(0x90), 1_700_000_000_856);
+
+  assert!(operations.rebuild_directory_tree(&RequestContext::system()).unwrap() > 0);
+  assert_eq!(fixture.source.index_runtime_snapshot_v1().unwrap().producer.pending_tasks, 1);
+}
+
+fn collect_rust_sources(path: &Path, files: &mut Vec<std::path::PathBuf>) {
+  for entry in fs::read_dir(path).unwrap() {
+    let entry = entry.unwrap();
+    let path = entry.path();
+    if path.is_dir() {
+      collect_rust_sources(&path, files);
+    } else if path.extension().is_some_and(|extension| extension == "rs") {
+      files.push(path);
+    }
+  }
+}
+
+fn source_occurrences_by_file(root: &Path, needle: &str) -> BTreeMap<String, usize> {
+  let mut paths = Vec::new();
+  collect_rust_sources(root, &mut paths);
+  paths
+    .into_iter()
+    .filter_map(|path| {
+      let source = fs::read_to_string(&path).unwrap();
+      let count = source.matches(needle).count();
+      (count > 0).then(|| (path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), count))
+    })
+    .collect()
+}
+
+#[test]
+fn legacy_index_writer_bypasses_are_closed_to_reviewed_compatibility_adapters() {
+  let engine_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine");
+  let expected_unrouted = [
+    ("index_store.rs", 19usize),
+    ("indexing_pipeline.rs", 13),
+    ("directory_ops.rs", 9),
+    ("task_worker.rs", 3),
+    ("index_cleanup.rs", 1),
+    ("storage_engine.rs", 7),
+    ("verify.rs", 4),
+  ];
+  let mut sources = Vec::new();
+  collect_rust_sources(&engine_root, &mut sources);
+  for path in sources {
+    let source = fs::read_to_string(&path).unwrap();
+    let relative = path.strip_prefix(&engine_root).unwrap();
+    let expected = expected_unrouted.iter().find_map(|(file, count)| (relative == Path::new(file)).then_some(*count)).unwrap_or(0);
+    assert_eq!(source.matches("_unrouted").count(), expected, "unreviewed raw legacy index writer in {}", relative.display());
+  }
+
+  let store = fs::read_to_string(engine_root.join("index_store.rs")).unwrap();
+  assert_eq!(store.matches("admit_explicit_legacy_mutation(").count(), 8);
+  assert_eq!(store.matches("admit_configuration_retirement(").count(), 2);
+  let pipeline = fs::read_to_string(engine_root.join("indexing_pipeline.rs")).unwrap();
+  assert_eq!(pipeline.matches("admit_explicit_legacy_mutation_if_applicable(").count(), 7);
+  let directory = fs::read_to_string(engine_root.join("directory_ops.rs")).unwrap();
+  assert_eq!(directory.matches("admit_implicit_index_maintenance_v1(").count(), 5);
+  assert_eq!(directory.matches("IndexProducerMaintenanceClassV1::LegacyMigration").count(), 1);
+
+  let expected_facade_callers: [(&str, &[(&str, usize)]); 4] = [
+    ("admit_index_maintenance_task_v1(", &[("directory_ops.rs", 1), ("storage_engine.rs", 3)]),
+    ("admit_index_maintenance_tasks_v1(", &[("storage_engine.rs", 2), ("task_worker.rs", 1)]),
+    ("admit_implicit_index_maintenance_v1(", &[("directory_ops.rs", 5), ("index_store.rs", 1), ("storage_engine.rs", 5), ("verify.rs", 1)]),
+    ("admit_explicit_legacy_index_mutation_v1(", &[("index_store.rs", 1), ("indexing_pipeline.rs", 1), ("storage_engine.rs", 1)]),
+  ];
+  for (needle, expected) in expected_facade_callers {
+    let expected: BTreeMap<_, _> = expected.iter().map(|(file, count)| ((*file).to_string(), *count)).collect();
+    assert_eq!(source_occurrences_by_file(&engine_root, needle), expected, "unreviewed maintenance facade caller for {needle}");
+  }
+
+  for reader in ["query_engine.rs", "search.rs"] {
+    let source = fs::read_to_string(engine_root.join(reader)).unwrap();
+    assert!(source.contains("IndexManager::new"), "{reader} no longer names the retained v3 query adapter");
+    for mutation in
+      ["update_index(", "save_index(", "create_index(", "delete_index(", "delete_indexes_not_in_config(", "remove_file_from_index"]
+    {
+      assert!(!source.contains(mutation), "{reader} acquired legacy mutation authority through {mutation}");
+    }
+  }
 }
 
 #[test]

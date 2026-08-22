@@ -436,7 +436,9 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
 
   // Repair 1: Rebuild KV if there are missing or stale entries
   if report.missing_kv_entries > 0 || report.stale_kv_entries > 0 {
-    engine.rebuild_kv().map_err(|error| progress.preserve_error(error, "kv_rebuild", engine.database_path().to_string_lossy().as_ref()))?;
+    engine
+      .rebuild_kv_unrouted()
+      .map_err(|error| progress.preserve_error(error, "kv_rebuild", engine.database_path().to_string_lossy().as_ref()))?;
     progress.kv_rebuilds = progress.kv_rebuilds.saturating_add(1);
     mutated = true;
     repairs
@@ -459,7 +461,6 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
     || !report.btree_directory_issues.is_empty()
   {
     let ops = DirectoryOps::new(engine);
-    let ctx = crate::engine::request_context::RequestContext::system();
 
     let mut targeted_repair_failed = false;
     let mut targeted_repair_succeeded = false;
@@ -468,7 +469,7 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
       paths.sort();
       paths.dedup();
       for path in paths {
-        match ops.repair_directory_index_from_path_records(&path) {
+        match ops.repair_directory_index_from_path_records_unrouted(&path) {
           Ok(count) => {
             targeted_repair_succeeded = true;
             mutated |= count > 0;
@@ -489,7 +490,7 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
 
     let missing_kv_needs_full_rebuild = report.missing_kv_entries > 0 && report.file_records > 0 && !targeted_repair_succeeded;
     if targeted_repair_failed || !report.missing_children.is_empty() || missing_kv_needs_full_rebuild {
-      let count = ops.rebuild_directory_tree(&ctx).map_err(|error| progress.preserve_error(error, "full_directory_rebuild", "/"))?;
+      let count = ops.rebuild_directory_tree_unrouted().map_err(|error| progress.preserve_error(error, "full_directory_rebuild", "/"))?;
       mutated |= count > 0;
       progress.rebuilt_directories = progress.rebuilt_directories.saturating_add(count);
       repairs.push(format!("Directory tree rebuilt ({} directories written)", count));
@@ -507,7 +508,8 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
     let ops = DirectoryOps::new(engine);
     let mut repaired = 0usize;
     for path in &report.stale_dir_path_keys {
-      let changed = ops.repair_stale_dir_key(path).map_err(|error| progress.preserve_error(error, "stale_directory_locator", path))?;
+      let changed =
+        ops.repair_stale_dir_key_unrouted(path).map_err(|error| progress.preserve_error(error, "stale_directory_locator", path))?;
       if changed {
         repaired = repaired.saturating_add(1);
         progress.stale_locators = progress.stale_locators.saturating_add(1);
@@ -530,6 +532,13 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
     engine
       .force_hot_tail_flush()
       .map_err(|error| progress.preserve_error(error, "durability_publication", engine.database_path().to_string_lossy().as_ref()))?;
+    engine
+      .admit_implicit_index_maintenance_v1(
+        crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+        "/",
+        "completed repair",
+      )
+      .map_err(|error| progress.preserve_error(error, "v4_index_maintenance", "/"))?;
     if void_snapshot_staged {
       progress.void_publications = progress.void_publications.saturating_add(1);
     }
@@ -677,6 +686,15 @@ mod repair_tests {
 
     assert!(!matches!(error, EngineError::PartialOperation { .. }), "unpublished Void state must not count as completed");
     assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  }
+
+  #[test]
+  fn every_completed_repair_routes_through_the_shared_maintenance_admission() {
+    let source = include_str!("verify.rs");
+    let call = ["admit_implicit_index_maintenance_v1", "("].concat();
+    let class = ["IndexProducerMaintenanceClassV1", "::Repair"].concat();
+    assert_eq!(source.matches(&call).count(), 1);
+    assert_eq!(source.matches(&class).count(), 1);
   }
 }
 

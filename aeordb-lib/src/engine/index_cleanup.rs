@@ -166,7 +166,7 @@ pub(crate) fn remove_file_from_resolved_indexes(engine: &StorageEngine, path: &s
 
   for target in targets {
     for field_name in target.index_names {
-      index_manager.remove_file_from_index_name(&target.parent, &field_name, &file_key)?;
+      index_manager.remove_file_from_index_name_unrouted(&target.parent, &field_name, &file_key)?;
       removed_indexes += 1;
     }
   }

@@ -1457,6 +1457,25 @@ struct DirectoryMutationFanout<'a> {
   effects: std::sync::Arc<std::sync::OnceLock<DirectoryMutationEffects>>,
 }
 
+impl DirectoryMutationFanout<'_> {
+  fn admit_index_maintenance(
+    &self,
+    acknowledgement: &NamespaceMutationAcknowledgement,
+    class: crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1,
+    scope: &str,
+  ) {
+    match self.engine.admit_index_maintenance_task_v1(*acknowledgement.operation_id.as_bytes(), class, scope) {
+      Ok(_) => {}
+      Err(error) => crate::metrics::record_system_soft_failure(
+        "index_runtime",
+        "post_commit_maintenance_admission",
+        format_args!("operation_id={} scope={scope}", acknowledgement.operation_id),
+        error,
+      ),
+    }
+  }
+}
+
 impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
   fn publish(&self, acknowledgement: &NamespaceMutationAcknowledgement) {
     let Some(effects) = self.effects.get() else {
@@ -1520,13 +1539,21 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
     }
 
     for path in &effects.metadata_index_removal_paths {
-      if let Err(error) = crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, path) {
-        crate::metrics::record_system_soft_failure(
-          "index_cleanup",
-          "post_commit_path_removal",
-          format_args!("operation_id={} path={path}", acknowledgement.operation_id),
-          error,
-        );
+      match crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, path) {
+        Ok(removed) if removed > 0 => self.admit_index_maintenance(
+          acknowledgement,
+          crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::DeleteCleanup,
+          path,
+        ),
+        Ok(_) => {}
+        Err(error) => {
+          crate::metrics::record_system_soft_failure(
+            "index_cleanup",
+            "post_commit_path_removal",
+            format_args!("operation_id={} path={path}", acknowledgement.operation_id),
+            error,
+          );
+        }
       }
     }
 
@@ -1535,8 +1562,16 @@ impl NamespaceMutationFanout for DirectoryMutationFanout<'_> {
       let options = IndexWriteBufferOptions::new(DEFAULT_INDEX_BUFFER_FLUSH_WRITES, std::time::Duration::from_secs(300));
       let mut index_buffer = IndexWriteBuffer::new(self.engine, options);
       for path in &effects.metadata_index_paths {
-        if let Err(error) = pipeline.run_metadata_only_buffered_with_outcome(path, &mut index_buffer) {
-          tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata indexing failed");
+        match pipeline.run_metadata_only_buffered_unrouted_with_outcome(path, &mut index_buffer) {
+          Ok(true) => self.admit_index_maintenance(
+            acknowledgement,
+            crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::ExplicitLegacyMutation,
+            path,
+          ),
+          Ok(false) => {}
+          Err(error) => {
+            tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata indexing failed");
+          }
         }
         if let Err(error) = index_buffer.flush_if_due() {
           tracing::warn!(operation_id = %acknowledgement.operation_id, path, error = %error, "Post-commit metadata index flush failed");
@@ -1624,6 +1659,17 @@ impl<'a> DirectoryOps<'a> {
   /// Create a new `DirectoryOps` handle wrapping the given storage engine.
   pub fn new(engine: &'a StorageEngine) -> Self {
     DirectoryOps { engine }
+  }
+
+  fn admit_explicit_legacy_index_mutation(&self, path: &str) {
+    match self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::ExplicitLegacyMutation,
+      &normalize_path(path),
+      "explicit legacy index mutation",
+    ) {
+      Ok(_) => {}
+      Err(error) => crate::metrics::record_system_soft_failure("index_runtime", "explicit_legacy_maintenance_admission", path, error),
+    }
   }
 
   fn execute_namespace_mutation<'operation, T, F>(
@@ -3631,7 +3677,13 @@ impl<'a> DirectoryOps<'a> {
   pub fn migrate_file_record_to_current_version(&self, path: &str) -> EngineResult<bool> {
     let mut memory =
       OperationMemoryBudget::new(self.engine, "file record migration", MemoryOwner::Migration, AdmissionClass::Maintenance, 0, None)?;
-    self.migrate_file_record_to_current_version_with_memory(path, &mut memory)
+    let migrated = self.migrate_file_record_to_current_version_with_memory(path, &mut memory)?;
+    self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::LegacyMigration,
+      &normalize_path(path),
+      "file record migration",
+    )?;
+    Ok(migrated)
   }
 
   pub(crate) fn migrate_file_record_to_current_version_with_memory(
@@ -3981,6 +4033,16 @@ impl<'a> DirectoryOps<'a> {
   /// grouped and written bottom-up, so database-wide repair memory remains
   /// bounded without replaying historical content/identity copies.
   pub fn rebuild_directory_tree(&self, _ctx: &RequestContext) -> EngineResult<usize> {
+    let written = self.rebuild_directory_tree_unrouted()?;
+    self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      "/",
+      "directory tree repair",
+    )?;
+    Ok(written)
+  }
+
+  pub(crate) fn rebuild_directory_tree_unrouted(&self) -> EngineResult<usize> {
     let algo = self.engine.hash_algo();
     let hash_length = self.engine.hash_algo().hash_length();
     let family_policy = SystemFamilyPolicyResolver::new(algo)?;
@@ -4140,6 +4202,16 @@ impl<'a> DirectoryOps<'a> {
   /// by descendant path records, and preserves any readable child directories
   /// already present in the damaged directory.
   pub fn repair_directory_index_from_path_records(&self, path: &str) -> EngineResult<usize> {
+    let repaired = self.repair_directory_index_from_path_records_unrouted(path)?;
+    self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      &normalize_path(path),
+      "targeted directory repair",
+    )?;
+    Ok(repaired)
+  }
+
+  pub(crate) fn repair_directory_index_from_path_records_unrouted(&self, path: &str) -> EngineResult<usize> {
     let normalized = normalize_path(path);
     let algo = self.engine.hash_algo();
     let hash_length = algo.hash_length();
@@ -4559,8 +4631,10 @@ impl<'a> DirectoryOps<'a> {
     // Delegate to indexing pipeline using the detected content type from the file record
     let pipeline = crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine);
     let detected_ct = file_record.content_type.as_deref();
-    if let Err(e) = pipeline.run(ctx, path, data, detected_ct) {
-      tracing::warn!("Indexing pipeline failed for '{}': {}", path, e);
+    match pipeline.run_unrouted_with_outcome(path, data, detected_ct) {
+      Ok(true) => self.admit_explicit_legacy_index_mutation(path),
+      Ok(false) => {}
+      Err(error) => tracing::warn!("Indexing pipeline failed for '{}': {}", path, error),
     }
 
     Ok(file_record)
@@ -4585,8 +4659,10 @@ impl<'a> DirectoryOps<'a> {
       None => crate::engine::indexing_pipeline::IndexingPipeline::new(self.engine),
     };
     let detected_ct = file_record.content_type.as_deref();
-    if let Err(e) = pipeline.run(ctx, path, data, detected_ct) {
-      tracing::warn!("Indexing pipeline failed for '{}': {}", path, e);
+    match pipeline.run_unrouted_with_outcome(path, data, detected_ct) {
+      Ok(true) => self.admit_explicit_legacy_index_mutation(path),
+      Ok(false) => {}
+      Err(error) => tracing::warn!("Indexing pipeline failed for '{}': {}", path, error),
     }
 
     Ok(file_record)
@@ -4594,8 +4670,6 @@ impl<'a> DirectoryOps<'a> {
 
   /// Delete a file and remove its entries from all indexes at that path.
   pub fn delete_file_with_indexing(&self, ctx: &RequestContext, path: &str) -> EngineResult<()> {
-    let normalized = normalize_path(path);
-    crate::engine::index_cleanup::remove_file_from_resolved_indexes(self.engine, &normalized)?;
     self.delete_file(ctx, path)
   }
 
@@ -4651,6 +4725,16 @@ impl<'a> DirectoryOps<'a> {
   /// (post-GC) and diverged-target (alive but != HEAD) scenarios.
   /// Returns Ok(true) if a write happened, Ok(false) otherwise.
   pub fn repair_stale_dir_key(&self, path: &str) -> EngineResult<bool> {
+    let repaired = self.repair_stale_dir_key_unrouted(path)?;
+    self.engine.admit_implicit_index_maintenance_v1(
+      crate::engine::v4::index_producer_admission::IndexProducerMaintenanceClassV1::Repair,
+      &normalize_path(path),
+      "stale directory locator repair",
+    )?;
+    Ok(repaired)
+  }
+
+  pub(crate) fn repair_stale_dir_key_unrouted(&self, path: &str) -> EngineResult<bool> {
     let normalized = normalize_path(path);
     let log_path = normalized.clone();
     let repaired = self.execute_optional_namespace_mutation(None, move |planning_engine| {

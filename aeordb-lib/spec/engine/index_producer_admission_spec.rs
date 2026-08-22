@@ -2,7 +2,8 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::index_producer_admission::{
   IndexProducerJournalAdmissionErrorV1, IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceIntentV1,
-  IndexProducerMaintenanceClassV1, admit_mutation_journal_tasks, build_maintenance_task, derive_mutation_operation_id,
+  IndexProducerMaintenanceClassV1, admit_mutation_journal_tasks, build_maintenance_task, derive_implicit_maintenance_source_operation_id,
+  derive_mutation_operation_id,
 };
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
@@ -297,6 +298,33 @@ fn maintenance_identity_separates_every_authority_dimension() {
   ] {
     assert_ne!(build_maintenance_task(ALGORITHM, changed).unwrap().operation_id, base_id);
   }
+}
+
+#[test]
+fn implicit_maintenance_source_identity_is_retry_stable_and_separates_class_scope_and_hash_profile() {
+  let mut identities = Vec::new();
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let first = derive_implicit_maintenance_source_operation_id(algorithm, IndexProducerMaintenanceClassV1::Repair, "/docs").unwrap();
+    let retry = derive_implicit_maintenance_source_operation_id(algorithm, IndexProducerMaintenanceClassV1::Repair, "/docs").unwrap();
+    assert_eq!(first, retry);
+    assert_ne!(first, [0; 16]);
+    assert_ne!(
+      first,
+      derive_implicit_maintenance_source_operation_id(algorithm, IndexProducerMaintenanceClassV1::Reindex, "/docs").unwrap()
+    );
+    assert_ne!(
+      first,
+      derive_implicit_maintenance_source_operation_id(algorithm, IndexProducerMaintenanceClassV1::Repair, "/docs/sub").unwrap()
+    );
+    identities.push(first);
+  }
+  identities.sort();
+  identities.dedup();
+  assert_eq!(identities.len(), 5);
+  assert!(derive_implicit_maintenance_source_operation_id(ALGORITHM, IndexProducerMaintenanceClassV1::Repair, "docs").is_err());
+  assert!(derive_implicit_maintenance_source_operation_id(ALGORITHM, IndexProducerMaintenanceClassV1::Repair, "/docs/../private").is_err());
 }
 
 #[test]

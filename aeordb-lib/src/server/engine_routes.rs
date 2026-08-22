@@ -2917,7 +2917,8 @@ pub async fn repair_kv(State(state): State<AppState>, Extension(claims): Extensi
     return ErrorResponse::new("Root access required for repair operations").with_status(StatusCode::FORBIDDEN).into_response();
   }
 
-  match state.engine.rebuild_kv() {
+  let source_operation_id = uuid::Uuid::new_v4().into_bytes();
+  match state.engine.repair_kv_and_admit_index_maintenance_v1(source_operation_id) {
     Ok(()) => (
       StatusCode::OK,
       Json(serde_json::json!({

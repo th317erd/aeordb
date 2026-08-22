@@ -23,6 +23,7 @@ use crate::engine::run_configuration::MaintenanceRunConfiguration;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::task_queue::{ProgressInfo, TaskOriginV1, TaskQueue, TaskRecord, TaskStatus};
 use crate::engine::v4::gc_run::GcRunInvocationV1;
+use crate::engine::v4::index_producer_admission::{IndexProducerMaintenanceClassV1, IndexProducerMaintenanceTargetV1};
 use crate::plugins::PluginManager;
 
 /// Maximum completed tasks to keep after pruning.
@@ -642,6 +643,46 @@ fn require_forced_migration_memory(migration_memory: &mut Option<OperationMemory
     .ok_or_else(|| EngineError::DurabilityFailure("forced reindex migration memory authority is unavailable".to_string()))
 }
 
+fn parse_reindex_source_operation_id(task_id: &str) -> EngineResult<[u8; 16]> {
+  uuid::Uuid::parse_str(task_id)
+    .map(uuid::Uuid::into_bytes)
+    .map_err(|error| EngineError::InvalidInput(format!("reindex task ID is not a UUID: {error}")))
+}
+
+fn completed_reindex_maintenance_targets<'a>(
+  reindex_root: &'a str,
+  config_scope: Option<&'a str>,
+  force: bool,
+) -> EngineResult<Vec<IndexProducerMaintenanceTargetV1<'a>>> {
+  let mut targets = Vec::new();
+  targets
+    .try_reserve_exact(3)
+    .map_err(|error| EngineError::ResourceExhausted(format!("reindex maintenance target allocation failed: {error}")))?;
+  if let Some(scope) = config_scope {
+    targets.push(IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::ConfigurationRetirement, scope });
+  }
+  if force {
+    targets.push(IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::LegacyMigration, scope: reindex_root });
+  }
+  targets.push(IndexProducerMaintenanceTargetV1 { class: IndexProducerMaintenanceClassV1::Reindex, scope: reindex_root });
+  Ok(targets)
+}
+
+fn admit_completed_reindex_maintenance(
+  engine: &StorageEngine,
+  task_id: &str,
+  reindex_root: &str,
+  config_scope: Option<&str>,
+  force: bool,
+) -> EngineResult<()> {
+  let source_operation_id = parse_reindex_source_operation_id(task_id)?;
+  let targets = completed_reindex_maintenance_targets(reindex_root, config_scope, force)?;
+  engine
+    .admit_index_maintenance_tasks_v1(source_operation_id, &targets)
+    .map(|_| ())
+    .map_err(|error| EngineError::DurabilityFailure(format!("completed reindex v4 maintenance admission failed: {error}")))
+}
+
 /// Execute a reindex task: re-run the indexing pipeline on all files under a directory.
 fn execute_reindex(
   queue: &TaskQueue,
@@ -697,7 +738,7 @@ fn execute_reindex(
     Err(error) => return Err(error),
   };
   let stale_indexes_deleted = if let Some((config, config_dir)) = resolved_config.as_ref() {
-    let deleted = IndexManager::new(engine).delete_indexes_not_in_config(config_dir, config)?;
+    let deleted = IndexManager::new(engine).delete_indexes_not_in_config_unrouted(config_dir, config)?;
     if deleted > 0 {
       tracing::info!(path = %config_dir, requested_scope = %reindex_root, deleted, "retired stale indexes before reindex");
     }
@@ -728,11 +769,17 @@ fn execute_reindex(
 
   let total_count = file_paths.len();
   if total_count == 0 {
+    admit_completed_reindex_maintenance(
+      engine,
+      &task.id,
+      &reindex_root,
+      resolved_config.as_ref().map(|(_, config_dir)| config_dir.as_str()),
+      force,
+    )?;
     return Ok("reindexed 0 files".to_string());
   }
 
   let pipeline = IndexingPipeline::with_plugin_manager(engine, plugin_manager);
-  let ctx = RequestContext::system();
   let mut index_buffer = IndexWriteBuffer::new(engine, index_flush_options);
 
   let mut indexed_count: usize = 0;
@@ -831,7 +878,7 @@ fn execute_reindex(
       }
 
       let index_result = if metadata_only {
-        pipeline.run_metadata_only_buffered(&ctx, file_path, &mut index_buffer)
+        pipeline.run_metadata_only_buffered_unrouted_with_outcome(file_path, &mut index_buffer).map(|_| ())
       } else {
         let metadata = match ops.get_metadata(file_path) {
           Ok(metadata) => metadata,
@@ -897,7 +944,9 @@ fn execute_reindex(
           }
         };
 
-        let result = pipeline.run_buffered_with_cancellation(&ctx, file_path, &data, content_type.as_deref(), &mut index_buffer, cancel);
+        let result = pipeline
+          .run_buffered_unrouted_with_outcome(file_path, &data, content_type.as_deref(), &mut index_buffer, Some(cancel))
+          .map(|_| ());
         drop(data);
         task_memory.release_to(buffered_body_checkpoint, "reindex buffered file body release after parsing")?;
         result
@@ -1014,6 +1063,14 @@ fn execute_reindex(
   if !failures.is_empty() {
     return Err(failures.into_error(completed_count, false));
   }
+
+  admit_completed_reindex_maintenance(
+    engine,
+    &task.id,
+    &reindex_root,
+    resolved_config.as_ref().map(|(_, config_dir)| config_dir.as_str()),
+    force,
+  )?;
 
   let elapsed_ms = start.elapsed().as_millis();
   let index_stats =
@@ -1515,6 +1572,33 @@ mod direct_reindex_path_tests {
     .expect_err("a growing namespace must be retried from its durable task checkpoint");
 
     assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected error: {error}");
+  }
+
+  #[test]
+  fn completed_reindex_routes_every_intent_under_one_stable_task_identity() {
+    let operation_id = parse_reindex_source_operation_id("123e4567-e89b-12d3-a456-426614174000").unwrap();
+    assert_eq!(operation_id, *uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap().as_bytes());
+    assert!(parse_reindex_source_operation_id("not-a-task-uuid").is_err());
+
+    let targets = completed_reindex_maintenance_targets("/requested", Some("/configured"), true).unwrap();
+    assert_eq!(targets.len(), 3);
+    assert_eq!(targets[0].class, IndexProducerMaintenanceClassV1::ConfigurationRetirement);
+    assert_eq!(targets[0].scope, "/configured");
+    assert_eq!(targets[1].class, IndexProducerMaintenanceClassV1::LegacyMigration);
+    assert_eq!(targets[1].scope, "/requested");
+    assert_eq!(targets[2].class, IndexProducerMaintenanceClassV1::Reindex);
+    assert_eq!(targets[2].scope, "/requested");
+
+    let ordinary = completed_reindex_maintenance_targets("/requested", None, false).unwrap();
+    assert_eq!(ordinary.len(), 1);
+    assert_eq!(ordinary[0].class, IndexProducerMaintenanceClassV1::Reindex);
+  }
+
+  #[test]
+  fn every_successful_reindex_exit_uses_the_shared_maintenance_completion_boundary() {
+    let source = include_str!("task_worker.rs");
+    let call = ["admit_completed_reindex_maintenance", "("].concat();
+    assert_eq!(source.matches(&call).count(), 3);
   }
 }
 
