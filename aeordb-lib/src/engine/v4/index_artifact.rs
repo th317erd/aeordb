@@ -282,6 +282,21 @@ pub fn encode_active_pointer(request: &ActivePointerWriteV1<'_>) -> FormatResult
   Ok(EncodedActivePointerV1 { key: decoded.key, value })
 }
 
+pub(crate) fn active_pointer_key_v1(
+  kind: ActivePointerKindV1,
+  hash_algorithm: HashAlgorithm,
+  owner_id: &[u8],
+  slot: u8,
+) -> FormatResult<Vec<u8>> {
+  if owner_id.len() != hash_algorithm.hash_length() || owner_id.iter().all(|byte| *byte == 0) {
+    return Err(identity_error("active-pointer key owner disagrees with the database hash profile"));
+  }
+  if slot > 1 {
+    return Err(error(MalformedInputClass::NoncanonicalBooleanOrOptionalPresence, "index_pointer_slot", format!("slot {slot} is not A/B")));
+  }
+  Ok(digest_parts(hash_algorithm, &[b"aeordb.index-artifact.pointer.v1\0", &kind.id().to_le_bytes(), owner_id, &[slot]]))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexManifestKindV1 {
   FieldIndex,
@@ -497,7 +512,7 @@ pub fn decode_active_pointer(value: &[u8], hash_algorithm: HashAlgorithm) -> For
   if sequence == 0 || target_manifest_hash.iter().all(|byte| *byte == 0) {
     return Err(identity_error("active-pointer sequence or target is zero"));
   }
-  let key = digest_parts(hash_algorithm, &[b"aeordb.index-artifact.pointer.v1\0", &kind.id().to_le_bytes(), envelope.identity]);
+  let key = active_pointer_key_v1(kind, hash_algorithm, owner_id, slot)?;
   Ok(ActivePointerV1 { kind, generation: envelope.generation, owner_id, slot, sequence, target_manifest_hash, key })
 }
 

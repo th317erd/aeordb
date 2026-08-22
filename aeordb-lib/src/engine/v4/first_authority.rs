@@ -29,12 +29,17 @@ use super::entity::{
   encode_whole_entity,
 };
 use super::header_publication::{
-  DatabaseHeaderObservationV4, DatabaseHeaderPublicationErrorV4, DatabaseHeaderPublisherV4, HeaderPublicationDependencyV4,
-  observe_database_header_v4,
+  DatabaseHeaderObservationV4, DatabaseHeaderPublicationErrorV4, DatabaseHeaderPublicationReceiptV4, DatabaseHeaderPublisherV4,
+  HeaderPublicationDependencyV4, observe_database_header_v4,
 };
 use super::hash::digest_parts;
-use super::index_artifact::{EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, decode_immutable_index_artifact};
+use super::index_artifact::{
+  ActivePointerKindV1, ActivePointerSlotObservationV1, EncodedActivePointerV1, EncodedImmutableIndexArtifactV1,
+  ImmutableIndexArtifactKindV1, IndexManifestBodyV1, active_pointer_key_v1, decode_active_pointer, decode_immutable_index_artifact,
+  decode_index_manifest, plan_active_pointer_rewrite, select_closure_valid_active_pointer, validate_correctness_manifest_chain,
+};
 use super::index_operation_control::{IndexOperationControlV1, IndexOperationStateV1, decode_index_operation_control};
+use super::index_page::{OrderedIndexRoleV1, decode_artifact_directory};
 use super::gc::{
   EncodedGcActiveControlV1, EncodedImmutableGcArtifactV1, GcActiveControlV1, GcArtifactKindV1, decode_gc_active_control,
   decode_gc_artifact_envelope, gc_active_control_key, immutable_gc_artifact_key, select_gc_active_control,
@@ -597,6 +602,139 @@ pub struct IndexArtifactBatchPublicationReceiptV1 {
   pub artifacts: Vec<IndexArtifactPublicationReceiptV1>,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IndexActivePointerPublicationRequestV1<'a> {
+  pub database_id: &'a [u8; 16],
+  pub pointer: &'a EncodedActivePointerV1,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedIndexActivePointerV1 {
+  pub kind: ActivePointerKindV1,
+  pub generation: u64,
+  pub owner_id: Vec<u8>,
+  pub selected_slot: u8,
+  pub pointer_sequence: u64,
+  pub target_manifest_hash: Vec<u8>,
+  pub write_sequence: u64,
+  pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedIndexActivePointerPairV1 {
+  pub slots: [Option<LoadedIndexActivePointerV1>; 2],
+  pub selected: Option<LoadedIndexActivePointerV1>,
+  pub repair_required: bool,
+  pub structurally_invalid_slots: [bool; 2],
+  pub closure_invalid_slots: [bool; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexActivePointerPublicationReceiptV1 {
+  pub pointer_key: Vec<u8>,
+  pub selected_slot: u8,
+  pub pointer_sequence: u64,
+  pub generation: u64,
+  pub target_manifest_hash: Vec<u8>,
+  pub write_sequence: u64,
+  pub replaced_slot: bool,
+  pub retirement_hard_publication_sequence: Option<u64>,
+  pub observation: DatabaseHeaderObservationV4,
+  pub idempotent: bool,
+}
+
+#[derive(Debug)]
+pub enum IndexActivePointerPublicationErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Committed { code: &'static str, message: String, receipt: Box<IndexActivePointerPublicationReceiptV1> },
+  Authority(FirstAuthorityPublicationErrorV1),
+  RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
+  RetirementOwner(RetirementJournalOwnerErrorV1),
+}
+
+impl IndexActivePointerPublicationErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
+      Self::Authority(source) => source.code(),
+      Self::RetirementAdmission(source) => source.code(),
+      Self::RetirementOwner(source) => source.code(),
+    }
+  }
+
+  pub fn committed_receipt(&self) -> Option<&IndexActivePointerPublicationReceiptV1> {
+    match self {
+      Self::Committed { receipt, .. } => Some(receipt),
+      Self::Invalid { .. } | Self::Authority(_) | Self::RetirementAdmission(_) | Self::RetirementOwner(_) => None,
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+
+  fn committed(code: &'static str, message: impl Into<String>, receipt: IndexActivePointerPublicationReceiptV1) -> Self {
+    Self::Committed { code, message: message.into(), receipt: Box::new(receipt) }
+  }
+}
+
+impl Display for IndexActivePointerPublicationErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Committed { code, message, receipt } => {
+        write!(formatter, "{code}: active pointer {} committed, but post-commit handling failed: {message}", receipt.pointer_sequence)
+      }
+      Self::Authority(source) => write!(formatter, "active-pointer authority error: {source}"),
+      Self::RetirementAdmission(source) => write!(formatter, "active-pointer retirement admission error: {source}"),
+      Self::RetirementOwner(source) => write!(formatter, "active-pointer retirement owner error: {source}"),
+    }
+  }
+}
+
+impl Error for IndexActivePointerPublicationErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Authority(source) => Some(source),
+      Self::RetirementAdmission(source) => Some(source),
+      Self::RetirementOwner(source) => Some(source),
+      Self::Invalid { .. } | Self::Committed { .. } => None,
+    }
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for IndexActivePointerPublicationErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<EngineError> for IndexActivePointerPublicationErrorV1 {
+  fn from(source: EngineError) -> Self {
+    Self::Authority(source.into())
+  }
+}
+
+impl From<DatabaseHeaderPublicationErrorV4> for IndexActivePointerPublicationErrorV1 {
+  fn from(source: DatabaseHeaderPublicationErrorV4) -> Self {
+    Self::Authority(FirstAuthorityPublicationErrorV1::Header(source))
+  }
+}
+
+impl From<RetirementJournalReplacementAdmissionErrorV1> for IndexActivePointerPublicationErrorV1 {
+  fn from(source: RetirementJournalReplacementAdmissionErrorV1) -> Self {
+    Self::RetirementAdmission(source)
+  }
+}
+
+impl From<RetirementJournalOwnerErrorV1> for IndexActivePointerPublicationErrorV1 {
+  fn from(source: RetirementJournalOwnerErrorV1) -> Self {
+    Self::RetirementOwner(source)
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2856,6 +2994,75 @@ impl V4FirstAuthorityPublisher {
       .map(|loaded| loaded.and_then(|loaded| (loaded.value.len() == expected_value_length).then_some(loaded.value)))
   }
 
+  pub fn load_index_active_pointer_pair(
+    &self,
+    database_id: &[u8; 16],
+    kind: ActivePointerKindV1,
+    owner_id: &[u8],
+  ) -> Result<LoadedIndexActivePointerPairV1, FirstAuthorityPublicationErrorV1> {
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_index_active_pointer_identity(header, database_id, owner_id)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let pair = load_index_active_pointer_entities(&self.file, &kv, header, kind, owner_id)?;
+    select_loaded_index_active_pointer_pair(&self.file, &kv, header, kind, owner_id, &pair)
+  }
+
+  /// Publish an actual hard-authority barrier without changing semantic or KV
+  /// authority. Index-generation hard mode uses the returned durability
+  /// receipt as proof that all previously appended immutable dependencies are
+  /// durable; it must never synthesize that evidence from a pointer sequence.
+  pub fn publish_index_hard_barrier(
+    &self,
+    database_id: &[u8; 16],
+    publication_timestamp_ms: u64,
+  ) -> Result<DatabaseHeaderPublicationReceiptV4, FirstAuthorityPublicationErrorV1> {
+    if publication_timestamp_ms == 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "index_hard_barrier_time",
+        "index hard-barrier publication timestamp must be nonzero",
+      ));
+    }
+    let _authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "index_hard_barrier_missing_authority",
+        "index hard-barrier publication requires selected non-degraded first authority",
+      ));
+    }
+    if &header.database_id != database_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "index_active_pointer_database_mismatch",
+        "index hard-barrier authority belongs to another logical database",
+      ));
+    }
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "index_hard_barrier_baseline_not_flushed",
+        "index hard-barrier publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+    drop(kv);
+
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(publication_timestamp_ms);
+    self.header_publisher.publish_inactive_slot(&self.file, &observation, candidate).map_err(Into::into)
+  }
+
   pub fn index_artifact_length(&self, key: &[u8]) -> Result<Option<u64>, FirstAuthorityPublicationErrorV1> {
     let observation = self.observe()?;
     let header = &observation.selected.header;
@@ -4259,6 +4466,310 @@ impl V4FirstAuthorityPublisher {
     }
     if let Some((failure, message)) = committed_failure {
       return Err(ImmutableEntityBatchPublicationErrorV1::committed(immutable_entity_committed_failure_code(failure), message, receipt));
+    }
+    Ok(receipt)
+  }
+
+  pub fn publish_index_active_pointer(
+    &self,
+    request: IndexActivePointerPublicationRequestV1<'_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<IndexActivePointerPublicationReceiptV1, IndexActivePointerPublicationErrorV1> {
+    if request.publication_timestamp_ms == 0 || request.monotonic_now_ms == 0 {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_publication_time",
+        "publication and monotonic timestamps must be nonzero",
+      ));
+    }
+    retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
+    let prior_hard_publication_sequence = retirement_owner.status().last_hard_publication_sequence;
+    let authority = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_missing_authority",
+        "active-pointer publication requires selected non-degraded first authority",
+      ));
+    }
+    let incoming = decode_active_pointer(&request.pointer.value, header.hash_algorithm)
+      .map_err(|source| IndexActivePointerPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+    validate_index_active_pointer_identity(header, request.database_id, incoming.owner_id)?;
+    if incoming.key != request.pointer.key {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_prepared_mismatch",
+        "active-pointer key disagrees with its encoded bytes",
+      ));
+    }
+    if retirement_owner.hash_algorithm() != header.hash_algorithm || retirement_owner.database_id() != header.database_id {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_retirement_authority",
+        "active pointer and retirement owner belong to different database authority",
+      ));
+    }
+
+    let mut kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    kv.flush()?;
+    validate_kv_header_alignment(&kv, header)?;
+    if kv.write_buffer_len() != 0 || kv.hot_buffer_len() != 0 {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_baseline_not_flushed",
+        "active-pointer publication requires an empty KV write and hot-buffer baseline",
+      ));
+    }
+    if !index_active_pointer_closure_valid(&self.file, &kv, header, &incoming)? {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_target_closure",
+        "active pointer does not select one complete durable manifest closure",
+      ));
+    }
+    let pair = load_index_active_pointer_entities(&self.file, &kv, header, incoming.kind, incoming.owner_id)?;
+    let inspection = inspect_loaded_index_active_pointer_pair(&self.file, &kv, header, incoming.kind, incoming.owner_id, &pair)?;
+    if let Some(current) = inspection.loaded.selected.as_ref() {
+      if current.bytes == request.pointer.value {
+        return Ok(IndexActivePointerPublicationReceiptV1 {
+          pointer_key: request.pointer.key.clone(),
+          selected_slot: current.selected_slot,
+          pointer_sequence: current.pointer_sequence,
+          generation: current.generation,
+          target_manifest_hash: current.target_manifest_hash.clone(),
+          write_sequence: current.write_sequence,
+          replaced_slot: false,
+          retirement_hard_publication_sequence: None,
+          observation,
+          idempotent: true,
+        });
+      }
+    }
+    let rewrite = inspection.rewrite;
+    if incoming.slot != rewrite.write_slot || incoming.sequence != rewrite.next_sequence {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_rewrite_plan",
+        format!(
+          "active pointer targets slot {} sequence {}, but current authority requires slot {} sequence {}",
+          incoming.slot, incoming.sequence, rewrite.write_slot, rewrite.next_sequence
+        ),
+      ));
+    }
+    let target = pair.slots[usize::from(incoming.slot)].as_ref();
+    if target.is_none() && !kv.preflight_new_keys_fit_current_layout(&[request.pointer.key.as_slice()])? {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_kv_capacity",
+        "the current KV layout cannot retain the active-pointer slot",
+      ));
+    }
+    let write_sequence = header.write_sequence_high_water.checked_add(1).ok_or_else(|| {
+      IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_write_sequence_exhausted", "v4 write sequence is exhausted")
+    })?;
+    let entity_bytes = encode_entity(
+      1,
+      EntryTypeV4::IndexArtifact,
+      WHOLE_ENTITY_V1_FLAG_SYSTEM,
+      header.hash_algorithm,
+      request.publication_timestamp_ms,
+      write_sequence,
+      &request.pointer.key,
+      &request.pointer.value,
+    )?;
+    let entity = decode_whole_entity(&entity_bytes, header.hash_algorithm, write_sequence)
+      .map_err(|source| IndexActivePointerPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+    let replacement_integrity_hash = entity.integrity_hash.to_vec();
+    let entity_length = entity_bytes.len();
+    let prepared = [PreparedWholeEntityV1 { key: request.pointer.key.clone(), kv_type: kv_tag::INDEX_ARTIFACT, bytes: entity_bytes }];
+    let append_start = self.file.metadata().map_err(EngineError::IoError)?.len();
+    if append_start < header.hot_tail_offset {
+      return Err(IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_file_truncated",
+        "database length precedes the selected v4 hot-tail offset",
+      ));
+    }
+    write_file_at_native(&self.file, append_start, &prepared[0].bytes)
+      .map_err(|source| IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_write", source.to_string()))?;
+    verify_file_bytes_native(&self.file, append_start, &prepared[0].bytes)
+      .map_err(|source| IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_readback", source.to_string()))?;
+    let expected_hot_tail_offset = append_start.checked_add(entity_length as u64).ok_or_else(|| {
+      IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_wal_overflow", "active-pointer WAL offset overflowed")
+    })?;
+    let replacement_incarnation = encode_v4_physical_incarnation(
+      header.hash_algorithm,
+      &request.pointer.key,
+      &replacement_integrity_hash,
+      append_start,
+      write_sequence,
+      entity_length,
+      EntryTypeV4::IndexArtifact,
+    )
+    .map_err(|source| IndexActivePointerPublicationErrorV1::invalid(source.code(), source.to_string()))?;
+    let old_incarnation = target
+      .map(|target| {
+        encode_v4_physical_incarnation(
+          header.hash_algorithm,
+          &request.pointer.key,
+          &target.integrity_hash,
+          target.locator.offset,
+          target.write_sequence,
+          target.entity_length,
+          EntryTypeV4::IndexArtifact,
+        )
+        .map_err(|source| IndexActivePointerPublicationErrorV1::invalid(source.code(), source.to_string()))
+      })
+      .transpose()?;
+    let orphan_prefix_bytes = append_start.checked_sub(header.hot_tail_offset).ok_or_else(|| {
+      IndexActivePointerPublicationErrorV1::invalid(
+        "index_active_pointer_wal_prefix",
+        "active-pointer append precedes the selected hot tail",
+      )
+    })?;
+    let dependency_bytes = entity_dependency_bytes(&prepared, header.hash_algorithm.hash_length())?
+      .checked_add(pending_void_hot_tail_bytes(&kv, header.hash_algorithm.hash_length())?)
+      .and_then(|bytes| bytes.checked_add(orphan_prefix_bytes))
+      .ok_or_else(|| {
+        IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_dependency_bytes", "dependency byte count overflowed")
+      })?;
+    let mut candidate = header.clone();
+    candidate.updated_at_ms = header.updated_at_ms.max(request.publication_timestamp_ms);
+    candidate.write_sequence_high_water = write_sequence;
+    candidate.hot_tail_offset = expected_hot_tail_offset;
+    candidate.entry_count = header
+      .entry_count
+      .checked_add(u64::from(target.is_none()))
+      .ok_or_else(|| IndexActivePointerPublicationErrorV1::invalid("index_active_pointer_entry_count", "v4 entry count overflowed"))?;
+    let admitted =
+      self.header_publisher.admit_inactive_slot_with_dependency_bytes(&self.file, &observation, candidate, dependency_bytes)?;
+    let authority_sequence = admitted.sequence();
+    let batch = kv.begin_atomic_visibility_batch(1, authority_sequence)?;
+    let expected_existing = [target.map(|target| target.locator.clone())];
+    let prepared_retirement = if let Some(old_incarnation) = old_incarnation.as_ref() {
+      let replacements = [RetirementJournalReplacementV1 {
+        reason: RetirementReasonV1::PointerOrControlReplace,
+        old_incarnation,
+        replacement_incarnation: &replacement_incarnation,
+      }];
+      let mut sink = BufferedOnlyRetirementSinkV1;
+      match RetirementJournalReplacementCoordinatorV1::new(retirement_owner, &mut sink).prepare_buffered_single(
+        RetirementJournalReplacementBatchV1 {
+          replacement_publication_sequence: write_sequence,
+          retired_at_ms: request.publication_timestamp_ms,
+          replacements: &replacements,
+        },
+        request.monotonic_now_ms,
+      ) {
+        Ok(prepared) => Some(prepared),
+        Err(source) => {
+          kv.abort_atomic_visibility_batch(batch)?;
+          return Err(source.into());
+        }
+      }
+    } else {
+      None
+    };
+    let mut observer = NoopFirstAuthorityDependencyObserverV1;
+    let publication = if let Some(prepared_retirement) = prepared_retirement {
+      match prepared_retirement.activate(|_| {
+        commit_stable_entity_dependency(
+          &self.file,
+          &mut kv,
+          admitted,
+          batch,
+          authority_sequence,
+          &prepared,
+          append_start,
+          expected_hot_tail_offset,
+          &expected_existing,
+          &mut observer,
+        )
+      }) {
+        Ok(outcome) => outcome.output,
+        Err(source) => {
+          let Some((source, prepared_retirement)) = source.into_activation_failure() else {
+            return Err(IndexActivePointerPublicationErrorV1::invalid(
+              "index_active_pointer_retirement_activation",
+              "prepared retirement activation returned an admission error",
+            ));
+          };
+          if let Err(discard_error) = prepared_retirement.discard_buffered(retirement_owner) {
+            let (discard_source, _prepared) = discard_error.into_parts();
+            return Err(discard_source.into());
+          }
+          return Err(source.into());
+        }
+      }
+    } else {
+      commit_stable_entity_dependency(
+        &self.file,
+        &mut kv,
+        admitted,
+        batch,
+        authority_sequence,
+        &prepared,
+        append_start,
+        expected_hot_tail_offset,
+        &expected_existing,
+        &mut observer,
+      )?
+    };
+    let (publication_observation, committed_failure) = match publication {
+      StableEntityDependencyOutcomeV1::Complete(publication) => (publication.observation, None),
+      StableEntityDependencyOutcomeV1::CommittedFailure { publication, failure, message } => {
+        (publication.observation, Some((failure, message)))
+      }
+    };
+    let pair =
+      load_index_active_pointer_entities(&self.file, &kv, &publication_observation.selected.header, incoming.kind, incoming.owner_id);
+    let readback_failure = match pair.and_then(|pair| {
+      select_loaded_index_active_pointer_pair(
+        &self.file,
+        &kv,
+        &publication_observation.selected.header,
+        incoming.kind,
+        incoming.owner_id,
+        &pair,
+      )
+    }) {
+      Ok(pair) if pair.selected.as_ref().is_some_and(|selected| selected.bytes == request.pointer.value) => None,
+      Ok(_) => Some("published active pointer was not selected exactly".to_string()),
+      Err(source) => Some(source.to_string()),
+    };
+    drop(kv);
+    drop(authority);
+
+    let replaced_slot = target.is_some();
+    let mut receipt = IndexActivePointerPublicationReceiptV1 {
+      pointer_key: request.pointer.key.clone(),
+      selected_slot: incoming.slot,
+      pointer_sequence: incoming.sequence,
+      generation: incoming.generation,
+      target_manifest_hash: incoming.target_manifest_hash.to_vec(),
+      write_sequence,
+      replaced_slot,
+      retirement_hard_publication_sequence: None,
+      observation: publication_observation,
+      idempotent: false,
+    };
+    if replaced_slot {
+      if let Err(source) = retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self }) {
+        return Err(IndexActivePointerPublicationErrorV1::committed("index_active_pointer_retirement_flush", source.to_string(), receipt));
+      }
+      let hard_sequence = retirement_owner.status().last_hard_publication_sequence;
+      if hard_sequence <= prior_hard_publication_sequence {
+        return Err(IndexActivePointerPublicationErrorV1::committed(
+          "index_active_pointer_retirement_missing",
+          "active-pointer replacement committed without a new hard retirement publication",
+          receipt,
+        ));
+      }
+      receipt.retirement_hard_publication_sequence = Some(hard_sequence);
+      receipt.observation = self.observe()?;
+    }
+    if let Some((failure, message)) = committed_failure {
+      return Err(IndexActivePointerPublicationErrorV1::committed(index_active_pointer_committed_failure_code(failure), message, receipt));
+    }
+    if let Some(message) = readback_failure {
+      return Err(IndexActivePointerPublicationErrorV1::committed("index_active_pointer_committed_readback", message, receipt));
     }
     Ok(receipt)
   }
@@ -12009,6 +12520,29 @@ struct LoadedIndexArtifactEntityV1 {
   write_sequence: u64,
 }
 
+struct LoadedIndexActivePointerEntityV1 {
+  locator: KVEntry,
+  entity_length: usize,
+  integrity_hash: Vec<u8>,
+  write_sequence: u64,
+  value: Vec<u8>,
+}
+
+struct LoadedIndexActivePointerEntitiesV1 {
+  slots: [Option<LoadedIndexActivePointerEntityV1>; 2],
+}
+
+#[derive(Clone, Copy)]
+struct IndexActivePointerRewriteDecisionV1 {
+  write_slot: u8,
+  next_sequence: u64,
+}
+
+struct InspectedIndexActivePointerPairV1 {
+  loaded: LoadedIndexActivePointerPairV1,
+  rewrite: IndexActivePointerRewriteDecisionV1,
+}
+
 struct ValidatedIndexArtifactLocatorV1 {
   locator: KVEntry,
   total_length: usize,
@@ -12119,6 +12653,302 @@ fn load_index_artifact_entity(
   bytes.copy_within(value_start.., 0);
   bytes.truncate(located.value_length);
   Ok(Some(LoadedIndexArtifactEntityV1 { value: bytes, write_sequence }))
+}
+
+fn validate_index_active_pointer_identity(
+  header: &DatabaseHeaderV4,
+  database_id: &[u8; 16],
+  owner_id: &[u8],
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if &header.database_id != database_id {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_database_mismatch",
+      "active-pointer authority belongs to another logical database",
+    ));
+  }
+  if owner_id.len() != header.hash_algorithm.hash_length() || owner_id.iter().all(|byte| *byte == 0) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_owner",
+      "active-pointer owner disagrees with the database hash profile",
+    ));
+  }
+  Ok(())
+}
+
+fn load_index_active_pointer_entities(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: ActivePointerKindV1,
+  owner_id: &[u8],
+) -> Result<LoadedIndexActivePointerEntitiesV1, FirstAuthorityPublicationErrorV1> {
+  Ok(LoadedIndexActivePointerEntitiesV1 {
+    slots: [
+      load_index_active_pointer_entity(file, kv, header, kind, owner_id, 0)?,
+      load_index_active_pointer_entity(file, kv, header, kind, owner_id, 1)?,
+    ],
+  })
+}
+
+fn load_index_active_pointer_entity(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: ActivePointerKindV1,
+  owner_id: &[u8],
+  slot: u8,
+) -> Result<Option<LoadedIndexActivePointerEntityV1>, FirstAuthorityPublicationErrorV1> {
+  let key = active_pointer_key_v1(kind, header.hash_algorithm, owner_id, slot)?;
+  let Some(located) = validated_index_artifact_locator(file, kv, header, &key)? else {
+    return Ok(None);
+  };
+  let expected_value_length = 45usize
+    .checked_add(2 * header.hash_algorithm.hash_length())
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("index_active_pointer_length", "active-pointer length overflowed"))?;
+  if located.value_length != expected_value_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_length",
+      format!("active-pointer slot stores {} bytes instead of {expected_value_length}", located.value_length),
+    ));
+  }
+  let mut entity_bytes = Vec::new();
+  entity_bytes.try_reserve_exact(located.total_length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_read_allocation",
+      format!("active-pointer entity allocation failed for {} bytes: {error}", located.total_length),
+    )
+  })?;
+  entity_bytes.resize(located.total_length, 0);
+  read_file_at_native(file, located.locator.offset, &mut entity_bytes)
+    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("index_active_pointer_read_io", error.to_string()))?;
+  let entity = decode_whole_entity(&entity_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if entity.entity_version != 1
+    || entity.entry_type != EntryTypeV4::IndexArtifact
+    || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != key
+    || entity.stored_value.len() != expected_value_length
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_representation",
+      "active-pointer WholeEntity representation is noncanonical",
+    ));
+  }
+  let integrity_hash = entity.integrity_hash.to_vec();
+  let write_sequence = entity.write_sequence;
+  let value = entity.stored_value.to_vec();
+  Ok(Some(LoadedIndexActivePointerEntityV1 {
+    locator: located.locator,
+    entity_length: located.total_length,
+    integrity_hash,
+    write_sequence,
+    value,
+  }))
+}
+
+fn select_loaded_index_active_pointer_pair(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: ActivePointerKindV1,
+  owner_id: &[u8],
+  pair: &LoadedIndexActivePointerEntitiesV1,
+) -> Result<LoadedIndexActivePointerPairV1, FirstAuthorityPublicationErrorV1> {
+  inspect_loaded_index_active_pointer_pair(file, kv, header, kind, owner_id, pair).map(|inspection| inspection.loaded)
+}
+
+fn inspect_loaded_index_active_pointer_pair(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  kind: ActivePointerKindV1,
+  owner_id: &[u8],
+  pair: &LoadedIndexActivePointerEntitiesV1,
+) -> Result<InspectedIndexActivePointerPairV1, FirstAuthorityPublicationErrorV1> {
+  let decoded_a = pair.slots[0].as_ref().map(|slot| decode_active_pointer(&slot.value, header.hash_algorithm));
+  let decoded_b = pair.slots[1].as_ref().map(|slot| decode_active_pointer(&slot.value, header.hash_algorithm));
+  let pointer_a = decoded_a.as_ref().and_then(|decoded| decoded.as_ref().ok());
+  let pointer_b = decoded_b.as_ref().and_then(|decoded| decoded.as_ref().ok());
+  let closure_a = pointer_a.map(|pointer| index_active_pointer_closure_valid(file, kv, header, pointer)).transpose()?.unwrap_or(false);
+  let closure_b = pointer_b.map(|pointer| index_active_pointer_closure_valid(file, kv, header, pointer)).transpose()?.unwrap_or(false);
+  let loaded_slots = [
+    pointer_a.map(|pointer| loaded_index_active_pointer(pointer, pair.slots[0].as_ref(), 0)).transpose()?,
+    pointer_b.map(|pointer| loaded_index_active_pointer(pointer, pair.slots[1].as_ref(), 1)).transpose()?,
+  ];
+  let observation_a = match pointer_a {
+    Some(pointer) => ActivePointerSlotObservationV1::Structural { pointer, closure_valid: closure_a },
+    None if pair.slots[0].is_some() => ActivePointerSlotObservationV1::StructurallyInvalid,
+    None => ActivePointerSlotObservationV1::Missing,
+  };
+  let observation_b = match pointer_b {
+    Some(pointer) => ActivePointerSlotObservationV1::Structural { pointer, closure_valid: closure_b },
+    None if pair.slots[1].is_some() => ActivePointerSlotObservationV1::StructurallyInvalid,
+    None => ActivePointerSlotObservationV1::Missing,
+  };
+  let selection = select_closure_valid_active_pointer(kind, owner_id, observation_a, observation_b)?;
+  let rewrite = plan_active_pointer_rewrite(kind, owner_id, observation_a, observation_b)?;
+  let selected = selection
+    .selected()
+    .map(|pointer| {
+      loaded_slots[usize::from(pointer.slot)].clone().ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "index_active_pointer_selected_slot_missing",
+          "selected active-pointer observation has no structurally valid stored slot entity",
+        )
+      })
+    })
+    .transpose()?;
+  Ok(InspectedIndexActivePointerPairV1 {
+    loaded: LoadedIndexActivePointerPairV1 {
+      slots: loaded_slots,
+      selected,
+      repair_required: selection.repair_required(),
+      structurally_invalid_slots: [decoded_a.as_ref().is_some_and(Result::is_err), decoded_b.as_ref().is_some_and(Result::is_err)],
+      closure_invalid_slots: [pointer_a.is_some() && !closure_a, pointer_b.is_some() && !closure_b],
+    },
+    rewrite: IndexActivePointerRewriteDecisionV1 { write_slot: rewrite.write_slot(), next_sequence: rewrite.next_sequence() },
+  })
+}
+
+fn loaded_index_active_pointer(
+  pointer: &super::index_artifact::ActivePointerV1<'_>,
+  entity: Option<&LoadedIndexActivePointerEntityV1>,
+  expected_slot: u8,
+) -> Result<LoadedIndexActivePointerV1, FirstAuthorityPublicationErrorV1> {
+  let entity = entity.ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_structural_slot_missing",
+      "structurally valid active-pointer bytes have no stored slot entity",
+    )
+  })?;
+  if pointer.slot != expected_slot {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "index_active_pointer_structural_slot_mismatch",
+      "structurally valid active-pointer bytes identify the wrong stable slot",
+    ));
+  }
+  Ok(LoadedIndexActivePointerV1 {
+    kind: pointer.kind,
+    generation: pointer.generation,
+    owner_id: pointer.owner_id.to_vec(),
+    selected_slot: pointer.slot,
+    pointer_sequence: pointer.sequence,
+    target_manifest_hash: pointer.target_manifest_hash.to_vec(),
+    write_sequence: entity.write_sequence,
+    bytes: entity.value.clone(),
+  })
+}
+
+fn index_active_pointer_closure_valid(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  pointer: &super::index_artifact::ActivePointerV1<'_>,
+) -> Result<bool, FirstAuthorityPublicationErrorV1> {
+  let Some(target_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, pointer.target_manifest_hash)? else {
+    return Ok(false);
+  };
+  let Ok(target) = decode_index_manifest(&target_bytes, header.hash_algorithm) else {
+    return Ok(false);
+  };
+  if target.key != pointer.target_manifest_hash
+    || target.owner_id != pointer.owner_id
+    || target.generation != pointer.generation
+    || !active_pointer_manifest_kind_matches(pointer.kind, target.kind)
+  {
+    return Ok(false);
+  }
+  if !index_manifest_immediate_roots_valid(file, kv, header, &target)? {
+    return Ok(false);
+  }
+  let IndexManifestBodyV1::FieldIndex(field_body) = &target.details else {
+    return Ok(true);
+  };
+  let Some(value_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, field_body.value_store_manifest)? else {
+    return Ok(false);
+  };
+  let Ok(value) = decode_index_manifest(&value_bytes, header.hash_algorithm) else {
+    return Ok(false);
+  };
+  let IndexManifestBodyV1::ValueStore(value_body) = &value.details else {
+    return Ok(false);
+  };
+  if !index_manifest_immediate_roots_valid(file, kv, header, &value)? {
+    return Ok(false);
+  }
+  let Some(scope_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, value_body.scope_catalog_manifest)? else {
+    return Ok(false);
+  };
+  let Ok(scope) = decode_index_manifest(&scope_bytes, header.hash_algorithm) else {
+    return Ok(false);
+  };
+  Ok(
+    index_manifest_immediate_roots_valid(file, kv, header, &scope)?
+      && validate_correctness_manifest_chain(&scope, &value, &target, header.hash_algorithm).is_ok(),
+  )
+}
+
+fn index_manifest_immediate_roots_valid(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  manifest: &super::index_artifact::IndexManifestV1<'_>,
+) -> Result<bool, FirstAuthorityPublicationErrorV1> {
+  let roots: [(OrderedIndexRoleV1, Option<&[u8]>); 2] = match &manifest.details {
+    IndexManifestBodyV1::ScopeCatalog(body) => {
+      [(OrderedIndexRoleV1::ScopeOrdinal, body.ordinal_directory_root), (OrderedIndexRoleV1::ScopeReverse, body.reverse_directory_root)]
+    }
+    IndexManifestBodyV1::ValueStore(body) => {
+      [(OrderedIndexRoleV1::Value, body.value_directory_root), (OrderedIndexRoleV1::ValueDocumentState, body.document_state_directory_root)]
+    }
+    IndexManifestBodyV1::FieldIndex(body) => [
+      (OrderedIndexRoleV1::Posting, body.posting_directory_root),
+      (OrderedIndexRoleV1::IndexDocumentState, body.document_state_directory_root),
+    ],
+    IndexManifestBodyV1::FieldNvt(body) => [(OrderedIndexRoleV1::NvtTile, body.tile_directory_root), (OrderedIndexRoleV1::NvtTile, None)],
+  };
+  for (role, root_key) in roots {
+    let Some(root_key) = root_key else {
+      continue;
+    };
+    let Some(root_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, root_key)? else {
+      return Ok(false);
+    };
+    let Ok(root) = decode_artifact_directory(&root_bytes, header.hash_algorithm) else {
+      return Ok(false);
+    };
+    if root.key != root_key
+      || root.owner_id != manifest.owner_id
+      || root.role != role
+      || root.generation == 0
+      || root.generation > manifest.generation
+    {
+      return Ok(false);
+    }
+  }
+  Ok(true)
+}
+
+fn load_index_manifest_for_pointer_closure(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+  match load_index_artifact_entity(file, kv, header, key) {
+    Ok(loaded) => Ok(loaded.map(|loaded| loaded.value)),
+    Err(FirstAuthorityPublicationErrorV1::Invalid { .. } | FirstAuthorityPublicationErrorV1::Format(_)) => Ok(None),
+    Err(source) => Err(source),
+  }
+}
+
+fn active_pointer_manifest_kind_matches(kind: ActivePointerKindV1, manifest_kind: super::index_artifact::IndexManifestKindV1) -> bool {
+  matches!(
+    (kind, manifest_kind),
+    (ActivePointerKindV1::FieldIndex, super::index_artifact::IndexManifestKindV1::FieldIndex)
+      | (ActivePointerKindV1::FieldNvt, super::index_artifact::IndexManifestKindV1::FieldNvt)
+      | (ActivePointerKindV1::ScopeCatalog, super::index_artifact::IndexManifestKindV1::ScopeCatalog)
+  )
 }
 
 fn load_system_file(
@@ -12500,6 +13330,15 @@ const fn mutable_system_control_committed_failure_code(failure: StableEntityDepe
     StableEntityDependencyFailureV1::AuthorityUncertain => "mutable_control_committed_authority_uncertain",
     StableEntityDependencyFailureV1::VisibilityFailure => "mutable_control_committed_visibility_failure",
     StableEntityDependencyFailureV1::PostconditionFailure => "mutable_control_committed_postcondition_failure",
+  }
+}
+
+const fn index_active_pointer_committed_failure_code(failure: StableEntityDependencyFailureV1) -> &'static str {
+  match failure {
+    StableEntityDependencyFailureV1::DependencyMissing => "index_active_pointer_committed_dependency_missing",
+    StableEntityDependencyFailureV1::AuthorityUncertain => "index_active_pointer_committed_authority_uncertain",
+    StableEntityDependencyFailureV1::VisibilityFailure => "index_active_pointer_committed_visibility_failure",
+    StableEntityDependencyFailureV1::PostconditionFailure => "index_active_pointer_committed_postcondition_failure",
   }
 }
 
