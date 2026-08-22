@@ -1087,7 +1087,12 @@
               - [x] Freeze the sole production coordinator construction/admission/lease, cadence construction/admission/service, and legacy index-buffer construction callers.
               - [x] Run focused delete/index/runtime gates before affected, architecture, suppression, static, broad, resource, and real-world qualification.
               - [ ] Qualify the exact landed commit on native macOS arm64 and Windows x86_64 MSVC; retain the Windows gate until the reverse endpoint is reachable.
+                - [x] Pass the exact-commit native macOS arm64 matrix.
+                - [ ] Pass the exact-commit native Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
+            - [x] Prove installed admission pressure plus durable-spill refusal cannot reverse post-commit indexed writes or deletes.
+            - [x] Close the existing cancellation, retry exhaustion, spill recovery, mixed-owner, and duplicate-delivery matrix through one reviewed evidence inventory.
+            - [ ] Run focused producer/runtime/namespace gates before affected, architecture, suppression, static, broad, resource, real-world, and native qualification.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
         - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.

@@ -1158,6 +1158,74 @@ fn post_commit_maintenance_admission_failure_cannot_reverse_legacy_write_or_dele
 }
 
 #[test]
+fn post_commit_pressure_and_spill_refusal_cannot_reverse_legacy_write_or_delete() {
+  let fixture = RuntimeFixture::new("runtime-post-commit-spill-refusal");
+  let operations = DirectoryOps::new(&fixture.source);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@hash".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  operations
+    .store_file_buffered(&RequestContext::system(), "/legacy/.aeordb-config/indexes.json", &config.serialize(), Some("application/json"))
+    .unwrap();
+
+  let mut owner_options = runtime_options();
+  owner_options.producer = IndexProducerCoordinatorOptionsV1::new(1, 2 * 1_024 * 1_024, 3, 10, 1_000, 16, 256, 2 * 1_024 * 1_024).unwrap();
+  let workspace_id = id(0xa1);
+  let workspace_root = fixture._directory.path().join(format!("runtime-{}", hex::encode(workspace_id)));
+  fs::create_dir_all(&workspace_root).unwrap();
+  let workspace_options = IndexRuntimeWorkspaceOptionsV1::new(Some(workspace_root), 397, 0, 32).unwrap();
+  let publisher_options = NativeIndexRuntimePublisherOptionsV1::new(
+    descriptor_with_algorithm(fixture.permit.hash_algorithm(), fixture.permit.database_id(), 0xd1, 0xd2, 0xd3),
+    workspace_id,
+    1,
+    workspace_options,
+  )
+  .unwrap();
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: id(0xa2),
+      shadow_identity: &fixture.identity(),
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: fixture.retirement(),
+      operation_descriptors: &[],
+      runtime_options: owner_options,
+      recovery_options: native_recovery_options(),
+      runtime_publisher: publisher_options,
+      cancellation: &fixture.cancellation,
+      clock: fixture.clock(80, 1_700_000_000_900),
+      now_ms: 1_700_000_000_900,
+    },
+  )
+  .unwrap();
+  assert_eq!(
+    fixture.source.admit_index_maintenance_task_v1(id(0xa3), IndexProducerMaintenanceClassV1::Repair, "/occupied").unwrap(),
+    Some(IndexProducerAdmissionV1::Queued)
+  );
+
+  let contents = br#"{"durable":"despite-spill-refusal"}"#;
+  operations
+    .store_file_with_indexing(&RequestContext::system(), "/legacy/durable.json", contents, Some("application/json"))
+    .expect("post-commit spill refusal cannot reverse an acknowledged file write");
+  assert_eq!(operations.read_file_buffered("/legacy/durable.json").unwrap(), contents);
+  assert!(IndexManager::new(&fixture.source).load_index("/legacy", "@hash").unwrap().is_some());
+
+  operations
+    .delete_file(&RequestContext::system(), "/legacy/durable.json")
+    .expect("post-commit spill refusal cannot reverse an acknowledged file deletion");
+  assert!(matches!(operations.read_file_buffered("/legacy/durable.json"), Err(aeordb::engine::EngineError::NotFound(_))));
+  assert_eq!(IndexManager::new(&fixture.source).load_index("/legacy", "@hash").unwrap().unwrap().len(), 0);
+
+  let runtime = fixture.source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(runtime.producer.pending_tasks, 1, "the admitted task must remain retained");
+  assert_eq!(runtime.producer.spilled_tasks, 0, "a refused spill cannot be reported as durable");
+}
+
+#[test]
 fn maintenance_batch_admission_uses_one_stable_operation_and_retries_as_exact_duplicates() {
   let fixture = RuntimeFixture::new("runtime-maintenance-batch-admission");
   DirectoryOps::new(&fixture.source).store_file_buffered(&RequestContext::system(), "/seed.txt", b"seed", Some("text/plain")).unwrap();
