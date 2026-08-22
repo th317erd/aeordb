@@ -2994,6 +2994,27 @@ impl V4FirstAuthorityPublisher {
       .map(|loaded| loaded.and_then(|loaded| (loaded.value.len() == expected_value_length).then_some(loaded.value)))
   }
 
+  /// Load one immutable IndexArtifact after enforcing the caller's value-byte
+  /// ceiling before allocating the WholeEntity buffer.
+  pub fn load_index_artifact_bounded(
+    &self,
+    key: &[u8],
+    maximum_value_length: usize,
+  ) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+    if maximum_value_length == 0 || maximum_value_length > super::entity::WHOLE_ENTITY_V1_VALUE_CAP {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "immutable_index_read_bound",
+        format!("IndexArtifact read bound {maximum_value_length} is outside 1..={}", super::entity::WHOLE_ENTITY_V1_VALUE_CAP),
+      ));
+    }
+    let observation = self.observe()?;
+    let header = &observation.selected.header;
+    validate_index_artifact_key(header.hash_algorithm, key)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    load_index_artifact_entity_bounded(&self.file, &kv, header, key, maximum_value_length).map(|loaded| loaded.map(|loaded| loaded.value))
+  }
+
   pub fn load_index_active_pointer_pair(
     &self,
     database_id: &[u8; 16],
@@ -12613,10 +12634,25 @@ fn load_index_artifact_entity(
   header: &DatabaseHeaderV4,
   key: &[u8],
 ) -> Result<Option<LoadedIndexArtifactEntityV1>, FirstAuthorityPublicationErrorV1> {
+  load_index_artifact_entity_bounded(file, kv, header, key, ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length())
+}
+
+fn load_index_artifact_entity_bounded(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+  key: &[u8],
+  maximum_value_length: usize,
+) -> Result<Option<LoadedIndexArtifactEntityV1>, FirstAuthorityPublicationErrorV1> {
   let Some(located) = validated_index_artifact_locator(file, kv, header, key)? else {
     return Ok(None);
   };
-  let maximum_value_length = ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length();
+  if located.value_length > maximum_value_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "immutable_index_value_exceeds_cap",
+      format!("IndexArtifact value length {} exceeds its {maximum_value_length}-byte caller bound", located.value_length),
+    ));
+  }
   let mut bytes = Vec::new();
   bytes.try_reserve_exact(located.total_length).map_err(|error| {
     FirstAuthorityPublicationErrorV1::invalid(
@@ -12640,7 +12676,11 @@ fn load_index_artifact_entity(
         "immutable IndexArtifact WholeEntity representation is noncanonical",
       ));
     }
-    let artifact = decode_immutable_index_artifact(entity.stored_value, header.hash_algorithm, maximum_value_length)?;
+    let artifact = decode_immutable_index_artifact(
+      entity.stored_value,
+      header.hash_algorithm,
+      ImmutableIndexArtifactKindV1::MutationJournalSegment.maximum_encoded_length(),
+    )?;
     if artifact.key != key {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "immutable_index_prepared_mismatch",

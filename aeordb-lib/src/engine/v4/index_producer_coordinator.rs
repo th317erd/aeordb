@@ -479,6 +479,37 @@ pub(crate) struct IndexProducerMaintenanceScanPlanV1 {
   _reservation: MemoryReservation,
 }
 
+pub(crate) struct IndexProducerCompactionPlanV1 {
+  operation_id: [u8; 16],
+  publication_sequence: u64,
+  namespace_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  scope: String,
+  _reservation: MemoryReservation,
+}
+
+impl IndexProducerCompactionPlanV1 {
+  pub(crate) const fn operation_id(&self) -> [u8; 16] {
+    self.operation_id
+  }
+
+  pub(crate) const fn publication_sequence(&self) -> u64 {
+    self.publication_sequence
+  }
+
+  pub(crate) fn namespace_root(&self) -> &[u8] {
+    &self.namespace_root
+  }
+
+  pub(crate) fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub(crate) fn scope(&self) -> &str {
+    &self.scope
+  }
+}
+
 impl IndexProducerMaintenanceScanPlanV1 {
   pub(crate) fn namespace_root(&self) -> &[u8] {
     &self.namespace_root
@@ -857,6 +888,43 @@ impl IndexProducerCoordinatorV1 {
         .map_err(|error| memory_error(retained_bytes, self.options.max_pending_bytes, error))?;
     }
     Ok(IndexProducerMaintenanceScanPlanV1 { namespace_root, semantic_state_root, scope, resume_after, limits, _reservation: reservation })
+  }
+
+  pub(crate) fn leased_compaction_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+  ) -> Result<IndexProducerCompactionPlanV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    let task = &self.tasks[self.task_index(lease.operation_id)?];
+    if index_producer_service_mode_v1(task.kind) != IndexProducerServiceModeV1::ArtifactCompaction {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("leased task is not artifact-compaction work".to_string()));
+    }
+    let scope = task
+      .scope
+      .as_deref()
+      .ok_or_else(|| IndexProducerCoordinatorErrorV1::Invariant("artifact-compaction task lost its scope".to_string()))?;
+    let requested_bytes = compaction_plan_bytes(task.namespace_root_after.len(), task.semantic_state_root.len(), scope.len())?;
+    let mut reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, requested_bytes, AdmissionClass::Workload)
+      .map_err(|error| memory_error(requested_bytes, self.options.max_pending_bytes, error))?;
+    let namespace_root = clone_bytes(&task.namespace_root_after, "compaction plan namespace root")?;
+    let semantic_state_root = clone_bytes(&task.semantic_state_root, "compaction plan semantic-state root")?;
+    let scope = clone_string(scope, "compaction plan scope")?;
+    let retained_bytes = compaction_plan_bytes(namespace_root.capacity(), semantic_state_root.capacity(), scope.capacity())?;
+    if retained_bytes > requested_bytes {
+      reservation
+        .grow(retained_bytes - requested_bytes)
+        .map_err(|error| memory_error(retained_bytes, self.options.max_pending_bytes, error))?;
+    }
+    Ok(IndexProducerCompactionPlanV1 {
+      operation_id: task.operation_id,
+      publication_sequence: task.publication_sequence,
+      namespace_root,
+      semantic_state_root,
+      scope,
+      _reservation: reservation,
+    })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1538,6 +1606,20 @@ fn maintenance_scan_plan_bytes(
     .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("maintenance scan plan bytes"))?;
   u64::try_from(retained)
     .map_err(|source| IndexProducerCoordinatorErrorV1::Invariant(format!("maintenance scan plan bytes exceed u64: {source}")))
+}
+
+fn compaction_plan_bytes(
+  namespace_root_bytes: usize,
+  semantic_state_root_bytes: usize,
+  scope_bytes: usize,
+) -> Result<u64, IndexProducerCoordinatorErrorV1> {
+  let retained = size_of::<IndexProducerCompactionPlanV1>()
+    .checked_add(namespace_root_bytes)
+    .and_then(|bytes| bytes.checked_add(semantic_state_root_bytes))
+    .and_then(|bytes| bytes.checked_add(scope_bytes))
+    .ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("compaction plan bytes"))?;
+  u64::try_from(retained)
+    .map_err(|source| IndexProducerCoordinatorErrorV1::Invariant(format!("compaction plan bytes exceed u64: {source}")))
 }
 
 fn clone_task(

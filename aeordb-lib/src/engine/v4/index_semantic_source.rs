@@ -17,7 +17,7 @@ use super::namespace::{
   SemanticAvailabilityV1, SemanticCatalogNodeV1, SemanticCatalogRecordV1, SemanticObjectKind, decode_semantic_catalog_node,
   decode_semantic_definition_record, decode_semantic_object,
 };
-use super::scope::{decode_scope_definition, scope_matches_path};
+use super::scope::{decode_scope_definition, scope_matches_path, validate_canonical_absolute_path};
 use super::semantic_store::V4SemanticObjectStore;
 use super::value_store::decode_value_store_definition;
 
@@ -200,6 +200,72 @@ impl<'source> CatalogIndexSemanticScopeSourceV1<'source> {
   }
 }
 
+#[derive(Clone, Copy)]
+pub struct IndexCompactionSemanticInventoryRequestV1<'request> {
+  pub semantic_state_root: &'request [u8],
+  pub maintenance_scope: &'request str,
+  pub limits: super::index_producer_source::IndexSemanticScopeLimitsV1,
+  pub is_cancelled: &'request dyn Fn() -> bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCompactionSemanticValueStoreV1 {
+  value_store_id: Vec<u8>,
+  field_index_ids: Vec<Vec<u8>>,
+}
+
+impl IndexCompactionSemanticValueStoreV1 {
+  pub fn value_store_id(&self) -> &[u8] {
+    &self.value_store_id
+  }
+
+  pub fn field_index_ids(&self) -> &[Vec<u8>] {
+    &self.field_index_ids
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCompactionSemanticScopeV1 {
+  scope_id: Vec<u8>,
+  value_stores: Vec<IndexCompactionSemanticValueStoreV1>,
+}
+
+impl IndexCompactionSemanticScopeV1 {
+  pub fn scope_id(&self) -> &[u8] {
+    &self.scope_id
+  }
+
+  pub fn value_stores(&self) -> &[IndexCompactionSemanticValueStoreV1] {
+    &self.value_stores
+  }
+}
+
+pub struct IndexCompactionSemanticInventoryV1 {
+  semantic_state_root: Vec<u8>,
+  scopes: Vec<IndexCompactionSemanticScopeV1>,
+  _reservation: crate::engine::memory_coordinator::MemoryReservation,
+}
+
+impl std::fmt::Debug for IndexCompactionSemanticInventoryV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("IndexCompactionSemanticInventoryV1")
+      .field("semantic_state_root", &hex::encode(&self.semantic_state_root))
+      .field("scopes", &self.scopes)
+      .finish_non_exhaustive()
+  }
+}
+
+impl IndexCompactionSemanticInventoryV1 {
+  pub fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub fn scopes(&self) -> &[IndexCompactionSemanticScopeV1] {
+    &self.scopes
+  }
+}
+
 impl IndexSemanticScopeSourceV1 for CatalogIndexSemanticScopeSourceV1<'_> {
   fn resolve_scopes(
     &self,
@@ -309,11 +375,11 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
 
     let mut definition_bytes = 0u64;
     let mut scopes = Vec::new();
-    let scope_stats = self.walk_catalog(catalog_root, request, |record| {
+    let scope_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
       if record.record_kind != 3 {
         return Ok(());
       }
-      self.with_definition(record, request, |definition| {
+      self.with_definition(record, request.is_cancelled, |definition| {
         let scope = decode_scope_definition(definition, self.hash_algorithm)
           .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
         validate_definition_identity(record, &scope.scope_id)?;
@@ -347,11 +413,11 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(scope_stats, expected)?;
 
     let mut value_store_count = 0usize;
-    let value_stats = self.walk_catalog(catalog_root, request, |record| {
+    let value_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
       if record.record_kind != 4 {
         return Ok(());
       }
-      self.with_definition(record, request, |definition| {
+      self.with_definition(record, request.is_cancelled, |definition| {
         let value_store = decode_value_store_definition(definition, self.hash_algorithm)
           .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
         validate_definition_identity(record, &value_store.value_store_id)?;
@@ -372,11 +438,11 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(value_stats, expected)?;
 
     let mut field_index_count = 0usize;
-    let field_stats = self.walk_catalog(catalog_root, request, |record| {
+    let field_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
       if record.record_kind != 5 {
         return Ok(());
       }
-      self.with_definition(record, request, |definition| {
+      self.with_definition(record, request.is_cancelled, |definition| {
         let field = decode_field_index_definition(definition, self.hash_algorithm)
           .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
         validate_definition_identity(record, &field.index_id)?;
@@ -445,17 +511,153 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     )
   }
 
+  pub fn resolve_compaction_inventory(
+    &self,
+    request: IndexCompactionSemanticInventoryRequestV1<'_>,
+  ) -> Result<IndexCompactionSemanticInventoryV1, IndexSemanticScopeReadErrorV1> {
+    if (request.is_cancelled)() {
+      return Err(IndexSemanticScopeReadErrorV1::cancelled(
+        "semantic_cancelled",
+        "compaction semantic inventory was cancelled before admission",
+      ));
+    }
+    validate_canonical_absolute_path(request.maintenance_scope)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+    let reservation_bytes = semantic_limits_reservation_bytes(self.hash_algorithm, request.limits)?;
+    let reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, reservation_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("semantic_memory_pressure", error.to_string()))?;
+    let state_bytes = self
+      .objects
+      .load_semantic_object(0x0001, request.semantic_state_root)?
+      .ok_or_else(|| IndexSemanticScopeReadErrorV1::corrupt("semantic_state_missing", "semantic-state object is absent"))?;
+    let object = decode_semantic_object(&state_bytes, self.hash_algorithm)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+    if object.object_id != request.semantic_state_root || !matches!(object.kind, SemanticObjectKind::State { .. }) {
+      return Err(IndexSemanticScopeReadErrorV1::corrupt(
+        "semantic_state_identity",
+        "semantic-state bytes do not match the requested compaction inventory identity",
+      ));
+    }
+    let state = object.semantic_state.ok_or_else(|| {
+      IndexSemanticScopeReadErrorV1::corrupt("semantic_state_fields", "semantic-state object has no decoded state fields")
+    })?;
+    let semantic_state_root = request.semantic_state_root.to_vec();
+    let SemanticAvailabilityV1::Complete {
+      catalog_root, catalog_record_count, catalog_node_count, definition_count, dependency_count, ..
+    } = state.availability
+    else {
+      return Ok(IndexCompactionSemanticInventoryV1 { semantic_state_root, scopes: Vec::new(), _reservation: reservation });
+    };
+    let expected = CatalogExpectedCountsV1 {
+      records: catalog_record_count,
+      nodes: catalog_node_count,
+      definitions: definition_count,
+      dependencies: dependency_count,
+    };
+    if expected.definitions == 0 || expected.definitions > expected.records || expected.dependencies > expected.definitions {
+      return Err(IndexSemanticScopeReadErrorV1::corrupt(
+        "semantic_state_counts",
+        "semantic-state definition/dependency counts do not fit the catalog record count",
+      ));
+    }
+
+    let mut definition_bytes = 0u64;
+    let mut scopes = Vec::new();
+    let scope_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+      if record.record_kind != 3 {
+        return Ok(());
+      }
+      self.with_definition(record, request.is_cancelled, |definition| {
+        let scope = decode_scope_definition(definition, self.hash_algorithm)
+          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+        validate_definition_identity(record, &scope.scope_id)?;
+        if !canonical_paths_overlap(scope.owner_path, request.maintenance_scope) {
+          return Ok(());
+        }
+        enforce_count_limit("scopes", scopes.len(), request.limits.max_scopes())?;
+        definition_bytes = retained_definition_bytes(definition_bytes, definition.len(), request.limits.max_definition_bytes())?;
+        scopes.push(IndexCompactionSemanticScopeV1 { scope_id: scope.scope_id, value_stores: Vec::new() });
+        Ok(())
+      })
+    })?;
+    validate_walk_counts(scope_stats, expected)?;
+
+    let mut value_store_count = 0usize;
+    let value_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+      if record.record_kind != 4 {
+        return Ok(());
+      }
+      self.with_definition(record, request.is_cancelled, |definition| {
+        let value_store = decode_value_store_definition(definition, self.hash_algorithm)
+          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+        validate_definition_identity(record, &value_store.value_store_id)?;
+        let Some(scope) = scopes.iter_mut().find(|scope| scope.scope_id == value_store.scope_id) else {
+          return Ok(());
+        };
+        enforce_count_limit("value stores", value_store_count, request.limits.max_value_stores())?;
+        definition_bytes = retained_definition_bytes(definition_bytes, definition.len(), request.limits.max_definition_bytes())?;
+        scope
+          .value_stores
+          .push(IndexCompactionSemanticValueStoreV1 { value_store_id: value_store.value_store_id, field_index_ids: Vec::new() });
+        value_store_count += 1;
+        Ok(())
+      })
+    })?;
+    validate_walk_counts(value_stats, expected)?;
+
+    let mut field_index_count = 0usize;
+    let field_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+      if record.record_kind != 5 {
+        return Ok(());
+      }
+      self.with_definition(record, request.is_cancelled, |definition| {
+        let field = decode_field_index_definition(definition, self.hash_algorithm)
+          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+        validate_definition_identity(record, &field.index_id)?;
+        let value_store = scopes
+          .iter_mut()
+          .flat_map(|scope| scope.value_stores.iter_mut())
+          .find(|value_store| value_store.value_store_id == field.value_store_id);
+        let Some(value_store) = value_store else {
+          return Ok(());
+        };
+        enforce_count_limit("field indexes", field_index_count, request.limits.max_field_indexes())?;
+        definition_bytes = retained_definition_bytes(definition_bytes, definition.len(), request.limits.max_definition_bytes())?;
+        value_store.field_index_ids.push(field.index_id);
+        field_index_count += 1;
+        Ok(())
+      })
+    })?;
+    validate_walk_counts(field_stats, expected)?;
+    if (request.is_cancelled)() {
+      return Err(IndexSemanticScopeReadErrorV1::cancelled(
+        "semantic_cancelled",
+        "compaction semantic inventory was cancelled before ordering",
+      ));
+    }
+    scopes.sort_unstable_by(|left, right| left.scope_id.cmp(&right.scope_id));
+    for scope in &mut scopes {
+      scope.value_stores.sort_unstable_by(|left, right| left.value_store_id.cmp(&right.value_store_id));
+      for value_store in &mut scope.value_stores {
+        value_store.field_index_ids.sort_unstable();
+      }
+    }
+    Ok(IndexCompactionSemanticInventoryV1 { semantic_state_root, scopes, _reservation: reservation })
+  }
+
   fn walk_catalog(
     &self,
     catalog_root: &[u8],
-    request: IndexSemanticScopeReadRequestV1<'_>,
+    is_cancelled: &dyn Fn() -> bool,
     mut visit_record: impl FnMut(SemanticCatalogRecordV1<'_>) -> Result<(), IndexSemanticScopeReadErrorV1>,
   ) -> Result<CatalogWalkStatsV1, IndexSemanticScopeReadErrorV1> {
     let hash_width = self.hash_algorithm.hash_length();
     let mut stack = vec![CatalogWalkFrameV1::Visit { object_id: catalog_root.to_vec(), expected_prefix: Vec::new(), expected_records: 0 }];
     let mut stats = CatalogWalkStatsV1::default();
     while let Some(frame) = stack.pop() {
-      if (request.is_cancelled)() {
+      if is_cancelled() {
         return Err(IndexSemanticScopeReadErrorV1::cancelled("semantic_cancelled", "semantic catalog traversal was cancelled"));
       }
       if stack.len() > hash_width.saturating_mul(2) {
@@ -571,10 +773,10 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
   fn with_definition<T>(
     &self,
     record: SemanticCatalogRecordV1<'_>,
-    request: IndexSemanticScopeReadRequestV1<'_>,
+    is_cancelled: &dyn Fn() -> bool,
     inspect: impl FnOnce(&[u8]) -> Result<T, IndexSemanticScopeReadErrorV1>,
   ) -> Result<T, IndexSemanticScopeReadErrorV1> {
-    if (request.is_cancelled)() {
+    if is_cancelled() {
       return Err(IndexSemanticScopeReadErrorV1::cancelled("semantic_cancelled", "semantic definition read was cancelled"));
     }
     let bytes = self.objects.load_semantic_object(0x0004, record.definition_object_id)?.ok_or_else(|| {
@@ -672,15 +874,30 @@ fn semantic_reservation_bytes(
   hash_algorithm: HashAlgorithm,
   request: IndexSemanticScopeReadRequestV1<'_>,
 ) -> Result<u64, IndexSemanticScopeReadErrorV1> {
+  semantic_limits_reservation_bytes(hash_algorithm, request.limits)
+}
+
+fn semantic_limits_reservation_bytes(
+  hash_algorithm: HashAlgorithm,
+  limits: super::index_producer_source::IndexSemanticScopeLimitsV1,
+) -> Result<u64, IndexSemanticScopeReadErrorV1> {
   let hash_width = hash_algorithm.hash_length() as u64;
-  let identity_count = u64::from(request.limits.max_scopes())
+  let identity_count = u64::from(limits.max_scopes())
     .checked_mul(2)
-    .and_then(|value| value.checked_add(u64::from(request.limits.max_value_stores()) * 2))
-    .and_then(|value| value.checked_add(u64::from(request.limits.max_field_indexes()) * 2))
+    .and_then(|value| value.checked_add(u64::from(limits.max_value_stores()) * 2))
+    .and_then(|value| value.checked_add(u64::from(limits.max_field_indexes()) * 2))
     .ok_or_else(|| IndexSemanticScopeReadErrorV1::corrupt("semantic_memory_overflow", "semantic identity count overflow"))?;
   SEMANTIC_TRAVERSAL_WORKSPACE_BYTES
-    .checked_add(request.limits.max_definition_bytes())
+    .checked_add(limits.max_definition_bytes())
     .and_then(|value| value.checked_add(identity_count.checked_mul(hash_width + 128)?))
     .and_then(|value| value.checked_add(hash_width * 4))
     .ok_or_else(|| IndexSemanticScopeReadErrorV1::corrupt("semantic_memory_overflow", "semantic reservation byte overflow"))
+}
+
+fn canonical_paths_overlap(left: &str, right: &str) -> bool {
+  canonical_path_contains(left, right) || canonical_path_contains(right, left)
+}
+
+fn canonical_path_contains(parent: &str, child: &str) -> bool {
+  parent == "/" || parent == child || child.strip_prefix(parent).is_some_and(|suffix| suffix.starts_with('/'))
 }

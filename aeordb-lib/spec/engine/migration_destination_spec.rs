@@ -1403,12 +1403,13 @@ fn standalone_unbounded_index_cleanup_worker_cannot_return() {
 #[test]
 fn installed_producer_cadence_and_legacy_buffer_callers_are_closed() {
   let engine_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine");
-  let expected: [(&str, &[(&str, usize)]); 8] = [
+  let expected: [(&str, &[(&str, usize)]); 9] = [
     ("IndexProducerCoordinatorV1::new(", &[("v4/index_runtime_owner.rs", 1)]),
     ("state.producer.admit(", &[("v4/index_runtime_owner.rs", 1)]),
     ("state.producer.admit_or_spill(", &[("v4/index_runtime_owner.rs", 1)]),
     ("state.producer.lease_next(", &[("v4/index_runtime_owner.rs", 1)]),
     ("NativeIndexRuntimeCadenceV1::new(", &[("v4/index_runtime_installation.rs", 1)]),
+    ("NativeIndexCompactionExecutorV1::new(", &[("v4/index_runtime_installation.rs", 1)]),
     ("self.cadence.admit_task(", &[("v4/index_runtime_installation.rs", 1)]),
     ("self.cadence.service_bounded_producers(", &[("v4/index_runtime_installation.rs", 1)]),
     ("IndexWriteBuffer::new(", &[("directory_ops.rs", 1), ("task_worker.rs", 1)]),
@@ -2464,9 +2465,13 @@ fn native_runtime_has_one_atomic_publisher_and_cadence_installation_boundary() {
   let package = Path::new(env!("CARGO_MANIFEST_DIR"));
   let installation = fs::read_to_string(package.join("src/engine/v4/index_runtime_installation.rs")).unwrap();
   let storage_engine = fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
+  let query_engine = fs::read_to_string(package.join("src/engine/query_engine.rs")).unwrap();
 
   assert_eq!(installation.matches("NativeIndexRuntimeCadenceV1::new").count(), 1);
+  assert_eq!(installation.matches("NativeIndexCompactionExecutorV1::new").count(), 1);
   assert!(installation.contains("cadence: Arc<NativeIndexRuntimeCadenceV1>"));
+  assert!(installation.contains("Arc::clone(&self.retirement_owner)"));
+  assert!(installation.contains("compaction_executor: &compaction_executor"));
   assert!(installation.contains("build_runtime_publisher("));
   let source_frontier = installation
     .find("let source_authority_guard = engine.direct_hard_authority_guard()?;")
@@ -2479,10 +2484,16 @@ fn native_runtime_has_one_atomic_publisher_and_cadence_installation_boundary() {
     "runtime installation must never hold destination selection while waiting on source authority"
   );
   assert!(installation.contains("installation.install(&source_authority_guard, runtime)"));
-  for forbidden in
-    ["NativeIndexRuntimeCadenceInstallationErrorV1", "install_index_runtime_cadence_v1", "OnceLock<Arc<NativeIndexRuntimeCadenceV1>>"]
-  {
+  for forbidden in [
+    "NativeIndexRuntimeCadenceInstallationErrorV1",
+    "install_index_runtime_cadence_v1",
+    "OnceLock<Arc<NativeIndexRuntimeCadenceV1>>",
+    "PendingNativeIndexCompactionExecutorV1",
+  ] {
     assert!(!installation.contains(forbidden), "runtime installation retained split cadence authority {forbidden}");
     assert!(!storage_engine.contains(forbidden), "storage engine retained split cadence authority {forbidden}");
+  }
+  for shadow_authority in ["NativeIndexRuntimeV1", "V4FirstAuthorityPublisher", "IndexActivePointerPublication"] {
+    assert!(!query_engine.contains(shadow_authority), "v3 query authority was bypassed through {shadow_authority}");
   }
 }

@@ -4,6 +4,7 @@ use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 
 use super::index_coordinator::IndexCoordinatorV1;
+use super::index_compaction_runtime::{IndexArtifactCompactionExecutionOutcomeV1, IndexRuntimeCompactionErrorV1};
 use super::index_maintenance_scan::{
   IndexMaintenanceScanDocumentV1, IndexMaintenanceScanReadErrorClassV1, IndexProducerServiceModeV1,
   derive_index_maintenance_document_operation_id_v1, index_producer_service_mode_v1,
@@ -53,6 +54,14 @@ pub(crate) struct IndexProducerMaintenancePageRequestV1<'request> {
   pub is_cancelled: &'request dyn Fn() -> bool,
 }
 
+pub(crate) struct IndexProducerCompactionRetryRequestV1<'request> {
+  pub lease: &'request IndexProducerLeaseV1,
+  pub source: IndexRuntimeCompactionErrorV1,
+  pub retry_after_ms: u64,
+  pub now_ms: u64,
+  pub is_cancelled: &'request dyn Fn() -> bool,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum IndexProducerWorkerOutcomeV1 {
   Completed(IndexProducerCompletionV1),
@@ -60,6 +69,8 @@ pub enum IndexProducerWorkerOutcomeV1 {
   SourceRetry { source: IndexProducerSourceErrorV1, completion: IndexProducerCompletionV1 },
   MaintenanceDocument(IndexProducerMaintenanceProgressV1),
   MaintenancePage { processed_documents: u32, complete: bool, completion: Option<IndexProducerCompletionV1> },
+  ArtifactCompaction { published_owners: u32, publication_bytes: u64, complete: bool, completion: Option<IndexProducerCompletionV1> },
+  ArtifactCompactionRetry { source: IndexRuntimeCompactionErrorV1, completion: IndexProducerCompletionV1 },
 }
 
 pub(crate) struct IndexProducerMutationCollectionV1 {
@@ -441,6 +452,55 @@ impl IndexProducerMutationWorkerV1 {
         complete: true,
         completion: Some(completion),
       }),
+      Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
+      Err(error) => self.coordinator_failure(producer, request.lease, error),
+    }
+  }
+
+  pub(crate) fn finish_compaction_success(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    mutations: &mut IndexCoordinatorV1,
+    lease: &IndexProducerLeaseV1,
+    outcome: IndexArtifactCompactionExecutionOutcomeV1,
+    now_ms: u64,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    let (published_owners, publication_bytes, complete) = match outcome {
+      IndexArtifactCompactionExecutionOutcomeV1::Complete { published_owners, publication_bytes } => {
+        (published_owners, publication_bytes, true)
+      }
+      IndexArtifactCompactionExecutionOutcomeV1::Progress { published_owners, publication_bytes } => {
+        (published_owners, publication_bytes, false)
+      }
+    };
+    if !complete {
+      return match producer.cancel(lease) {
+        Ok(()) => {
+          Ok(IndexProducerWorkerOutcomeV1::ArtifactCompaction { published_owners, publication_bytes, complete: false, completion: None })
+        }
+        Err(source) => Err(IndexProducerWorkerErrorV1::Coordinator(source)),
+      };
+    }
+    match producer.complete(lease, IndexProducerReportV1 { outcomes: Vec::new() }, mutations, now_ms, false, spill_store) {
+      Ok(completion) => Ok(IndexProducerWorkerOutcomeV1::ArtifactCompaction {
+        published_owners,
+        publication_bytes,
+        complete: true,
+        completion: Some(completion),
+      }),
+      Err(error) => self.coordinator_failure(producer, lease, error),
+    }
+  }
+
+  pub(crate) fn finish_compaction_retry(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    request: IndexProducerCompactionRetryRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    match producer.retry_task(request.lease, request.retry_after_ms, request.now_ms, (request.is_cancelled)(), spill_store) {
+      Ok(completion) => Ok(IndexProducerWorkerOutcomeV1::ArtifactCompactionRetry { source: request.source, completion }),
       Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
       Err(error) => self.coordinator_failure(producer, request.lease, error),
     }

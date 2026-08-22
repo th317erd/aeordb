@@ -23,6 +23,10 @@ use super::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorLifecycleV1, IndexCoordinatorOptionsV1, IndexCoordinatorSnapshotV1, IndexCoordinatorV1,
   IndexFlushReasonV1,
 };
+use super::index_compaction_runtime::{
+  IndexArtifactCompactionExecutionOutcomeV1, IndexArtifactCompactionExecutionRequestV1, IndexRuntimeCompactionErrorClassV1,
+  IndexRuntimeCompactionErrorV1, IndexRuntimeCompactionExecutorV1,
+};
 use super::index_maintenance_scan::{
   IndexMaintenanceScanLimitsV1, IndexMaintenanceScanSourceV1, IndexProducerServiceModeV1, index_producer_service_mode_v1,
 };
@@ -35,8 +39,8 @@ use super::index_producer_collector::{
 };
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorSnapshotV1, IndexProducerCoordinatorV1,
-  IndexProducerDurableTaskStoreV1, IndexProducerJournalWorkPlanV1, IndexProducerLeaseV1, IndexProducerMaintenanceProgressV1,
-  IndexProducerMaintenanceScanPlanV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
+  IndexProducerCompactionPlanV1, IndexProducerDurableTaskStoreV1, IndexProducerJournalWorkPlanV1, IndexProducerLeaseV1,
+  IndexProducerMaintenanceProgressV1, IndexProducerMaintenanceScanPlanV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
 };
 use super::index_producer_executor::IndexProducerExecutorV1;
 use super::index_producer_journal_source::{IndexProducerJournalReadRequestV1, IndexProducerJournalSourceV1};
@@ -45,8 +49,8 @@ use super::index_producer_source::{
   resolve_planned_mutation_record,
 };
 use super::index_producer_worker::{
-  IndexProducerMaintenancePageRequestV1, IndexProducerMaintenanceWorkRequestV1, IndexProducerMutationWorkRequestV1,
-  IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
+  IndexProducerCompactionRetryRequestV1, IndexProducerMaintenancePageRequestV1, IndexProducerMaintenanceWorkRequestV1,
+  IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
 };
 use super::index_source::PluginMapperExecutorV1;
 use super::index_task::MutationJournalV1;
@@ -112,6 +116,7 @@ pub enum IndexRuntimeRecoveryDecisionV1 {
 pub struct IndexRuntimeProducerWorkRequestV1<'request> {
   pub journal_source: &'request dyn IndexProducerJournalSourceV1,
   pub maintenance_source: &'request dyn IndexMaintenanceScanSourceV1,
+  pub compaction_executor: &'request dyn IndexRuntimeCompactionExecutorV1,
   pub maintenance_limits: IndexMaintenanceScanLimitsV1,
   pub revision_source: &'request dyn IndexFileRevisionSourceV1,
   pub semantic_source: &'request dyn IndexSemanticScopeSourceV1,
@@ -124,6 +129,7 @@ pub struct IndexRuntimeProducerWorkRequestV1<'request> {
 enum IndexRuntimeLeasedWorkPlanV1 {
   Journal(IndexProducerJournalWorkPlanV1),
   Maintenance(IndexProducerMaintenanceScanPlanV1),
+  Compaction(IndexProducerCompactionPlanV1),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -652,17 +658,7 @@ impl IndexRuntimeOwnerV1 {
           state.producer.leased_maintenance_scan_plan(&lease, request.maintenance_limits).map(IndexRuntimeLeasedWorkPlanV1::Maintenance)
         }
         IndexProducerServiceModeV1::ArtifactCompaction => {
-          let execution = catch_unwind(AssertUnwindSafe(|| {
-            self.worker.finish_source_failure(
-              &mut state.producer,
-              &lease,
-              IndexProducerSourceErrorV1::UnsupportedServiceMode(lease.kind()),
-              request.now_ms,
-              request.is_cancelled,
-              spill_store,
-            )
-          }));
-          return self.apply_caught_worker_result(&mut state, &lease, execution, request.now_ms);
+          state.producer.leased_compaction_plan(&lease).map(IndexRuntimeLeasedWorkPlanV1::Compaction)
         }
       };
       let plan = match plan {
@@ -688,6 +684,85 @@ impl IndexRuntimeOwnerV1 {
     match plan {
       IndexRuntimeLeasedWorkPlanV1::Journal(plan) => self.execute_journal_plan(&lease, plan, &request, spill_store),
       IndexRuntimeLeasedWorkPlanV1::Maintenance(plan) => self.execute_maintenance_plan(&lease, plan, &request, spill_store),
+      IndexRuntimeLeasedWorkPlanV1::Compaction(plan) => self.execute_compaction_plan(&lease, plan, &request, spill_store),
+    }
+  }
+
+  fn execute_compaction_plan(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    plan: IndexProducerCompactionPlanV1,
+    request: &IndexRuntimeProducerWorkRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+      request.compaction_executor.execute(IndexArtifactCompactionExecutionRequestV1 {
+        operation_id: plan.operation_id(),
+        publication_sequence: plan.publication_sequence(),
+        namespace_root: plan.namespace_root(),
+        semantic_state_root: plan.semantic_state_root(),
+        scope: plan.scope(),
+        now_ms: request.now_ms,
+        is_cancelled: request.is_cancelled,
+      })
+    }));
+    let mut state = self.reacquire_producer_state(lease)?;
+    match execution {
+      Err(_) => self.latch_worker_panic(&mut state, lease),
+      Ok(Ok(outcome)) if valid_compaction_outcome(outcome) => {
+        let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+          self.worker.finish_compaction_success(producer, mutations, lease, outcome, request.now_ms, spill_store)
+        }));
+        self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
+      }
+      Ok(Ok(outcome)) => self.latch_compaction_failure(
+        &mut state,
+        lease,
+        "compaction_invalid_outcome",
+        format!("artifact compaction executor returned an invalid bounded outcome: {outcome:?}"),
+      ),
+      Ok(Err(error)) if !valid_compaction_error(&error) => self.latch_compaction_failure(
+        &mut state,
+        lease,
+        "compaction_invalid_error",
+        format!("artifact compaction executor returned malformed failure evidence: {error}"),
+      ),
+      Ok(Err(error)) => match error.class() {
+        IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection => {
+          let execution = catch_unwind(AssertUnwindSafe(|| {
+            self.worker.finish_compaction_retry(
+              &mut state.producer,
+              IndexProducerCompactionRetryRequestV1 {
+                lease,
+                source: error,
+                retry_after_ms: self.publication_retry_after_ms,
+                now_ms: request.now_ms,
+                is_cancelled: request.is_cancelled,
+              },
+              spill_store,
+            )
+          }));
+          self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
+        }
+        IndexRuntimeCompactionErrorClassV1::CancelledBeforeSelection => match state.producer.cancel(lease) {
+          Ok(()) => Err(IndexRuntimeErrorV1::Canceled),
+          Err(release) => {
+            let context =
+              format!("artifact compaction was cancelled before selection and its exact lease could not be released: {release}");
+            latch_degraded(&mut state, "compaction_cancel_release", context.clone());
+            Err(IndexRuntimeErrorV1::Work(context))
+          }
+        },
+        IndexRuntimeCompactionErrorClassV1::CommitUnknown => {
+          let context = format!("artifact compaction publication outcome is unknown ({}): {}", error.code(), error.context());
+          self.latch_compaction_failure(&mut state, lease, "compaction_commit_unknown", context)
+        }
+        IndexRuntimeCompactionErrorClassV1::Corrupt => {
+          let context = format!("artifact compaction authority is corrupt ({}): {}", error.code(), error.context());
+          self.latch_compaction_failure(&mut state, lease, "compaction_corrupt", context)
+        }
+      },
     }
   }
 
@@ -912,6 +987,21 @@ impl IndexRuntimeOwnerV1 {
       Err(error) => format!("index producer worker panicked and its exact lease could not be released: {error}"),
     };
     latch_degraded(state, "worker_panic", context.clone());
+    Err(IndexRuntimeErrorV1::Work(context))
+  }
+
+  fn latch_compaction_failure(
+    &self,
+    state: &mut IndexRuntimeStateV1,
+    lease: &IndexProducerLeaseV1,
+    code: &'static str,
+    context: String,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let context = match state.producer.cancel(lease) {
+      Ok(()) => context,
+      Err(release) => format!("{context}; exact compaction lease release failed: {release}"),
+    };
+    latch_degraded(state, code, context.clone());
     Err(IndexRuntimeErrorV1::Work(context))
   }
 
@@ -1189,6 +1279,21 @@ fn receipt_matches(receipt: &IndexRuntimePublicationReceiptV1, batch: &FrozenInd
 
 fn valid_publication_error(error: &IndexRuntimePublicationErrorV1) -> bool {
   valid_stable_code(error.code()) && !error.context().is_empty() && error.context().len() <= MAX_DEGRADED_CONTEXT_BYTES
+}
+
+fn valid_compaction_error(error: &IndexRuntimeCompactionErrorV1) -> bool {
+  valid_stable_code(error.code()) && !error.context().is_empty() && error.context().len() <= MAX_DEGRADED_CONTEXT_BYTES
+}
+
+fn valid_compaction_outcome(outcome: IndexArtifactCompactionExecutionOutcomeV1) -> bool {
+  match outcome {
+    IndexArtifactCompactionExecutionOutcomeV1::Complete { published_owners, publication_bytes } => {
+      (published_owners == 0) == (publication_bytes == 0)
+    }
+    IndexArtifactCompactionExecutionOutcomeV1::Progress { published_owners, publication_bytes } => {
+      published_owners != 0 && publication_bytes != 0
+    }
+  }
 }
 
 fn modeled_soft_capacity(options: SoftMutationHubOptionsV1) -> Result<u64, IndexRuntimeErrorV1> {

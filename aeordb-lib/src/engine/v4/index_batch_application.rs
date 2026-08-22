@@ -49,6 +49,8 @@ pub enum IndexBatchArtifactReadErrorV1 {
   Cancelled,
   #[error("immutable index artifact read exceeded resource limits: {0}")]
   ResourcePressure(String),
+  #[error("immutable index artifact source returned corrupt authority: {0}")]
+  Corrupt(String),
   #[error("immutable index artifact read failed: {0}")]
   Operational(String),
 }
@@ -65,6 +67,8 @@ pub enum IndexBatchApplicationErrorV1 {
   MissingArtifact { key: String },
   #[error("immutable index artifact source exceeded resource limits: {0}")]
   SourcePressure(String),
+  #[error("immutable index artifact source returned corrupt authority: {0}")]
+  SourceCorrupt(String),
   #[error("immutable index artifact source failed: {0}")]
   SourceOperational(String),
   #[error("malformed immutable index state: {0}")]
@@ -87,6 +91,7 @@ impl IndexBatchApplicationErrorV1 {
       Self::Cancelled => "index_batch_cancelled",
       Self::MissingArtifact { .. } => "index_batch_artifact_missing",
       Self::SourcePressure(_) => "index_batch_source_pressure",
+      Self::SourceCorrupt(_) => "index_batch_source_corrupt",
       Self::SourceOperational(_) => "index_batch_source_operational",
       Self::Malformed(error) => error.code(),
       Self::InvalidLimits(_) => "index_batch_invalid_limits",
@@ -551,10 +556,8 @@ fn compaction_closure_sources<'a>(
     let mut selected = None;
     for candidate in &candidates {
       let page = decode_ordered_page(candidate, request.hash_algorithm)?;
-      if page.key == replacement.source_key {
-        if selected.replace(*candidate).is_some() {
-          return Err(manifest_closure_error("compaction source candidates contain a duplicate immutable page"));
-        }
+      if page.key == replacement.source_key && selected.replace(*candidate).is_some() {
+        return Err(manifest_closure_error("compaction source candidates contain a duplicate immutable page"));
       }
     }
     sources.push(selected.ok_or_else(|| manifest_closure_error("compaction replacement has no exact supplied source page"))?);
@@ -583,7 +586,7 @@ fn compacted_posting_endpoints(
   }
   let mut retained_window_page_id = None;
   for replacement in &page_plan.replacements {
-    if !primary_keys.iter().any(|key| *key == replacement.source_key) {
+    if !primary_keys.contains(&replacement.source_key) {
       continue;
     }
     for artifact in &replacement.artifacts {
@@ -598,12 +601,16 @@ fn compacted_posting_endpoints(
   let next_page_id =
     request.next_posting_page.map(|page| decode_ordered_page(page, request.hash_algorithm).map(|page| page.page_id)).transpose()?;
   let first_page_id = if page_plan.retired_page_ids.contains(&body.first_page_id) {
-    retained_window_page_id.or(next_page_id).unwrap_or(0)
+    retained_window_page_id
+      .or(next_page_id)
+      .ok_or_else(|| manifest_closure_error("compacted Posting root lost its logical first PageId"))?
   } else {
     body.first_page_id
   };
   let last_page_id = if page_plan.retired_page_ids.contains(&body.last_page_id) {
-    retained_window_page_id.or(previous_page_id).unwrap_or(0)
+    retained_window_page_id
+      .or(previous_page_id)
+      .ok_or_else(|| manifest_closure_error("compacted Posting root lost its logical last PageId"))?
   } else {
     body.last_page_id
   };
@@ -1209,7 +1216,7 @@ fn manifest_coverage<'a>(source: &'a IndexManifestBodyV1<'a>) -> Result<&'a Cove
   }
 }
 
-fn source_role_root<'a>(
+pub(crate) fn source_role_root<'a>(
   source: &'a IndexManifestBodyV1<'a>,
   role: OrderedIndexRoleV1,
 ) -> Result<Option<&'a [u8]>, IndexBatchApplicationErrorV1> {
@@ -2096,6 +2103,17 @@ pub struct OrderedPagePathLookupRequestV1<'a> {
   pub limits: OrderedPagePathLookupLimitsV1,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OrderedPageOrdinalLookupRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub root_key: &'a [u8],
+  pub owner_id: &'a [u8],
+  pub role: OrderedIndexRoleV1,
+  pub page_ordinal: u64,
+  pub load_posting_neighbors: bool,
+  pub limits: OrderedPagePathLookupLimitsV1,
+}
+
 #[derive(Clone, Debug)]
 enum RetainedArtifactBytesV1 {
   Prepared(Arc<EncodedImmutableIndexArtifactV1>),
@@ -2199,6 +2217,67 @@ pub struct LoadedOrderedPagePathV1 {
   page: RetainedArtifactBytesV1,
   next_posting: Option<LoadedPostingSuccessorV1>,
   input_bytes: usize,
+}
+
+#[derive(Debug)]
+pub struct LoadedOrderedPageOrdinalPathV1 {
+  directories: Vec<RetainedArtifactBytesV1>,
+  page: RetainedArtifactBytesV1,
+  previous_posting: Option<LoadedPostingSuccessorV1>,
+  next_posting: Option<LoadedPostingSuccessorV1>,
+  page_ordinal: u64,
+  page_count: u64,
+  input_bytes: usize,
+}
+
+impl LoadedOrderedPageOrdinalPathV1 {
+  pub fn directory_count(&self) -> usize {
+    self.directories.len()
+  }
+
+  pub fn directory(&self, index: usize) -> Option<&[u8]> {
+    self.directories.get(index).map(RetainedArtifactBytesV1::value)
+  }
+
+  pub fn page(&self) -> &[u8] {
+    self.page.value()
+  }
+
+  pub fn previous_posting_page(&self) -> Option<&[u8]> {
+    self.previous_posting.as_ref().map(|previous| previous.page.value())
+  }
+
+  pub fn previous_directory_count(&self) -> usize {
+    self.previous_posting.as_ref().map_or(0, |previous| previous.directories.len())
+  }
+
+  pub fn previous_directory(&self, index: usize) -> Option<&[u8]> {
+    self.previous_posting.as_ref().and_then(|previous| previous.directories.get(index)).map(RetainedArtifactBytesV1::value)
+  }
+
+  pub fn next_posting_page(&self) -> Option<&[u8]> {
+    self.next_posting.as_ref().map(|next| next.page.value())
+  }
+
+  pub fn next_directory_count(&self) -> usize {
+    self.next_posting.as_ref().map_or(0, |next| next.directories.len())
+  }
+
+  pub fn next_directory(&self, index: usize) -> Option<&[u8]> {
+    self.next_posting.as_ref().and_then(|next| next.directories.get(index)).map(RetainedArtifactBytesV1::value)
+  }
+
+  pub const fn page_ordinal(&self) -> u64 {
+    self.page_ordinal
+  }
+
+  pub const fn page_count(&self) -> u64 {
+    self.page_count
+  }
+
+  pub const fn input_bytes(&self) -> usize {
+    self.input_bytes
+  }
 }
 
 impl LoadedOrderedPagePathV1 {
@@ -2338,6 +2417,120 @@ pub fn load_ordered_page_path_v1(
   Ok(LoadedOrderedPagePathV1 { directories: traversed.directories, page: traversed.page, next_posting, input_bytes: budget.retained_bytes })
 }
 
+pub fn load_ordered_page_ordinal_path_v1(
+  request: &OrderedPageOrdinalLookupRequestV1<'_>,
+  overlay: &SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<LoadedOrderedPageOrdinalPathV1, IndexBatchApplicationErrorV1> {
+  validate_ordinal_lookup_request(request, overlay)?;
+  check_cancelled(is_cancelled)?;
+  let mut budget = PathInputBudgetV1::new(request.limits.maximum_input_bytes());
+  let (traversed, page_count) = descend_to_page_ordinal(request, overlay, source, is_cancelled, &mut budget)?;
+  let context = OrderedPagePathLookupRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    root_key: request.root_key,
+    owner_id: request.owner_id,
+    role: request.role,
+    order_key: &[],
+    load_posting_successor: request.load_posting_neighbors,
+    limits: request.limits,
+  };
+  let (previous_posting, next_posting) = if request.role == OrderedIndexRoleV1::Posting && request.load_posting_neighbors {
+    (
+      load_posting_predecessor(&context, &traversed, overlay, source, is_cancelled, &mut budget)?,
+      load_posting_successor(&context, &traversed, overlay, source, is_cancelled, &mut budget)?,
+    )
+  } else {
+    (None, None)
+  };
+  Ok(LoadedOrderedPageOrdinalPathV1 {
+    directories: traversed.directories,
+    page: traversed.page,
+    previous_posting,
+    next_posting,
+    page_ordinal: request.page_ordinal,
+    page_count,
+    input_bytes: budget.retained_bytes,
+  })
+}
+
+fn descend_to_page_ordinal(
+  request: &OrderedPageOrdinalLookupRequestV1<'_>,
+  overlay: &SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+  budget: &mut PathInputBudgetV1,
+) -> Result<(TraversedPagePathV1, u64), IndexBatchApplicationErrorV1> {
+  let mut directories = Vec::new();
+  let mut selected_entries = Vec::new();
+  let mut current_key = clone_bytes(request.root_key, "ordinal root key")?;
+  let mut expected_level = None;
+  let mut expected_child = None;
+  let mut remaining = request.page_ordinal;
+  let mut page_count = None;
+  loop {
+    check_cancelled(is_cancelled)?;
+    if directories.len() >= request.limits.maximum_directory_depth() {
+      return Err(IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+        MalformedInputClass::AllocationAmplification,
+        "index_batch_path_depth",
+        "ordinal page path exceeds its directory-depth limit",
+      )));
+    }
+    let retained = load_artifact(&current_key, overlay, source, is_cancelled, budget)?;
+    let directory = decode_artifact_directory(retained.value(), request.hash_algorithm)?;
+    validate_directory_identity(&directory, &current_key, request.owner_id, request.role, expected_level)?;
+    if let Some(expected) = expected_child.as_ref() {
+      validate_directory_child(&directory, expected)?;
+    } else {
+      page_count = Some(directory.page_count);
+      if remaining >= directory.page_count {
+        return Err(page_ordinal_error(format!(
+          "requested page ordinal {} is outside the selected root's {} pages",
+          request.page_ordinal, directory.page_count
+        )));
+      }
+    }
+    let (selected, child_ordinal) = select_directory_entry_by_page_ordinal(&directory, remaining)?;
+    let entry = &directory.entries[selected];
+    directories
+      .try_reserve(1)
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("ordinal directory path reservation failed: {error}")))?;
+    selected_entries
+      .try_reserve(1)
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("ordinal directory index reservation failed: {error}")))?;
+    directories.push(retained.clone());
+    selected_entries.push(selected);
+    if directory.level == 0 {
+      let page = load_artifact(entry.child_hash, overlay, source, is_cancelled, budget)?;
+      let decoded_page = decode_ordered_page(page.value(), request.hash_algorithm)?;
+      validate_leaf_page(&decoded_page, entry, request.owner_id, request.role)?;
+      let page_count =
+        page_count.ok_or_else(|| manifest_closure_error("ordinal traversal reached a leaf without a root page-count authority"))?;
+      return Ok((TraversedPagePathV1 { directories, selected_entries, page }, page_count));
+    }
+    remaining = child_ordinal;
+    current_key = clone_bytes(entry.child_hash, "ordinal directory child key")?;
+    expected_level = Some(directory.level - 1);
+    expected_child = Some(OwnedDirectoryEntryExpectationV1::from_entry(entry)?);
+  }
+}
+
+fn select_directory_entry_by_page_ordinal(
+  directory: &ArtifactDirectoryNodeV1<'_>,
+  mut page_ordinal: u64,
+) -> Result<(usize, u64), IndexBatchApplicationErrorV1> {
+  for (index, entry) in directory.entries.iter().enumerate() {
+    if page_ordinal < entry.page_count {
+      return Ok((index, page_ordinal));
+    }
+    page_ordinal =
+      page_ordinal.checked_sub(entry.page_count).ok_or_else(|| page_ordinal_error("directory page ordinal subtraction underflowed"))?;
+  }
+  Err(page_ordinal_error("directory aggregate page count does not cover the requested page ordinal"))
+}
+
 fn descend_to_order_key(
   request: &OrderedPagePathLookupRequestV1<'_>,
   overlay: &SparseIndexArtifactOverlayV1,
@@ -2412,6 +2605,91 @@ fn load_posting_successor(
       Ok(Some(successor))
     }
   }
+}
+
+fn load_posting_predecessor(
+  request: &OrderedPagePathLookupRequestV1<'_>,
+  traversed: &TraversedPagePathV1,
+  overlay: &SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+  budget: &mut PathInputBudgetV1,
+) -> Result<Option<LoadedPostingSuccessorV1>, IndexBatchApplicationErrorV1> {
+  let current_page = decode_ordered_page(traversed.page.value(), request.hash_algorithm)?;
+  let predecessor = locate_logical_predecessor(request, traversed, overlay, source, is_cancelled, budget)?;
+  match predecessor {
+    None if current_page.previous_page_id == 0 => Ok(None),
+    None => Err(closure_error("posting page names a predecessor absent from its artifact directory")),
+    Some(_predecessor) if current_page.previous_page_id == 0 => {
+      Err(closure_error("posting artifact directory has a predecessor for an initial posting page"))
+    }
+    Some(predecessor) => {
+      let previous = decode_ordered_page(predecessor.page.value(), request.hash_algorithm)?;
+      if previous.page_id != current_page.previous_page_id {
+        return Err(closure_error("posting artifact-directory predecessor does not match the page previous-link"));
+      }
+      validate_posting_page_link(&previous, &current_page, request.hash_algorithm)?;
+      Ok(Some(predecessor))
+    }
+  }
+}
+
+fn locate_logical_predecessor(
+  request: &OrderedPagePathLookupRequestV1<'_>,
+  traversed: &TraversedPagePathV1,
+  overlay: &SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+  budget: &mut PathInputBudgetV1,
+) -> Result<Option<LoadedPostingSuccessorV1>, IndexBatchApplicationErrorV1> {
+  for directory_index in (0..traversed.directories.len()).rev() {
+    let directory = decode_artifact_directory(traversed.directories[directory_index].value(), request.hash_algorithm)?;
+    let selected = traversed.selected_entries[directory_index];
+    let Some(previous_index) = selected.checked_sub(1) else {
+      continue;
+    };
+    let mut predecessor_directories = traversed.directories[..=directory_index].to_vec();
+    let entry = &directory.entries[previous_index];
+    if directory.level == 0 {
+      let page = load_artifact(entry.child_hash, overlay, source, is_cancelled, budget)?;
+      let decoded = decode_ordered_page(page.value(), request.hash_algorithm)?;
+      validate_leaf_page(&decoded, entry, request.owner_id, request.role)?;
+      return Ok(Some(LoadedPostingSuccessorV1 { directories: predecessor_directories, page }));
+    }
+
+    let mut current_key = clone_bytes(entry.child_hash, "predecessor directory key")?;
+    let mut expected_level = directory.level - 1;
+    let mut expected_child = OwnedDirectoryEntryExpectationV1::from_entry(entry)?;
+    loop {
+      check_cancelled(is_cancelled)?;
+      if predecessor_directories.len() >= request.limits.maximum_directory_depth() {
+        return Err(IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+          MalformedInputClass::AllocationAmplification,
+          "index_batch_path_depth",
+          "posting predecessor path exceeds its directory-depth limit",
+        )));
+      }
+      let retained = load_artifact(&current_key, overlay, source, is_cancelled, budget)?;
+      let child = decode_artifact_directory(retained.value(), request.hash_algorithm)?;
+      validate_directory_identity(&child, &current_key, request.owner_id, request.role, Some(expected_level))?;
+      validate_directory_child(&child, &expected_child)?;
+      predecessor_directories
+        .try_reserve(1)
+        .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("predecessor path reservation failed: {error}")))?;
+      predecessor_directories.push(retained.clone());
+      let last = child.entries.last().ok_or_else(|| closure_error("posting predecessor directory is empty"))?;
+      if child.level == 0 {
+        let page = load_artifact(last.child_hash, overlay, source, is_cancelled, budget)?;
+        let decoded = decode_ordered_page(page.value(), request.hash_algorithm)?;
+        validate_leaf_page(&decoded, last, request.owner_id, request.role)?;
+        return Ok(Some(LoadedPostingSuccessorV1 { directories: predecessor_directories, page }));
+      }
+      current_key = clone_bytes(last.child_hash, "predecessor child key")?;
+      expected_level = child.level - 1;
+      expected_child = OwnedDirectoryEntryExpectationV1::from_entry(last)?;
+    }
+  }
+  Ok(None)
 }
 
 fn locate_logical_successor(
@@ -2514,6 +2792,29 @@ fn validate_lookup_request(
   Ok(())
 }
 
+fn validate_ordinal_lookup_request(
+  request: &OrderedPageOrdinalLookupRequestV1<'_>,
+  overlay: &SparseIndexArtifactOverlayV1,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  OrderedPagePathLookupLimitsV1::new(request.limits.maximum_directory_depth(), request.limits.maximum_input_bytes())?;
+  let hash_width = request.hash_algorithm.hash_length();
+  if overlay.hash_algorithm != request.hash_algorithm
+    || request.root_key.len() != hash_width
+    || request.root_key.iter().all(|byte| *byte == 0)
+    || request.owner_id.len() != hash_width
+    || request.owner_id.iter().all(|byte| *byte == 0)
+    || request.role == OrderedIndexRoleV1::NvtTile
+    || request.load_posting_neighbors && request.role != OrderedIndexRoleV1::Posting
+  {
+    return Err(IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+      MalformedInputClass::IdentityKeyOrGenerationMismatch,
+      "index_batch_lookup_identity",
+      "ordinal lookup hash profile, root, owner, role, or neighbor mode is invalid",
+    )));
+  }
+  Ok(())
+}
+
 fn validate_directory_identity(
   directory: &ArtifactDirectoryNodeV1<'_>,
   expected_key: &[u8],
@@ -2609,6 +2910,7 @@ fn map_source_error(key: &[u8], error: IndexBatchArtifactReadErrorV1) -> IndexBa
     IndexBatchArtifactReadErrorV1::Missing => IndexBatchApplicationErrorV1::MissingArtifact { key: hex::encode(key) },
     IndexBatchArtifactReadErrorV1::Cancelled => IndexBatchApplicationErrorV1::Cancelled,
     IndexBatchArtifactReadErrorV1::ResourcePressure(context) => IndexBatchApplicationErrorV1::SourcePressure(context),
+    IndexBatchArtifactReadErrorV1::Corrupt(context) => IndexBatchApplicationErrorV1::SourceCorrupt(context),
     IndexBatchArtifactReadErrorV1::Operational(context) => IndexBatchApplicationErrorV1::SourceOperational(context),
   }
 }
@@ -2625,6 +2927,14 @@ fn closure_error(context: impl Into<String>) -> IndexBatchApplicationErrorV1 {
   IndexBatchApplicationErrorV1::Malformed(FormatError::new(
     MalformedInputClass::CrossRecordClosureMismatch,
     "index_batch_path_closure",
+    context,
+  ))
+}
+
+fn page_ordinal_error(context: impl Into<String>) -> IndexBatchApplicationErrorV1 {
+  IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+    MalformedInputClass::CrossRecordClosureMismatch,
+    "index_batch_page_ordinal",
     context,
   ))
 }

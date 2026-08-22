@@ -15,6 +15,7 @@ use crate::engine::VirtualClock;
 
 use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_coordinator::IndexFlushReasonV1;
+use super::index_compaction_runtime::IndexRuntimeCompactionExecutorV1;
 use super::index_maintenance_scan::{IndexMaintenanceScanLimitsV1, IndexMaintenanceScanSourceV1};
 use super::index_producer_collector::IndexParserExecutorV1;
 use super::index_producer_admission::IndexProducerJournalAdmissionSummaryV1;
@@ -81,6 +82,7 @@ pub struct NativeIndexRuntimeWorkspaceSnapshotV1 {
 pub struct IndexRuntimeProducerServiceSourcesV1<'request> {
   pub journal_source: &'request dyn IndexProducerJournalSourceV1,
   pub maintenance_source: &'request dyn IndexMaintenanceScanSourceV1,
+  pub compaction_executor: &'request dyn IndexRuntimeCompactionExecutorV1,
   pub maintenance_limits: IndexMaintenanceScanLimitsV1,
   pub revision_source: &'request dyn IndexFileRevisionSourceV1,
   pub semantic_source: &'request dyn IndexSemanticScopeSourceV1,
@@ -291,6 +293,7 @@ where
       IndexRuntimeProducerWorkRequestV1 {
         journal_source: sources.journal_source,
         maintenance_source: sources.maintenance_source,
+        compaction_executor: sources.compaction_executor,
         maintenance_limits: sources.maintenance_limits,
         revision_source: sources.revision_source,
         semantic_source: sources.semantic_source,

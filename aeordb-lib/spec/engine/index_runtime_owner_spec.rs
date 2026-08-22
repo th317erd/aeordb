@@ -10,6 +10,10 @@ use aeordb::engine::namespace_mutation::{NamespaceMutationAcknowledgement, Names
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::coverage_runtime::{SoftMutationAdmissionV1, SoftMutationHubOptionsV1, SoftMutationHubV1, SoftMutationLossReasonV1};
 use aeordb::engine::v4::index_coordinator::{FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexFlushReasonV1};
+use aeordb::engine::v4::index_compaction_runtime::{
+  IndexArtifactCompactionExecutionOutcomeV1, IndexArtifactCompactionExecutionRequestV1, IndexRuntimeCompactionErrorV1,
+  IndexRuntimeCompactionErrorClassV1, IndexRuntimeCompactionExecutorV1,
+};
 use aeordb::engine::v4::index_maintenance_scan::{
   IndexMaintenanceScanDocumentV1, IndexMaintenanceScanLimitsV1, IndexMaintenanceScanPageV1, IndexMaintenanceScanReadErrorV1,
   IndexMaintenanceScanReadV1, IndexMaintenanceScanRequestV1, IndexMaintenanceScanSourceV1,
@@ -305,6 +309,50 @@ impl IndexMaintenanceScanSourceV1 for UnexpectedMaintenanceSource {
   }
 }
 
+struct UnexpectedCompactionExecutor;
+
+impl IndexRuntimeCompactionExecutorV1 for UnexpectedCompactionExecutor {
+  fn execute(
+    &self,
+    _request: IndexArtifactCompactionExecutionRequestV1<'_>,
+  ) -> Result<IndexArtifactCompactionExecutionOutcomeV1, IndexRuntimeCompactionErrorV1> {
+    panic!("unexpected artifact compaction execution")
+  }
+}
+
+#[derive(Clone)]
+enum CompactionBehavior {
+  Outcome(IndexArtifactCompactionExecutionOutcomeV1),
+  Error(IndexRuntimeCompactionErrorV1),
+  Panic,
+}
+
+struct CompactionExecutor {
+  behavior: CompactionBehavior,
+  observed: Arc<Mutex<Vec<([u8; 16], u64, Vec<u8>, Vec<u8>, String, u64)>>>,
+}
+
+impl IndexRuntimeCompactionExecutorV1 for CompactionExecutor {
+  fn execute(
+    &self,
+    request: IndexArtifactCompactionExecutionRequestV1<'_>,
+  ) -> Result<IndexArtifactCompactionExecutionOutcomeV1, IndexRuntimeCompactionErrorV1> {
+    self.observed.lock().unwrap().push((
+      request.operation_id,
+      request.publication_sequence,
+      request.namespace_root.to_vec(),
+      request.semantic_state_root.to_vec(),
+      request.scope.to_string(),
+      request.now_ms,
+    ));
+    match &self.behavior {
+      CompactionBehavior::Outcome(outcome) => Ok(*outcome),
+      CompactionBehavior::Error(error) => Err(error.clone()),
+      CompactionBehavior::Panic => panic!("injected artifact compaction panic"),
+    }
+  }
+}
+
 #[derive(Clone, Copy)]
 enum JournalFailure {
   Cancelled,
@@ -582,6 +630,7 @@ fn execute_journal_source_work(
     IndexRuntimeProducerWorkRequestV1 {
       journal_source,
       maintenance_source: &UnexpectedMaintenanceSource,
+      compaction_executor: &UnexpectedCompactionExecutor,
       maintenance_limits: maintenance_limits(),
       revision_source,
       semantic_source,
@@ -607,6 +656,7 @@ fn execute_maintenance_work(
     IndexRuntimeProducerWorkRequestV1 {
       journal_source: &UnexpectedJournalSource,
       maintenance_source: source,
+      compaction_executor: &UnexpectedCompactionExecutor,
       maintenance_limits: limits,
       revision_source: &RevisionSource::default(),
       semantic_source,
@@ -616,6 +666,29 @@ fn execute_maintenance_work(
       is_cancelled,
     },
     spill_store,
+  )
+}
+
+fn execute_compaction_work(
+  owner: &IndexRuntimeOwnerV1,
+  executor: &dyn IndexRuntimeCompactionExecutorV1,
+  semantic_state_root: &[u8],
+  now_ms: u64,
+) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+  owner.execute_next_producer(
+    IndexRuntimeProducerWorkRequestV1 {
+      journal_source: &UnexpectedJournalSource,
+      maintenance_source: &UnexpectedMaintenanceSource,
+      compaction_executor: executor,
+      maintenance_limits: maintenance_limits(),
+      revision_source: &RevisionSource::default(),
+      semantic_source: &SemanticSource { semantic_state_root: semantic_state_root.to_vec() },
+      parser: &UnexpectedParser,
+      mapper: None,
+      now_ms,
+      is_cancelled: &|| false,
+    },
+    &mut Spill,
   )
 }
 
@@ -740,34 +813,176 @@ fn unified_dispatcher_executes_every_authoritative_scan_task_kind() {
 }
 
 #[test]
-fn artifact_compaction_is_retained_and_degrades_without_invoking_an_unrelated_source() {
+fn artifact_compaction_executes_through_its_lease_without_invoking_an_unrelated_source() {
   let owner = owner();
   owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
   let root = hash(b"compact-root");
   let semantic = hash(b"compact-semantic");
   owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Compact), 1, &mut Spill).unwrap();
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let compaction_executor = CompactionExecutor {
+    behavior: CompactionBehavior::Outcome(IndexArtifactCompactionExecutionOutcomeV1::Complete {
+      published_owners: 2,
+      publication_bytes: 4_096,
+    }),
+    observed: Arc::clone(&observed),
+  };
 
-  let result = owner.execute_next_producer(
-    IndexRuntimeProducerWorkRequestV1 {
-      journal_source: &UnexpectedJournalSource,
-      maintenance_source: &UnexpectedMaintenanceSource,
-      maintenance_limits: maintenance_limits(),
-      revision_source: &RevisionSource::default(),
-      semantic_source: &SemanticSource { semantic_state_root: semantic },
-      parser: &UnexpectedParser,
-      mapper: None,
-      now_ms: 2,
-      is_cancelled: &|| false,
-    },
-    &mut Spill,
-  );
+  let result = owner
+    .execute_next_producer(
+      IndexRuntimeProducerWorkRequestV1 {
+        journal_source: &UnexpectedJournalSource,
+        maintenance_source: &UnexpectedMaintenanceSource,
+        compaction_executor: &compaction_executor,
+        maintenance_limits: maintenance_limits(),
+        revision_source: &RevisionSource::default(),
+        semantic_source: &SemanticSource { semantic_state_root: semantic.clone() },
+        parser: &UnexpectedParser,
+        mapper: None,
+        now_ms: 2,
+        is_cancelled: &|| false,
+      },
+      &mut Spill,
+    )
+    .unwrap();
 
-  assert!(matches!(result, Err(IndexRuntimeErrorV1::Work(message)) if message.contains("Compact")));
+  assert!(matches!(
+    result,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ArtifactCompaction {
+      published_owners: 2,
+      publication_bytes: 4_096,
+      complete: true,
+      completion: Some(_),
+    })
+  ));
+  assert_eq!(observed.lock().unwrap().as_slice(), &[([0x56; 16], 8, root, semantic, "/".to_string(), 2)]);
   let snapshot = owner.snapshot().unwrap();
-  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
+  assert_eq!(snapshot.producer.pending_tasks, 0);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+  assert!(snapshot.degraded.is_none());
+}
+
+#[test]
+fn artifact_compaction_progress_releases_the_lease_but_retains_the_exact_task() {
+  let owner = owner();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let root = hash(b"compact-progress-root");
+  let semantic = hash(b"compact-progress-semantic");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Compact), 1, &mut Spill).unwrap();
+  let executor = CompactionExecutor {
+    behavior: CompactionBehavior::Outcome(IndexArtifactCompactionExecutionOutcomeV1::Progress {
+      published_owners: 1,
+      publication_bytes: 2_048,
+    }),
+    observed: Arc::new(Mutex::new(Vec::new())),
+  };
+
+  let outcome = execute_compaction_work(&owner, &executor, &semantic, 2).unwrap();
+
+  assert!(matches!(
+    outcome,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ArtifactCompaction {
+      published_owners: 1,
+      publication_bytes: 2_048,
+      complete: false,
+      completion: None,
+    })
+  ));
+  let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(snapshot.producer.pending_tasks, 1);
   assert_eq!(snapshot.producer.leased_tasks, 0);
-  assert_eq!(snapshot.degraded.unwrap().code, "worker_terminal");
+}
+
+#[test]
+fn artifact_compaction_retry_and_cancellation_retain_work_without_degrading() {
+  for (ordinal, behavior) in [
+    CompactionBehavior::Error(IndexRuntimeCompactionErrorV1::new(
+      IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection,
+      "source_busy",
+      "injected retryable read failure",
+    )),
+    CompactionBehavior::Error(IndexRuntimeCompactionErrorV1::new(
+      IndexRuntimeCompactionErrorClassV1::CancelledBeforeSelection,
+      "cancelled",
+      "injected cancellation before selection",
+    )),
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    let owner = owner();
+    owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+    let root = hash(format!("compact-recoverable-root-{ordinal}").as_bytes());
+    let semantic = hash(format!("compact-recoverable-semantic-{ordinal}").as_bytes());
+    owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Compact), 1, &mut Spill).unwrap();
+    let executor = CompactionExecutor { behavior, observed: Arc::new(Mutex::new(Vec::new())) };
+
+    let result = execute_compaction_work(&owner, &executor, &semantic, 2);
+
+    if ordinal == 0 {
+      assert!(matches!(result, Ok(IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ArtifactCompactionRetry { .. }))));
+      assert_eq!(owner.snapshot().unwrap().producer.scheduled_retries, 1);
+    } else {
+      assert_eq!(result.unwrap_err(), IndexRuntimeErrorV1::Canceled);
+    }
+    let snapshot = owner.snapshot().unwrap();
+    assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Running);
+    assert_eq!(snapshot.producer.pending_tasks, 1);
+    assert_eq!(snapshot.producer.leased_tasks, 0);
+  }
+}
+
+#[test]
+fn artifact_compaction_terminal_uncertainty_corruption_invalid_results_and_panic_degrade_without_consuming_work() {
+  let cases = [
+    (
+      CompactionBehavior::Error(IndexRuntimeCompactionErrorV1::new(
+        IndexRuntimeCompactionErrorClassV1::CommitUnknown,
+        "pointer_readback",
+        "injected selected-pointer readback failure",
+      )),
+      "compaction_commit_unknown",
+    ),
+    (
+      CompactionBehavior::Error(IndexRuntimeCompactionErrorV1::new(
+        IndexRuntimeCompactionErrorClassV1::Corrupt,
+        "manifest_corrupt",
+        "injected malformed selected manifest",
+      )),
+      "compaction_corrupt",
+    ),
+    (
+      CompactionBehavior::Outcome(IndexArtifactCompactionExecutionOutcomeV1::Progress { published_owners: 0, publication_bytes: 0 }),
+      "compaction_invalid_outcome",
+    ),
+    (
+      CompactionBehavior::Error(IndexRuntimeCompactionErrorV1::new(
+        IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection,
+        "",
+        "missing stable code",
+      )),
+      "compaction_invalid_error",
+    ),
+    (CompactionBehavior::Panic, "worker_panic"),
+  ];
+
+  for (ordinal, (behavior, expected_code)) in cases.into_iter().enumerate() {
+    let owner = owner();
+    owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+    let root = hash(format!("compact-terminal-root-{ordinal}").as_bytes());
+    let semantic = hash(format!("compact-terminal-semantic-{ordinal}").as_bytes());
+    owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Compact), 1, &mut Spill).unwrap();
+    let executor = CompactionExecutor { behavior, observed: Arc::new(Mutex::new(Vec::new())) };
+
+    assert!(matches!(execute_compaction_work(&owner, &executor, &semantic, 2), Err(IndexRuntimeErrorV1::Work(_))));
+    let snapshot = owner.snapshot().unwrap();
+    assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+    assert_eq!(snapshot.producer.pending_tasks, 1);
+    assert_eq!(snapshot.producer.leased_tasks, 0);
+    assert_eq!(snapshot.degraded.unwrap().code, expected_code);
+  }
 }
 
 #[test]
@@ -801,6 +1016,7 @@ fn mixed_canonical_queue_dispatches_each_task_only_to_its_own_source() {
   let request = |now_ms| IndexRuntimeProducerWorkRequestV1 {
     journal_source: &journal_source,
     maintenance_source: &maintenance_source,
+    compaction_executor: &UnexpectedCompactionExecutor,
     maintenance_limits: maintenance_limits(),
     revision_source: &revisions,
     semantic_source: &semantics,
@@ -934,6 +1150,57 @@ fn journal_plan_pressure_retries_before_source_io_and_releases_temporary_memory(
   let completed = execute_journal_source_work(&owner, &source, &revisions, &semantics, 130, &|| false, &mut Spill).unwrap();
   assert!(matches!(completed, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::Completed(_))));
   assert_eq!(*observed.lock().unwrap(), vec![journal.key.to_vec()]);
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), 0);
+}
+
+#[test]
+fn compaction_plan_pressure_retries_before_executor_io_and_releases_temporary_memory() {
+  let coordinator = memory();
+  let owner = IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, coordinator.clone(), options(), 1).unwrap();
+  owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let root = hash(b"pressured-compaction-root");
+  let semantic = hash(b"pressured-compaction-semantic");
+  owner.admit_task(maintenance_task(&root, &semantic, IndexProducerTaskKindV1::Compact), 100, &mut Spill).unwrap();
+  let retained_task_bytes = reserved(&coordinator, MemoryOwner::Task);
+  coordinator
+    .observe_legacy(
+      MemoryOwner::IndexCleanCache,
+      MemoryObservation {
+        resident_bytes: 60 * 1_024 * 1_024,
+        clean_bytes: 60 * 1_024 * 1_024,
+        dirty_bytes: 0,
+        evictable_bytes: 60 * 1_024 * 1_024,
+        pinned_bytes: 0,
+        spill_bytes: 0,
+        items: 1,
+        hits: 0,
+        misses: 0,
+        evictions: 0,
+      },
+    )
+    .unwrap();
+  let observed = Arc::new(Mutex::new(Vec::new()));
+  let executor = CompactionExecutor {
+    behavior: CompactionBehavior::Outcome(IndexArtifactCompactionExecutionOutcomeV1::Complete {
+      published_owners: 1,
+      publication_bytes: 1_024,
+    }),
+    observed: Arc::clone(&observed),
+  };
+
+  let retry = execute_compaction_work(&owner, &executor, &semantic, 101).unwrap();
+  assert!(matches!(retry, IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::SourceRetry { .. })));
+  assert!(observed.lock().unwrap().is_empty());
+  assert_eq!(reserved(&coordinator, MemoryOwner::Task), retained_task_bytes);
+  assert_eq!(owner.snapshot().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
+
+  coordinator.observe_legacy(MemoryOwner::IndexCleanCache, MemoryObservation::default()).unwrap();
+  let completed = execute_compaction_work(&owner, &executor, &semantic, 130).unwrap();
+  assert!(matches!(
+    completed,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ArtifactCompaction { complete: true, .. })
+  ));
+  assert_eq!(observed.lock().unwrap().len(), 1);
   assert_eq!(reserved(&coordinator, MemoryOwner::Task), 0);
 }
 

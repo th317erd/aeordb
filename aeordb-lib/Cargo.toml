@@ -1265,6 +1265,10 @@ path = "spec/engine/kv_page_provider_spec.rs"
 name = "integrity_scanner_spec"
 path = "spec/engine/integrity_scanner_spec.rs"
 
+[[test]]
+name = "v4_index_native_compaction_spec"
+path = "spec/engine/v4_index_native_compaction_spec.rs"
+
 
 [lints]
 workspace = true

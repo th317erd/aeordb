@@ -25,6 +25,7 @@ use super::index_coordinator_recovery::{
   IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
 };
 use super::index_maintenance_scan::IndexMaintenanceScanLimitsV1;
+use super::index_native_compaction::{NativeIndexCompactionExecutorV1, NativeIndexCompactionOptionsV1};
 use super::index_native_journal_source::FirstAuthorityIndexProducerJournalSourceV1;
 use super::index_native_parser::NativeIndexParserExecutorV1;
 use super::index_recovery_store::{
@@ -72,10 +73,13 @@ struct NativeIndexRuntimeProducerServiceOptionsV1 {
   maintenance: IndexMaintenanceScanLimitsV1,
   ordinals: IndexScopeOrdinalStateOptionsV1,
   cadence: IndexRuntimeProducerServiceLimitsV1,
+  compaction: NativeIndexCompactionOptionsV1,
 }
 
 impl NativeIndexRuntimeProducerServiceOptionsV1 {
-  fn engine_default() -> Result<Self, NativeIndexRuntimeInstallationErrorV1> {
+  fn engine_default(
+    semantic_limits: super::index_producer_source::IndexSemanticScopeLimitsV1,
+  ) -> Result<Self, NativeIndexRuntimeInstallationErrorV1> {
     Ok(Self {
       source: NativeIndexSourceLimitsV1::new(16 * 1_024 * 1_024, 16 * 1_024 * 1_024, 64)
         .map_err(|error| invalid("native_index_service_source_options", error.to_string()))?,
@@ -87,6 +91,8 @@ impl NativeIndexRuntimeProducerServiceOptionsV1 {
         .map_err(|error| invalid("native_index_service_ordinal_options", error.to_string()))?,
       cadence: IndexRuntimeProducerServiceLimitsV1::new(256, Duration::from_millis(500))
         .map_err(|error| invalid("native_index_service_cadence_options", error.to_string()))?,
+      compaction: NativeIndexCompactionOptionsV1::engine_default(semantic_limits)
+        .map_err(|error| invalid("native_index_service_compaction_options", error.to_string()))?,
     })
   }
 }
@@ -208,6 +214,7 @@ pub struct NativeIndexRuntimeInstallationRequestV1<'request> {
 pub struct NativeIndexRuntimeV1 {
   owner: Arc<IndexRuntimeOwnerV1>,
   publisher: Arc<V4FirstAuthorityPublisher>,
+  retirement_owner: SharedRetirementJournalOwnerV1,
   registry: Arc<IndexScopeOrdinalStoreRegistryV1>,
   descriptor_catalog: Arc<NativeIndexOperationDescriptorCatalogV1>,
   shadow_identity: IndexRuntimeShadowIdentityV1,
@@ -402,10 +409,21 @@ impl NativeIndexRuntimeV1 {
       &ordinal_authority,
     );
     let parser = NativeIndexParserExecutorV1::new(engine);
+    let compaction_executor = NativeIndexCompactionExecutorV1::new(
+      self.shadow_identity.database_id,
+      self.shadow_identity.hash_algorithm,
+      Arc::clone(&self.publisher),
+      Arc::clone(&self.retirement_owner),
+      Arc::clone(&memory),
+      &semantic_source,
+      self.service_options.compaction,
+    )
+    .map_err(|error| IndexRuntimeCadenceErrorV1::NativeSource(error.to_string()))?;
     self.cadence.service_bounded_producers(
       IndexRuntimeProducerServiceSourcesV1 {
         journal_source: &journal_source,
         maintenance_source: &maintenance_source,
+        compaction_executor: &compaction_executor,
         maintenance_limits: self.service_options.maintenance,
         revision_source: &revision_source,
         semantic_source: &semantic_source,
@@ -642,7 +660,7 @@ pub fn install_native_index_runtime_v1(
     request.cancellation.clone(),
     Arc::clone(&request.clock),
   )?);
-  let service_options = NativeIndexRuntimeProducerServiceOptionsV1::engine_default()?;
+  let service_options = NativeIndexRuntimeProducerServiceOptionsV1::engine_default(request.runtime_options.semantic)?;
   let source_authority_guard = engine.direct_hard_authority_guard()?;
   let semantic_authority_guard = request.publisher.selected_semantic_authority_guard()?;
   let current_semantic_authority = semantic_authority_guard.load()?;
@@ -666,6 +684,7 @@ pub fn install_native_index_runtime_v1(
   let runtime = Arc::new(NativeIndexRuntimeV1 {
     owner,
     publisher: Arc::clone(&request.publisher),
+    retirement_owner: Arc::clone(&request.retirement_owner),
     registry,
     descriptor_catalog,
     shadow_identity: request.shadow_identity.clone(),

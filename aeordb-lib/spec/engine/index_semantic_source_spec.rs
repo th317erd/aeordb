@@ -9,9 +9,9 @@ use aeordb::engine::v4::index_producer_source::{
   IndexSemanticScopeSourceV1, ResolvedIndexDocumentTransitionV1, ResolvedIndexDocumentV1,
 };
 use aeordb::engine::v4::index_semantic_source::{
-  CatalogIndexSemanticScopeSourceV1, IndexScopeOrdinalAuthorityV1, IndexScopeOrdinalClaimErrorClassV1, IndexScopeOrdinalClaimErrorV1,
-  IndexScopeOrdinalClaimObservationV1, IndexScopeOrdinalClaimPlanV1, IndexScopeOrdinalClaimRequestV1, IndexSemanticObjectReadSourceV1,
-  StoredIndexSemanticObjectReadSourceV1, plan_scope_ordinal_claim,
+  CatalogIndexSemanticScopeSourceV1, IndexCompactionSemanticInventoryRequestV1, IndexScopeOrdinalAuthorityV1,
+  IndexScopeOrdinalClaimErrorClassV1, IndexScopeOrdinalClaimErrorV1, IndexScopeOrdinalClaimObservationV1, IndexScopeOrdinalClaimPlanV1,
+  IndexScopeOrdinalClaimRequestV1, IndexSemanticObjectReadSourceV1, StoredIndexSemanticObjectReadSourceV1, plan_scope_ordinal_claim,
 };
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::hash::digest_parts;
@@ -551,6 +551,63 @@ fn content_only_state_is_resolved_without_catalog_or_ordinal_access() {
     .unwrap();
 
   assert_eq!(read.resolution(), &IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: state.object_id });
+}
+
+#[test]
+fn compaction_inventory_reads_complete_owner_relationships_without_claiming_ordinals() {
+  let graph = complete_graph();
+  let memory = memory(16 * 1_024 * 1_024);
+  let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory.clone(), &graph.objects, &UnexpectedOrdinals);
+
+  let inventory = source
+    .resolve_compaction_inventory(IndexCompactionSemanticInventoryRequestV1 {
+      semantic_state_root: &graph.state_root,
+      maintenance_scope: "/docs",
+      limits: limits(),
+      is_cancelled: &|| false,
+    })
+    .unwrap();
+
+  assert_eq!(inventory.semantic_state_root(), graph.state_root);
+  assert_eq!(inventory.scopes().len(), 1);
+  assert_eq!(inventory.scopes()[0].scope_id(), graph.scope_id);
+  assert_eq!(inventory.scopes()[0].value_stores().len(), 1);
+  assert_eq!(inventory.scopes()[0].value_stores()[0].value_store_id(), graph.value_store_id);
+  assert_eq!(inventory.scopes()[0].value_stores()[0].field_index_ids(), &[graph.field_index_id]);
+  assert!(task_reserved_bytes(&memory) > 0);
+  drop(inventory);
+  assert_eq!(task_reserved_bytes(&memory), 0);
+}
+
+#[test]
+fn compaction_inventory_returns_content_only_as_empty_and_rejects_cancelled_or_bounded_inputs() {
+  let state_bytes = fixture("state-content-only");
+  let state = decode_semantic_object(&state_bytes, ALGORITHM).unwrap();
+  let objects = Objects::default().with(state_bytes);
+  let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory(16 * 1_024 * 1_024), &objects, &UnexpectedOrdinals);
+  let request = IndexCompactionSemanticInventoryRequestV1 {
+    semantic_state_root: &state.object_id,
+    maintenance_scope: "/",
+    limits: limits(),
+    is_cancelled: &|| false,
+  };
+  assert!(source.resolve_compaction_inventory(request).unwrap().scopes().is_empty());
+
+  let cancelled = IndexCompactionSemanticInventoryRequestV1 { is_cancelled: &|| true, ..request };
+  let error = source.resolve_compaction_inventory(cancelled).unwrap_err();
+  assert_eq!(error.class(), IndexSemanticScopeReadErrorClassV1::Cancelled);
+
+  let graph = complete_graph();
+  let complete = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory(16 * 1_024 * 1_024), &graph.objects, &UnexpectedOrdinals);
+  let bounded = complete
+    .resolve_compaction_inventory(IndexCompactionSemanticInventoryRequestV1 {
+      semantic_state_root: &graph.state_root,
+      maintenance_scope: "/",
+      limits: IndexSemanticScopeLimitsV1::new(1, 1, 1, graph.definition_bytes - 1).unwrap(),
+      is_cancelled: &|| false,
+    })
+    .unwrap_err();
+  assert_eq!(bounded.code(), "semantic_limit_exceeded");
 }
 
 #[test]

@@ -5,6 +5,10 @@ use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, Memor
 use crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1;
 use crate::engine::v4::index_artifact::EncodedImmutableIndexArtifactV1;
 use crate::engine::v4::index_coordinator::{FrozenIndexBatchV1, IndexCoordinatorOptionsV1};
+use crate::engine::v4::index_compaction_runtime::{
+  IndexArtifactCompactionExecutionOutcomeV1, IndexArtifactCompactionExecutionRequestV1, IndexRuntimeCompactionErrorV1,
+  IndexRuntimeCompactionExecutorV1,
+};
 use crate::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1;
 use crate::engine::v4::index_producer_collector::{
   IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1,
@@ -101,6 +105,15 @@ impl IndexSemanticScopeSourceV1 for UnusedSources {
 impl IndexParserExecutorV1 for UnusedSources {
   fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
     panic!("idle cadence unexpectedly invoked a parser")
+  }
+}
+
+impl IndexRuntimeCompactionExecutorV1 for UnusedSources {
+  fn execute(
+    &self,
+    _request: IndexArtifactCompactionExecutionRequestV1<'_>,
+  ) -> Result<IndexArtifactCompactionExecutionOutcomeV1, IndexRuntimeCompactionErrorV1> {
+    panic!("idle cadence unexpectedly invoked artifact compaction")
   }
 }
 
@@ -257,6 +270,7 @@ fn unused_service_sources(sources: &UnusedSources) -> IndexRuntimeProducerServic
   IndexRuntimeProducerServiceSourcesV1 {
     journal_source: sources,
     maintenance_source: sources,
+    compaction_executor: sources,
     maintenance_limits: IndexMaintenanceScanLimitsV1::new(1, 64 * 1_024, 4 * 1_024).unwrap(),
     revision_source: sources,
     semantic_source: sources,
@@ -399,6 +413,7 @@ fn bounded_service_stops_at_the_attempt_limit_and_retains_remaining_work() {
   let sources = IndexRuntimeProducerServiceSourcesV1 {
     journal_source: &unused,
     maintenance_source: &maintenance,
+    compaction_executor: &unused,
     maintenance_limits: IndexMaintenanceScanLimitsV1::new(1, 64 * 1_024, 4 * 1_024).unwrap(),
     revision_source: &unused,
     semantic_source: &unused,
@@ -447,6 +462,7 @@ fn bounded_service_stops_at_the_elapsed_limit_between_complete_attempts() {
   let sources = IndexRuntimeProducerServiceSourcesV1 {
     journal_source: &unused,
     maintenance_source: &maintenance,
+    compaction_executor: &unused,
     maintenance_limits: IndexMaintenanceScanLimitsV1::new(1, 64 * 1_024, 4 * 1_024).unwrap(),
     revision_source: &unused,
     semantic_source: &unused,

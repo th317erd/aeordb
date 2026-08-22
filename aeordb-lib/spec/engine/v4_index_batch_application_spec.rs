@@ -11,8 +11,8 @@ use aeordb::engine::v4::index_artifact::{EncodedImmutableIndexArtifactV1, IndexM
 use aeordb::engine::v4::index_batch_application::{
   INDEX_BATCH_PATH_MAXIMUM_INPUT_BYTES_V1, FrozenIndexBatchApplicationRequestV1, FrozenIndexOwnerSourceV1, IndexBatchApplicationErrorV1,
   IndexBatchArtifactOverlayLimitsV1, IndexBatchArtifactReadErrorV1, IndexBatchArtifactSourceV1, IndexManifestSuccessorRequestV1,
-  OrderedPagePathLookupLimitsV1, OrderedPagePathLookupRequestV1, SparseIndexArtifactOverlayV1, apply_frozen_index_batch_v1,
-  load_ordered_page_path_v1, synthesize_successor_index_manifest_v1,
+  OrderedPageOrdinalLookupRequestV1, OrderedPagePathLookupLimitsV1, OrderedPagePathLookupRequestV1, SparseIndexArtifactOverlayV1,
+  apply_frozen_index_batch_v1, load_ordered_page_ordinal_path_v1, load_ordered_page_path_v1, synthesize_successor_index_manifest_v1,
 };
 use aeordb::engine::v4::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexGroupMutationRequestV1,
@@ -2638,6 +2638,77 @@ fn sparse_lookup_finds_a_posting_successor_across_internal_directory_branches() 
 }
 
 #[test]
+fn ordinal_lookup_lands_on_one_bounded_page_and_loads_exact_posting_neighbors() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let first = posting_page(hash_algorithm, &owner_id, 10, 1, 0, 2);
+    let second = posting_page(hash_algorithm, &owner_id, 20, 2, 1, 3);
+    let third = posting_page(hash_algorithm, &owner_id, 30, 3, 2, 0);
+    let left = leaf_directory(hash_algorithm, &owner_id, &[&first]);
+    let right = leaf_directory(hash_algorithm, &owner_id, &[&second, &third]);
+    let root = internal_directory(hash_algorithm, &owner_id, &[(&left, 0), (&right, 0)]);
+    let mut source = CountingSource::default();
+    for artifact in [&root, &left, &right, &first, &second, &third] {
+      source.insert(artifact);
+    }
+    let overlay = SparseIndexArtifactOverlayV1::new(hash_algorithm, IndexBatchArtifactOverlayLimitsV1::default()).unwrap();
+
+    let loaded = load_ordered_page_ordinal_path_v1(
+      &OrderedPageOrdinalLookupRequestV1 {
+        hash_algorithm,
+        root_key: &root.key,
+        owner_id: &owner_id,
+        role: OrderedIndexRoleV1::Posting,
+        page_ordinal: 1,
+        load_posting_neighbors: true,
+        limits: OrderedPagePathLookupLimitsV1::default(),
+      },
+      &overlay,
+      &mut source,
+      &|| false,
+    )
+    .unwrap();
+
+    assert_eq!(loaded.page_ordinal(), 1);
+    assert_eq!(loaded.page_count(), 3);
+    assert_eq!(decode_ordered_page(loaded.page(), hash_algorithm).unwrap().page_id, 2);
+    assert_eq!(decode_ordered_page(loaded.previous_posting_page().unwrap(), hash_algorithm).unwrap().page_id, 1);
+    assert_eq!(decode_ordered_page(loaded.next_posting_page().unwrap(), hash_algorithm).unwrap().page_id, 3);
+    assert_eq!(loaded.directory_count(), 2);
+    assert_eq!(loaded.previous_directory_count(), 2);
+    assert_eq!(loaded.next_directory_count(), 2);
+    assert!(loaded.input_bytes() <= INDEX_BATCH_PATH_MAXIMUM_INPUT_BYTES_V1);
+    assert_eq!(source.reads.len(), 6);
+  }
+}
+
+#[test]
+fn ordinal_lookup_rejects_out_of_range_cancellation_and_bounded_input_pressure() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let page = posting_page(hash_algorithm, &owner_id, 10, 1, 0, 0);
+  let root = leaf_directory(hash_algorithm, &owner_id, &[&page]);
+  let mut source = CountingSource::default();
+  source.insert(&root);
+  source.insert(&page);
+  let overlay = SparseIndexArtifactOverlayV1::new(hash_algorithm, IndexBatchArtifactOverlayLimitsV1::default()).unwrap();
+  let request = OrderedPageOrdinalLookupRequestV1 {
+    hash_algorithm,
+    root_key: &root.key,
+    owner_id: &owner_id,
+    role: OrderedIndexRoleV1::Posting,
+    page_ordinal: 1,
+    load_posting_neighbors: true,
+    limits: OrderedPagePathLookupLimitsV1::default(),
+  };
+  assert_eq!(load_ordered_page_ordinal_path_v1(&request, &overlay, &mut source, &|| false).unwrap_err().code(), "index_batch_page_ordinal");
+  let first = OrderedPageOrdinalLookupRequestV1 { page_ordinal: 0, ..request };
+  assert_eq!(load_ordered_page_ordinal_path_v1(&first, &overlay, &mut source, &|| true).unwrap_err().code(), "index_batch_cancelled");
+  let tiny = OrderedPageOrdinalLookupRequestV1 { limits: OrderedPagePathLookupLimitsV1::new(16, 1).unwrap(), ..first };
+  assert_eq!(load_ordered_page_ordinal_path_v1(&tiny, &overlay, &mut source, &|| false).unwrap_err().code(), "index_batch_source_pressure");
+}
+
+#[test]
 fn sparse_lookup_and_overlay_fail_closed_on_missing_pressure_corruption_cancellation_and_caps() {
   let hash_algorithm = HashAlgorithm::Blake3_256;
   let owner_id = owner(hash_algorithm);
@@ -2711,6 +2782,7 @@ fn sparse_lookup_rejects_source_classes_link_corruption_depth_and_byte_limits() 
 
   for (failure, code) in [
     (IndexBatchArtifactReadErrorV1::Cancelled, "index_batch_cancelled"),
+    (IndexBatchArtifactReadErrorV1::Corrupt("checksum".to_string()), "index_batch_source_corrupt"),
     (IndexBatchArtifactReadErrorV1::Operational("disk".to_string()), "index_batch_source_operational"),
   ] {
     let mut source = CountingSource { failure: Some(failure), ..Default::default() };

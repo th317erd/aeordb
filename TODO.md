@@ -1126,16 +1126,16 @@
             - [x] Rewrite exact idempotent page mutations at the successor generation so every published role closes through one uniform COW validator.
             - [x] Integrate bootstrap, no-op rewrite, and composite chaining into the storage-neutral full sparse applicator.
           - [x] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
-        - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
+        - [x] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [x] P6-3c1: add one first-authority A/B active-pointer reader/writer with exact closure selection, retry, replacement retirement, and reopen proof.
           - [x] P6-3c2: execute publication-ready frozen-batch closures through dependency/manifest/pointer ordering and reconcile every crash prefix.
-          - [ ] P6-3c3: route bounded artifact compaction through the same producer lease, immutable applicator, and first-authority publisher.
+          - [x] P6-3c3: route bounded artifact compaction through the same producer lease, immutable applicator, and first-authority publisher.
             - [x] P6-3c3a: add a storage-neutral bounded compaction applicator that binds one selected source generation, rewrites the exact page/directory/manifest closure, preserves coverage, and carries every dependent ValueStore selector.
-            - [ ] P6-3c3b: replace the retained unsupported `Compact` branch with one canonical leased execution/completion path whose cancellation, retry, corruption, and commit-unknown outcomes never consume unresolved work.
-            - [ ] P6-3c3c: bind native compaction reads and publication to the existing first-authority publisher, shared retirement owner, memory budget, and cadence lock without adding a selector, timer, or writer.
-            - [ ] P6-3c3d: prove stale-source refusal, exact retry, partial-pointer reconciliation, restart, pressure, malformed closure, both hash widths, bounded candidate scans, and unchanged v3 query authority.
+            - [x] P6-3c3b: replace the retained unsupported `Compact` branch with one canonical leased execution/completion path whose cancellation, retry, corruption, and commit-unknown outcomes never consume unresolved work.
+            - [x] P6-3c3c: bind native compaction reads and publication to the existing first-authority publisher, shared retirement owner, memory budget, and cadence lock without adding a selector, timer, or writer.
+            - [x] P6-3c3d: prove stale-source refusal, exact retry, partial-pointer reconciliation, restart, pressure, malformed closure, both hash widths, bounded candidate scans, and unchanged v3 query authority.
           - [x] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
-          - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
+          - [x] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
         - [ ] P6-3d: rotate cumulative runtime workspaces only after immutable coverage proves represented batches/tasks, carrying forward exactly pending work.
           - [ ] Bound restart replay independently of historical completed task count and preserve selected-chain idempotence across rotation crashes.
         - [ ] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.

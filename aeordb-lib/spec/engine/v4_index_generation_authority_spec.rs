@@ -136,6 +136,31 @@ fn dependency_bearing_scope_generation_publishes_pages_directories_manifest_and_
 }
 
 #[test]
+fn bounded_index_artifact_load_rejects_the_locator_before_an_oversized_value_allocation() {
+  let plan = scope_insert_application_plan(ALGORITHM);
+  let artifact = plan.prepared_artifacts().next().unwrap();
+  let expected_key = artifact.key.clone();
+  let expected_value = artifact.value.clone();
+  let (_directory, _path, publisher) = create_publisher(ALGORITHM);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut retirement = retirement_owner(ALGORITHM, &cancellation, &memory);
+  publish_frozen_index_application_v1(
+    &publisher,
+    &mut retirement,
+    publication_request(&plan, IndexGenerationPublicationModeV1::Soft),
+    &|| false,
+  )
+  .unwrap();
+
+  assert_eq!(publisher.load_index_artifact_bounded(&expected_key, expected_value.len()).unwrap().unwrap(), expected_value);
+  assert_eq!(
+    publisher.load_index_artifact_bounded(&expected_key, expected_value.len() - 1).unwrap_err().code(),
+    "immutable_index_value_exceeds_cap"
+  );
+}
+
+#[test]
 fn sha512_application_publishes_and_reopens_the_exact_complete_closure() {
   let plan = complete_application_plan(HashAlgorithm::Sha512);
   let (_directory, path, publisher) = create_publisher(HashAlgorithm::Sha512);
