@@ -1075,6 +1075,8 @@
                 - [x] Assemble exact revision, root-pinned scan, selected semantic catalog, durable scope-ordinal, native parser, and optional mapper sources only at the installed native runtime boundary under explicit engine defaults.
                 - [x] Drive bounded one-task/page attempts from the existing five-second server index timer and preserve the embedded-host cadence entry point, soft-journal durability ordering, legacy/v4 independence, cancellation, and shutdown authority.
                 - [ ] Prove focused journal, cadence, installed-runtime, restart, retry, corruption, pressure, reservation-release, and timer-uniqueness behavior before affected, architecture, suppression, contract, broad, resource, real-filesystem, and native-platform gates.
+                  - [x] Pass the exact-commit Linux and macOS arm64 matrices and preserve their resource/log evidence.
+                  - [ ] Pass the exact-commit Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
             - [ ] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
