@@ -1054,6 +1054,10 @@ name = "index_coverage_registry_spec"
 path = "spec/engine/index_coverage_registry_spec.rs"
 
 [[test]]
+name = "index_partial_acceleration_spec"
+path = "spec/engine/index_partial_acceleration_spec.rs"
+
+[[test]]
 name = "coverage_journal_spec"
 path = "spec/engine/coverage_journal_spec.rs"
 

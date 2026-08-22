@@ -721,8 +721,6 @@ fn selected_scope_field_and_compatible_nvt_metadata_load_at_both_hash_widths_wit
       required_dependency_fingerprint: selected.dependency_fingerprint(),
       semantic_availability: IndexSemanticQueryAvailabilityV1::Complete,
       selected_generation: Some(generation),
-      exact_complement: None,
-      maximum_complement_documents: 1,
     })
     .unwrap();
     let IndexCoveragePlanV1::Complete { generation } = plan else {

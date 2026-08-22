@@ -69,6 +69,7 @@ pub mod index_native_source;
 pub mod index_nvt;
 pub mod index_operation_control;
 pub mod index_page;
+pub mod index_partial_acceleration;
 pub mod index_producer_admission;
 pub mod index_producer_collector;
 pub mod index_producer_coordinator;

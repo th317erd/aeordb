@@ -27,18 +27,6 @@ pub struct IndexCoverageGenerationV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExactIndexComplementProofV1<'a> {
-  pub generation_manifest_hash: &'a [u8],
-  pub source_namespace_root: &'a [u8],
-  pub target_namespace_root: &'a [u8],
-  pub coverage_epoch_id: &'a [u8],
-  pub covered_through_publication_sequence: u64,
-  pub target_publication_sequence: u64,
-  pub changed_document_set_hash: &'a [u8],
-  pub changed_document_count: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexSemanticQueryAvailabilityV1 {
   Complete,
   ContentOnly(SemanticUnavailableReasonV1),
@@ -55,8 +43,6 @@ pub struct IndexCoveragePlanningRequestV1<'a> {
   pub required_dependency_fingerprint: &'a [u8],
   pub semantic_availability: IndexSemanticQueryAvailabilityV1,
   pub selected_generation: Option<IndexCoverageGenerationV1<'a>>,
-  pub exact_complement: Option<ExactIndexComplementProofV1<'a>>,
-  pub maximum_complement_documents: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,9 +51,7 @@ pub enum IndexAuthoritativeFallbackReasonV1 {
   IncompatibleOwner,
   IncompatibleDefinition,
   IncompatibleDependencies,
-  ExactComplementUnavailable,
   DegradedPartialGeneration,
-  ComplementWorkLimitExceeded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,23 +62,39 @@ pub enum IndexHistoricalViewUnavailableReasonV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexCoveragePlanV1<'a> {
-  Complete { generation: IndexCoverageGenerationV1<'a> },
-  PartialExact { generation: IndexCoverageGenerationV1<'a>, complement: ExactIndexComplementProofV1<'a> },
-  AuthoritativeOnly { reason: IndexAuthoritativeFallbackReasonV1 },
-  HistoricalViewUnavailable { reason: IndexHistoricalViewUnavailableReasonV1 },
+  Complete {
+    generation: IndexCoverageGenerationV1<'a>,
+  },
+  /// A compatible older generation that may only be used through the exact
+  /// partial-acceleration executor. This variant is not result authority.
+  PartialCandidate {
+    generation: IndexCoverageGenerationV1<'a>,
+    target_namespace_root: &'a [u8],
+    target_publication_sequence: u64,
+  },
+  AuthoritativeOnly {
+    reason: IndexAuthoritativeFallbackReasonV1,
+  },
+  HistoricalViewUnavailable {
+    reason: IndexHistoricalViewUnavailableReasonV1,
+  },
 }
 
 impl IndexCoveragePlanV1<'_> {
   pub const fn requires_authoritative_complement_scan(&self) -> bool {
-    matches!(self, Self::PartialExact { .. })
+    matches!(self, Self::PartialCandidate { .. })
   }
 
   pub const fn requires_candidate_recheck(&self) -> bool {
-    matches!(self, Self::PartialExact { .. })
+    matches!(self, Self::PartialCandidate { .. })
   }
 
   pub const fn requires_deduplication(&self) -> bool {
-    matches!(self, Self::PartialExact { .. })
+    matches!(self, Self::PartialCandidate { .. })
+  }
+
+  pub const fn generation_alone_is_complete(&self) -> bool {
+    matches!(self, Self::Complete { .. })
   }
 }
 
@@ -102,7 +102,6 @@ impl IndexCoveragePlanV1<'_> {
 pub enum IndexCoveragePlanningErrorClassV1 {
   InvalidRequest,
   CorruptSelectedGeneration,
-  InvalidComplementProof,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,13 +150,6 @@ pub fn plan_selected_index_coverage_v1<'a>(
   }
 
   let Some(generation) = request.selected_generation else {
-    if request.exact_complement.is_some() {
-      return Err(error(
-        IndexCoveragePlanningErrorClassV1::InvalidComplementProof,
-        "index_coverage_orphan_complement",
-        "an exact complement cannot exist without a selected generation",
-      ));
-    }
     return Ok(IndexCoveragePlanV1::AuthoritativeOnly { reason: IndexAuthoritativeFallbackReasonV1::NoSelectedGeneration });
   };
   validate_generation(generation, hash_width)?;
@@ -173,13 +165,6 @@ pub fn plan_selected_index_coverage_v1<'a>(
   }
 
   if generation.source_namespace_root == request.requested_namespace_root {
-    if request.exact_complement.is_some() {
-      return Err(error(
-        IndexCoveragePlanningErrorClassV1::InvalidComplementProof,
-        "index_coverage_redundant_complement",
-        "an exact-root generation must not carry a complement proof",
-      ));
-    }
     if generation.coverage_publication_sequence > request.requested_publication_sequence {
       return Err(error(
         IndexCoveragePlanningErrorClassV1::CorruptSelectedGeneration,
@@ -193,15 +178,19 @@ pub fn plan_selected_index_coverage_v1<'a>(
   if generation.health == IndexCoverageGenerationHealthV1::Degraded {
     return Ok(IndexCoveragePlanV1::AuthoritativeOnly { reason: IndexAuthoritativeFallbackReasonV1::DegradedPartialGeneration });
   }
-  let Some(complement) = request.exact_complement else {
-    return Ok(IndexCoveragePlanV1::AuthoritativeOnly { reason: IndexAuthoritativeFallbackReasonV1::ExactComplementUnavailable });
-  };
-  validate_complement(request, generation, complement, hash_width)?;
-  if complement.changed_document_count > request.maximum_complement_documents {
-    return Ok(IndexCoveragePlanV1::AuthoritativeOnly { reason: IndexAuthoritativeFallbackReasonV1::ComplementWorkLimitExceeded });
+  if generation.coverage_publication_sequence >= request.requested_publication_sequence {
+    return Err(error(
+      IndexCoveragePlanningErrorClassV1::CorruptSelectedGeneration,
+      "index_coverage_nonhistorical_partial_generation",
+      "an older-root generation must precede the requested root publication",
+    ));
   }
 
-  Ok(IndexCoveragePlanV1::PartialExact { generation, complement })
+  Ok(IndexCoveragePlanV1::PartialCandidate {
+    generation,
+    target_namespace_root: request.requested_namespace_root,
+    target_publication_sequence: request.requested_publication_sequence,
+  })
 }
 
 fn validate_request(request: &IndexCoveragePlanningRequestV1<'_>, hash_width: usize) -> Result<(), IndexCoveragePlanningErrorV1> {
@@ -213,11 +202,11 @@ fn validate_request(request: &IndexCoveragePlanningRequestV1<'_>, hash_width: us
   ] {
     validate_hash(value, hash_width, IndexCoveragePlanningErrorClassV1::InvalidRequest, "index_coverage_invalid_request", label)?;
   }
-  if request.requested_publication_sequence == 0 || request.maximum_complement_documents == 0 {
+  if request.requested_publication_sequence == 0 {
     return Err(error(
       IndexCoveragePlanningErrorClassV1::InvalidRequest,
       "index_coverage_invalid_request",
-      "requested publication sequence and complement-document bound must be nonzero",
+      "requested publication sequence must be nonzero",
     ));
   }
   Ok(())
@@ -248,36 +237,6 @@ fn validate_generation(generation: IndexCoverageGenerationV1<'_>, hash_width: us
       IndexCoveragePlanningErrorClassV1::CorruptSelectedGeneration,
       "index_coverage_corrupt_generation",
       "selected generation, coverage sequence, or coverage epoch is invalid",
-    ));
-  }
-  Ok(())
-}
-
-fn validate_complement(
-  request: &IndexCoveragePlanningRequestV1<'_>,
-  generation: IndexCoverageGenerationV1<'_>,
-  complement: ExactIndexComplementProofV1<'_>,
-  hash_width: usize,
-) -> Result<(), IndexCoveragePlanningErrorV1> {
-  validate_hash(
-    complement.changed_document_set_hash,
-    hash_width,
-    IndexCoveragePlanningErrorClassV1::InvalidComplementProof,
-    "index_coverage_invalid_complement",
-    "changed-document set hash",
-  )?;
-  if complement.generation_manifest_hash != generation.manifest_hash
-    || complement.source_namespace_root != generation.source_namespace_root
-    || complement.target_namespace_root != request.requested_namespace_root
-    || complement.coverage_epoch_id != generation.coverage_epoch_id
-    || complement.covered_through_publication_sequence != generation.coverage_publication_sequence
-    || complement.target_publication_sequence != request.requested_publication_sequence
-    || complement.covered_through_publication_sequence >= complement.target_publication_sequence
-  {
-    return Err(error(
-      IndexCoveragePlanningErrorClassV1::InvalidComplementProof,
-      "index_coverage_invalid_complement",
-      "complement proof does not bind the exact selected generation and requested root interval",
     ));
   }
   Ok(())

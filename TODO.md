@@ -1145,7 +1145,7 @@
         - [ ] P6-3e: implement the selected-generation coverage registry and exact complete/partial/degraded/no-index planning contract.
           - [x] P6-3e1: freeze a storage-neutral coverage-planning contract for exact selected roots, compatible partial roots, degraded generations, authoritative fallback, and content-only historical views.
           - [x] P6-3e2: load closure-valid selected ScopeCatalog/FieldIndex/FieldNvt generations into one bounded immutable registry without retaining pages or creating a second selector.
-          - [ ] P6-3e3: require an exact changed-document complement plus candidate recheck/dedupe proof before partial acceleration, and keep Posting-directory fallback authoritative when NVT is absent or unusable.
+          - [x] P6-3e3: require an exact changed-document complement plus candidate recheck/dedupe proof before partial acceleration, and keep Posting-directory fallback authoritative when NVT is absent or unusable.
           - [ ] P6-3e4: prove restart, selected-pointer change, corruption, cancellation, pressure, both hash widths, in-flight generation retention, and registry/planner architecture uniqueness.
           - [ ] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.
           - [ ] Keep NVT hints disposable and preserve exact Posting-directory fallback for absent, stale, corrupt, or pressure-refused hints.
