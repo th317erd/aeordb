@@ -143,6 +143,18 @@ pub struct OrderedPageBatchMutationRequestV1<'a> {
   pub layout: IndexPageLayoutV1,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IndexCopyOnWriteBootstrapRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub owner_id: &'a [u8],
+  pub role: OrderedIndexRoleV1,
+  pub generation: u64,
+  pub initial_next_page_id: u64,
+  pub mutations: &'a [OrderedPageMutationKindV1<'a>],
+  pub page_layout: IndexPageLayoutV1,
+  pub directory_layout: IndexDirectoryLayoutV1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TombstoneDropProofV1<'a> {
   pub owner_id: &'a [u8],
@@ -260,7 +272,7 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub owner_id: Vec<u8>,
   pub role: OrderedIndexRoleV1,
   pub generation: u64,
-  pub source_root_key: Vec<u8>,
+  pub source_root_key: Option<Vec<u8>>,
   pub root_key: Option<Vec<u8>>,
   pub live_count: u64,
   pub tombstone_count: u64,
@@ -279,6 +291,12 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub directory_artifact_bytes: usize,
   pub retained_encoded_bytes: usize,
   _validated: IndexCopyOnWriteClosureSealV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCopyOnWriteBootstrapPlanV1 {
+  pub artifacts: Vec<EncodedImmutableIndexArtifactV1>,
+  pub summary: IndexCopyOnWriteClosureSummaryV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,6 +439,289 @@ pub fn mutate_ordered_page_batch_v1(request: &OrderedPageBatchMutationRequestV1<
     allocated_page_ids: page_id_allocator.allocated_page_ids,
     retired_page_ids: Vec::new(),
     next_page_id: page_id_allocator.next_page_id,
+  })
+}
+
+pub fn mutate_ordered_page_batch_for_publication_v1(
+  request: &OrderedPageBatchMutationRequestV1<'_>,
+) -> FormatResult<OrderedPageMutationPlanV1> {
+  let plan = mutate_ordered_page_batch_v1(request)?;
+  if !plan.is_unchanged() {
+    return Ok(plan);
+  }
+
+  let source = decode_ordered_page(request.source_page, request.hash_algorithm)?;
+  let record_count = source.records.len();
+  let metadata_bytes = record_count
+    .checked_mul(size_of::<super::index_page::OrderedRecordV1<'_>>() + size_of::<&[u8]>())
+    .ok_or_else(|| arithmetic_error("index_cow_publication_noop_workspace", "publication no-op metadata bytes overflowed"))?;
+  let output_bytes = request
+    .source_page
+    .len()
+    .checked_add(metadata_bytes)
+    .and_then(|bytes| bytes.checked_add(request.source_page.len()))
+    .and_then(|bytes| bytes.checked_add(request.hash_algorithm.hash_length()))
+    .and_then(|bytes| bytes.checked_add(size_of::<EncodedImmutableIndexArtifactV1>()))
+    .ok_or_else(|| arithmetic_error("index_cow_publication_noop_workspace", "publication no-op workspace bytes overflowed"))?;
+  if output_bytes > request.layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_publication_noop_workspace",
+      format!("publication no-op rewrite exceeds the {}-byte operation cap", request.layout.maximum_workspace_bytes),
+    ));
+  }
+  let mut records = Vec::new();
+  records
+    .try_reserve_exact(record_count)
+    .map_err(|error| amplification_error("index_cow_publication_noop_workspace", format!("record-slice reservation failed: {error}")))?;
+  for record in source.records.iter() {
+    records.push(record?.encoded);
+  }
+  let artifact = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: request.hash_algorithm,
+    role: source.role,
+    owner_id: source.owner_id,
+    generation: request.generation,
+    page_id: source.page_id,
+    previous_page_id: source.previous_page_id,
+    next_page_id: source.next_page_id,
+    records: &records,
+  })?;
+  let mut artifacts = Vec::new();
+  artifacts
+    .try_reserve_exact(1)
+    .map_err(|error| amplification_error("index_cow_publication_noop_workspace", format!("artifact reservation failed: {error}")))?;
+  artifacts.push(artifact);
+  let replacement = ordered_page_replacement(&source, artifacts)?;
+  let mut replacements = Vec::new();
+  replacements
+    .try_reserve_exact(1)
+    .map_err(|error| amplification_error("index_cow_publication_noop_workspace", format!("replacement reservation failed: {error}")))?;
+  replacements.push(replacement);
+  Ok(OrderedPageMutationPlanV1 {
+    replacements,
+    allocated_page_ids: Vec::new(),
+    retired_page_ids: Vec::new(),
+    next_page_id: request.next_page_id,
+  })
+}
+
+pub fn bootstrap_ordered_index_v1(request: &IndexCopyOnWriteBootstrapRequestV1<'_>) -> FormatResult<IndexCopyOnWriteBootstrapPlanV1> {
+  validate_layout(request.page_layout)?;
+  validate_directory_layout(request.directory_layout)?;
+  let hash_width = request.hash_algorithm.hash_length();
+  if request.generation == 0
+    || request.owner_id.len() != hash_width
+    || request.owner_id.iter().all(|byte| *byte == 0)
+    || request.role == OrderedIndexRoleV1::NvtTile
+  {
+    return Err(identity_error("index_cow_bootstrap_identity", "bootstrap generation, owner, or ordered role is invalid"));
+  }
+  if request.mutations.is_empty() {
+    return Err(closure_error("index_cow_bootstrap_empty", "absent-root bootstrap has no mutations"));
+  }
+  if request.mutations.iter().any(|mutation| !matches!(mutation, OrderedPageMutationKindV1::UpsertLive(_))) {
+    return Err(closure_error("index_cow_bootstrap_mutation_kind", "absent-root bootstrap accepts only live upserts"));
+  }
+
+  let mut binding_workspace_bytes = 0usize;
+  let (bound, mutation_commitment) = collect_binding_mutations(
+    request.hash_algorithm,
+    request.role,
+    request.mutations,
+    request.page_layout.maximum_workspace_bytes,
+    &mut binding_workspace_bytes,
+  )?;
+  if bound.iter().any(|record| record.tombstone) {
+    return Err(closure_error("index_cow_bootstrap_tombstone", "absent-root bootstrap contains a tombstone"));
+  }
+  let owned_metadata_bytes = bound
+    .len()
+    .checked_mul(size_of::<OwnedOrderedRecordV1>())
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_workspace", "bootstrap record metadata bytes overflowed"))?;
+  let retained_record_bytes = bound.iter().try_fold(0usize, |bytes, record| {
+    bytes
+      .checked_add(record.encoded.len())
+      .and_then(|bytes| bytes.checked_add(record.order_key.len()))
+      .ok_or_else(|| arithmetic_error("index_cow_bootstrap_workspace", "bootstrap retained record bytes overflowed"))
+  })?;
+  let conversion_peak_bytes = binding_workspace_bytes
+    .checked_add(owned_metadata_bytes)
+    .and_then(|bytes| bytes.checked_add(retained_record_bytes))
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_workspace", "bootstrap conversion workspace overflowed"))?;
+  if conversion_peak_bytes > request.page_layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_bootstrap_workspace",
+      format!("bootstrap conversion exceeds the {}-byte page-operation cap", request.page_layout.maximum_workspace_bytes),
+    ));
+  }
+  let mut records = Vec::new();
+  records
+    .try_reserve_exact(bound.len())
+    .map_err(|error| amplification_error("index_cow_bootstrap_workspace", format!("bootstrap record reservation failed: {error}")))?;
+  for record in bound {
+    records.push(OwnedOrderedRecordV1 {
+      encoded: copy_batch_bytes(record.encoded, "bootstrap record")?,
+      order_key: record.order_key,
+      tombstone: false,
+    });
+  }
+  let record_workspace_bytes = checked_record_workspace(&records)?;
+  let groups = partition_record_ranges(
+    request.hash_algorithm,
+    request.role,
+    &records,
+    request.page_layout.split_above_bytes,
+    request.page_layout.target_bytes,
+  )?;
+  let page_count = u64::try_from(groups.len()).map_err(|source| {
+    amplification_error("index_cow_bootstrap_page_count", format!("bootstrap page count is not representable: {source}"))
+  })?;
+  let next_page_id = if request.role.uses_page_id() {
+    if request.initial_next_page_id == 0 {
+      return Err(identity_error("index_cow_bootstrap_page_id", "PageID-bearing bootstrap has a zero high-water mark"));
+    }
+    request
+      .initial_next_page_id
+      .checked_add(page_count)
+      .ok_or_else(|| arithmetic_error("index_cow_bootstrap_page_id", "bootstrap PageID range overflowed"))?
+  } else {
+    if request.initial_next_page_id != 0 {
+      return Err(identity_error("index_cow_bootstrap_page_id", "non-PageID bootstrap carries a high-water mark"));
+    }
+    0
+  };
+  preflight_bootstrap_page_workspace(request, &records, &groups, record_workspace_bytes)?;
+
+  let mut artifacts = Vec::new();
+  artifacts
+    .try_reserve_exact(groups.len())
+    .map_err(|error| amplification_error("index_cow_bootstrap_output", format!("bootstrap artifact reservation failed: {error}")))?;
+  let mut page_summaries = Vec::new();
+  page_summaries
+    .try_reserve_exact(groups.len())
+    .map_err(|error| amplification_error("index_cow_bootstrap_output", format!("bootstrap page-summary reservation failed: {error}")))?;
+  let mut page_artifact_bytes = 0usize;
+  for (index, range) in groups.iter().enumerate() {
+    let page_id = if request.role.uses_page_id() {
+      request
+        .initial_next_page_id
+        .checked_add(u64::try_from(index).map_err(|source| {
+          amplification_error("index_cow_bootstrap_page_count", format!("bootstrap page index is not representable: {source}"))
+        })?)
+        .ok_or_else(|| arithmetic_error("index_cow_bootstrap_page_id", "bootstrap PageID allocation overflowed"))?
+    } else {
+      0
+    };
+    let previous_page_id = if request.role == OrderedIndexRoleV1::Posting && index > 0 { page_id - 1 } else { 0 };
+    let next_link = if request.role == OrderedIndexRoleV1::Posting && index + 1 < groups.len() { page_id + 1 } else { 0 };
+    let record_slices = record_slices(&records[range.clone()]);
+    let artifact = encode_ordered_page(&OrderedPageWriteV1 {
+      hash_algorithm: request.hash_algorithm,
+      role: request.role,
+      owner_id: request.owner_id,
+      generation: request.generation,
+      page_id,
+      previous_page_id,
+      next_page_id: next_link,
+      records: &record_slices,
+    })?;
+    page_artifact_bytes = page_artifact_bytes
+      .checked_add(artifact.value.len())
+      .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap page artifact bytes overflowed"))?;
+    let page = decode_ordered_page(&artifact.value, request.hash_algorithm)?;
+    page_summaries.push(OwnedDirectoryEntryV1::from_page(&page)?);
+    artifacts.push(artifact);
+  }
+
+  let page_artifact_count = artifacts.len();
+  let mut retained_directory_artifact_bytes = 0usize;
+  let mut root_entries = encode_directory_entry_groups(
+    request.hash_algorithm,
+    request.generation,
+    request.directory_layout,
+    0,
+    request.owner_id,
+    request.role,
+    &page_summaries,
+    request.directory_layout.target_bytes,
+    &mut artifacts,
+    &mut retained_directory_artifact_bytes,
+  )?;
+  let mut root_level = 0u16;
+  while root_entries.len() > 1 {
+    root_level = root_level
+      .checked_add(1)
+      .filter(|level| *level <= 15)
+      .ok_or_else(|| amplification_error("index_cow_bootstrap_directory_depth", "bootstrap directory depth exceeds level 15"))?;
+    let target_groups =
+      partition_directory_entries(request.hash_algorithm, root_level, &root_entries, request.directory_layout.target_bytes)?;
+    let target_bytes = if target_groups.len() < root_entries.len() {
+      request.directory_layout.target_bytes
+    } else {
+      let hard_groups =
+        partition_directory_entries(request.hash_algorithm, root_level, &root_entries, request.directory_layout.hard_artifact_bytes)?;
+      if hard_groups.len() >= root_entries.len() {
+        return Err(amplification_error(
+          "index_cow_bootstrap_directory_nonreducing",
+          "bootstrap directory descriptors cannot form a smaller hard-cap-bounded parent level",
+        ));
+      }
+      request.directory_layout.hard_artifact_bytes
+    };
+    root_entries = encode_directory_entry_groups(
+      request.hash_algorithm,
+      request.generation,
+      request.directory_layout,
+      root_level,
+      request.owner_id,
+      request.role,
+      &root_entries,
+      target_bytes,
+      &mut artifacts,
+      &mut retained_directory_artifact_bytes,
+    )?;
+  }
+  let root =
+    root_entries.pop().ok_or_else(|| closure_error("index_cow_bootstrap_root", "bootstrap directory construction produced no root"))?;
+  let directory_artifact_count = artifacts
+    .len()
+    .checked_sub(page_artifact_count)
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap directory artifact count underflowed"))?;
+  let directory_artifact_bytes = artifacts[page_artifact_count..].iter().try_fold(0usize, |bytes, artifact| {
+    bytes
+      .checked_add(artifact.value.len())
+      .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap directory artifact bytes overflowed"))
+  })?;
+  let retained_encoded_bytes = page_artifact_bytes
+    .checked_add(directory_artifact_bytes)
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap retained encoded bytes overflowed"))?;
+
+  Ok(IndexCopyOnWriteBootstrapPlanV1 {
+    artifacts,
+    summary: IndexCopyOnWriteClosureSummaryV1 {
+      owner_id: copy_fallible_bytes(request.owner_id, "bootstrap owner")?,
+      role: request.role,
+      generation: request.generation,
+      source_root_key: None,
+      root_key: Some(root.child_hash),
+      live_count: root.live_count,
+      tombstone_count: root.tombstone_count,
+      page_count: root.page_count,
+      logical_bytes: root.logical_bytes,
+      minimum_page_id: root.minimum_page_id,
+      maximum_page_id: root.maximum_page_id,
+      initial_next_page_id: request.initial_next_page_id,
+      next_page_id,
+      mutation_commitment: Some(mutation_commitment),
+      page_artifact_count,
+      directory_artifact_count,
+      source_page_bytes: 0,
+      directory_path_bytes: 0,
+      page_artifact_bytes,
+      directory_artifact_bytes,
+      retained_encoded_bytes,
+      _validated: IndexCopyOnWriteClosureSealV1,
+    },
   })
 }
 
@@ -773,7 +1074,9 @@ pub fn rewrite_artifact_directory_paths_v1(
       let source = decode_artifact_directory(source_bytes, request.hash_algorithm)?;
       let rewritten_entries = rewrite_directory_entries(&source, child_replacements, request.layout.maximum_workspace_bytes)?;
       let summaries = encode_directory_entry_groups(
-        request,
+        request.hash_algorithm,
+        request.generation,
+        request.layout,
         source.level,
         &graph.owner_id,
         graph.role,
@@ -815,7 +1118,9 @@ pub fn rewrite_artifact_directory_paths_v1(
       request.layout.hard_artifact_bytes
     };
     root_entries = encode_directory_entry_groups(
-      request,
+      request.hash_algorithm,
+      request.generation,
+      request.layout,
       root_level,
       &graph.owner_id,
       graph.role,
@@ -899,7 +1204,7 @@ pub fn validate_index_copy_on_write_closure_v1(
     owner_id: page_closure.owner_id,
     role: page_closure.role,
     generation: request.generation,
-    source_root_key: copy_fallible_bytes(&request.directory_plan.source_root_key, "closure source root key")?,
+    source_root_key: Some(copy_fallible_bytes(&request.directory_plan.source_root_key, "closure source root key")?),
     root_key,
     live_count: request.directory_plan.live_count,
     tombstone_count: request.directory_plan.tombstone_count,
@@ -962,7 +1267,7 @@ pub fn validate_index_copy_on_write_composite_closure_v1(
     let closure = step.closure;
     if closure.owner_id.as_slice() != owner_id
       || closure.role != role
-      || closure.source_root_key.as_slice() != expected_source_root
+      || closure.source_root_key.as_deref() != Some(expected_source_root)
       || closure.generation <= previous_generation
       || closure.generation > request.generation
       || closure.initial_next_page_id != next_page_id
@@ -1024,7 +1329,7 @@ pub fn validate_index_copy_on_write_composite_closure_v1(
     owner_id: copy_fallible_bytes(owner_id, "composite closure owner")?,
     role,
     generation: request.generation,
-    source_root_key: copy_fallible_bytes(request.source_root_key, "composite source root")?,
+    source_root_key: Some(copy_fallible_bytes(request.source_root_key, "composite source root")?),
     root_key: final_closure.root_key.as_deref().map(|root_key| copy_fallible_bytes(root_key, "composite successor root")).transpose()?,
     live_count: final_closure.live_count,
     tombstone_count: final_closure.tombstone_count,
@@ -2255,7 +2560,9 @@ fn checked_add_owned_entry_workspace(total: usize, entry: &OwnedDirectoryEntryV1
 
 #[allow(clippy::too_many_arguments)]
 fn encode_directory_entry_groups(
-  request: &ArtifactDirectoryMutationRequestV1<'_>,
+  hash_algorithm: HashAlgorithm,
+  generation: u64,
+  layout: IndexDirectoryLayoutV1,
   level: u16,
   owner_id: &[u8],
   role: OrderedIndexRoleV1,
@@ -2267,7 +2574,7 @@ fn encode_directory_entry_groups(
   if entries.is_empty() {
     return Ok(Vec::new());
   }
-  let groups = partition_directory_entries(request.hash_algorithm, level, entries, target_bytes)?;
+  let groups = partition_directory_entries(hash_algorithm, level, entries, target_bytes)?;
   let mut summaries = Vec::new();
   if let Err(error) = summaries.try_reserve_exact(groups.len()) {
     return Err(amplification_error("index_cow_directory_summary_workspace", format!("directory-summary reservation failed: {error}")));
@@ -2279,17 +2586,11 @@ fn encode_directory_entry_groups(
       return Err(amplification_error("index_cow_directory_write_workspace", format!("directory write-entry reservation failed: {error}")));
     }
     write_entries.extend(group_entries.iter().map(OwnedDirectoryEntryV1::as_write));
-    let artifact = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
-      hash_algorithm: request.hash_algorithm,
-      role,
-      owner_id,
-      generation: request.generation,
-      level,
-      entries: &write_entries,
-    })?;
-    let directory = decode_artifact_directory(&artifact.value, request.hash_algorithm)?;
+    let artifact =
+      encode_artifact_directory(&ArtifactDirectoryWriteV1 { hash_algorithm, role, owner_id, generation, level, entries: &write_entries })?;
+    let directory = decode_artifact_directory(&artifact.value, hash_algorithm)?;
     let summary = OwnedDirectoryEntryV1::from_directory(&directory)?;
-    append_directory_artifact(artifact, artifacts, retained_artifact_bytes, request.layout.maximum_workspace_bytes)?;
+    append_directory_artifact(artifact, artifacts, retained_artifact_bytes, layout.maximum_workspace_bytes)?;
     summaries.push(summary);
   }
   Ok(summaries)
@@ -2951,13 +3252,53 @@ fn preflight_output_workspace(
   Ok(())
 }
 
+fn preflight_bootstrap_page_workspace(
+  request: &IndexCopyOnWriteBootstrapRequestV1<'_>,
+  records: &[OwnedOrderedRecordV1],
+  groups: &[Range<usize>],
+  record_workspace_bytes: usize,
+) -> FormatResult<()> {
+  let output_bytes = groups.iter().try_fold(0usize, |bytes, range| {
+    bytes
+      .checked_add(checked_page_range_length(request.hash_algorithm, request.role, &records[range.clone()])?)
+      .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap page output bytes overflowed"))
+  })?;
+  let planning_bytes = groups
+    .len()
+    .checked_mul(size_of::<Range<usize>>() + size_of::<EncodedImmutableIndexArtifactV1>() + size_of::<OwnedDirectoryEntryV1>())
+    .and_then(|bytes| records.len().checked_mul(size_of::<&[u8]>()).and_then(|record_bytes| bytes.checked_add(record_bytes)))
+    .and_then(|bytes| groups.len().checked_mul(request.hash_algorithm.hash_length()).and_then(|key_bytes| bytes.checked_add(key_bytes)))
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap planning bytes overflowed"))?;
+  let peak_bytes = record_workspace_bytes
+    .checked_add(output_bytes)
+    .and_then(|bytes| bytes.checked_add(planning_bytes))
+    .ok_or_else(|| arithmetic_error("index_cow_bootstrap_output", "bootstrap peak workspace overflowed"))?;
+  if peak_bytes > request.page_layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_bootstrap_output",
+      format!("bootstrap page construction exceeds the {}-byte operation cap", request.page_layout.maximum_workspace_bytes),
+    ));
+  }
+  Ok(())
+}
+
 fn partition_records(
   request: &OrderedPageBatchMutationRequestV1<'_>,
   source: &OrderedPageV1<'_>,
   records: &[OwnedOrderedRecordV1],
 ) -> FormatResult<Vec<std::ops::Range<usize>>> {
-  let unsplit_length = checked_page_range_representable_length(request.hash_algorithm, source.role, records)?;
-  if unsplit_length <= request.layout.split_above_bytes || records.len() == 1 {
+  partition_record_ranges(request.hash_algorithm, source.role, records, request.layout.split_above_bytes, request.layout.target_bytes)
+}
+
+fn partition_record_ranges(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  records: &[OwnedOrderedRecordV1],
+  split_above_bytes: usize,
+  target_bytes: usize,
+) -> FormatResult<Vec<std::ops::Range<usize>>> {
+  let unsplit_length = checked_page_range_representable_length(hash_algorithm, role, records)?;
+  if unsplit_length <= split_above_bytes || records.len() == 1 {
     return Ok(std::iter::once(0..records.len()).collect());
   }
 
@@ -2967,8 +3308,8 @@ fn partition_records(
     let mut end = start + 1;
     while end < records.len() {
       let candidate_end = end + 1;
-      let candidate_length = checked_page_range_representable_length(request.hash_algorithm, source.role, &records[start..candidate_end])?;
-      if candidate_length > request.layout.target_bytes {
+      let candidate_length = checked_page_range_representable_length(hash_algorithm, role, &records[start..candidate_end])?;
+      if candidate_length > target_bytes {
         break;
       }
       end = candidate_end;

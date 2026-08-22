@@ -1122,6 +1122,9 @@
           - [x] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
           - [x] Chain more-than-four-path role rewrites through one bounded composite COW transcript with exact root, generation, PageID, mutation-partition, and combined workspace closure.
           - [ ] Close absent-root bootstrap, idempotent no-op mutations, and mutation sets spanning more than four page paths in the full sparse applicator.
+            - [x] Build absent-role roots from canonical frozen upserts with exact page, directory, aggregate, PageID, and mutation-commitment closure.
+            - [x] Rewrite exact idempotent page mutations at the successor generation so every published role closes through one uniform COW validator.
+            - [ ] Integrate bootstrap, no-op rewrite, and composite chaining into the storage-neutral full sparse applicator.
           - [ ] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.

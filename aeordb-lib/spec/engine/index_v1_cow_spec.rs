@@ -1,10 +1,11 @@
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_copy_on_write::{
-  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, IndexCopyOnWriteCompositeClosureRequestV1,
-  IndexCopyOnWriteCompositeStepV1, OrderedPageCompactionWindowRequestV1, OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1,
-  OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1, default_index_directory_layout_v1,
-  default_index_page_layout_v1, mutate_ordered_page_batch_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteBootstrapRequestV1, IndexCopyOnWriteClosureRequestV1,
+  IndexCopyOnWriteCompositeClosureRequestV1, IndexCopyOnWriteCompositeStepV1, OrderedPageCompactionWindowRequestV1,
+  OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, TombstoneDropProofV1,
+  bootstrap_ordered_index_v1, compact_ordered_page_window_v1, default_index_directory_layout_v1, default_index_page_layout_v1,
+  mutate_ordered_page_batch_for_publication_v1, mutate_ordered_page_batch_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
   validate_index_copy_on_write_closure_v1, validate_index_copy_on_write_composite_closure_v1,
 };
 use aeordb::engine::v4::index_page::{
@@ -272,6 +273,193 @@ fn cow_upsert_of_identical_bytes_is_an_idempotent_noop() {
 
   assert!(plan.is_unchanged());
   assert_eq!(plan.next_page_id, 40);
+}
+
+#[test]
+fn cow_publication_mode_rewrites_an_exact_noop_at_the_successor_generation() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let record = posting_record(1, 1, 16, false);
+    let source_page = posting_page(hash_algorithm, &owner_id, 7, 10, 0, 0, std::slice::from_ref(&record));
+    let source_root =
+      leaf_directory(hash_algorithm, &owner_id, 7, &[&source_page], PhysicalHintV1 { wal_offset: 1, total_length: 2, write_sequence: 3 });
+    let original_page = source_page.clone();
+    let original_root = source_root.clone();
+    let mutations = [OrderedPageMutationKindV1::UpsertLive(&record)];
+    let request = OrderedPageBatchMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source_page,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 40,
+      mutations: &mutations,
+      layout: default_index_page_layout_v1(),
+    };
+
+    assert!(mutate_ordered_page_batch_v1(&request).unwrap().is_unchanged());
+    let publication = mutate_ordered_page_batch_for_publication_v1(&request).unwrap();
+    assert!(!publication.is_unchanged());
+    assert_eq!(publication.replacements.len(), 1);
+    assert!(publication.allocated_page_ids.is_empty());
+    assert!(publication.retired_page_ids.is_empty());
+    assert_eq!(publication.next_page_id, 40);
+    let rewritten = decode_ordered_page(&publication.replacements[0].artifacts[0].value, hash_algorithm).unwrap();
+    assert_eq!(rewritten.generation, 8);
+    assert_eq!(rewritten.page_id, 10);
+    assert_eq!(decoded_coordinates(&publication.replacements[0].artifacts[0].value, hash_algorithm), vec![(1, false)]);
+    let source_page_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key.to_vec();
+    let source_root_key = decode_artifact_directory(&source_root, hash_algorithm).unwrap().key.to_vec();
+    let source_directories = [source_root.as_slice()];
+    let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_page_key, directories: &source_directories }];
+    let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &publication,
+      paths: &paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let source_pages = [source_page.as_slice()];
+    let closure = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 40,
+      applied_mutations: Some(&mutations),
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: &publication,
+      directory_plan: &directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    assert_eq!(closure.source_root_key.as_deref(), Some(source_root_key.as_slice()));
+    assert_eq!(closure.live_count, 1);
+    assert_eq!(closure.page_count, 1);
+    assert_ne!(closure.root_key.as_deref(), Some(source_root_key.as_slice()));
+    assert_eq!(source_page, original_page);
+    assert_eq!(source_root, original_root);
+
+    let inserted = posting_record(2, 2, 16, false);
+    let changed_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted)];
+    let changed_request = OrderedPageBatchMutationRequestV1 { mutations: &changed_mutations, ..request };
+    assert_eq!(
+      mutate_ordered_page_batch_for_publication_v1(&changed_request).unwrap(),
+      mutate_ordered_page_batch_v1(&changed_request).unwrap()
+    );
+  }
+}
+
+#[test]
+fn cow_bootstrap_builds_an_absent_role_root_in_frozen_byte_order() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let record_256 = posting_record(256, 256, 40_000, false);
+    let record_1 = posting_record(1, 1, 40_000, false);
+    let record_257 = posting_record(257, 257, 40_000, false);
+    let mutations = [
+      OrderedPageMutationKindV1::UpsertLive(&record_256),
+      OrderedPageMutationKindV1::UpsertLive(&record_1),
+      OrderedPageMutationKindV1::UpsertLive(&record_257),
+    ];
+
+    let request = IndexCopyOnWriteBootstrapRequestV1 {
+      hash_algorithm,
+      owner_id: &owner_id,
+      role: OrderedIndexRoleV1::Posting,
+      generation: 8,
+      initial_next_page_id: 40,
+      mutations: &mutations,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+    let bootstrap = bootstrap_ordered_index_v1(&request).unwrap();
+
+    assert!(bootstrap.summary.source_root_key.is_none());
+    assert_eq!(bootstrap.summary.generation, 8);
+    assert_eq!(bootstrap.summary.live_count, 3);
+    assert_eq!(bootstrap.summary.tombstone_count, 0);
+    assert_eq!(bootstrap.summary.page_count, 3);
+    assert_eq!(bootstrap.summary.minimum_page_id, 40);
+    assert_eq!(bootstrap.summary.maximum_page_id, 42);
+    assert_eq!(bootstrap.summary.initial_next_page_id, 40);
+    assert_eq!(bootstrap.summary.next_page_id, 43);
+    assert_eq!(bootstrap.summary.page_artifact_count, 3);
+    assert_eq!(bootstrap.summary.directory_artifact_count, 4);
+    assert_eq!(bootstrap.summary.mutation_commitment.as_ref().map(Vec::len), Some(hash_algorithm.hash_length()));
+    assert_eq!(bootstrap.artifacts.len(), 7);
+    assert_eq!(
+      bootstrap.artifacts[..3].iter().flat_map(|artifact| decoded_coordinates(&artifact.value, hash_algorithm)).collect::<Vec<_>>(),
+      vec![(1, false), (256, false), (257, false)]
+    );
+    let root = decode_artifact_directory(&bootstrap.artifacts.last().unwrap().value, hash_algorithm).unwrap();
+    assert_eq!(bootstrap.summary.root_key.as_deref(), Some(root.key.as_slice()));
+    assert_eq!(root.page_count, 3);
+    assert_eq!(root.entries.len(), 3);
+    assert_eq!(root.level, 1);
+
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { mutations: &[], ..request }).unwrap_err().code(),
+      "index_cow_bootstrap_empty"
+    );
+    let tombstone = posting_record(9, 9, 16, true);
+    let tombstone_mutations = [OrderedPageMutationKindV1::TombstoneExisting(&tombstone)];
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { mutations: &tombstone_mutations, ..request }).unwrap_err().code(),
+      "index_cow_bootstrap_mutation_kind"
+    );
+    let remove_mutations = [OrderedPageMutationKindV1::RemoveExisting(&record_1)];
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { mutations: &remove_mutations, ..request }).unwrap_err().code(),
+      "index_cow_bootstrap_mutation_kind"
+    );
+    let duplicate = [OrderedPageMutationKindV1::UpsertLive(&record_1), OrderedPageMutationKindV1::UpsertLive(&record_1)];
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { mutations: &duplicate, ..request }).unwrap_err().code(),
+      "index_cow_mutation_binding_frozen_order"
+    );
+    let reversed = [
+      OrderedPageMutationKindV1::UpsertLive(&record_1),
+      OrderedPageMutationKindV1::UpsertLive(&record_256),
+      OrderedPageMutationKindV1::UpsertLive(&record_257),
+    ];
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { mutations: &reversed, ..request }).unwrap_err().code(),
+      "index_cow_mutation_binding_frozen_order"
+    );
+    for invalid in [
+      IndexCopyOnWriteBootstrapRequestV1 { generation: 0, ..request },
+      IndexCopyOnWriteBootstrapRequestV1 { owner_id: &owner_id[..owner_id.len() - 1], ..request },
+      IndexCopyOnWriteBootstrapRequestV1 { role: OrderedIndexRoleV1::NvtTile, ..request },
+    ] {
+      assert_eq!(bootstrap_ordered_index_v1(&invalid).unwrap_err().code(), "index_cow_bootstrap_identity");
+    }
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { initial_next_page_id: 0, ..request }).unwrap_err().code(),
+      "index_cow_bootstrap_page_id"
+    );
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { initial_next_page_id: u64::MAX, ..request }).unwrap_err().code(),
+      "index_cow_bootstrap_page_id"
+    );
+
+    let scope = scope_document_record(hash_algorithm, 1, "/first");
+    let scope_mutations = [OrderedPageMutationKindV1::UpsertLive(&scope)];
+    let scope_request = IndexCopyOnWriteBootstrapRequestV1 {
+      role: OrderedIndexRoleV1::ScopeOrdinal,
+      mutations: &scope_mutations,
+      initial_next_page_id: 0,
+      ..request
+    };
+    let scope_bootstrap = bootstrap_ordered_index_v1(&scope_request).unwrap();
+    assert_eq!(scope_bootstrap.summary.minimum_page_id, 0);
+    assert_eq!(scope_bootstrap.summary.maximum_page_id, 0);
+    assert_eq!(scope_bootstrap.summary.next_page_id, 0);
+    assert_eq!(
+      bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 { initial_next_page_id: 1, ..scope_request }).unwrap_err().code(),
+      "index_cow_bootstrap_page_id"
+    );
+  }
 }
 
 #[test]
@@ -1742,7 +1930,7 @@ fn cow_whole_plan_validator_closes_source_pages_directory_and_root_summary() {
     assert_eq!(summary.owner_id, owner_id);
     assert_eq!(summary.role, OrderedIndexRoleV1::Posting);
     assert_eq!(summary.generation, 8);
-    assert_eq!(summary.source_root_key, decode_artifact_directory(&source_root, hash_algorithm).unwrap().key);
+    assert_eq!(summary.source_root_key, Some(decode_artifact_directory(&source_root, hash_algorithm).unwrap().key));
     assert_eq!(summary.root_key, directory_plan.root_key);
     assert_eq!(summary.live_count, 3);
     assert_eq!(summary.tombstone_count, 0);
@@ -1944,7 +2132,7 @@ fn cow_composite_closure_chains_bounded_roots_and_exact_mutation_partitions() {
       maximum_workspace_bytes: 64 * 1_024 * 1_024,
     };
     let summary = validate_index_copy_on_write_composite_closure_v1(&request).unwrap();
-    assert_eq!(summary.source_root_key, source_root_key);
+    assert_eq!(summary.source_root_key, Some(source_root_key.clone()));
     assert_eq!(summary.root_key, second_summary.root_key);
     assert_eq!(summary.generation, 9);
     assert_eq!(summary.live_count, 4);
@@ -2022,7 +2210,7 @@ fn cow_composite_closure_chains_bounded_roots_and_exact_mutation_partitions() {
     );
 
     let mut wrong_root = second_summary.clone();
-    wrong_root.source_root_key[0] ^= 0x80;
+    wrong_root.source_root_key.as_mut().unwrap()[0] ^= 0x80;
     let wrong_root_steps = [
       IndexCopyOnWriteCompositeStepV1 { closure: &first_summary, applied_mutations: &first_mutations },
       IndexCopyOnWriteCompositeStepV1 { closure: &wrong_root, applied_mutations: &second_mutations },
@@ -2301,7 +2489,7 @@ fn cow_whole_plan_validator_closes_scope_pages_without_page_id_state() {
 
     assert_eq!(summary.owner_id, owner_id);
     assert_eq!(summary.role, OrderedIndexRoleV1::ScopeOrdinal);
-    assert_eq!(summary.source_root_key, decode_artifact_directory(&source_root, hash_algorithm).unwrap().key);
+    assert_eq!(summary.source_root_key, Some(decode_artifact_directory(&source_root, hash_algorithm).unwrap().key));
     assert_eq!(summary.live_count, 3);
     assert_eq!(summary.tombstone_count, 0);
     assert_eq!(summary.page_count, 1);

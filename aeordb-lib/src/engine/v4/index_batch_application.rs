@@ -355,14 +355,14 @@ fn source_next_page_id(source: &IndexManifestBodyV1<'_>) -> u64 {
   }
 }
 
-fn source_role_root_matches(source: &IndexManifestBodyV1<'_>, role: OrderedIndexRoleV1, expected: &[u8]) -> bool {
+fn source_role_root_matches(source: &IndexManifestBodyV1<'_>, role: OrderedIndexRoleV1, expected: Option<&[u8]>) -> bool {
   match (source, role) {
-    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeOrdinal) => body.ordinal_directory_root == Some(expected),
-    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeReverse) => body.reverse_directory_root == Some(expected),
-    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::Value) => body.value_directory_root == Some(expected),
-    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::ValueDocumentState) => body.document_state_directory_root == Some(expected),
-    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::Posting) => body.posting_directory_root == Some(expected),
-    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::IndexDocumentState) => body.document_state_directory_root == Some(expected),
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeOrdinal) => body.ordinal_directory_root == expected,
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeReverse) => body.reverse_directory_root == expected,
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::Value) => body.value_directory_root == expected,
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::ValueDocumentState) => body.document_state_directory_root == expected,
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::Posting) => body.posting_directory_root == expected,
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::IndexDocumentState) => body.document_state_directory_root == expected,
     _ => false,
   }
 }
@@ -701,7 +701,7 @@ fn validate_manifest_role_summaries(
       || summary.role == OrderedIndexRoleV1::NvtTile
       || summary.generation != request.generation
       || summary.role.id() <= previous_role
-      || !source_role_root_matches(source, summary.role, &summary.source_root_key)
+      || !source_role_root_matches(source, summary.role, summary.source_root_key.as_deref())
     {
       return Err(manifest_closure_error("COW role summary owner, role, generation, order, or source root is invalid"));
     }

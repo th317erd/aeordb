@@ -19,9 +19,10 @@ use aeordb::engine::v4::index_coordinator::{
   IndexMutationOperationV1, IndexMutationRequestV1,
 };
 use aeordb::engine::v4::index_copy_on_write::{
-  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, IndexCopyOnWriteClosureSummaryV1,
-  OrderedPageMutationKindV1, OrderedPageMutationRequestV1, default_index_directory_layout_v1, default_index_page_layout_v1,
-  mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1, validate_index_copy_on_write_closure_v1,
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteBootstrapRequestV1, IndexCopyOnWriteClosureRequestV1,
+  IndexCopyOnWriteClosureSummaryV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, bootstrap_ordered_index_v1,
+  default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
+  validate_index_copy_on_write_closure_v1,
 };
 use aeordb::engine::v4::index_manifest::{
   CoverageVersionV1, FieldIndexManifestBodyV1, IndexManifestBodyV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1,
@@ -417,6 +418,143 @@ fn manifest_successor_preserves_count_neutral_transition_only_state_and_rejects_
         mutations: unclosed.records(),
         transitions: unclosed.transitions(),
         role_summaries: &[],
+      },
+      &|| false,
+    )
+    .unwrap_err();
+    assert!(
+      matches!(error, IndexBatchApplicationErrorV1::Malformed(error) if error.class() == aeordb::engine::v4::reader::MalformedInputClass::CrossRecordClosureMismatch)
+    );
+  }
+}
+
+#[test]
+fn manifest_successor_accepts_absent_root_bootstrap_and_rejects_it_for_a_present_root() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = fixture_manifest(hash_algorithm, "value-store");
+    let fixture = decode_index_manifest(&fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(fixture_body) = &fixture.details else {
+      panic!("fixture is a value-store manifest");
+    };
+    let source_generation = fixture.generation;
+    let successor_generation = source_generation.checked_add(1).unwrap();
+    let source_next_page_id = fixture_body.next_page_id;
+    let absent_source = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: source_generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        value_directory_root: None,
+        next_page_id: source_next_page_id,
+        value_page_count: 0,
+        value_document_count: 0,
+        live_value_count: 0,
+        value_tombstone_count: 0,
+        live_canonical_value_bytes: 0,
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let source = decode_index_manifest(&absent_source.value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(source_body) = &source.details else {
+      panic!("source is a value-store manifest");
+    };
+
+    let canonical_value =
+      encode_canonical_value(&CanonicalConfigValueV1::String("first".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+    let record_revision_hash = vec![0xe1; hash_algorithm.hash_length()];
+    let inserted = encode_canonical_value_record(
+      &CanonicalValueRecordV1 {
+        tombstone: false,
+        document_ordinal: 7,
+        source_value_ordinal: 0,
+        record_revision_hash: &record_revision_hash,
+        canonical_value: Some(&canonical_value),
+      },
+      hash_algorithm,
+    )
+    .unwrap();
+    let mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted)];
+    let bootstrap = bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 {
+      hash_algorithm,
+      owner_id: source.owner_id,
+      role: OrderedIndexRoleV1::Value,
+      generation: successor_generation,
+      initial_next_page_id: source_next_page_id,
+      mutations: &mutations,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let batch = mutation_batch(
+      hash_algorithm,
+      source.owner_id,
+      IndexMembershipOwnerClassV1::ValueStore,
+      OrderedIndexRoleV1::Value,
+      &inserted,
+      IndexMembershipStateV1 { live: false, unindexable: false },
+      IndexMembershipStateV1 { live: true, unindexable: false },
+    );
+    let namespace_root = vec![0xe2; hash_algorithm.hash_length()];
+    let epoch = vec![0xe3; 16];
+    let coverage =
+      CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 };
+    let summaries = [bootstrap.summary.clone()];
+    let successor = synthesize_successor_index_manifest_v1(
+      &IndexManifestSuccessorRequestV1 {
+        hash_algorithm,
+        source_manifest: &absent_source.value,
+        generation: successor_generation,
+        parent_manifest_key: Some(source_body.scope_catalog_manifest),
+        coverage: coverage.clone(),
+        next_document_ordinal: None,
+        mutations: batch.records(),
+        transitions: batch.transitions(),
+        role_summaries: &summaries,
+      },
+      &|| false,
+    )
+    .unwrap();
+    let successor = decode_index_manifest(&successor.value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(successor_body) = successor.details else {
+      panic!("successor is a value-store manifest");
+    };
+    assert_eq!(successor_body.value_directory_root, bootstrap.summary.root_key.as_deref());
+    assert_eq!(successor_body.next_page_id, bootstrap.summary.next_page_id);
+    assert_eq!(successor_body.value_page_count, bootstrap.summary.page_count);
+    assert_eq!(successor_body.value_document_count, 1);
+    assert_eq!(successor_body.live_value_count, bootstrap.summary.live_count);
+    assert_eq!(successor_body.value_tombstone_count, 0);
+    assert_eq!(successor_body.live_canonical_value_bytes, bootstrap.summary.logical_bytes);
+
+    let present_root = vec![0xe4; hash_algorithm.hash_length()];
+    let present_source = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: source_generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        value_directory_root: Some(&present_root),
+        next_page_id: source_next_page_id,
+        value_page_count: 1,
+        value_document_count: 1,
+        live_value_count: 1,
+        value_tombstone_count: 0,
+        live_canonical_value_bytes: 1,
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let error = synthesize_successor_index_manifest_v1(
+      &IndexManifestSuccessorRequestV1 {
+        hash_algorithm,
+        source_manifest: &present_source.value,
+        generation: successor_generation,
+        parent_manifest_key: Some(source_body.scope_catalog_manifest),
+        coverage,
+        next_document_ordinal: None,
+        mutations: batch.records(),
+        transitions: batch.transitions(),
+        role_summaries: &summaries,
       },
       &|| false,
     )
