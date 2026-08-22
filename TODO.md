@@ -1130,6 +1130,10 @@
           - [x] P6-3c1: add one first-authority A/B active-pointer reader/writer with exact closure selection, retry, replacement retirement, and reopen proof.
           - [x] P6-3c2: execute publication-ready frozen-batch closures through dependency/manifest/pointer ordering and reconcile every crash prefix.
           - [ ] P6-3c3: route bounded artifact compaction through the same producer lease, immutable applicator, and first-authority publisher.
+            - [x] P6-3c3a: add a storage-neutral bounded compaction applicator that binds one selected source generation, rewrites the exact page/directory/manifest closure, preserves coverage, and carries every dependent ValueStore selector.
+            - [ ] P6-3c3b: replace the retained unsupported `Compact` branch with one canonical leased execution/completion path whose cancellation, retry, corruption, and commit-unknown outcomes never consume unresolved work.
+            - [ ] P6-3c3c: bind native compaction reads and publication to the existing first-authority publisher, shared retirement owner, memory budget, and cadence lock without adding a selector, timer, or writer.
+            - [ ] P6-3c3d: prove stale-source refusal, exact retry, partial-pointer reconciliation, restart, pressure, malformed closure, both hash widths, bounded candidate scans, and unchanged v3 query authority.
           - [x] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
           - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
         - [ ] P6-3d: rotate cumulative runtime workspaces only after immutable coverage proves represented batches/tasks, carrying forward exactly pending work.

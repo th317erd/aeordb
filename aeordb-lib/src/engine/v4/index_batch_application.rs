@@ -22,8 +22,9 @@ use super::index_copy_on_write::{
   ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1,
   IndexCopyOnWriteBootstrapRequestV1, IndexCopyOnWriteClosureRequestV1, IndexCopyOnWriteClosureSummaryV1,
   IndexCopyOnWriteCompositeClosureRequestV1, IndexCopyOnWriteCompositeStepV1, IndexDirectoryLayoutV1, IndexMutationCommitmentV1,
-  IndexPageLayoutV1, OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1, bootstrap_ordered_index_v1,
-  bind_logical_page_endpoints_v1, mutate_ordered_page_batch_for_publication_v1, rewrite_artifact_directory_paths_v1,
+  IndexPageLayoutV1, OrderedPageBatchMutationRequestV1, OrderedPageCompactionWindowRequestV1, OrderedPageMutationKindV1,
+  OrderedPageMutationPlanV1, TombstoneDropProofV1, bootstrap_ordered_index_v1, bind_logical_page_endpoints_v1,
+  compact_ordered_page_window_v1, mutate_ordered_page_batch_for_publication_v1, rewrite_artifact_directory_paths_v1,
   validate_index_application_layouts_v1, validate_index_copy_on_write_closure_v1, validate_index_copy_on_write_composite_closure_v1,
 };
 use super::index_generation_publication::{INDEX_GENERATION_DEPENDENCY_HARD_CAP_V1, INDEX_GENERATION_TOTAL_BYTES_HARD_CAP_V1};
@@ -133,6 +134,32 @@ pub struct FrozenIndexBatchApplicationRequestV1<'a> {
   pub path_limits: OrderedPagePathLookupLimitsV1,
   pub page_layout: IndexPageLayoutV1,
   pub directory_layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Clone, Copy)]
+pub struct IndexArtifactCompactionApplicationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub coordinator_id: [u8; 16],
+  pub batch_id: u64,
+  pub attempt_id: u64,
+  pub generation: u64,
+  pub source_manifest: &'a [u8],
+  pub dependent_field_manifests: &'a [&'a [u8]],
+  pub role: OrderedIndexRoleV1,
+  pub source_pages: &'a [&'a [u8]],
+  pub previous_posting_page: Option<&'a [u8]>,
+  pub next_posting_page: Option<&'a [u8]>,
+  pub paths: &'a [ArtifactDirectoryPathV1<'a>],
+  pub tombstone_drop_proof: Option<&'a TombstoneDropProofV1<'a>>,
+  pub overlay_limits: IndexBatchArtifactOverlayLimitsV1,
+  pub page_layout: IndexPageLayoutV1,
+  pub directory_layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Debug)]
+pub enum FrozenIndexCompactionApplicationOutcomeV1 {
+  Unchanged,
+  Publication(FrozenIndexBatchApplicationPlanV1),
 }
 
 #[derive(Debug)]
@@ -316,6 +343,110 @@ pub fn apply_frozen_index_batch_v1(
   })
 }
 
+pub fn apply_index_artifact_compaction_v1(
+  request: &IndexArtifactCompactionApplicationRequestV1<'_>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<FrozenIndexCompactionApplicationOutcomeV1, IndexBatchApplicationErrorV1> {
+  validate_compaction_application_request(request)?;
+  check_cancelled(is_cancelled)?;
+  let source = decode_index_manifest(request.source_manifest, request.hash_algorithm)?;
+  let owner_class = manifest_owner_class(&source.details)?;
+  if request.generation <= source.generation || source_role_root(&source.details, request.role)?.is_none() {
+    return Err(manifest_closure_error("compaction generation must advance a source manifest that owns the selected ordered role"));
+  }
+  validate_compaction_dependents(request, &source, owner_class, is_cancelled)?;
+
+  let page_plan = compact_ordered_page_window_v1(&OrderedPageCompactionWindowRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    source_pages: request.source_pages,
+    previous_posting_page: request.previous_posting_page,
+    next_posting_page: request.next_posting_page,
+    generation: request.generation,
+    next_page_id: source_next_page_id(&source.details),
+    tombstone_drop_proof: request.tombstone_drop_proof,
+    layout: request.page_layout,
+  })?;
+  if page_plan.is_unchanged() {
+    return Ok(FrozenIndexCompactionApplicationOutcomeV1::Unchanged);
+  }
+  check_cancelled(is_cancelled)?;
+
+  let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    page_plan: &page_plan,
+    paths: request.paths,
+    layout: request.directory_layout,
+  })?;
+  let closure_sources = compaction_closure_sources(request, &page_plan)?;
+  let mut summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    initial_next_page_id: source_next_page_id(&source.details),
+    applied_mutations: None,
+    source_pages: &closure_sources,
+    paths: request.paths,
+    page_plan: &page_plan,
+    directory_plan: &directory_plan,
+    page_layout: request.page_layout,
+    directory_layout: request.directory_layout,
+  })?;
+  if request.role == OrderedIndexRoleV1::Posting {
+    let (first_page_id, last_page_id) = compacted_posting_endpoints(request, &source.details, &page_plan, &summary)?;
+    if summary.root_key.is_some() {
+      bind_logical_page_endpoints_v1(&mut summary, first_page_id, last_page_id)?;
+    }
+  }
+  check_cancelled(is_cancelled)?;
+
+  let mut overlay = SparseIndexArtifactOverlayV1::new(request.hash_algorithm, request.overlay_limits)?;
+  for replacement in page_plan.replacements {
+    for artifact in replacement.artifacts {
+      overlay.insert(artifact)?;
+    }
+  }
+  for artifact in directory_plan.artifacts {
+    overlay.insert(artifact)?;
+  }
+  let dependency_end = overlay.artifact_count();
+  let source_parent = source_parent_manifest_key(&source.details);
+  let successor_manifest = synthesize_compacted_index_manifest_v1(
+    request.hash_algorithm,
+    request.source_manifest,
+    request.generation,
+    source_parent,
+    &summary,
+    is_cancelled,
+  )?;
+  let mut owner_plans = Vec::new();
+  owner_plans
+    .try_reserve_exact(1usize.saturating_add(request.dependent_field_manifests.len()))
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("compaction owner-plan reservation failed: {error}")))?;
+  let mut role_summaries = Vec::new();
+  role_summaries
+    .try_reserve_exact(1)
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("compaction role-summary reservation failed: {error}")))?;
+  role_summaries.push(summary);
+  owner_plans.push(FrozenIndexOwnerApplicationPlanV1 {
+    owner_id: clone_bytes(source.owner_id, "compaction owner identity")?,
+    owner_class,
+    source_manifest_key: source.key,
+    source_generation: source.generation,
+    successor_manifest,
+    dependency_range: 0..dependency_end,
+    role_summaries,
+  });
+  append_compaction_dependent_fields(request, &mut owner_plans, is_cancelled)?;
+  Ok(FrozenIndexCompactionApplicationOutcomeV1::Publication(FrozenIndexBatchApplicationPlanV1 {
+    coordinator_id: request.coordinator_id,
+    batch_id: request.batch_id,
+    attempt_id: request.attempt_id,
+    generation: request.generation,
+    overlay,
+    owner_plans,
+  }))
+}
+
 fn validate_frozen_application_request(request: &FrozenIndexBatchApplicationRequestV1<'_>) -> Result<(), IndexBatchApplicationErrorV1> {
   validate_successor_coverage(&request.coverage, request.hash_algorithm)?;
   IndexBatchArtifactOverlayLimitsV1::new(request.overlay_limits.maximum_artifacts(), request.overlay_limits.maximum_retained_bytes())?;
@@ -329,6 +460,198 @@ fn validate_frozen_application_request(request: &FrozenIndexBatchApplicationRequ
     return Err(IndexBatchApplicationErrorV1::InvalidLimits(
       "frozen application generation, owner-source count, or batch contents are invalid".to_string(),
     ));
+  }
+  Ok(())
+}
+
+fn validate_compaction_application_request(
+  request: &IndexArtifactCompactionApplicationRequestV1<'_>,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  IndexBatchArtifactOverlayLimitsV1::new(request.overlay_limits.maximum_artifacts(), request.overlay_limits.maximum_retained_bytes())?;
+  validate_index_application_layouts_v1(request.page_layout, request.directory_layout)?;
+  if request.coordinator_id == [0; 16]
+    || request.batch_id == 0
+    || request.attempt_id == 0
+    || request.generation == 0
+    || request.source_pages.is_empty()
+    || request.source_pages.len() > 2
+    || request.paths.is_empty()
+    || request.paths.len() > 4
+    || request.role == OrderedIndexRoleV1::NvtTile
+    || request.dependent_field_manifests.len() >= INDEX_GENERATION_DEPENDENCY_HARD_CAP_V1
+  {
+    return Err(IndexBatchApplicationErrorV1::InvalidLimits(
+      "compaction identity, window, path, role, or dependent-manifest bounds are invalid".to_string(),
+    ));
+  }
+  Ok(())
+}
+
+fn validate_compaction_dependents(
+  request: &IndexArtifactCompactionApplicationRequestV1<'_>,
+  source: &IndexManifestV1<'_>,
+  owner_class: IndexMembershipOwnerClassV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  if owner_class != IndexMembershipOwnerClassV1::ValueStore {
+    if !request.dependent_field_manifests.is_empty() {
+      return Err(manifest_closure_error("only ValueStore compaction may carry dependent FieldIndex manifests"));
+    }
+    return Ok(());
+  }
+  if request.dependent_field_manifests.is_empty() {
+    return Err(manifest_closure_error(
+      "ValueStore compaction requires every dependent selected FieldIndex manifest so the successor remains reachable",
+    ));
+  }
+  let source_coverage = manifest_coverage(&source.details)?;
+  let mut previous_owner: Option<&[u8]> = None;
+  for dependent_bytes in request.dependent_field_manifests {
+    check_cancelled(is_cancelled)?;
+    let dependent = decode_index_manifest(dependent_bytes, request.hash_algorithm)?;
+    let IndexManifestBodyV1::FieldIndex(body) = &dependent.details else {
+      return Err(manifest_closure_error("a ValueStore compaction dependent is not a FieldIndex manifest"));
+    };
+    if body.value_store_manifest != source.key
+      || &body.coverage != source_coverage
+      || dependent.generation >= request.generation
+      || previous_owner.is_some_and(|owner| owner >= dependent.owner_id)
+    {
+      return Err(manifest_closure_error(
+        "ValueStore dependent FieldIndex manifests are stale, foreign, coverage-incompatible, or not in strict owner order",
+      ));
+    }
+    previous_owner = Some(dependent.owner_id);
+  }
+  Ok(())
+}
+
+fn compaction_closure_sources<'a>(
+  request: &'a IndexArtifactCompactionApplicationRequestV1<'a>,
+  page_plan: &OrderedPageMutationPlanV1,
+) -> Result<Vec<&'a [u8]>, IndexBatchApplicationErrorV1> {
+  let candidate_count = request
+    .source_pages
+    .len()
+    .checked_add(usize::from(request.previous_posting_page.is_some()))
+    .and_then(|count| count.checked_add(usize::from(request.next_posting_page.is_some())))
+    .ok_or_else(|| manifest_closure_error("compaction source candidate count overflowed"))?;
+  let mut candidates = Vec::new();
+  candidates
+    .try_reserve_exact(candidate_count)
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("compaction source candidate reservation failed: {error}")))?;
+  candidates.extend_from_slice(request.source_pages);
+  candidates.extend(request.previous_posting_page);
+  candidates.extend(request.next_posting_page);
+  let mut sources = Vec::new();
+  sources
+    .try_reserve_exact(page_plan.replacements.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("compaction closure-source reservation failed: {error}")))?;
+  for replacement in &page_plan.replacements {
+    let mut selected = None;
+    for candidate in &candidates {
+      let page = decode_ordered_page(candidate, request.hash_algorithm)?;
+      if page.key == replacement.source_key {
+        if selected.replace(*candidate).is_some() {
+          return Err(manifest_closure_error("compaction source candidates contain a duplicate immutable page"));
+        }
+      }
+    }
+    sources.push(selected.ok_or_else(|| manifest_closure_error("compaction replacement has no exact supplied source page"))?);
+  }
+  Ok(sources)
+}
+
+fn compacted_posting_endpoints(
+  request: &IndexArtifactCompactionApplicationRequestV1<'_>,
+  source: &IndexManifestBodyV1<'_>,
+  page_plan: &OrderedPageMutationPlanV1,
+  summary: &IndexCopyOnWriteClosureSummaryV1,
+) -> Result<(u64, u64), IndexBatchApplicationErrorV1> {
+  let IndexManifestBodyV1::FieldIndex(body) = source else {
+    return Err(manifest_closure_error("Posting compaction source is not a FieldIndex manifest"));
+  };
+  if summary.root_key.is_none() {
+    return Ok((0, 0));
+  }
+  let mut primary_keys = Vec::new();
+  primary_keys
+    .try_reserve_exact(request.source_pages.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("compaction endpoint key reservation failed: {error}")))?;
+  for source_page in request.source_pages {
+    primary_keys.push(decode_ordered_page(source_page, request.hash_algorithm)?.key);
+  }
+  let mut retained_window_page_id = None;
+  for replacement in &page_plan.replacements {
+    if !primary_keys.iter().any(|key| *key == replacement.source_key) {
+      continue;
+    }
+    for artifact in &replacement.artifacts {
+      let page = decode_ordered_page(&artifact.value, request.hash_algorithm)?;
+      if retained_window_page_id.replace(page.page_id).is_some() {
+        return Err(manifest_closure_error("compaction window produced more than one retained endpoint page"));
+      }
+    }
+  }
+  let previous_page_id =
+    request.previous_posting_page.map(|page| decode_ordered_page(page, request.hash_algorithm).map(|page| page.page_id)).transpose()?;
+  let next_page_id =
+    request.next_posting_page.map(|page| decode_ordered_page(page, request.hash_algorithm).map(|page| page.page_id)).transpose()?;
+  let first_page_id = if page_plan.retired_page_ids.contains(&body.first_page_id) {
+    retained_window_page_id.or(next_page_id).unwrap_or(0)
+  } else {
+    body.first_page_id
+  };
+  let last_page_id = if page_plan.retired_page_ids.contains(&body.last_page_id) {
+    retained_window_page_id.or(previous_page_id).unwrap_or(0)
+  } else {
+    body.last_page_id
+  };
+  if first_page_id == 0 || last_page_id == 0 {
+    return Err(manifest_closure_error("populated compacted Posting root has no logical first or last PageId"));
+  }
+  Ok((first_page_id, last_page_id))
+}
+
+fn append_compaction_dependent_fields(
+  request: &IndexArtifactCompactionApplicationRequestV1<'_>,
+  owner_plans: &mut Vec<FrozenIndexOwnerApplicationPlanV1>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  if request.dependent_field_manifests.is_empty() {
+    return Ok(());
+  }
+  let value_successor_key = clone_bytes(
+    &owner_plans.first().ok_or_else(|| manifest_closure_error("ValueStore compaction has no successor owner plan"))?.successor_manifest.key,
+    "compacted ValueStore successor key",
+  )?;
+  for source_bytes in request.dependent_field_manifests {
+    check_cancelled(is_cancelled)?;
+    let source = decode_index_manifest(source_bytes, request.hash_algorithm)?;
+    let coverage = manifest_coverage(&source.details)?.clone();
+    let successor_manifest = synthesize_successor_index_manifest_v1(
+      &IndexManifestSuccessorRequestV1 {
+        hash_algorithm: request.hash_algorithm,
+        source_manifest: source_bytes,
+        generation: request.generation,
+        parent_manifest_key: Some(&value_successor_key),
+        coverage,
+        next_document_ordinal: None,
+        mutations: &[],
+        transitions: &[],
+        role_summaries: &[],
+      },
+      is_cancelled,
+    )?;
+    owner_plans.push(FrozenIndexOwnerApplicationPlanV1 {
+      owner_id: clone_bytes(source.owner_id, "dependent FieldIndex owner identity")?,
+      owner_class: IndexMembershipOwnerClassV1::FieldIndex,
+      source_manifest_key: source.key,
+      source_generation: source.generation,
+      successor_manifest,
+      dependency_range: 0..0,
+      role_summaries: Vec::new(),
+    });
   }
   Ok(())
 }
@@ -877,6 +1200,15 @@ fn source_parent_manifest_key<'a>(source: &'a IndexManifestBodyV1<'a>) -> Option
   }
 }
 
+fn manifest_coverage<'a>(source: &'a IndexManifestBodyV1<'a>) -> Result<&'a CoverageVersionV1<'a>, IndexBatchApplicationErrorV1> {
+  match source {
+    IndexManifestBodyV1::ScopeCatalog(body) => Ok(&body.coverage),
+    IndexManifestBodyV1::ValueStore(body) => Ok(&body.coverage),
+    IndexManifestBodyV1::FieldIndex(body) => Ok(&body.coverage),
+    IndexManifestBodyV1::FieldNvt(_) => Err(manifest_closure_error("FieldNvt manifests do not carry ordered-data coverage")),
+  }
+}
+
 fn source_role_root<'a>(
   source: &'a IndexManifestBodyV1<'a>,
   role: OrderedIndexRoleV1,
@@ -1019,22 +1351,67 @@ pub fn synthesize_successor_index_manifest_v1(
   validate_manifest_role_summaries(request, &source.details, source.owner_id, owner_class, required_roles, &mutation_closure)?;
   check_cancelled(is_cancelled)?;
 
+  encode_successor_index_manifest_v1(request, &source, &transition_deltas)
+}
+
+fn synthesize_compacted_index_manifest_v1(
+  hash_algorithm: HashAlgorithm,
+  source_manifest: &[u8],
+  generation: u64,
+  parent_manifest_key: Option<&[u8]>,
+  summary: &IndexCopyOnWriteClosureSummaryV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<EncodedImmutableIndexArtifactV1, IndexBatchApplicationErrorV1> {
+  check_cancelled(is_cancelled)?;
+  let source = decode_index_manifest(source_manifest, hash_algorithm)?;
+  if generation <= source.generation || summary.mutation_commitment.is_some() {
+    return Err(manifest_closure_error(
+      "compaction manifest generation must advance its source and carry an unbound maintenance COW summary",
+    ));
+  }
+  let coverage = manifest_coverage(&source.details)?.clone();
+  let role_summaries = std::slice::from_ref(summary);
+  let request = IndexManifestSuccessorRequestV1 {
+    hash_algorithm,
+    source_manifest,
+    generation,
+    parent_manifest_key,
+    coverage,
+    next_document_ordinal: match &source.details {
+      IndexManifestBodyV1::ScopeCatalog(body) => Some(body.next_document_ordinal),
+      IndexManifestBodyV1::ValueStore(_) | IndexManifestBodyV1::FieldIndex(_) | IndexManifestBodyV1::FieldNvt(_) => None,
+    },
+    mutations: &[],
+    transitions: &[],
+    role_summaries,
+  };
+  let owner_class = manifest_owner_class(&source.details)?;
+  let mutation_closure = ManifestMutationClosureV1 { role_mask: 0, commitments: std::array::from_fn(|_| None) };
+  validate_manifest_role_summaries(&request, &source.details, source.owner_id, owner_class, role_bit(summary.role), &mutation_closure)?;
+  check_cancelled(is_cancelled)?;
+  encode_successor_index_manifest_v1(&request, &source, &ManifestTransitionDeltasV1::default())
+}
+
+fn encode_successor_index_manifest_v1(
+  request: &IndexManifestSuccessorRequestV1<'_>,
+  source: &IndexManifestV1<'_>,
+  transition_deltas: &ManifestTransitionDeltasV1,
+) -> Result<EncodedImmutableIndexArtifactV1, IndexBatchApplicationErrorV1> {
   let body = match &source.details {
     IndexManifestBodyV1::ScopeCatalog(body) => {
-      let successor = synthesize_scope_manifest_body(request, body, &transition_deltas)?;
+      let successor = synthesize_scope_manifest_body(request, body, transition_deltas)?;
       IndexManifestBodyV1::ScopeCatalog(successor)
     }
     IndexManifestBodyV1::ValueStore(body) => {
-      let successor = synthesize_value_manifest_body(request, body, &transition_deltas)?;
+      let successor = synthesize_value_manifest_body(request, body, transition_deltas)?;
       IndexManifestBodyV1::ValueStore(successor)
     }
     IndexManifestBodyV1::FieldIndex(body) => {
-      let successor = synthesize_field_manifest_body(request, body, &transition_deltas)?;
+      let successor = synthesize_field_manifest_body(request, body, transition_deltas)?;
       IndexManifestBodyV1::FieldIndex(successor)
     }
     IndexManifestBodyV1::FieldNvt(_) => return Err(manifest_closure_error("FieldNvt manifests are not ordered-batch owners")),
   };
-  check_cancelled(is_cancelled)?;
   encode_index_manifest(&IndexManifestWriteV1 {
     hash_algorithm: request.hash_algorithm,
     generation: request.generation,

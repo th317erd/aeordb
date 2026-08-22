@@ -730,6 +730,10 @@ name = "v4_index_generation_authority_spec"
 path = "spec/engine/v4_index_generation_authority_spec.rs"
 
 [[test]]
+name = "v4_index_compaction_application_spec"
+path = "spec/engine/v4_index_compaction_application_spec.rs"
+
+[[test]]
 name = "v4_index_batch_application_spec"
 path = "spec/engine/v4_index_batch_application_spec.rs"
 

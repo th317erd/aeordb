@@ -487,6 +487,17 @@ fn preflight_application(
     let pair = publisher.load_index_active_pointer_pair(request.database_id, kind, &info.owner_id).map_err(|source| {
       FrozenIndexGenerationPublicationErrorV1::authority(source, IndexGenerationPublicationFailureBoundaryV1::PriorAuthorityRetained)
     })?;
+    let owner_plan = &request.plan.owner_plans()[owner_index];
+    if pair.selected.as_ref().is_some_and(|selected| {
+      selected.target_manifest_hash != owner_plan.source_manifest_key()
+        && selected.target_manifest_hash != owner_plan.successor_manifest().key
+    }) {
+      return Err(FrozenIndexGenerationPublicationErrorV1::invalid(
+        "index_generation_source_superseded",
+        "selected active-pointer authority names neither the frozen source manifest nor its exact successor",
+        IndexGenerationPublicationFailureBoundaryV1::PriorAuthorityRetained,
+      ));
+    }
     let pointer = prepare_pointer(
       request.hash_algorithm,
       request.plan.generation(),

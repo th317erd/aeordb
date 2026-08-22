@@ -238,6 +238,51 @@ fn unreferenced_value_store_refuses_before_any_authority_mutation() {
 }
 
 #[test]
+fn a_plan_built_from_a_superseded_selected_manifest_refuses_before_pointer_mutation() {
+  let selected_plan = complete_application_plan(ALGORITHM);
+  let stale_plan = scope_insert_application_plan(ALGORITHM);
+  let (_directory, _path, publisher) = create_publisher(ALGORITHM);
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut retirement = retirement_owner(ALGORITHM, &cancellation, &memory);
+  publish_frozen_index_application_v1(
+    &publisher,
+    &mut retirement,
+    publication_request(&selected_plan, IndexGenerationPublicationModeV1::Soft),
+    &|| false,
+  )
+  .unwrap();
+  let before = publisher.observe().unwrap();
+  let stale_owner = &stale_plan.owner_plans()[0];
+  let selected = publisher
+    .load_index_active_pointer_pair(
+      &DATABASE_ID,
+      aeordb::engine::v4::index_artifact::ActivePointerKindV1::ScopeCatalog,
+      stale_owner.owner_id(),
+    )
+    .unwrap()
+    .selected
+    .unwrap();
+  assert_ne!(selected.target_manifest_hash, stale_owner.source_manifest_key());
+  assert_ne!(selected.target_manifest_hash, stale_owner.successor_manifest().key);
+
+  let error = publish_frozen_index_application_v1(
+    &publisher,
+    &mut retirement,
+    publication_request(&stale_plan, IndexGenerationPublicationModeV1::Soft),
+    &|| false,
+  )
+  .unwrap_err();
+
+  assert_eq!(error.code(), "index_generation_source_superseded");
+  assert_eq!(
+    error.failure_boundary(),
+    aeordb::engine::v4::index_generation_publication::IndexGenerationPublicationFailureBoundaryV1::PriorAuthorityRetained
+  );
+  assert_eq!(publisher.observe().unwrap(), before);
+}
+
+#[test]
 fn every_cancellable_physical_prefix_reopens_and_converges_on_exact_retry() {
   let mut saw_prior_authority = false;
   let mut saw_partial_successor = false;
