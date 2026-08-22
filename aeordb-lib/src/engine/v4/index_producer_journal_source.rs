@@ -20,6 +20,17 @@ pub struct IndexProducerJournalReadV1 {
   _reservation: MemoryReservation,
 }
 
+impl std::fmt::Debug for IndexProducerJournalReadV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("IndexProducerJournalReadV1")
+      .field("encoded_bytes", &self.encoded.len())
+      .field("reservation_owner", &self._reservation.owner())
+      .field("reserved_bytes", &self._reservation.bytes())
+      .finish()
+  }
+}
+
 impl IndexProducerJournalReadV1 {
   pub fn new(
     request: &IndexProducerJournalReadRequestV1<'_>,

@@ -172,6 +172,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
 
   let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let first_authority_path = source_root.join("engine/v4/first_authority.rs");
+  let index_native_journal_source_path = source_root.join("engine/v4/index_native_journal_source.rs");
   let index_native_semantic_source_path = source_root.join("engine/v4/index_native_semantic_source.rs");
   let index_recovery_store_path = source_root.join("engine/v4/index_recovery_store.rs");
   let index_runtime_installation_path = source_root.join("engine/v4/index_runtime_installation.rs");
@@ -196,6 +197,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   assert_eq!(
     publisher_callers,
     vec![
+      &index_native_journal_source_path,
       &index_native_semantic_source_path,
       &index_recovery_store_path,
       &index_runtime_installation_path,
@@ -210,6 +212,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
   for owner_path in [
+    &index_native_journal_source_path,
     &index_native_semantic_source_path,
     &index_recovery_store_path,
     &index_runtime_installation_path,

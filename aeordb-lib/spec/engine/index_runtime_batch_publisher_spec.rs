@@ -1211,6 +1211,7 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   let recovery = include_str!("../../src/engine/v4/index_runtime_dirty_overlay_recovery.rs");
   let workspace = include_str!("../../src/engine/v4/index_runtime_workspace_store.rs");
   let cadence = include_str!("../../src/engine/v4/index_runtime_cadence.rs");
+  let native_journal = include_str!("../../src/engine/v4/index_native_journal_source.rs");
   let server = include_str!("../../src/server/mod.rs");
   let directory_ops = include_str!("../../src/engine/directory_ops.rs");
   let immutable = source.find("self.store.put_immutable(&checkpoint)").unwrap();
@@ -1225,11 +1226,13 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   assert_eq!(source.matches("IndexProducerSpillStoreV1 for DurableIndexRuntimeBatchPublisherV1").count(), 1);
   assert!(!cadence.contains("tokio::spawn"));
   assert!(!cadence.contains("tokio::time::interval"));
+  assert_eq!(cadence.matches("self.owner.execute_next_producer(").count(), 1);
   assert_eq!(server.matches("spawn_index_buffer_flush_timer(").count(), 2);
   assert_eq!(server.matches("tokio::time::interval(std::time::Duration::from_secs(5))").count(), 1);
   assert!(server.contains("engine.flush_index_runtime_if_due_v1()"));
   assert!(!directory_ops.contains("flush_index_runtime_if_due_v1"));
   let shutdown = include_str!("../../src/engine/storage_engine.rs");
+  assert_eq!(shutdown.matches("runtime.service_bounded_producers(self)").count(), 1);
   assert!(shutdown.contains("runtime.owner().has_pending_soft_mutations()"));
   assert!(!shutdown.contains("cached_snapshot().soft_hub.queued_notices"));
   assert!(shutdown.contains("try_direct_hard_authority_guard()"));
@@ -1247,6 +1250,10 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   assert_eq!(shutdown.matches("self.drain_index_runtime_v1()").count(), 1);
   assert_eq!(shutdown.matches("fn attempt_emergency_spill(").count(), 1);
   assert_eq!(shutdown.matches("fn write_emergency_spill_files(").count(), 1);
+  let journal_probe = native_journal.find(".index_artifact_length(request.journal_head)").expect("bounded journal length probe");
+  let journal_reservation = native_journal.find(".reserve(MemoryOwner::Task").expect("journal Task-memory reservation");
+  let journal_read = native_journal.find(".load_index_artifact(request.journal_head").expect("first-authority journal load");
+  assert!(journal_probe < journal_reservation && journal_reservation < journal_read);
   let spill = include_str!("../../src/engine/emergency_spill.rs");
   assert_eq!(spill.matches("pub fn scan_for_database_with_locations(").count(), 1);
   assert!(!spill.contains("V4FirstAuthorityPublisher"));

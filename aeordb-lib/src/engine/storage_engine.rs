@@ -936,6 +936,33 @@ impl IndexRuntimeInstallationPermitV1<'_> {
   }
 }
 
+fn resolve_index_runtime_service_and_flush(
+  service: Result<u16, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+  flush: Result<
+    crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1,
+    crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+  >,
+) -> Result<
+  crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1,
+  crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+> {
+  use crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1;
+  use crate::engine::v4::index_runtime_owner::IndexRuntimeErrorV1;
+
+  match (service, flush) {
+    (Ok(_), Ok(flush)) => Ok(flush),
+    (Err(service), Ok(_)) => Err(service),
+    (Ok(_), Err(flush)) => Err(flush),
+    (Err(service), Err(flush))
+      if matches!(&service, IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled))
+        && matches!(&flush, IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled)) =>
+    {
+      Err(service)
+    }
+    (Err(service), Err(flush)) => Err(IndexRuntimeCadenceErrorV1::ServiceAndFlush { service: Box::new(service), flush: Box::new(flush) }),
+  }
+}
+
 impl StorageEngine {
   fn initialize_configuration_authority(
     &self,
@@ -3704,27 +3731,32 @@ impl StorageEngine {
     let leased = if !runtime.owner().has_pending_soft_mutations() {
       None
     } else {
-      let _source_authority = match self
+      match self
         .try_direct_hard_authority_guard()
         .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?
       {
-        Some(authority) => authority,
-        None => return runtime.cadence().flush_if_due().map(Some),
-      };
-      let namespace_root = self
-        .head_hash()
-        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?;
-      let publication_sequence = self
-        .durability_snapshot()
-        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?
-        .hard_frontier;
-      runtime.lease_soft_mutation_journal(&namespace_root, publication_sequence)?
+        Some(source_authority) => {
+          let namespace_root = self
+            .head_hash()
+            .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?;
+          let publication_sequence = self
+            .durability_snapshot()
+            .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::SoftJournal(error.to_string()))?
+            .hard_frontier;
+          let leased = runtime.lease_soft_mutation_journal(&namespace_root, publication_sequence)?;
+          drop(source_authority);
+          leased
+        }
+        None => None,
+      }
     };
     let prepared = leased.map(|leased| leased.prepare()).transpose()?;
     if let Some(prepared) = prepared {
       prepared.persist()?;
     }
-    runtime.cadence().flush_if_due().map(Some)
+    let service = runtime.service_bounded_producers(self);
+    let flush = runtime.cadence().flush_if_due();
+    resolve_index_runtime_service_and_flush(service, flush).map(Some)
   }
 
   fn index_runtime_emergency_state_v1(

@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -14,17 +15,22 @@ use crate::engine::VirtualClock;
 
 use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_coordinator::IndexFlushReasonV1;
+use super::index_maintenance_scan::{IndexMaintenanceScanLimitsV1, IndexMaintenanceScanSourceV1};
+use super::index_producer_collector::IndexParserExecutorV1;
 use super::index_producer_admission::IndexProducerJournalAdmissionSummaryV1;
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerDurableTaskStoreV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
 };
+use super::index_producer_journal_source::IndexProducerJournalSourceV1;
+use super::index_producer_source::{IndexFileRevisionSourceV1, IndexSemanticScopeSourceV1};
 use super::index_runtime_owner::{
   IndexRuntimeBatchPublisherV1, IndexRuntimeErrorV1, IndexRuntimeFlushOutcomeV1, IndexRuntimeLifecycleV1, IndexRuntimeOwnerV1,
-  IndexRuntimePublicationErrorV1,
+  IndexRuntimeProducerWorkRequestV1, IndexRuntimePublicationErrorV1, IndexRuntimeWorkOutcomeV1,
 };
 use super::index_runtime_batch_publisher::{IndexRuntimeMutationJournalStoreV1, NativeIndexRuntimeBatchPublisherV1};
 use super::index_runtime_workspace_store::{IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceSelectedHeadV1};
 use super::index_task::MutationJournalV1;
+use super::index_source::PluginMapperExecutorV1;
 
 pub type NativeIndexRuntimeCadenceV1 = IndexRuntimeCadenceV1<NativeIndexRuntimeBatchPublisherV1>;
 
@@ -40,10 +46,16 @@ pub enum IndexRuntimeCadenceErrorV1 {
   DrainAccountingOverflow,
   #[error("index runtime drain unexpectedly deferred until {retry_at_ms}")]
   DrainDeferred { retry_at_ms: u64 },
+  #[error("index runtime producer service limits must have nonzero attempts and elapsed time")]
+  InvalidServiceLimits,
   #[error("index runtime cadence failed ({failure}) and could not latch degraded state: {source}")]
   FailureLatch { failure: &'static str, source: IndexRuntimeErrorV1 },
   #[error("index runtime soft-journal handoff failed: {0}")]
   SoftJournal(String),
+  #[error("index runtime native producer source construction failed: {0}")]
+  NativeSource(String),
+  #[error("index runtime producer service failed ({service}) and due publication also failed ({flush})")]
+  ServiceAndFlush { service: Box<IndexRuntimeCadenceErrorV1>, flush: Box<IndexRuntimeCadenceErrorV1> },
   #[error(transparent)]
   Runtime(#[from] IndexRuntimeErrorV1),
   #[error(transparent)]
@@ -63,6 +75,32 @@ pub struct NativeIndexRuntimeWorkspaceSnapshotV1 {
   pub identity: IndexRuntimeWorkspaceIdentityV1,
   pub path: PathBuf,
   pub selected_head: Option<IndexRuntimeWorkspaceSelectedHeadV1>,
+}
+
+#[derive(Clone, Copy)]
+pub struct IndexRuntimeProducerServiceSourcesV1<'request> {
+  pub journal_source: &'request dyn IndexProducerJournalSourceV1,
+  pub maintenance_source: &'request dyn IndexMaintenanceScanSourceV1,
+  pub maintenance_limits: IndexMaintenanceScanLimitsV1,
+  pub revision_source: &'request dyn IndexFileRevisionSourceV1,
+  pub semantic_source: &'request dyn IndexSemanticScopeSourceV1,
+  pub parser: &'request dyn IndexParserExecutorV1,
+  pub mapper: Option<&'request dyn PluginMapperExecutorV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexRuntimeProducerServiceLimitsV1 {
+  maximum_attempts: u16,
+  maximum_elapsed: Duration,
+}
+
+impl IndexRuntimeProducerServiceLimitsV1 {
+  pub fn new(maximum_attempts: u16, maximum_elapsed: Duration) -> Result<Self, IndexRuntimeCadenceErrorV1> {
+    if maximum_attempts == 0 || maximum_elapsed.is_zero() {
+      return Err(IndexRuntimeCadenceErrorV1::InvalidServiceLimits);
+    }
+    Ok(Self { maximum_attempts, maximum_elapsed })
+  }
 }
 
 pub struct IndexRuntimeCadenceV1<Publisher> {
@@ -203,6 +241,68 @@ impl<Publisher> IndexRuntimeCadenceV1<Publisher>
 where
   Publisher: IndexRuntimeBatchPublisherV1 + IndexProducerSpillStoreV1 + Send,
 {
+  /// Service a bounded slice of canonical producer work. Each attempt still
+  /// owns no more than one task or maintenance page; the count/time slice keeps
+  /// the shared five-second timer productive without monopolizing it.
+  pub fn service_bounded_producers(
+    &self,
+    sources: IndexRuntimeProducerServiceSourcesV1<'_>,
+    limits: IndexRuntimeProducerServiceLimitsV1,
+  ) -> Result<u16, IndexRuntimeCadenceErrorV1> {
+    let started = Instant::now();
+    let mut completed_attempts = 0u16;
+    loop {
+      match self.service_next_producer(sources)? {
+        IndexRuntimeWorkOutcomeV1::Idle | IndexRuntimeWorkOutcomeV1::Deferred { .. } => return Ok(completed_attempts),
+        IndexRuntimeWorkOutcomeV1::Completed(_) => {
+          completed_attempts = completed_attempts.checked_add(1).ok_or(IndexRuntimeCadenceErrorV1::InvalidServiceLimits)?;
+          if completed_attempts >= limits.maximum_attempts || started.elapsed() >= limits.maximum_elapsed {
+            return Ok(completed_attempts);
+          }
+        }
+      }
+    }
+  }
+
+  /// Execute at most one canonical producer task or maintenance page through
+  /// the same serialized publisher used by admission, spill, and publication.
+  pub fn service_next_producer(
+    &self,
+    sources: IndexRuntimeProducerServiceSourcesV1<'_>,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeCadenceErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let now_ms = self.clock.now_ms();
+    if now_ms == 0 {
+      return Err(self.fail_closed(
+        IndexRuntimeCadenceErrorV1::InvalidClock,
+        "cadence_invalid_clock",
+        "index runtime cadence clock returned zero during producer service; queued work was retained",
+      ));
+    }
+    let mut publisher =
+      self.lock_publisher("index runtime cadence publisher lock was poisoned during producer service; queued work was retained")?;
+    if self.cancellation.is_cancelled() {
+      return Err(IndexRuntimeCadenceErrorV1::Runtime(IndexRuntimeErrorV1::Canceled));
+    }
+    let is_cancelled = || self.cancellation.is_cancelled();
+    Ok(self.owner.execute_next_producer(
+      IndexRuntimeProducerWorkRequestV1 {
+        journal_source: sources.journal_source,
+        maintenance_source: sources.maintenance_source,
+        maintenance_limits: sources.maintenance_limits,
+        revision_source: sources.revision_source,
+        semantic_source: sources.semantic_source,
+        parser: sources.parser,
+        mapper: sources.mapper,
+        now_ms,
+        is_cancelled: &is_cancelled,
+      },
+      &mut *publisher,
+    )?)
+  }
+
   /// Admit one canonical producer task through the same serialized publisher
   /// that owns pressure spill and runtime-batch publication.
   pub(crate) fn admit_task(&self, request: IndexProducerTaskRequestV1<'_>) -> Result<IndexProducerAdmissionV1, IndexRuntimeCadenceErrorV1> {

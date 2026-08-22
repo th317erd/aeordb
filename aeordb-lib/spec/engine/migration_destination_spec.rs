@@ -887,12 +887,17 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   source.flush_index_runtime_if_due_v1().unwrap().expect("installed runtime must service its cadence");
   let after_journal = source.index_runtime_snapshot_v1().unwrap();
   assert_eq!(after_journal.soft_hub.queued_notices, 0, "durable journal and task evidence must retire the leased notice");
-  assert_eq!(after_journal.producer.pending_tasks, 2, "the exact mutation task must join the existing maintenance task");
+  assert_eq!(after_journal.producer.pending_tasks, 0, "one bounded cadence slice must service both small retained tasks");
+  assert_eq!(after_journal.producer.completed_tasks, 2);
   assert_eq!(
     source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().reserved_bytes,
     journal_memory_before,
     "journal encoding and persistence must release their temporary working reservation"
   );
+  source.flush_index_runtime_if_due_v1().unwrap().expect("an idle follow-up cadence tick must remain valid");
+  let after_second_tick = source.index_runtime_snapshot_v1().unwrap();
+  assert_eq!(after_second_tick.producer.pending_tasks, 0);
+  assert_eq!(after_second_tick.producer.completed_tasks, 2);
 
   let duplicate = install_native_index_runtime_v1(
     &source,

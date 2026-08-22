@@ -55,6 +55,7 @@ pub mod index_copy_on_write;
 pub mod index_definition_runtime;
 pub mod index_maintenance_scan;
 pub mod index_manifest;
+pub mod index_native_journal_source;
 pub mod index_native_parser;
 pub mod index_native_semantic_source;
 pub mod index_native_source;

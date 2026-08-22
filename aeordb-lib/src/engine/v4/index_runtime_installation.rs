@@ -5,6 +5,7 @@
 //! v4 destination are the exact pair admitted by migration preflight.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,9 @@ use super::index_coordinator_recovery::{
   IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
   IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
 };
+use super::index_maintenance_scan::IndexMaintenanceScanLimitsV1;
+use super::index_native_journal_source::FirstAuthorityIndexProducerJournalSourceV1;
+use super::index_native_parser::NativeIndexParserExecutorV1;
 use super::index_recovery_store::{
   IndexScopeOrdinalStoreRegistryErrorV1, IndexScopeOrdinalStoreRegistryOptionsV1, IndexScopeOrdinalStoreRegistryV1,
   NativeIndexOperationDescriptorV1, NativeIndexRecoveryStoreV1, SharedRetirementJournalOwnerV1,
@@ -31,8 +35,13 @@ use super::index_native_semantic_source::{
   FirstAuthorityIndexSemanticObjectReadSourceV1, NativeIndexOperationDescriptorCatalogV1, NativeIndexScopeOrdinalAuthorityV1,
   NativeIndexSemanticSourceErrorV1,
 };
+use super::index_native_source::{
+  NativeIndexFileRevisionSourceV1, NativeIndexMaintenanceScanSourceV1, NativeIndexScanTraversalLimitsV1, NativeIndexSourceLimitsV1,
+};
 use super::index_runtime_batch_publisher::{IndexRuntimeBatchPublisherBuildErrorV1, NativeIndexRuntimeBatchPublisherV1};
-use super::index_runtime_cadence::{IndexRuntimeCadenceErrorV1, NativeIndexRuntimeCadenceV1};
+use super::index_runtime_cadence::{
+  IndexRuntimeCadenceErrorV1, IndexRuntimeProducerServiceLimitsV1, IndexRuntimeProducerServiceSourcesV1, NativeIndexRuntimeCadenceV1,
+};
 use super::index_producer_admission::{
   IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceClassV1, IndexProducerMaintenanceIntentV1, build_maintenance_task,
 };
@@ -48,12 +57,39 @@ use super::index_runtime_workspace_store::{
   IndexRuntimeWorkspaceOptionsV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
 use super::index_scope_ordinal_authority::IndexScopeOrdinalStateOptionsV1;
+use super::index_semantic_source::CatalogIndexSemanticScopeSourceV1;
 use super::migration_owner::MigrationStateOwnerV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::namespace::SemanticAvailabilityV1;
 use super::system_family::embedded_system_family_registry;
 
 const INDEX_RUNTIME_SOFT_JOURNAL_MAX_RECORDS: usize = 10_000;
+
+#[derive(Clone, Copy)]
+struct NativeIndexRuntimeProducerServiceOptionsV1 {
+  source: NativeIndexSourceLimitsV1,
+  traversal: NativeIndexScanTraversalLimitsV1,
+  maintenance: IndexMaintenanceScanLimitsV1,
+  ordinals: IndexScopeOrdinalStateOptionsV1,
+  cadence: IndexRuntimeProducerServiceLimitsV1,
+}
+
+impl NativeIndexRuntimeProducerServiceOptionsV1 {
+  fn engine_default() -> Result<Self, NativeIndexRuntimeInstallationErrorV1> {
+    Ok(Self {
+      source: NativeIndexSourceLimitsV1::new(16 * 1_024 * 1_024, 16 * 1_024 * 1_024, 64)
+        .map_err(|error| invalid("native_index_service_source_options", error.to_string()))?,
+      traversal: NativeIndexScanTraversalLimitsV1::new(256, 65_536)
+        .map_err(|error| invalid("native_index_service_traversal_options", error.to_string()))?,
+      maintenance: IndexMaintenanceScanLimitsV1::new(8, 80 * 1_024 * 1_024, 16 * 1_024)
+        .map_err(|error| invalid("native_index_service_page_options", error.to_string()))?,
+      ordinals: IndexScopeOrdinalStateOptionsV1::new(8, 256)
+        .map_err(|error| invalid("native_index_service_ordinal_options", error.to_string()))?,
+      cadence: IndexRuntimeProducerServiceLimitsV1::new(256, Duration::from_millis(500))
+        .map_err(|error| invalid("native_index_service_cadence_options", error.to_string()))?,
+    })
+  }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexRuntimeShadowIdentityV1 {
@@ -179,6 +215,7 @@ pub struct NativeIndexRuntimeV1 {
   journal_generation: u64,
   cancellation: CancellationToken,
   cadence: Arc<NativeIndexRuntimeCadenceV1>,
+  service_options: NativeIndexRuntimeProducerServiceOptionsV1,
 }
 
 pub(crate) struct PreparedNativeSoftMutationJournalV1<'runtime> {
@@ -340,6 +377,43 @@ impl NativeIndexRuntimeV1 {
 
   pub fn cadence(&self) -> &Arc<NativeIndexRuntimeCadenceV1> {
     &self.cadence
+  }
+
+  pub(crate) fn service_bounded_producers(&self, engine: &StorageEngine) -> Result<u16, IndexRuntimeCadenceErrorV1> {
+    if engine.hash_algo() != self.shadow_identity.hash_algorithm {
+      return Err(IndexRuntimeCadenceErrorV1::NativeSource("installed runtime and source engine hash profiles disagree".to_string()));
+    }
+    let memory = engine.memory_coordinator();
+    let journal_source = FirstAuthorityIndexProducerJournalSourceV1::new(
+      Arc::clone(&self.publisher),
+      Arc::clone(&memory),
+      self.shadow_identity.hash_algorithm,
+    );
+    let revision_source = NativeIndexFileRevisionSourceV1::new(engine, self.service_options.source);
+    let maintenance_source = NativeIndexMaintenanceScanSourceV1::new(engine, self.service_options.source, self.service_options.traversal);
+    let semantic_objects = FirstAuthorityIndexSemanticObjectReadSourceV1::new(Arc::clone(&self.publisher));
+    let ordinal_authority = self
+      .scope_ordinal_authority(self.service_options.ordinals)
+      .map_err(|error| IndexRuntimeCadenceErrorV1::NativeSource(error.to_string()))?;
+    let semantic_source = CatalogIndexSemanticScopeSourceV1::new(
+      self.shadow_identity.hash_algorithm,
+      memory.as_ref().clone(),
+      &semantic_objects,
+      &ordinal_authority,
+    );
+    let parser = NativeIndexParserExecutorV1::new(engine);
+    self.cadence.service_bounded_producers(
+      IndexRuntimeProducerServiceSourcesV1 {
+        journal_source: &journal_source,
+        maintenance_source: &maintenance_source,
+        maintenance_limits: self.service_options.maintenance,
+        revision_source: &revision_source,
+        semantic_source: &semantic_source,
+        parser: &parser,
+        mapper: None,
+      },
+      self.service_options.cadence,
+    )
   }
 
   pub(crate) fn admit_maintenance_task(
@@ -540,6 +614,7 @@ pub fn install_native_index_runtime_v1(
     request.cancellation.clone(),
     Arc::clone(&request.clock),
   )?);
+  let service_options = NativeIndexRuntimeProducerServiceOptionsV1::engine_default()?;
   let source_authority_guard = engine.direct_hard_authority_guard()?;
   let semantic_authority_guard = request.publisher.selected_semantic_authority_guard()?;
   let current_semantic_authority = semantic_authority_guard.load()?;
@@ -570,6 +645,7 @@ pub fn install_native_index_runtime_v1(
     journal_generation: request.runtime_publisher.generation,
     cancellation: request.cancellation.clone(),
     cadence,
+    service_options,
   });
   check_cancellation(request.cancellation)?;
   let snapshot = installation.install(&source_authority_guard, runtime).map_err(|error| match error {
