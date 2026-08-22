@@ -1101,7 +1101,7 @@
           - [x] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.
           - [x] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
           - [x] Freeze dependency-before-manifest-before-pointer ordering and the distinct soft/hard durability receipts before connecting first authority.
-        - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
+        - [x] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
           - [x] P6-3b0: close the frozen-batch semantic gap before manifest application.
             - [x] Freeze and independently fixture an AIRB v2 payload that preserves explicit upsert/remove mutation operations and exact per-owner/document live/unindexable transitions while retaining AIRB v1 readers.
               - [x] Stream AIRB v2 workspace writes and bounded two-pass reopen validation without materializing the payload or owner-wide transition state.
@@ -1115,17 +1115,17 @@
               - [x] Add fail-closed scope-reverse remove-by-key COW, including last-page retirement and no persisted reverse tombstone.
               - [x] Permit exact tombstone-only value/posting/state manifest closures while retaining all root/count invariants.
               - [x] Apply canonical owner transitions to exact successor manifest counters and reject missing/mismatched role summaries.
-          - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
-          - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
+          - [x] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
+          - [x] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
           - [x] Add one bounded multi-mutation page COW path and make the single-mutation API delegate to it.
           - [x] Traverse selected roots through a sparse immutable-artifact source plus bounded successor overlay; never materialize an owner-wide page set.
           - [x] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
           - [x] Chain more-than-four-path role rewrites through one bounded composite COW transcript with exact root, generation, PageID, mutation-partition, and combined workspace closure.
-          - [ ] Close absent-root bootstrap, idempotent no-op mutations, and mutation sets spanning more than four page paths in the full sparse applicator.
+          - [x] Close absent-root bootstrap, idempotent no-op mutations, and mutation sets spanning more than four page paths in the full sparse applicator.
             - [x] Build absent-role roots from canonical frozen upserts with exact page, directory, aggregate, PageID, and mutation-commitment closure.
             - [x] Rewrite exact idempotent page mutations at the successor generation so every published role closes through one uniform COW validator.
-            - [ ] Integrate bootstrap, no-op rewrite, and composite chaining into the storage-neutral full sparse applicator.
-          - [ ] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
+            - [x] Integrate bootstrap, no-op rewrite, and composite chaining into the storage-neutral full sparse applicator.
+          - [x] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
           - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.

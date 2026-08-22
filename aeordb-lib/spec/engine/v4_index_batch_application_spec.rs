@@ -9,9 +9,10 @@ use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBou
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_artifact::{EncodedImmutableIndexArtifactV1, IndexManifestWriteV1, decode_index_manifest, encode_index_manifest};
 use aeordb::engine::v4::index_batch_application::{
-  INDEX_BATCH_PATH_MAXIMUM_INPUT_BYTES_V1, IndexBatchApplicationErrorV1, IndexBatchArtifactOverlayLimitsV1, IndexBatchArtifactReadErrorV1,
-  IndexBatchArtifactSourceV1, IndexManifestSuccessorRequestV1, OrderedPagePathLookupLimitsV1, OrderedPagePathLookupRequestV1,
-  SparseIndexArtifactOverlayV1, load_ordered_page_path_v1, synthesize_successor_index_manifest_v1,
+  INDEX_BATCH_PATH_MAXIMUM_INPUT_BYTES_V1, FrozenIndexBatchApplicationRequestV1, FrozenIndexOwnerSourceV1, IndexBatchApplicationErrorV1,
+  IndexBatchArtifactOverlayLimitsV1, IndexBatchArtifactReadErrorV1, IndexBatchArtifactSourceV1, IndexManifestSuccessorRequestV1,
+  OrderedPagePathLookupLimitsV1, OrderedPagePathLookupRequestV1, SparseIndexArtifactOverlayV1, apply_frozen_index_batch_v1,
+  load_ordered_page_path_v1, synthesize_successor_index_manifest_v1,
 };
 use aeordb::engine::v4::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexGroupMutationRequestV1,
@@ -20,7 +21,7 @@ use aeordb::engine::v4::index_coordinator::{
 };
 use aeordb::engine::v4::index_copy_on_write::{
   ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteBootstrapRequestV1, IndexCopyOnWriteClosureRequestV1,
-  IndexCopyOnWriteClosureSummaryV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, bootstrap_ordered_index_v1,
+  IndexCopyOnWriteClosureSummaryV1, IndexPageLayoutV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, bootstrap_ordered_index_v1,
   default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
   validate_index_copy_on_write_closure_v1,
 };
@@ -86,6 +87,39 @@ fn transition_only_batch(
   coordinator.begin_flush(1_002, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap()
 }
 
+fn transition_only_batch_many(hash_algorithm: HashAlgorithm, owners: &[(&[u8], IndexMembershipOwnerClassV1)]) -> FrozenIndexBatchV1 {
+  let hard_limit = 1_000_000;
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(700_000, hard_limit, 1, 299_999).unwrap());
+  let mut coordinator = IndexCoordinatorV1::new(
+    [0x44; 16],
+    hash_algorithm,
+    memory,
+    IndexCoordinatorOptionsV1::new(500_000, 100, 1_000, 500_000).unwrap(),
+    1_000,
+  )
+  .unwrap();
+  for (index, (owner_id, owner_class)) in owners.iter().enumerate() {
+    coordinator
+      .admit_group(
+        IndexMutationGroupRequestV1 {
+          transition: IndexMembershipTransitionRequestV1 {
+            owner_id,
+            owner_class: *owner_class,
+            publication_sequence: 9,
+            operation_id: [u8::try_from(index).unwrap() + 0x70; 16],
+            document_ordinal: 7,
+            before: IndexMembershipStateV1 { live: false, unindexable: false },
+            after: IndexMembershipStateV1 { live: false, unindexable: false },
+          },
+          mutations: &[],
+        },
+        1_001 + u64::try_from(index).unwrap(),
+      )
+      .unwrap();
+  }
+  coordinator.begin_flush(1_100, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap()
+}
+
 fn mutation_batch(
   hash_algorithm: HashAlgorithm,
   owner_id: &[u8],
@@ -124,6 +158,51 @@ fn mutation_batch(
   coordinator.begin_flush(1_002, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap()
 }
 
+fn mutation_batch_many(
+  hash_algorithm: HashAlgorithm,
+  owner_id: &[u8],
+  owner_class: IndexMembershipOwnerClassV1,
+  role: OrderedIndexRoleV1,
+  encoded_records: &[Vec<u8>],
+) -> FrozenIndexBatchV1 {
+  let hard_limit = 4_000_000;
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(3_000_000, hard_limit, 1, 999_999).unwrap());
+  let mut coordinator = IndexCoordinatorV1::new(
+    [0x43; 16],
+    hash_algorithm,
+    memory,
+    IndexCoordinatorOptionsV1::new(2_000_000, 100, 1_000, 2_000_000).unwrap(),
+    1_000,
+  )
+  .unwrap();
+  for (index, encoded_record) in encoded_records.iter().enumerate() {
+    let document_ordinal = u64::try_from(index).unwrap() + 1;
+    let operation_id = [u8::try_from(index).unwrap() + 0x60; 16];
+    let mutations = [IndexGroupMutationRequestV1 {
+      operation: IndexMutationOperationV1::Upsert,
+      mutation: IndexMutationRequestV1 { index_id: owner_id, role, publication_sequence: 9, operation_id, encoded_record },
+    }];
+    coordinator
+      .admit_group(
+        IndexMutationGroupRequestV1 {
+          transition: IndexMembershipTransitionRequestV1 {
+            owner_id,
+            owner_class,
+            publication_sequence: 9,
+            operation_id,
+            document_ordinal,
+            before: IndexMembershipStateV1 { live: true, unindexable: false },
+            after: IndexMembershipStateV1 { live: true, unindexable: false },
+          },
+          mutations: &mutations,
+        },
+        1_001 + document_ordinal,
+      )
+      .unwrap();
+  }
+  coordinator.begin_flush(1_100, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap()
+}
+
 fn ordered_leaf_directory(hash_algorithm: HashAlgorithm, page: &EncodedImmutableIndexArtifactV1) -> EncodedImmutableIndexArtifactV1 {
   let page = decode_ordered_page(&page.value, hash_algorithm).unwrap();
   encode_artifact_directory(&ArtifactDirectoryWriteV1 {
@@ -145,6 +224,38 @@ fn ordered_leaf_directory(hash_algorithm: HashAlgorithm, page: &EncodedImmutable
       maximum_page_id: page.page_id,
       physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
     }],
+  })
+  .unwrap()
+}
+
+fn ordered_leaf_directory_many(
+  hash_algorithm: HashAlgorithm,
+  pages: &[EncodedImmutableIndexArtifactV1],
+) -> EncodedImmutableIndexArtifactV1 {
+  let pages = pages.iter().map(|page| decode_ordered_page(&page.value, hash_algorithm).unwrap()).collect::<Vec<_>>();
+  let entries = pages
+    .iter()
+    .map(|page| ArtifactDirectoryEntryWriteV1 {
+      lower_fence: page.lower_fence,
+      upper_fence: page.upper_fence,
+      child_hash: &page.key,
+      child_generation: page.generation,
+      live_count: u64::from(page.live_count),
+      tombstone_count: u64::from(page.tombstone_count),
+      page_count: 1,
+      logical_bytes: page.logical_live_bytes,
+      minimum_page_id: page.page_id,
+      maximum_page_id: page.page_id,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    })
+    .collect::<Vec<_>>();
+  encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm,
+    role: pages[0].role,
+    owner_id: pages[0].owner_id,
+    generation: pages[0].generation,
+    level: 0,
+    entries: &entries,
   })
   .unwrap()
 }
@@ -562,6 +673,573 @@ fn manifest_successor_accepts_absent_root_bootstrap_and_rejects_it_for_a_present
     assert!(
       matches!(error, IndexBatchApplicationErrorV1::Malformed(error) if error.class() == aeordb::engine::v4::reader::MalformedInputClass::CrossRecordClosureMismatch)
     );
+  }
+}
+
+#[test]
+fn frozen_batch_application_bootstraps_an_absent_role_into_a_publication_ready_owner_plan() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = fixture_manifest(hash_algorithm, "value-store");
+    let fixture = decode_index_manifest(&fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(fixture_body) = &fixture.details else {
+      panic!("fixture is a value-store manifest");
+    };
+    let source_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: fixture.generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        value_directory_root: None,
+        next_page_id: fixture_body.next_page_id,
+        value_page_count: 0,
+        value_document_count: 0,
+        live_value_count: 0,
+        value_tombstone_count: 0,
+        live_canonical_value_bytes: 0,
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let inserted_value =
+      encode_canonical_value(&CanonicalConfigValueV1::String("first".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+    let revision = vec![0xf1; hash_algorithm.hash_length()];
+    let inserted = encode_canonical_value_record(
+      &CanonicalValueRecordV1 {
+        tombstone: false,
+        document_ordinal: 7,
+        source_value_ordinal: 0,
+        record_revision_hash: &revision,
+        canonical_value: Some(&inserted_value),
+      },
+      hash_algorithm,
+    )
+    .unwrap();
+    let batch = mutation_batch(
+      hash_algorithm,
+      fixture.owner_id,
+      IndexMembershipOwnerClassV1::ValueStore,
+      OrderedIndexRoleV1::Value,
+      &inserted,
+      IndexMembershipStateV1 { live: false, unindexable: false },
+      IndexMembershipStateV1 { live: true, unindexable: false },
+    );
+    let namespace_root = vec![0xf2; hash_algorithm.hash_length()];
+    let epoch = vec![0xf3; 16];
+    let coverage =
+      CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 };
+    let owner_sources = [FrozenIndexOwnerSourceV1 { source_manifest: &source_manifest.value, next_document_ordinal: None }];
+    let mut source = CountingSource::default();
+    let plan = apply_frozen_index_batch_v1(
+      &FrozenIndexBatchApplicationRequestV1 {
+        hash_algorithm,
+        generation: fixture.generation.checked_add(1).unwrap(),
+        coverage: coverage.clone(),
+        batch: &batch,
+        owner_sources: &owner_sources,
+        overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+        path_limits: OrderedPagePathLookupLimitsV1::default(),
+        page_layout: default_index_page_layout_v1(),
+        directory_layout: default_index_directory_layout_v1(),
+      },
+      &mut source,
+      &|| false,
+    )
+    .unwrap();
+
+    assert_eq!(plan.coordinator_id(), batch.coordinator_id());
+    assert_eq!(plan.batch_id(), batch.batch_id());
+    assert_eq!(plan.attempt_id(), batch.attempt_id());
+    assert_eq!(plan.generation(), fixture.generation + 1);
+    assert_eq!(plan.owner_plans().len(), 1);
+    assert_eq!(plan.prepared_artifacts().len(), 2);
+    assert!(source.reads.is_empty(), "absent-root bootstrap must not read an artifact source");
+    let owner_plan = &plan.owner_plans()[0];
+    assert_eq!(owner_plan.owner_id(), fixture.owner_id);
+    assert_eq!(owner_plan.owner_class(), IndexMembershipOwnerClassV1::ValueStore);
+    assert_eq!(owner_plan.source_manifest_key(), source_manifest.key);
+    assert_eq!(owner_plan.dependency_range(), 0..2);
+    assert_eq!(owner_plan.role_summaries().len(), 1);
+    assert!(owner_plan.role_summaries()[0].source_root_key.is_none());
+    let successor = decode_index_manifest(&owner_plan.successor_manifest().value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(body) = successor.details else {
+      panic!("successor is a value-store manifest");
+    };
+    assert_eq!(body.coverage, coverage);
+    assert_eq!(body.value_directory_root, owner_plan.role_summaries()[0].root_key.as_deref());
+    assert_eq!(body.value_document_count, 1);
+    assert_eq!(body.live_value_count, 1);
+  }
+}
+
+#[test]
+fn frozen_batch_application_publishes_count_neutral_transition_only_owners_without_dependencies() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let source_manifest = fixture_manifest(hash_algorithm, "value-store");
+    let source = decode_index_manifest(&source_manifest, hash_algorithm).unwrap();
+    let batch = transition_only_batch(
+      hash_algorithm,
+      source.owner_id,
+      IndexMembershipOwnerClassV1::ValueStore,
+      IndexMembershipStateV1 { live: false, unindexable: false },
+      IndexMembershipStateV1 { live: false, unindexable: false },
+    );
+    let namespace_root = vec![0xf8; hash_algorithm.hash_length()];
+    let epoch = vec![0xf9; 16];
+    let coverage =
+      CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 };
+    let owner_sources = [FrozenIndexOwnerSourceV1 { source_manifest: &source_manifest, next_document_ordinal: None }];
+    let mut artifact_source = CountingSource::default();
+
+    let plan = apply_frozen_index_batch_v1(
+      &FrozenIndexBatchApplicationRequestV1 {
+        hash_algorithm,
+        generation: source.generation + 1,
+        coverage: coverage.clone(),
+        batch: &batch,
+        owner_sources: &owner_sources,
+        overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+        path_limits: OrderedPagePathLookupLimitsV1::default(),
+        page_layout: default_index_page_layout_v1(),
+        directory_layout: default_index_directory_layout_v1(),
+      },
+      &mut artifact_source,
+      &|| false,
+    )
+    .unwrap();
+
+    assert_eq!(plan.prepared_artifacts().len(), 0);
+    assert!(artifact_source.reads.is_empty());
+    assert_eq!(plan.owner_plans().len(), 1);
+    assert_eq!(plan.owner_plans()[0].dependency_range(), 0..0);
+    assert!(plan.owner_plans()[0].role_summaries().is_empty());
+    let successor = decode_index_manifest(&plan.owner_plans()[0].successor_manifest().value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(successor) = successor.details else {
+      panic!("successor is a value-store manifest");
+    };
+    assert_eq!(successor.coverage, coverage);
+  }
+}
+
+#[test]
+fn frozen_batch_application_failures_return_no_plan_and_leave_the_exact_batch_retryable() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = fixture_manifest(hash_algorithm, "value-store");
+    let fixture = decode_index_manifest(&fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(fixture_body) = &fixture.details else {
+      panic!("fixture is a value-store manifest");
+    };
+    let source_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: fixture.generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        value_directory_root: None,
+        next_page_id: fixture_body.next_page_id,
+        value_page_count: 0,
+        value_document_count: 0,
+        live_value_count: 0,
+        value_tombstone_count: 0,
+        live_canonical_value_bytes: 0,
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let value = encode_canonical_value(&CanonicalConfigValueV1::String("retry".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+    let revision = vec![0xfc; hash_algorithm.hash_length()];
+    let inserted = encode_canonical_value_record(
+      &CanonicalValueRecordV1 {
+        tombstone: false,
+        document_ordinal: 7,
+        source_value_ordinal: 0,
+        record_revision_hash: &revision,
+        canonical_value: Some(&value),
+      },
+      hash_algorithm,
+    )
+    .unwrap();
+    let batch = mutation_batch(
+      hash_algorithm,
+      fixture.owner_id,
+      IndexMembershipOwnerClassV1::ValueStore,
+      OrderedIndexRoleV1::Value,
+      &inserted,
+      IndexMembershipStateV1 { live: false, unindexable: false },
+      IndexMembershipStateV1 { live: true, unindexable: false },
+    );
+    let original_records = batch.records().to_vec();
+    let original_transitions = batch.transitions().to_vec();
+    let namespace_root = vec![0xfd; hash_algorithm.hash_length()];
+    let epoch = vec![0xfe; 16];
+    let coverage =
+      CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 };
+    let owner_sources = [FrozenIndexOwnerSourceV1 { source_manifest: &source_manifest.value, next_document_ordinal: None }];
+    let request = FrozenIndexBatchApplicationRequestV1 {
+      hash_algorithm,
+      generation: fixture.generation + 1,
+      coverage: coverage.clone(),
+      batch: &batch,
+      owner_sources: &owner_sources,
+      overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+      path_limits: OrderedPagePathLookupLimitsV1::default(),
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+
+    let mut source = CountingSource::default();
+    assert_eq!(apply_frozen_index_batch_v1(&request, &mut source, &|| true).unwrap_err(), IndexBatchApplicationErrorV1::Cancelled);
+    assert!(source.reads.is_empty());
+    let pressure_request = FrozenIndexBatchApplicationRequestV1 {
+      overlay_limits: IndexBatchArtifactOverlayLimitsV1::new(1, IndexBatchArtifactOverlayLimitsV1::default().maximum_retained_bytes())
+        .unwrap(),
+      ..request.clone()
+    };
+    assert_eq!(
+      apply_frozen_index_batch_v1(&pressure_request, &mut source, &|| false).unwrap_err(),
+      IndexBatchApplicationErrorV1::OverlayCount
+    );
+    let duplicate_sources = [owner_sources[0], owner_sources[0]];
+    let duplicate_request = FrozenIndexBatchApplicationRequestV1 { owner_sources: &duplicate_sources, ..request.clone() };
+    assert!(matches!(
+      apply_frozen_index_batch_v1(&duplicate_request, &mut source, &|| false),
+      Err(IndexBatchApplicationErrorV1::Malformed(_))
+    ));
+    let old_generation = FrozenIndexBatchApplicationRequestV1 { generation: fixture.generation, ..request.clone() };
+    assert!(matches!(
+      apply_frozen_index_batch_v1(&old_generation, &mut source, &|| false),
+      Err(IndexBatchApplicationErrorV1::Malformed(_))
+    ));
+    let no_sources = FrozenIndexBatchApplicationRequestV1 { owner_sources: &[], ..request.clone() };
+    assert!(matches!(
+      apply_frozen_index_batch_v1(&no_sources, &mut source, &|| false),
+      Err(IndexBatchApplicationErrorV1::InvalidLimits(_))
+    ));
+
+    assert_eq!(batch.records(), original_records);
+    assert_eq!(batch.transitions(), original_transitions);
+    let retry = apply_frozen_index_batch_v1(&request, &mut source, &|| false).unwrap();
+    assert_eq!(retry.coordinator_id(), batch.coordinator_id());
+    assert_eq!(retry.batch_id(), batch.batch_id());
+    assert_eq!(retry.attempt_id(), batch.attempt_id());
+    assert_eq!(retry.prepared_artifacts().len(), 2);
+  }
+}
+
+#[test]
+fn frozen_batch_application_rewrites_same_batch_parent_manifests_in_topological_order() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let scope_source = fixture_manifest(hash_algorithm, "scope-catalog");
+    let scope = decode_index_manifest(&scope_source, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ScopeCatalog(scope_body) = &scope.details else {
+      panic!("fixture is a scope-catalog manifest");
+    };
+    let value_fixture = fixture_manifest(hash_algorithm, "value-store");
+    let value_fixture = decode_index_manifest(&value_fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(value_body) = &value_fixture.details else {
+      panic!("fixture is a value-store manifest");
+    };
+    let value_source = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: value_fixture.generation,
+      owner_id: value_fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 { scope_catalog_manifest: &scope.key, ..value_body.clone() }),
+    })
+    .unwrap();
+    let field_fixture = fixture_manifest(hash_algorithm, "field-index");
+    let field_fixture = decode_index_manifest(&field_fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::FieldIndex(field_body) = &field_fixture.details else {
+      panic!("fixture is a field-index manifest");
+    };
+    let field_source = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: field_fixture.generation,
+      owner_id: field_fixture.owner_id,
+      body: IndexManifestBodyV1::FieldIndex(FieldIndexManifestBodyV1 { value_store_manifest: &value_source.key, ..field_body.clone() }),
+    })
+    .unwrap();
+    let owners = [
+      (scope.owner_id, IndexMembershipOwnerClassV1::ScopeCatalog),
+      (value_fixture.owner_id, IndexMembershipOwnerClassV1::ValueStore),
+      (field_fixture.owner_id, IndexMembershipOwnerClassV1::FieldIndex),
+    ];
+    let batch = transition_only_batch_many(hash_algorithm, &owners);
+    let mut owner_sources = vec![
+      FrozenIndexOwnerSourceV1 { source_manifest: &scope_source, next_document_ordinal: Some(scope_body.next_document_ordinal) },
+      FrozenIndexOwnerSourceV1 { source_manifest: &value_source.value, next_document_ordinal: None },
+      FrozenIndexOwnerSourceV1 { source_manifest: &field_source.value, next_document_ordinal: None },
+    ];
+    owner_sources.sort_unstable_by(|left, right| {
+      decode_index_manifest(left.source_manifest, hash_algorithm)
+        .unwrap()
+        .owner_id
+        .cmp(decode_index_manifest(right.source_manifest, hash_algorithm).unwrap().owner_id)
+    });
+    let generation = scope.generation.max(value_fixture.generation).max(field_fixture.generation) + 1;
+    let namespace_root = vec![0xfa; hash_algorithm.hash_length()];
+    let epoch = vec![0xfb; 16];
+    let mut artifact_source = CountingSource::default();
+    let request = FrozenIndexBatchApplicationRequestV1 {
+      hash_algorithm,
+      generation,
+      coverage: CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 },
+      batch: &batch,
+      owner_sources: &owner_sources,
+      overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+      path_limits: OrderedPagePathLookupLimitsV1::default(),
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+    let mut reversed_sources = owner_sources.clone();
+    reversed_sources.reverse();
+    let reversed_request = FrozenIndexBatchApplicationRequestV1 { owner_sources: &reversed_sources, ..request.clone() };
+    assert!(matches!(
+      apply_frozen_index_batch_v1(&reversed_request, &mut artifact_source, &|| false),
+      Err(IndexBatchApplicationErrorV1::Malformed(_))
+    ));
+    let plan = apply_frozen_index_batch_v1(&request, &mut artifact_source, &|| false).unwrap();
+
+    assert_eq!(plan.prepared_artifacts().len(), 0);
+    assert!(artifact_source.reads.is_empty());
+    assert_eq!(
+      plan.owner_plans().iter().map(|owner| owner.owner_class()).collect::<Vec<_>>(),
+      vec![IndexMembershipOwnerClassV1::ScopeCatalog, IndexMembershipOwnerClassV1::ValueStore, IndexMembershipOwnerClassV1::FieldIndex,]
+    );
+    assert!(plan.owner_plans().iter().all(|owner| owner.dependency_range() == (0..0)));
+    let scope_successor = plan.owner_plans()[0].successor_manifest();
+    let value_successor = plan.owner_plans()[1].successor_manifest();
+    let value = decode_index_manifest(&value_successor.value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(value) = value.details else {
+      panic!("successor is a value-store manifest");
+    };
+    assert_eq!(value.scope_catalog_manifest, scope_successor.key);
+    let field = decode_index_manifest(&plan.owner_plans()[2].successor_manifest().value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::FieldIndex(field) = field.details else {
+      panic!("successor is a field-index manifest");
+    };
+    assert_eq!(field.value_store_manifest, value_successor.key);
+  }
+}
+
+#[test]
+fn frozen_batch_application_sequences_more_than_four_present_page_paths_without_mutating_sources() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = fixture_manifest(hash_algorithm, "value-store");
+    let fixture = decode_index_manifest(&fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(fixture_body) = &fixture.details else {
+      panic!("fixture is a value-store manifest");
+    };
+    let mut records = Vec::new();
+    let mut pages = Vec::new();
+    for document_ordinal in 1u64..=6 {
+      let value =
+        encode_canonical_value(&CanonicalConfigValueV1::String(format!("value-{document_ordinal}")), CanonicalValueBounds::SOURCE_VALUE)
+          .unwrap();
+      let revision = vec![u8::try_from(document_ordinal).unwrap() + 0x20; hash_algorithm.hash_length()];
+      let record = encode_canonical_value_record(
+        &CanonicalValueRecordV1 {
+          tombstone: false,
+          document_ordinal,
+          source_value_ordinal: 0,
+          record_revision_hash: &revision,
+          canonical_value: Some(&value),
+        },
+        hash_algorithm,
+      )
+      .unwrap();
+      pages.push(
+        encode_ordered_page(&OrderedPageWriteV1 {
+          hash_algorithm,
+          role: OrderedIndexRoleV1::Value,
+          owner_id: fixture.owner_id,
+          generation: fixture.generation,
+          page_id: document_ordinal,
+          previous_page_id: 0,
+          next_page_id: 0,
+          records: &[&record],
+        })
+        .unwrap(),
+      );
+      records.push(record);
+    }
+    let source_root = ordered_leaf_directory_many(hash_algorithm, &pages);
+    let live_bytes = pages
+      .iter()
+      .try_fold(0u64, |bytes, page| bytes.checked_add(decode_ordered_page(&page.value, hash_algorithm).unwrap().logical_live_bytes));
+    let source_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: fixture.generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        value_directory_root: Some(&source_root.key),
+        next_page_id: 100,
+        value_page_count: 6,
+        value_document_count: 6,
+        live_value_count: 6,
+        value_tombstone_count: 0,
+        live_canonical_value_bytes: live_bytes.unwrap(),
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let immutable_manifest = source_manifest.value.clone();
+    let immutable_root = source_root.value.clone();
+    let immutable_pages = pages.iter().map(|page| page.value.clone()).collect::<Vec<_>>();
+    let batch =
+      mutation_batch_many(hash_algorithm, fixture.owner_id, IndexMembershipOwnerClassV1::ValueStore, OrderedIndexRoleV1::Value, &records);
+    let namespace_root = vec![0xf4; hash_algorithm.hash_length()];
+    let epoch = vec![0xf5; 16];
+    let coverage =
+      CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 };
+    let owner_sources = [FrozenIndexOwnerSourceV1 { source_manifest: &source_manifest.value, next_document_ordinal: None }];
+    let mut source = CountingSource::default();
+    for page in &pages {
+      source.insert(page);
+    }
+    source.insert(&source_root);
+    let request = FrozenIndexBatchApplicationRequestV1 {
+      hash_algorithm,
+      generation: fixture.generation + 6,
+      coverage,
+      batch: &batch,
+      owner_sources: &owner_sources,
+      overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+      path_limits: OrderedPagePathLookupLimitsV1::default(),
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+    let mut early_source = CountingSource::default();
+    for page in &pages {
+      early_source.insert(page);
+    }
+    early_source.insert(&source_root);
+    let early_request = FrozenIndexBatchApplicationRequestV1 { generation: fixture.generation + 5, ..request.clone() };
+    assert!(matches!(
+      apply_frozen_index_batch_v1(&early_request, &mut early_source, &|| false),
+      Err(IndexBatchApplicationErrorV1::Malformed(_))
+    ));
+    let plan = apply_frozen_index_batch_v1(&request, &mut source, &|| false).unwrap();
+
+    assert_eq!(plan.owner_plans().len(), 1);
+    assert_eq!(plan.prepared_artifacts().len(), 12);
+    assert!(source.reads.len() <= 20, "six sparse no-op rewrites performed unbounded source reads");
+    let owner_plan = &plan.owner_plans()[0];
+    assert_eq!(owner_plan.dependency_range(), 0..12);
+    assert_eq!(owner_plan.role_summaries().len(), 1);
+    let summary = &owner_plan.role_summaries()[0];
+    assert_eq!(summary.source_root_key.as_deref(), Some(source_root.key.as_slice()));
+    assert_eq!(summary.generation, fixture.generation + 6);
+    assert_eq!(summary.live_count, 6);
+    assert_eq!(summary.tombstone_count, 0);
+    assert_eq!(summary.page_count, 6);
+    assert_eq!(summary.page_artifact_count, 6);
+    assert_eq!(summary.directory_artifact_count, 6);
+    let successor = decode_index_manifest(&owner_plan.successor_manifest().value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(successor) = successor.details else {
+      panic!("successor is a value-store manifest");
+    };
+    assert_eq!(successor.value_directory_root, summary.root_key.as_deref());
+    assert_eq!(successor.value_page_count, 6);
+    assert_eq!(successor.value_document_count, 6);
+    assert_eq!(successor.live_value_count, 6);
+    assert_eq!(source_manifest.value, immutable_manifest);
+    assert_eq!(source_root.value, immutable_root);
+    assert_eq!(pages.iter().map(|page| &page.value).collect::<Vec<_>>(), immutable_pages.iter().collect::<Vec<_>>());
+  }
+}
+
+#[test]
+fn frozen_batch_application_preserves_logical_posting_endpoints_when_a_page_splits_and_relinks() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = fixture_manifest(hash_algorithm, "field-index");
+    let fixture = decode_index_manifest(&fixture, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::FieldIndex(fixture_body) = &fixture.details else {
+      panic!("fixture is a field-index manifest");
+    };
+    let first_page = posting_page(hash_algorithm, fixture.owner_id, 10, 10, 0, 20);
+    let last_page = posting_page(hash_algorithm, fixture.owner_id, 512, 20, 10, 0);
+    let pages = vec![first_page, last_page];
+    let source_root = ordered_leaf_directory_many(hash_algorithm, &pages);
+    let live_bytes = pages.iter().map(|page| decode_ordered_page(&page.value, hash_algorithm).unwrap().logical_live_bytes).sum();
+    let source_manifest = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: fixture.generation,
+      owner_id: fixture.owner_id,
+      body: IndexManifestBodyV1::FieldIndex(FieldIndexManifestBodyV1 {
+        posting_directory_root: Some(&source_root.key),
+        document_state_directory_root: None,
+        first_page_id: 10,
+        last_page_id: 20,
+        next_page_id: 30,
+        posting_page_count: 2,
+        state_page_count: 0,
+        live_posting_count: 2,
+        posting_tombstone_count: 0,
+        posting_document_count: 2,
+        unindexable_document_count: 0,
+        state_tombstone_count: 0,
+        live_canonical_posting_bytes: live_bytes,
+        ..fixture_body.clone()
+      }),
+    })
+    .unwrap();
+    let inserted = posting_record(7);
+    let batch = mutation_batch(
+      hash_algorithm,
+      fixture.owner_id,
+      IndexMembershipOwnerClassV1::FieldIndex,
+      OrderedIndexRoleV1::Posting,
+      &inserted,
+      IndexMembershipStateV1 { live: false, unindexable: false },
+      IndexMembershipStateV1 { live: true, unindexable: false },
+    );
+    let namespace_root = vec![0xf6; hash_algorithm.hash_length()];
+    let epoch = vec![0xf7; 16];
+    let owner_sources = [FrozenIndexOwnerSourceV1 { source_manifest: &source_manifest.value, next_document_ordinal: None }];
+    let mut source = CountingSource::default();
+    for page in &pages {
+      source.insert(page);
+    }
+    source.insert(&source_root);
+    let source_page_bytes = pages[0].value.len();
+    let page_layout = IndexPageLayoutV1 {
+      merge_below_bytes: source_page_bytes / 2,
+      target_bytes: source_page_bytes,
+      split_above_bytes: source_page_bytes + 1,
+      ..default_index_page_layout_v1()
+    };
+
+    let request = FrozenIndexBatchApplicationRequestV1 {
+      hash_algorithm,
+      generation: fixture.generation + 1,
+      coverage: CoverageVersionV1 { source_namespace_root: &namespace_root, coverage_epoch_id: &epoch, coverage_publication_sequence: 9 },
+      batch: &batch,
+      owner_sources: &owner_sources,
+      overlay_limits: IndexBatchArtifactOverlayLimitsV1::default(),
+      path_limits: OrderedPagePathLookupLimitsV1::default(),
+      page_layout,
+      directory_layout: default_index_directory_layout_v1(),
+    };
+    source.failure = Some(IndexBatchArtifactReadErrorV1::ResourcePressure("injected pressure".to_string()));
+    assert_eq!(
+      apply_frozen_index_batch_v1(&request, &mut source, &|| false).unwrap_err(),
+      IndexBatchApplicationErrorV1::SourcePressure("injected pressure".to_string())
+    );
+    let plan = apply_frozen_index_batch_v1(&request, &mut source, &|| false).unwrap();
+
+    let owner_plan = &plan.owner_plans()[0];
+    let summary = &owner_plan.role_summaries()[0];
+    assert_eq!(summary.page_count, 3);
+    assert_eq!(summary.live_count, 3);
+    assert_eq!(summary.next_page_id, 31);
+    assert_eq!(summary.page_artifact_count, 3, "the split must rewrite both output pages and the relinked successor");
+    let successor = decode_index_manifest(&owner_plan.successor_manifest().value, hash_algorithm).unwrap();
+    let IndexManifestBodyV1::FieldIndex(successor) = successor.details else {
+      panic!("successor is a field-index manifest");
+    };
+    assert_eq!(successor.first_page_id, 10);
+    assert_eq!(successor.last_page_id, 20, "maximum allocated PageID is not the logical posting tail");
+    assert_eq!(successor.next_page_id, 31);
+    assert_eq!(successor.posting_page_count, 3);
+    assert_eq!(successor.live_posting_count, 3);
   }
 }
 

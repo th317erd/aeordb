@@ -280,6 +280,8 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub logical_bytes: u64,
   pub minimum_page_id: u64,
   pub maximum_page_id: u64,
+  first_page_id: u64,
+  last_page_id: u64,
   pub initial_next_page_id: u64,
   pub next_page_id: u64,
   pub mutation_commitment: Option<Vec<u8>>,
@@ -291,6 +293,16 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub directory_artifact_bytes: usize,
   pub retained_encoded_bytes: usize,
   _validated: IndexCopyOnWriteClosureSealV1,
+}
+
+impl IndexCopyOnWriteClosureSummaryV1 {
+  pub const fn first_page_id(&self) -> u64 {
+    self.first_page_id
+  }
+
+  pub const fn last_page_id(&self) -> u64 {
+    self.last_page_id
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,6 +722,8 @@ pub fn bootstrap_ordered_index_v1(request: &IndexCopyOnWriteBootstrapRequestV1<'
       logical_bytes: root.logical_bytes,
       minimum_page_id: root.minimum_page_id,
       maximum_page_id: root.maximum_page_id,
+      first_page_id: root.minimum_page_id,
+      last_page_id: root.maximum_page_id,
       initial_next_page_id: request.initial_next_page_id,
       next_page_id,
       mutation_commitment: Some(mutation_commitment),
@@ -1212,6 +1226,8 @@ pub fn validate_index_copy_on_write_closure_v1(
     logical_bytes: request.directory_plan.logical_bytes,
     minimum_page_id: request.directory_plan.minimum_page_id,
     maximum_page_id: request.directory_plan.maximum_page_id,
+    first_page_id: request.directory_plan.minimum_page_id,
+    last_page_id: request.directory_plan.maximum_page_id,
     initial_next_page_id: request.initial_next_page_id,
     next_page_id: request.page_plan.next_page_id,
     mutation_commitment,
@@ -1337,6 +1353,8 @@ pub fn validate_index_copy_on_write_composite_closure_v1(
     logical_bytes: final_closure.logical_bytes,
     minimum_page_id: final_closure.minimum_page_id,
     maximum_page_id: final_closure.maximum_page_id,
+    first_page_id: final_closure.first_page_id,
+    last_page_id: final_closure.last_page_id,
     initial_next_page_id: request.initial_next_page_id,
     next_page_id: final_closure.next_page_id,
     mutation_commitment: Some(mutation_commitment),
@@ -1349,6 +1367,34 @@ pub fn validate_index_copy_on_write_composite_closure_v1(
     retained_encoded_bytes,
     _validated: IndexCopyOnWriteClosureSealV1,
   })
+}
+
+pub(crate) fn bind_logical_page_endpoints_v1(
+  summary: &mut IndexCopyOnWriteClosureSummaryV1,
+  first_page_id: u64,
+  last_page_id: u64,
+) -> FormatResult<()> {
+  if summary.role != OrderedIndexRoleV1::Posting || summary.root_key.is_none() {
+    return Err(closure_error(
+      "index_cow_logical_page_endpoints",
+      "logical page endpoints may be rebound only for a populated posting closure",
+    ));
+  }
+  if first_page_id < summary.minimum_page_id
+    || first_page_id > summary.maximum_page_id
+    || last_page_id < summary.minimum_page_id
+    || last_page_id > summary.maximum_page_id
+    || first_page_id >= summary.next_page_id
+    || last_page_id >= summary.next_page_id
+  {
+    return Err(closure_error(
+      "index_cow_logical_page_endpoints",
+      "logical page endpoints fall outside the validated posting closure bounds",
+    ));
+  }
+  summary.first_page_id = first_page_id;
+  summary.last_page_id = last_page_id;
+  Ok(())
 }
 
 #[derive(Debug)]
@@ -2700,6 +2746,14 @@ fn validate_directory_layout(layout: IndexDirectoryLayoutV1) -> FormatResult<()>
     return Err(amplification_error("index_cow_directory_layout", "directory target, hard cap, or workspace bound is invalid"));
   }
   Ok(())
+}
+
+pub(crate) fn validate_index_application_layouts_v1(
+  page_layout: IndexPageLayoutV1,
+  directory_layout: IndexDirectoryLayoutV1,
+) -> FormatResult<()> {
+  validate_layout(page_layout)?;
+  validate_directory_layout(directory_layout)
 }
 
 #[derive(Debug)]

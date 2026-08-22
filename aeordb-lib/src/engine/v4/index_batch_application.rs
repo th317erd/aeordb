@@ -1,7 +1,9 @@
-//! Bounded sparse reads and successor-artifact retention for frozen index batches.
+//! Bounded sparse reads and publication-ready immutable application of frozen index batches.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -9,14 +11,21 @@ use thiserror::Error;
 use crate::engine::HashAlgorithm;
 
 use super::index_artifact::{
-  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, IndexManifestWriteV1, decode_immutable_index_artifact,
+  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, IndexManifestV1, IndexManifestWriteV1, decode_immutable_index_artifact,
   decode_index_manifest, encode_index_manifest,
 };
 use super::index_coordinator::{
-  IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1, PublishedIndexMembershipTransitionV1,
+  FrozenIndexBatchV1, IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1, PublishedIndexMembershipTransitionV1,
   PublishedIndexMutationV1,
 };
-use super::index_copy_on_write::{IndexCopyOnWriteClosureSummaryV1, IndexMutationCommitmentV1, OrderedPageMutationKindV1};
+use super::index_copy_on_write::{
+  ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1,
+  IndexCopyOnWriteBootstrapRequestV1, IndexCopyOnWriteClosureRequestV1, IndexCopyOnWriteClosureSummaryV1,
+  IndexCopyOnWriteCompositeClosureRequestV1, IndexCopyOnWriteCompositeStepV1, IndexDirectoryLayoutV1, IndexMutationCommitmentV1,
+  IndexPageLayoutV1, OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1, bootstrap_ordered_index_v1,
+  bind_logical_page_endpoints_v1, mutate_ordered_page_batch_for_publication_v1, rewrite_artifact_directory_paths_v1,
+  validate_index_application_layouts_v1, validate_index_copy_on_write_closure_v1, validate_index_copy_on_write_composite_closure_v1,
+};
 use super::index_generation_publication::{INDEX_GENERATION_DEPENDENCY_HARD_CAP_V1, INDEX_GENERATION_TOTAL_BYTES_HARD_CAP_V1};
 use super::index_manifest::{
   CoverageVersionV1, FieldIndexManifestBodyV1, IndexManifestBodyV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1,
@@ -105,6 +114,889 @@ pub struct IndexManifestSuccessorRequestV1<'a> {
   pub mutations: &'a [PublishedIndexMutationV1],
   pub transitions: &'a [PublishedIndexMembershipTransitionV1],
   pub role_summaries: &'a [IndexCopyOnWriteClosureSummaryV1],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FrozenIndexOwnerSourceV1<'a> {
+  pub source_manifest: &'a [u8],
+  pub next_document_ordinal: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct FrozenIndexBatchApplicationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub generation: u64,
+  pub coverage: CoverageVersionV1<'a>,
+  pub batch: &'a FrozenIndexBatchV1,
+  pub owner_sources: &'a [FrozenIndexOwnerSourceV1<'a>],
+  pub overlay_limits: IndexBatchArtifactOverlayLimitsV1,
+  pub path_limits: OrderedPagePathLookupLimitsV1,
+  pub page_layout: IndexPageLayoutV1,
+  pub directory_layout: IndexDirectoryLayoutV1,
+}
+
+#[derive(Debug)]
+pub struct FrozenIndexOwnerApplicationPlanV1 {
+  owner_id: Vec<u8>,
+  owner_class: IndexMembershipOwnerClassV1,
+  source_manifest_key: Vec<u8>,
+  source_generation: u64,
+  successor_manifest: EncodedImmutableIndexArtifactV1,
+  dependency_range: Range<usize>,
+  role_summaries: Vec<IndexCopyOnWriteClosureSummaryV1>,
+}
+
+impl FrozenIndexOwnerApplicationPlanV1 {
+  pub fn owner_id(&self) -> &[u8] {
+    &self.owner_id
+  }
+
+  pub const fn owner_class(&self) -> IndexMembershipOwnerClassV1 {
+    self.owner_class
+  }
+
+  pub fn source_manifest_key(&self) -> &[u8] {
+    &self.source_manifest_key
+  }
+
+  pub const fn source_generation(&self) -> u64 {
+    self.source_generation
+  }
+
+  pub fn successor_manifest(&self) -> &EncodedImmutableIndexArtifactV1 {
+    &self.successor_manifest
+  }
+
+  pub fn dependency_range(&self) -> Range<usize> {
+    self.dependency_range.clone()
+  }
+
+  pub fn role_summaries(&self) -> &[IndexCopyOnWriteClosureSummaryV1] {
+    &self.role_summaries
+  }
+}
+
+#[derive(Debug)]
+pub struct FrozenIndexBatchApplicationPlanV1 {
+  coordinator_id: [u8; 16],
+  batch_id: u64,
+  attempt_id: u64,
+  generation: u64,
+  overlay: SparseIndexArtifactOverlayV1,
+  owner_plans: Vec<FrozenIndexOwnerApplicationPlanV1>,
+}
+
+impl FrozenIndexBatchApplicationPlanV1 {
+  pub const fn coordinator_id(&self) -> [u8; 16] {
+    self.coordinator_id
+  }
+
+  pub const fn batch_id(&self) -> u64 {
+    self.batch_id
+  }
+
+  pub const fn attempt_id(&self) -> u64 {
+    self.attempt_id
+  }
+
+  pub const fn generation(&self) -> u64 {
+    self.generation
+  }
+
+  pub fn prepared_artifacts(&self) -> impl ExactSizeIterator<Item = &EncodedImmutableIndexArtifactV1> {
+    self.overlay.prepared_artifacts()
+  }
+
+  pub fn owner_plans(&self) -> &[FrozenIndexOwnerApplicationPlanV1] {
+    &self.owner_plans
+  }
+}
+
+struct PendingFrozenOwnerApplicationV1<'a> {
+  source_manifest: &'a [u8],
+  source_manifest_key: Vec<u8>,
+  owner_id: Vec<u8>,
+  owner_class: IndexMembershipOwnerClassV1,
+  source_generation: u64,
+  next_document_ordinal: Option<u64>,
+  mutation_range: Range<usize>,
+  transition_range: Range<usize>,
+  dependency_range: Range<usize>,
+  role_summaries: Vec<IndexCopyOnWriteClosureSummaryV1>,
+}
+
+pub fn apply_frozen_index_batch_v1(
+  request: &FrozenIndexBatchApplicationRequestV1<'_>,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<FrozenIndexBatchApplicationPlanV1, IndexBatchApplicationErrorV1> {
+  validate_frozen_application_request(request)?;
+  check_cancelled(is_cancelled)?;
+  let mut overlay = SparseIndexArtifactOverlayV1::new(request.hash_algorithm, request.overlay_limits)?;
+  let mut pending = Vec::new();
+  pending
+    .try_reserve_exact(request.owner_sources.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("owner application reservation failed: {error}")))?;
+  let mut mutation_index = 0usize;
+  let mut transition_index = 0usize;
+  let mut previous_owner_id: Option<&[u8]> = None;
+  for owner_source in request.owner_sources {
+    check_cancelled(is_cancelled)?;
+    let manifest = decode_index_manifest(owner_source.source_manifest, request.hash_algorithm)?;
+    if previous_owner_id.is_some_and(|owner_id| owner_id >= manifest.owner_id) {
+      return Err(manifest_closure_error("frozen owner sources are not in strict canonical owner order"));
+    }
+    if request.batch.records().get(mutation_index).is_some_and(|mutation| mutation.index_id() < manifest.owner_id)
+      || request.batch.transitions().get(transition_index).is_some_and(|transition| transition.owner_id() < manifest.owner_id)
+    {
+      return Err(manifest_closure_error("frozen batch has an owner without a source manifest"));
+    }
+    let mutation_start = mutation_index;
+    while request.batch.records().get(mutation_index).is_some_and(|mutation| mutation.index_id() == manifest.owner_id) {
+      mutation_index += 1;
+    }
+    let transition_start = transition_index;
+    while request.batch.transitions().get(transition_index).is_some_and(|transition| transition.owner_id() == manifest.owner_id) {
+      transition_index += 1;
+    }
+    if mutation_start == mutation_index && transition_start == transition_index {
+      return Err(manifest_closure_error("frozen owner source has no mutation or membership transition"));
+    }
+    if request.generation <= manifest.generation {
+      return Err(manifest_closure_error("frozen application generation is not newer than every source manifest"));
+    }
+    let owner_class = manifest_owner_class(&manifest.details)?;
+    let mutations = &request.batch.records()[mutation_start..mutation_index];
+    let transitions = &request.batch.transitions()[transition_start..transition_index];
+    let validation_request = IndexManifestSuccessorRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      source_manifest: owner_source.source_manifest,
+      generation: request.generation,
+      parent_manifest_key: source_parent_manifest_key(&manifest.details),
+      coverage: request.coverage.clone(),
+      next_document_ordinal: owner_source.next_document_ordinal,
+      mutations,
+      transitions,
+      role_summaries: &[],
+    };
+    let transition_deltas = validate_manifest_transitions(&validation_request, manifest.owner_id, owner_class, is_cancelled)?;
+    let mutation_closure = validate_manifest_mutations(&validation_request, manifest.owner_id, owner_class, is_cancelled)?;
+    if transition_deltas.required_roles & !mutation_closure.role_mask != 0 {
+      return Err(manifest_closure_error("membership-changing transitions are missing their required ordered-record mutations"));
+    }
+    let dependency_start = overlay.artifact_count();
+    let role_summaries = apply_owner_roles(request, &manifest, mutations, &mut overlay, source, is_cancelled)?;
+    let dependency_end = overlay.artifact_count();
+    pending.push(PendingFrozenOwnerApplicationV1 {
+      source_manifest: owner_source.source_manifest,
+      source_manifest_key: manifest.key,
+      owner_id: clone_bytes(manifest.owner_id, "frozen owner identity")?,
+      owner_class,
+      source_generation: manifest.generation,
+      next_document_ordinal: owner_source.next_document_ordinal,
+      mutation_range: mutation_start..mutation_index,
+      transition_range: transition_start..transition_index,
+      dependency_range: dependency_start..dependency_end,
+      role_summaries,
+    });
+    previous_owner_id = Some(manifest.owner_id);
+  }
+  if mutation_index != request.batch.records().len() || transition_index != request.batch.transitions().len() {
+    return Err(manifest_closure_error("frozen batch has an owner without a source manifest"));
+  }
+
+  let owner_plans = synthesize_frozen_owner_plans(request, pending, is_cancelled)?;
+  Ok(FrozenIndexBatchApplicationPlanV1 {
+    coordinator_id: request.batch.coordinator_id(),
+    batch_id: request.batch.batch_id(),
+    attempt_id: request.batch.attempt_id(),
+    generation: request.generation,
+    overlay,
+    owner_plans,
+  })
+}
+
+fn validate_frozen_application_request(request: &FrozenIndexBatchApplicationRequestV1<'_>) -> Result<(), IndexBatchApplicationErrorV1> {
+  validate_successor_coverage(&request.coverage, request.hash_algorithm)?;
+  IndexBatchArtifactOverlayLimitsV1::new(request.overlay_limits.maximum_artifacts(), request.overlay_limits.maximum_retained_bytes())?;
+  OrderedPagePathLookupLimitsV1::new(request.path_limits.maximum_directory_depth(), request.path_limits.maximum_input_bytes())?;
+  validate_index_application_layouts_v1(request.page_layout, request.directory_layout)?;
+  if request.generation == 0
+    || request.owner_sources.is_empty()
+    || request.owner_sources.len() > INDEX_GENERATION_DEPENDENCY_HARD_CAP_V1
+    || request.batch.records().is_empty() && request.batch.transitions().is_empty()
+  {
+    return Err(IndexBatchApplicationErrorV1::InvalidLimits(
+      "frozen application generation, owner-source count, or batch contents are invalid".to_string(),
+    ));
+  }
+  Ok(())
+}
+
+fn apply_owner_roles(
+  request: &FrozenIndexBatchApplicationRequestV1<'_>,
+  source_manifest: &IndexManifestV1<'_>,
+  mutations: &[PublishedIndexMutationV1],
+  overlay: &mut SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<IndexCopyOnWriteClosureSummaryV1>, IndexBatchApplicationErrorV1> {
+  let mut summaries = Vec::new();
+  summaries
+    .try_reserve_exact(ordered_role_count(&source_manifest.details))
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("role-summary reservation failed: {error}")))?;
+  let mut mutation_index = 0usize;
+  let mut next_page_id = source_next_page_id(&source_manifest.details);
+  while mutation_index < mutations.len() {
+    check_cancelled(is_cancelled)?;
+    let role = mutations[mutation_index].role();
+    let role_start = mutation_index;
+    while mutations.get(mutation_index).is_some_and(|mutation| mutation.role() == role) {
+      mutation_index += 1;
+    }
+    let role_mutations = &mutations[role_start..mutation_index];
+    let summary = if let Some(source_root_key) = source_role_root(&source_manifest.details, role)? {
+      let (first_page_id, last_page_id) = source_role_page_boundaries(&source_manifest.details, role);
+      apply_present_role(
+        request,
+        source_manifest.owner_id,
+        role,
+        source_manifest.generation,
+        next_page_id,
+        first_page_id,
+        last_page_id,
+        source_root_key,
+        role_mutations,
+        overlay,
+        source,
+        is_cancelled,
+      )?
+    } else {
+      let role_mutations = published_mutation_kinds(request.hash_algorithm, role_mutations, is_cancelled)?;
+      let bootstrap = bootstrap_ordered_index_v1(&IndexCopyOnWriteBootstrapRequestV1 {
+        hash_algorithm: request.hash_algorithm,
+        owner_id: source_manifest.owner_id,
+        role,
+        generation: request.generation,
+        initial_next_page_id: next_page_id,
+        mutations: &role_mutations,
+        page_layout: request.page_layout,
+        directory_layout: request.directory_layout,
+      })?;
+      for artifact in bootstrap.artifacts {
+        overlay.insert(artifact)?;
+      }
+      bootstrap.summary
+    };
+    next_page_id = summary.next_page_id;
+    summaries.push(summary);
+  }
+  Ok(summaries)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_present_role(
+  request: &FrozenIndexBatchApplicationRequestV1<'_>,
+  owner_id: &[u8],
+  role: OrderedIndexRoleV1,
+  source_generation: u64,
+  initial_next_page_id: u64,
+  mut first_page_id: u64,
+  mut last_page_id: u64,
+  source_root_key: &[u8],
+  mutations: &[PublishedIndexMutationV1],
+  overlay: &mut SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<IndexCopyOnWriteClosureSummaryV1, IndexBatchApplicationErrorV1> {
+  validate_sparse_metadata_budget(mutations.len(), request.directory_layout.maximum_workspace_bytes)?;
+  let semantic_indices = semantic_mutation_indices(request.hash_algorithm, role, mutations, is_cancelled)?;
+  let ranges =
+    plan_present_role_ranges(request, owner_id, role, source_root_key, mutations, &semantic_indices, overlay, source, is_cancelled)?;
+  let step_count = ranges.len();
+  let step_offset = u64::try_from(step_count.saturating_sub(1))
+    .map_err(|error| manifest_closure_error(format!("sparse application step count is not representable: {error}")))?;
+  let first_generation = request
+    .generation
+    .checked_sub(step_offset)
+    .filter(|generation| *generation > source_generation)
+    .ok_or_else(|| manifest_closure_error("successor generation has insufficient room for its sparse application steps"))?;
+  let mut current_root_key = clone_bytes(source_root_key, "present-role source root")?;
+  let mut next_page_id = initial_next_page_id;
+  let mut summaries = Vec::new();
+  let mut step_mutations = Vec::new();
+  summaries
+    .try_reserve_exact(ranges.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("sparse closure reservation failed: {error}")))?;
+  step_mutations
+    .try_reserve_exact(ranges.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("sparse mutation partition reservation failed: {error}")))?;
+
+  for (step_index, range) in ranges.into_iter().enumerate() {
+    check_cancelled(is_cancelled)?;
+    let generation = first_generation
+      .checked_add(
+        u64::try_from(step_index)
+          .map_err(|error| manifest_closure_error(format!("sparse application step index is not representable: {error}")))?,
+      )
+      .ok_or_else(|| manifest_closure_error("sparse application generation overflowed"))?;
+    let mut semantic_kinds = Vec::new();
+    semantic_kinds
+      .try_reserve_exact(range.len())
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("semantic mutation reservation failed: {error}")))?;
+    let mut frozen_indices = Vec::new();
+    frozen_indices
+      .try_reserve_exact(range.len())
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("frozen mutation index reservation failed: {error}")))?;
+    for (range_index, semantic_index) in semantic_indices[range.clone()].iter().enumerate() {
+      if range_index % 4_096 == 0 {
+        check_cancelled(is_cancelled)?;
+      }
+      let mutation = &mutations[*semantic_index];
+      semantic_kinds.push(published_mutation_kind(request.hash_algorithm, mutation)?);
+      frozen_indices.push(*semantic_index);
+    }
+    sort_frozen_mutation_indices(mutations, &mut frozen_indices, is_cancelled)?;
+    let mut frozen_kinds = Vec::new();
+    frozen_kinds
+      .try_reserve_exact(frozen_indices.len())
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("frozen mutation reservation failed: {error}")))?;
+    for mutation_index in frozen_indices {
+      frozen_kinds.push(published_mutation_kind(request.hash_algorithm, &mutations[mutation_index])?);
+    }
+
+    let first_mutation = &mutations[semantic_indices[range.start]];
+    let path = load_ordered_page_path_v1(
+      &OrderedPagePathLookupRequestV1 {
+        hash_algorithm: request.hash_algorithm,
+        root_key: &current_root_key,
+        owner_id,
+        role,
+        order_key: first_mutation.order_key(),
+        load_posting_successor: role == OrderedIndexRoleV1::Posting,
+        limits: request.path_limits,
+      },
+      overlay,
+      source,
+      is_cancelled,
+    )?;
+    validate_planned_range_against_path(request.hash_algorithm, role, mutations, &semantic_indices[range], &path)?;
+    let page_plan = mutate_ordered_page_batch_for_publication_v1(&OrderedPageBatchMutationRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      source_page: path.page(),
+      next_posting_page: path.next_posting_page(),
+      generation,
+      next_page_id,
+      mutations: &semantic_kinds,
+      layout: request.page_layout,
+    })?;
+    if role == OrderedIndexRoleV1::Posting {
+      let source_page = decode_ordered_page(path.page(), request.hash_algorithm)?;
+      let replacement =
+        page_plan.replacements.first().ok_or_else(|| manifest_closure_error("publication page mutation produced no replacement"))?;
+      let first_output = replacement
+        .artifacts
+        .first()
+        .ok_or_else(|| manifest_closure_error("posting mutation retired a page without an endpoint replacement"))?;
+      let last_output = replacement
+        .artifacts
+        .last()
+        .ok_or_else(|| manifest_closure_error("posting mutation retired a page without an endpoint replacement"))?;
+      if source_page.page_id == first_page_id {
+        first_page_id = decode_ordered_page(&first_output.value, request.hash_algorithm)?.page_id;
+      }
+      if source_page.page_id == last_page_id {
+        last_page_id = decode_ordered_page(&last_output.value, request.hash_algorithm)?.page_id;
+      }
+    }
+    let main_directories = collect_path_directories(&path, false)?;
+    let next_directories = collect_path_directories(&path, true)?;
+    let mut paths = Vec::new();
+    let mut source_pages = Vec::new();
+    paths
+      .try_reserve_exact(page_plan.replacements.len())
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("copy-on-write path reservation failed: {error}")))?;
+    source_pages
+      .try_reserve_exact(page_plan.replacements.len())
+      .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("copy-on-write source-page reservation failed: {error}")))?;
+    let main_replacement =
+      page_plan.replacements.first().ok_or_else(|| manifest_closure_error("publication page mutation produced no replacement"))?;
+    paths.push(ArtifactDirectoryPathV1 { source_page_key: &main_replacement.source_key, directories: &main_directories });
+    source_pages.push(path.page());
+    if page_plan.replacements.len() == 2 {
+      let next_page =
+        path.next_posting_page().ok_or_else(|| manifest_closure_error("posting relink replacement has no loaded successor page"))?;
+      let next_replacement = &page_plan.replacements[1];
+      paths.push(ArtifactDirectoryPathV1 { source_page_key: &next_replacement.source_key, directories: &next_directories });
+      source_pages.push(next_page);
+    } else if page_plan.replacements.len() != 1 {
+      return Err(manifest_closure_error("one sparse page step produced an unsupported replacement count"));
+    }
+    let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      generation,
+      page_plan: &page_plan,
+      paths: &paths,
+      layout: request.directory_layout,
+    })?;
+    let mut summary = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      generation,
+      initial_next_page_id: next_page_id,
+      applied_mutations: Some(&frozen_kinds),
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: &page_plan,
+      directory_plan: &directory_plan,
+      page_layout: request.page_layout,
+      directory_layout: request.directory_layout,
+    })?;
+    if role == OrderedIndexRoleV1::Posting {
+      bind_logical_page_endpoints_v1(&mut summary, first_page_id, last_page_id)?;
+    }
+    next_page_id = summary.next_page_id;
+    if step_index + 1 < step_count {
+      current_root_key = clone_bytes(
+        summary
+          .root_key
+          .as_deref()
+          .ok_or_else(|| manifest_closure_error("an intermediate sparse application step retired its role root"))?,
+        "intermediate sparse root",
+      )?;
+    }
+    for replacement in page_plan.replacements {
+      for artifact in replacement.artifacts {
+        overlay.insert(artifact)?;
+      }
+    }
+    for artifact in directory_plan.artifacts {
+      overlay.insert(artifact)?;
+    }
+    summaries.push(summary);
+    step_mutations.push(frozen_kinds);
+  }
+
+  if summaries.len() == 1 {
+    return summaries.pop().ok_or_else(|| manifest_closure_error("single sparse application summary disappeared"));
+  }
+  let mut steps = Vec::new();
+  steps
+    .try_reserve_exact(summaries.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("composite step reservation failed: {error}")))?;
+  for (summary, mutations) in summaries.iter().zip(&step_mutations) {
+    steps.push(IndexCopyOnWriteCompositeStepV1 { closure: summary, applied_mutations: mutations });
+  }
+  let all_mutations = published_mutation_kinds(request.hash_algorithm, mutations, is_cancelled)?;
+  Ok(validate_index_copy_on_write_composite_closure_v1(&IndexCopyOnWriteCompositeClosureRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    initial_next_page_id,
+    source_root_key,
+    applied_mutations: &all_mutations,
+    steps: &steps,
+    maximum_workspace_bytes: request.directory_layout.maximum_workspace_bytes,
+  })?)
+}
+
+fn validate_sparse_metadata_budget(mutation_count: usize, maximum_workspace_bytes: usize) -> Result<(), IndexBatchApplicationErrorV1> {
+  let mutation_metadata = mutation_count
+    .checked_mul(size_of::<usize>() + 4 * size_of::<OrderedPageMutationKindV1<'_>>())
+    .ok_or_else(|| manifest_closure_error("sparse mutation metadata bytes overflowed"))?;
+  let maximum_steps = mutation_count.min(INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1);
+  let step_metadata = maximum_steps
+    .checked_mul(
+      size_of::<Range<usize>>()
+        + size_of::<IndexCopyOnWriteClosureSummaryV1>()
+        + size_of::<Vec<OrderedPageMutationKindV1<'_>>>()
+        + size_of::<IndexCopyOnWriteCompositeStepV1<'_>>(),
+    )
+    .ok_or_else(|| manifest_closure_error("sparse step metadata bytes overflowed"))?;
+  let total =
+    mutation_metadata.checked_add(step_metadata).ok_or_else(|| manifest_closure_error("sparse application metadata bytes overflowed"))?;
+  if total > maximum_workspace_bytes {
+    return Err(IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+      MalformedInputClass::AllocationAmplification,
+      "index_batch_application_metadata",
+      format!("{total} sparse application metadata bytes exceed the {maximum_workspace_bytes}-byte workspace cap"),
+    )));
+  }
+  Ok(())
+}
+
+fn sort_frozen_mutation_indices(
+  mutations: &[PublishedIndexMutationV1],
+  indices: &mut [usize],
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  for (iteration, root) in (0..indices.len() / 2).rev().enumerate() {
+    if iteration % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    sift_frozen_mutation_heap(mutations, indices, root, indices.len())?;
+  }
+  for (iteration, end) in (1..indices.len()).rev().enumerate() {
+    if iteration % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    indices.swap(0, end);
+    sift_frozen_mutation_heap(mutations, indices, 0, end)?;
+  }
+  if indices.windows(2).any(|pair| mutations[pair[0]].order_key() >= mutations[pair[1]].order_key()) {
+    return Err(manifest_closure_error("sparse step mutations are not unique in frozen byte order"));
+  }
+  Ok(())
+}
+
+fn sift_frozen_mutation_heap(
+  mutations: &[PublishedIndexMutationV1],
+  indices: &mut [usize],
+  mut root: usize,
+  end: usize,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  loop {
+    let Some(left) = root.checked_mul(2).and_then(|value| value.checked_add(1)) else {
+      return Err(manifest_closure_error("frozen mutation heap index overflowed"));
+    };
+    if left >= end {
+      return Ok(());
+    }
+    let mut greatest = root;
+    if mutations[indices[greatest]].order_key() < mutations[indices[left]].order_key() {
+      greatest = left;
+    }
+    let right = left + 1;
+    if right < end && mutations[indices[greatest]].order_key() < mutations[indices[right]].order_key() {
+      greatest = right;
+    }
+    if greatest == root {
+      return Ok(());
+    }
+    indices.swap(root, greatest);
+    root = greatest;
+  }
+}
+
+fn semantic_mutation_indices(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  mutations: &[PublishedIndexMutationV1],
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<usize>, IndexBatchApplicationErrorV1> {
+  let mut indices = Vec::new();
+  indices
+    .try_reserve_exact(mutations.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("semantic mutation-index reservation failed: {error}")))?;
+  indices.extend(0..mutations.len());
+  for (iteration, root) in (0..indices.len() / 2).rev().enumerate() {
+    if iteration % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    sift_semantic_mutation_heap(hash_algorithm, role, mutations, &mut indices, root, mutations.len())?;
+  }
+  for (iteration, end) in (1..indices.len()).rev().enumerate() {
+    if iteration % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    indices.swap(0, end);
+    sift_semantic_mutation_heap(hash_algorithm, role, mutations, &mut indices, 0, end)?;
+  }
+  for pair in indices.windows(2) {
+    if compare_order_keys(hash_algorithm, role, mutations[pair[0]].order_key(), mutations[pair[1]].order_key())? != Ordering::Less {
+      return Err(manifest_closure_error("frozen role mutations are not semantically unique"));
+    }
+  }
+  Ok(indices)
+}
+
+fn sift_semantic_mutation_heap(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  mutations: &[PublishedIndexMutationV1],
+  indices: &mut [usize],
+  mut root: usize,
+  end: usize,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  loop {
+    let Some(left) = root.checked_mul(2).and_then(|value| value.checked_add(1)) else {
+      return Err(manifest_closure_error("semantic mutation heap index overflowed"));
+    };
+    if left >= end {
+      return Ok(());
+    }
+    let mut greatest = root;
+    if compare_order_keys(hash_algorithm, role, mutations[indices[greatest]].order_key(), mutations[indices[left]].order_key())?
+      == Ordering::Less
+    {
+      greatest = left;
+    }
+    let right = left + 1;
+    if right < end
+      && compare_order_keys(hash_algorithm, role, mutations[indices[greatest]].order_key(), mutations[indices[right]].order_key())?
+        == Ordering::Less
+    {
+      greatest = right;
+    }
+    if greatest == root {
+      return Ok(());
+    }
+    indices.swap(root, greatest);
+    root = greatest;
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_present_role_ranges(
+  request: &FrozenIndexBatchApplicationRequestV1<'_>,
+  owner_id: &[u8],
+  role: OrderedIndexRoleV1,
+  source_root_key: &[u8],
+  mutations: &[PublishedIndexMutationV1],
+  semantic_indices: &[usize],
+  overlay: &SparseIndexArtifactOverlayV1,
+  source: &mut dyn IndexBatchArtifactSourceV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Range<usize>>, IndexBatchApplicationErrorV1> {
+  let mut ranges = Vec::new();
+  let mut start = 0usize;
+  while start < semantic_indices.len() {
+    check_cancelled(is_cancelled)?;
+    if ranges.len() >= INDEX_COPY_ON_WRITE_MAXIMUM_COMPOSITE_STEPS_V1 {
+      return Err(manifest_closure_error("sparse application exceeds the composite-step cap"));
+    }
+    let mutation = &mutations[semantic_indices[start]];
+    let path = load_ordered_page_path_v1(
+      &OrderedPagePathLookupRequestV1 {
+        hash_algorithm: request.hash_algorithm,
+        root_key: source_root_key,
+        owner_id,
+        role,
+        order_key: mutation.order_key(),
+        load_posting_successor: false,
+        limits: request.path_limits,
+      },
+      overlay,
+      source,
+      is_cancelled,
+    )?;
+    let page = decode_ordered_page(path.page(), request.hash_algorithm)?;
+    let terminal = path_is_terminal(request.hash_algorithm, role, &path)?;
+    let mut end = start + 1;
+    if terminal {
+      end = semantic_indices.len();
+    } else {
+      while end < semantic_indices.len()
+        && compare_order_keys(request.hash_algorithm, role, mutations[semantic_indices[end]].order_key(), page.upper_fence)?
+          != Ordering::Greater
+      {
+        if (end - start).is_multiple_of(4_096) {
+          check_cancelled(is_cancelled)?;
+        }
+        end += 1;
+      }
+    }
+    ranges.try_reserve(1).map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("sparse range reservation failed: {error}")))?;
+    ranges.push(start..end);
+    start = end;
+  }
+  Ok(ranges)
+}
+
+fn validate_planned_range_against_path(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  mutations: &[PublishedIndexMutationV1],
+  semantic_indices: &[usize],
+  path: &LoadedOrderedPagePathV1,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  let last = semantic_indices.last().ok_or_else(|| manifest_closure_error("planned sparse range is empty"))?;
+  let page = decode_ordered_page(path.page(), hash_algorithm)?;
+  if !path_is_terminal(hash_algorithm, role, path)?
+    && compare_order_keys(hash_algorithm, role, mutations[*last].order_key(), page.upper_fence)? == Ordering::Greater
+  {
+    return Err(manifest_closure_error("planned sparse mutations no longer select one current page"));
+  }
+  Ok(())
+}
+
+fn path_is_terminal(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  path: &LoadedOrderedPagePathV1,
+) -> Result<bool, IndexBatchApplicationErrorV1> {
+  let root = path.directory(0).ok_or_else(|| manifest_closure_error("ordered page path has no root directory"))?;
+  let root = decode_artifact_directory(root, hash_algorithm)?;
+  let page = decode_ordered_page(path.page(), hash_algorithm)?;
+  Ok(compare_order_keys(hash_algorithm, role, page.upper_fence, root.upper_fence)? == Ordering::Equal)
+}
+
+fn collect_path_directories(path: &LoadedOrderedPagePathV1, successor: bool) -> Result<Vec<&[u8]>, IndexBatchApplicationErrorV1> {
+  let count = if successor { path.next_directory_count() } else { path.directory_count() };
+  let mut directories = Vec::new();
+  directories
+    .try_reserve_exact(count)
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("directory-slice reservation failed: {error}")))?;
+  for index in 0..count {
+    let directory = if successor { path.next_directory(index) } else { path.directory(index) }
+      .ok_or_else(|| manifest_closure_error("loaded ordered path lost a directory"))?;
+    directories.push(directory);
+  }
+  Ok(directories)
+}
+
+fn published_mutation_kinds<'a>(
+  hash_algorithm: HashAlgorithm,
+  mutations: &'a [PublishedIndexMutationV1],
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<OrderedPageMutationKindV1<'a>>, IndexBatchApplicationErrorV1> {
+  let mut kinds = Vec::new();
+  kinds
+    .try_reserve_exact(mutations.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("ordered mutation reservation failed: {error}")))?;
+  for (index, mutation) in mutations.iter().enumerate() {
+    if index % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    kinds.push(published_mutation_kind(hash_algorithm, mutation)?);
+  }
+  Ok(kinds)
+}
+
+fn published_mutation_kind<'a>(
+  hash_algorithm: HashAlgorithm,
+  mutation: &'a PublishedIndexMutationV1,
+) -> Result<OrderedPageMutationKindV1<'a>, IndexBatchApplicationErrorV1> {
+  let decoded = decode_ordered_record(mutation.encoded_record(), hash_algorithm, mutation.role())?;
+  Ok(manifest_mutation_kind(mutation, decoded.tombstone))
+}
+
+fn source_parent_manifest_key<'a>(source: &'a IndexManifestBodyV1<'a>) -> Option<&'a [u8]> {
+  match source {
+    IndexManifestBodyV1::ScopeCatalog(_) | IndexManifestBodyV1::FieldNvt(_) => None,
+    IndexManifestBodyV1::ValueStore(body) => Some(body.scope_catalog_manifest),
+    IndexManifestBodyV1::FieldIndex(body) => Some(body.value_store_manifest),
+  }
+}
+
+fn source_role_root<'a>(
+  source: &'a IndexManifestBodyV1<'a>,
+  role: OrderedIndexRoleV1,
+) -> Result<Option<&'a [u8]>, IndexBatchApplicationErrorV1> {
+  match (source, role) {
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeOrdinal) => Ok(body.ordinal_directory_root),
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeReverse) => Ok(body.reverse_directory_root),
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::Value) => Ok(body.value_directory_root),
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::ValueDocumentState) => Ok(body.document_state_directory_root),
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::Posting) => Ok(body.posting_directory_root),
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::IndexDocumentState) => Ok(body.document_state_directory_root),
+    _ => Err(manifest_closure_error("ordered mutation role does not belong to its source manifest")),
+  }
+}
+
+fn source_role_page_boundaries(source: &IndexManifestBodyV1<'_>, role: OrderedIndexRoleV1) -> (u64, u64) {
+  match (source, role) {
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::Posting) => (body.first_page_id, body.last_page_id),
+    _ => (0, 0),
+  }
+}
+
+fn ordered_role_count(source: &IndexManifestBodyV1<'_>) -> usize {
+  match source {
+    IndexManifestBodyV1::ScopeCatalog(_) | IndexManifestBodyV1::ValueStore(_) | IndexManifestBodyV1::FieldIndex(_) => 2,
+    IndexManifestBodyV1::FieldNvt(_) => 0,
+  }
+}
+
+fn owner_class_rank(owner_class: IndexMembershipOwnerClassV1) -> u8 {
+  match owner_class {
+    IndexMembershipOwnerClassV1::ScopeCatalog => 0,
+    IndexMembershipOwnerClassV1::ValueStore => 1,
+    IndexMembershipOwnerClassV1::FieldIndex => 2,
+  }
+}
+
+fn expected_parent_owner_class(owner_class: IndexMembershipOwnerClassV1) -> Option<IndexMembershipOwnerClassV1> {
+  match owner_class {
+    IndexMembershipOwnerClassV1::ScopeCatalog => None,
+    IndexMembershipOwnerClassV1::ValueStore => Some(IndexMembershipOwnerClassV1::ScopeCatalog),
+    IndexMembershipOwnerClassV1::FieldIndex => Some(IndexMembershipOwnerClassV1::ValueStore),
+  }
+}
+
+fn synthesize_frozen_owner_plans(
+  request: &FrozenIndexBatchApplicationRequestV1<'_>,
+  mut pending: Vec<PendingFrozenOwnerApplicationV1<'_>>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<FrozenIndexOwnerApplicationPlanV1>, IndexBatchApplicationErrorV1> {
+  pending.sort_unstable_by(|left, right| {
+    owner_class_rank(left.owner_class).cmp(&owner_class_rank(right.owner_class)).then(left.owner_id.cmp(&right.owner_id))
+  });
+  let mut source_classes: HashMap<Vec<u8>, IndexMembershipOwnerClassV1> = HashMap::new();
+  source_classes
+    .try_reserve(pending.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("source-manifest map reservation failed: {error}")))?;
+  for owner in &pending {
+    if source_classes.insert(clone_bytes(&owner.source_manifest_key, "source-manifest map key")?, owner.owner_class).is_some() {
+      return Err(manifest_closure_error("two frozen owners use one source manifest key"));
+    }
+  }
+  let mut successor_keys: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+  successor_keys
+    .try_reserve(pending.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("successor-manifest map reservation failed: {error}")))?;
+  let mut output = Vec::new();
+  output
+    .try_reserve_exact(pending.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("owner-plan reservation failed: {error}")))?;
+  for owner in pending {
+    check_cancelled(is_cancelled)?;
+    let source = decode_index_manifest(owner.source_manifest, request.hash_algorithm)?;
+    let source_parent = source_parent_manifest_key(&source.details);
+    let parent_manifest_key = if let Some(source_parent) = source_parent {
+      if let Some(parent_class) = source_classes.get(source_parent) {
+        if Some(*parent_class) != expected_parent_owner_class(owner.owner_class) {
+          return Err(manifest_closure_error("same-batch parent source manifest has the wrong owner class"));
+        }
+        Some(
+          successor_keys
+            .get(source_parent)
+            .ok_or_else(|| manifest_closure_error("same-batch parent successor was not synthesized before its child"))?
+            .as_slice(),
+        )
+      } else {
+        Some(source_parent)
+      }
+    } else {
+      None
+    };
+    let successor_manifest = synthesize_successor_index_manifest_v1(
+      &IndexManifestSuccessorRequestV1 {
+        hash_algorithm: request.hash_algorithm,
+        source_manifest: owner.source_manifest,
+        generation: request.generation,
+        parent_manifest_key,
+        coverage: request.coverage.clone(),
+        next_document_ordinal: owner.next_document_ordinal,
+        mutations: &request.batch.records()[owner.mutation_range.clone()],
+        transitions: &request.batch.transitions()[owner.transition_range.clone()],
+        role_summaries: &owner.role_summaries,
+      },
+      is_cancelled,
+    )?;
+    successor_keys.insert(
+      clone_bytes(&owner.source_manifest_key, "successor-manifest source key")?,
+      clone_bytes(&successor_manifest.key, "successor-manifest key")?,
+    );
+    output.push(FrozenIndexOwnerApplicationPlanV1 {
+      owner_id: owner.owner_id,
+      owner_class: owner.owner_class,
+      source_manifest_key: owner.source_manifest_key,
+      source_generation: owner.source_generation,
+      successor_manifest,
+      dependency_range: owner.dependency_range,
+      role_summaries: owner.role_summaries,
+    });
+  }
+  Ok(output)
 }
 
 pub fn synthesize_successor_index_manifest_v1(
@@ -294,7 +1186,7 @@ fn synthesize_field_manifest_body<'a>(
   }
   let posting_root = successor_root(postings, source.posting_directory_root);
   let (first_page_id, last_page_id) = match postings {
-    Some(summary) if summary.root_key.is_some() => (summary.minimum_page_id, summary.maximum_page_id),
+    Some(summary) if summary.root_key.is_some() => (summary.first_page_id(), summary.last_page_id()),
     Some(_) => (0, 0),
     None => (source.first_page_id, source.last_page_id),
   };
@@ -712,11 +1604,26 @@ fn validate_manifest_role_summaries(
       if summary.initial_next_page_id != next_page_id || summary.next_page_id < summary.initial_next_page_id {
         return Err(manifest_closure_error("COW role summaries do not form one nonoverlapping PageID allocation chain"));
       }
-      if summary.root_key.is_some() && (summary.minimum_page_id == 0 || summary.maximum_page_id >= summary.next_page_id) {
+      if summary.root_key.is_some()
+        && (summary.minimum_page_id == 0
+          || summary.maximum_page_id >= summary.next_page_id
+          || summary.first_page_id() < summary.minimum_page_id
+          || summary.first_page_id() > summary.maximum_page_id
+          || summary.last_page_id() < summary.minimum_page_id
+          || summary.last_page_id() > summary.maximum_page_id)
+      {
         return Err(manifest_closure_error("COW role summary PageID bounds exceed the successor high-water"));
       }
+      if summary.root_key.is_none() && (summary.first_page_id() != 0 || summary.last_page_id() != 0) {
+        return Err(manifest_closure_error("retired COW role summary carries logical PageID endpoints"));
+      }
       next_page_id = summary.next_page_id;
-    } else if summary.initial_next_page_id != 0 || summary.next_page_id != 0 || summary.minimum_page_id != 0 || summary.maximum_page_id != 0
+    } else if summary.initial_next_page_id != 0
+      || summary.next_page_id != 0
+      || summary.minimum_page_id != 0
+      || summary.maximum_page_id != 0
+      || summary.first_page_id() != 0
+      || summary.last_page_id() != 0
     {
       return Err(manifest_closure_error("non-PageID COW role summary carries PageID state"));
     }
