@@ -88,6 +88,17 @@ pub struct OrderedPageMutationRequestV1<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedPageBatchMutationRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub source_page: &'a [u8],
+  pub next_posting_page: Option<&'a [u8]>,
+  pub generation: u64,
+  pub next_page_id: u64,
+  pub mutations: &'a [OrderedPageMutationKindV1<'a>],
+  pub layout: IndexPageLayoutV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TombstoneDropProofV1<'a> {
   pub owner_id: &'a [u8],
   pub source_page_keys: &'a [&'a [u8]],
@@ -210,62 +221,44 @@ struct OwnedOrderedRecordV1 {
   tombstone: bool,
 }
 
+#[derive(Debug)]
+struct DecodedOrderedMutationV1<'a> {
+  encoded: &'a [u8],
+  order_key: Vec<u8>,
+  tombstone: bool,
+}
+
 pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> FormatResult<OrderedPageMutationPlanV1> {
+  let mutations = [request.mutation];
+  mutate_ordered_page_batch_v1(&OrderedPageBatchMutationRequestV1 {
+    hash_algorithm: request.hash_algorithm,
+    source_page: request.source_page,
+    next_posting_page: request.next_posting_page,
+    generation: request.generation,
+    next_page_id: request.next_page_id,
+    mutations: &mutations,
+    layout: request.layout,
+  })
+}
+
+pub fn mutate_ordered_page_batch_v1(request: &OrderedPageBatchMutationRequestV1<'_>) -> FormatResult<OrderedPageMutationPlanV1> {
   validate_layout(request.layout)?;
+  if request.mutations.is_empty() {
+    return Err(closure_error("index_cow_batch_empty", "ordered page mutation batch is empty"));
+  }
   let source = decode_ordered_page(request.source_page, request.hash_algorithm)?;
   validate_mutation_identity(request, &source)?;
-  let mutation_record = decode_ordered_record(request.mutation.encoded_record(), request.hash_algorithm, source.role)?;
-  if mutation_record.tombstone != request.mutation.expects_tombstone() {
-    return Err(closure_error("index_cow_mutation_tombstone", "mutation kind disagrees with the encoded record tombstone flag"));
-  }
 
-  let mut records = collect_owned_records(&source, request.layout.maximum_workspace_bytes)?;
-  let mutation_order_key = ordered_record_order_key(&mutation_record)?;
-  let mut matching_index = None;
-  let mut insertion_index = records.len();
-  for (index, existing) in records.iter().enumerate() {
-    match compare_order_keys(request.hash_algorithm, source.role, &existing.order_key, &mutation_order_key)? {
-      Ordering::Less => {}
-      Ordering::Equal => {
-        matching_index = Some(index);
-        insertion_index = index;
-        break;
-      }
-      Ordering::Greater => {
-        insertion_index = index;
-        break;
-      }
-    }
-  }
-
-  if request.mutation.expects_tombstone() && matching_index.is_none() {
-    return Err(closure_error("index_cow_tombstone_missing", "cannot tombstone an ordered record that is not present"));
-  }
-  if matching_index.is_some_and(|index| records[index].encoded == request.mutation.encoded_record()) {
+  let decoded_mutations = decode_ordered_mutation_batch(request, source.role)?;
+  let source_records = collect_owned_records(&source, request.layout.maximum_workspace_bytes)?;
+  let (records, changed) = merge_ordered_mutation_batch(request, source.role, source_records, decoded_mutations)?;
+  if !changed {
     return Ok(OrderedPageMutationPlanV1 {
       replacements: Vec::new(),
       allocated_page_ids: Vec::new(),
       retired_page_ids: Vec::new(),
       next_page_id: request.next_page_id,
     });
-  }
-
-  preflight_record_mutation_workspace(
-    &records,
-    matching_index,
-    request.mutation.encoded_record().len(),
-    mutation_order_key.len(),
-    request.layout.maximum_workspace_bytes,
-  )?;
-  let replacement = OwnedOrderedRecordV1 {
-    encoded: request.mutation.encoded_record().to_vec(),
-    order_key: mutation_order_key,
-    tombstone: mutation_record.tombstone,
-  };
-  if let Some(index) = matching_index {
-    records[index] = replacement;
-  } else {
-    records.insert(insertion_index, replacement);
   }
   let record_workspace_bytes = validate_workspace(&records, request.layout.maximum_workspace_bytes)?;
 
@@ -2039,7 +2032,7 @@ fn preflight_compaction_workspace(
   Ok(())
 }
 
-fn validate_mutation_identity(request: &OrderedPageMutationRequestV1<'_>, source: &OrderedPageV1<'_>) -> FormatResult<()> {
+fn validate_mutation_identity(request: &OrderedPageBatchMutationRequestV1<'_>, source: &OrderedPageV1<'_>) -> FormatResult<()> {
   if request.generation <= source.generation {
     return Err(identity_error(
       "index_cow_generation",
@@ -2055,6 +2048,153 @@ fn validate_mutation_identity(request: &OrderedPageMutationRequestV1<'_>, source
     return Err(identity_error("index_cow_scope_page_id", "scope-page mutation must not carry a page ID high-water mark"));
   }
   Ok(())
+}
+
+fn decode_ordered_mutation_batch<'a>(
+  request: &'a OrderedPageBatchMutationRequestV1<'a>,
+  role: OrderedIndexRoleV1,
+) -> FormatResult<Vec<DecodedOrderedMutationV1<'a>>> {
+  let metadata_bytes = request
+    .mutations
+    .len()
+    .checked_mul(size_of::<DecodedOrderedMutationV1<'_>>())
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "mutation metadata workspace overflowed"))?;
+  if metadata_bytes > request.layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_batch_workspace",
+      format!("mutation metadata exceeds the {}-byte operation cap", request.layout.maximum_workspace_bytes),
+    ));
+  }
+  let mut decoded: Vec<DecodedOrderedMutationV1<'a>> = Vec::new();
+  decoded
+    .try_reserve_exact(request.mutations.len())
+    .map_err(|error| amplification_error("index_cow_batch_capacity", format!("mutation batch reservation failed: {error}")))?;
+  let mut retained_bytes = decoded
+    .capacity()
+    .checked_mul(size_of::<DecodedOrderedMutationV1<'_>>())
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "mutation metadata workspace overflowed"))?;
+  for mutation in request.mutations {
+    let record = decode_ordered_record(mutation.encoded_record(), request.hash_algorithm, role)?;
+    if record.tombstone != mutation.expects_tombstone() {
+      return Err(closure_error("index_cow_mutation_tombstone", "mutation kind disagrees with the encoded record tombstone flag"));
+    }
+    let order_key = ordered_record_order_key(&record)?;
+    if let Some(previous) = decoded.last() {
+      if compare_order_keys(request.hash_algorithm, role, &previous.order_key, &order_key)? != Ordering::Less {
+        return Err(closure_error("index_cow_batch_order", "ordered page mutation batch keys are not strictly increasing and unique"));
+      }
+    }
+    retained_bytes = retained_bytes
+      .checked_add(order_key.len())
+      .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "mutation order-key workspace overflowed"))?;
+    if retained_bytes > request.layout.maximum_workspace_bytes {
+      return Err(amplification_error(
+        "index_cow_batch_workspace",
+        format!("mutation keys exceed the {}-byte operation cap", request.layout.maximum_workspace_bytes),
+      ));
+    }
+    decoded.push(DecodedOrderedMutationV1 { encoded: mutation.encoded_record(), order_key, tombstone: record.tombstone });
+  }
+  Ok(decoded)
+}
+
+fn merge_ordered_mutation_batch(
+  request: &OrderedPageBatchMutationRequestV1<'_>,
+  role: OrderedIndexRoleV1,
+  source_records: Vec<OwnedOrderedRecordV1>,
+  decoded_mutations: Vec<DecodedOrderedMutationV1<'_>>,
+) -> FormatResult<(Vec<OwnedOrderedRecordV1>, bool)> {
+  let output_capacity = source_records
+    .len()
+    .checked_add(decoded_mutations.len())
+    .ok_or_else(|| arithmetic_error("index_cow_batch_capacity", "merged record capacity overflowed"))?;
+  let peak_metadata_bytes = source_records
+    .capacity()
+    .checked_mul(size_of::<OwnedOrderedRecordV1>())
+    .and_then(|bytes| {
+      decoded_mutations.capacity().checked_mul(size_of::<DecodedOrderedMutationV1<'_>>()).and_then(|extra| bytes.checked_add(extra))
+    })
+    .and_then(|bytes| output_capacity.checked_mul(size_of::<OwnedOrderedRecordV1>()).and_then(|extra| bytes.checked_add(extra)))
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "merged record metadata workspace overflowed"))?;
+  let retained_payload_bytes = source_records
+    .iter()
+    .try_fold(0usize, |bytes, record| bytes.checked_add(record.encoded.len()).and_then(|value| value.checked_add(record.order_key.len())))
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "source record workspace overflowed"))?;
+  let mutation_key_bytes = decoded_mutations
+    .iter()
+    .try_fold(0usize, |bytes, mutation| bytes.checked_add(mutation.order_key.len()))
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "mutation order-key workspace overflowed"))?;
+  let mutation_encoded_bytes = decoded_mutations
+    .iter()
+    .try_fold(0usize, |bytes, mutation| bytes.checked_add(mutation.encoded.len()))
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "mutation record workspace overflowed"))?;
+  let peak_bytes = peak_metadata_bytes
+    .checked_add(retained_payload_bytes)
+    .and_then(|bytes| bytes.checked_add(mutation_key_bytes))
+    .and_then(|bytes| bytes.checked_add(mutation_encoded_bytes))
+    .ok_or_else(|| arithmetic_error("index_cow_batch_workspace", "merged record workspace overflowed"))?;
+  if peak_bytes > request.layout.maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_batch_workspace",
+      format!("{peak_bytes} batch workspace bytes exceed the {}-byte operation cap", request.layout.maximum_workspace_bytes),
+    ));
+  }
+
+  let mut merged = Vec::new();
+  merged
+    .try_reserve_exact(output_capacity)
+    .map_err(|error| amplification_error("index_cow_batch_capacity", format!("merged record reservation failed: {error}")))?;
+  let mut sources = source_records.into_iter().peekable();
+  let mut mutations = decoded_mutations.into_iter().peekable();
+  let mut changed = false;
+  while let Some(mutation) = mutations.peek() {
+    let ordering = match sources.peek() {
+      Some(source) => compare_order_keys(request.hash_algorithm, role, &source.order_key, &mutation.order_key)?,
+      None => Ordering::Greater,
+    };
+    match ordering {
+      Ordering::Less => {
+        merged.push(sources.next().ok_or_else(|| closure_error("index_cow_batch_source", "source iterator ended unexpectedly"))?);
+      }
+      Ordering::Equal => {
+        let source = sources.next().ok_or_else(|| closure_error("index_cow_batch_source", "source iterator ended unexpectedly"))?;
+        let mutation = mutations.next().ok_or_else(|| closure_error("index_cow_batch_mutation", "mutation iterator ended unexpectedly"))?;
+        changed |= source.encoded != mutation.encoded;
+        if source.encoded == mutation.encoded {
+          merged.push(source);
+        } else {
+          merged.push(OwnedOrderedRecordV1 {
+            encoded: copy_batch_bytes(mutation.encoded, "mutation record")?,
+            order_key: mutation.order_key,
+            tombstone: mutation.tombstone,
+          });
+        }
+      }
+      Ordering::Greater => {
+        let mutation = mutations.next().ok_or_else(|| closure_error("index_cow_batch_mutation", "mutation iterator ended unexpectedly"))?;
+        if mutation.tombstone {
+          return Err(closure_error("index_cow_tombstone_missing", "cannot tombstone an ordered record that is not present"));
+        }
+        changed = true;
+        merged.push(OwnedOrderedRecordV1 {
+          encoded: copy_batch_bytes(mutation.encoded, "mutation record")?,
+          order_key: mutation.order_key,
+          tombstone: false,
+        });
+      }
+    }
+  }
+  merged.extend(sources);
+  Ok((merged, changed))
+}
+
+fn copy_batch_bytes(value: &[u8], context: &'static str) -> FormatResult<Vec<u8>> {
+  let mut copied = Vec::new();
+  copied
+    .try_reserve_exact(value.len())
+    .map_err(|error| amplification_error("index_cow_batch_allocation", format!("{context} allocation failed: {error}")))?;
+  copied.extend_from_slice(value);
+  Ok(copied)
 }
 
 fn collect_owned_records(source: &OrderedPageV1<'_>, maximum_workspace_bytes: usize) -> FormatResult<Vec<OwnedOrderedRecordV1>> {
@@ -2097,37 +2237,6 @@ fn validate_workspace(records: &Vec<OwnedOrderedRecordV1>, maximum_workspace_byt
   Ok(accounted_bytes)
 }
 
-fn preflight_record_mutation_workspace(
-  records: &Vec<OwnedOrderedRecordV1>,
-  matching_index: Option<usize>,
-  encoded_length: usize,
-  order_key_length: usize,
-  maximum_workspace_bytes: usize,
-) -> FormatResult<()> {
-  let current = checked_record_workspace(records)?;
-  let removed = if let Some(index) = matching_index {
-    records[index]
-      .encoded
-      .len()
-      .checked_add(records[index].order_key.len())
-      .ok_or_else(|| arithmetic_error("index_cow_workspace_overflow", "replaced record workspace byte count overflowed"))?
-  } else {
-    0
-  };
-  let projected = current
-    .checked_sub(removed)
-    .and_then(|bytes| bytes.checked_add(encoded_length))
-    .and_then(|bytes| bytes.checked_add(order_key_length))
-    .ok_or_else(|| arithmetic_error("index_cow_workspace_overflow", "projected record workspace byte count overflowed"))?;
-  if projected > maximum_workspace_bytes {
-    return Err(amplification_error(
-      "index_cow_workspace_exceeded",
-      format!("record workspace exceeds the {maximum_workspace_bytes}-byte operation cap"),
-    ));
-  }
-  Ok(())
-}
-
 fn checked_record_workspace(records: &Vec<OwnedOrderedRecordV1>) -> FormatResult<usize> {
   records.iter().try_fold(
     records
@@ -2144,7 +2253,7 @@ fn checked_record_workspace(records: &Vec<OwnedOrderedRecordV1>) -> FormatResult
 }
 
 fn preflight_output_workspace(
-  request: &OrderedPageMutationRequestV1<'_>,
+  request: &OrderedPageBatchMutationRequestV1<'_>,
   source: &OrderedPageV1<'_>,
   records: &[OwnedOrderedRecordV1],
   groups: &[std::ops::Range<usize>],
@@ -2208,7 +2317,7 @@ fn preflight_output_workspace(
 }
 
 fn partition_records(
-  request: &OrderedPageMutationRequestV1<'_>,
+  request: &OrderedPageBatchMutationRequestV1<'_>,
   source: &OrderedPageV1<'_>,
   records: &[OwnedOrderedRecordV1],
 ) -> FormatResult<Vec<std::ops::Range<usize>>> {
@@ -2285,7 +2394,7 @@ fn checked_page_range_components(
 }
 
 fn validate_relinked_next(
-  request: &OrderedPageMutationRequestV1<'_>,
+  request: &OrderedPageBatchMutationRequestV1<'_>,
   source: &OrderedPageV1<'_>,
   next: &OrderedPageV1<'_>,
 ) -> FormatResult<()> {

@@ -2,9 +2,9 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_copy_on_write::{
   ArtifactDirectoryMutationRequestV1, ArtifactDirectoryPathV1, IndexCopyOnWriteClosureRequestV1, OrderedPageCompactionWindowRequestV1,
-  OrderedPageMutationKindV1, OrderedPageMutationRequestV1, TombstoneDropProofV1, compact_ordered_page_window_v1,
-  default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1,
-  validate_index_copy_on_write_closure_v1,
+  OrderedPageBatchMutationRequestV1, OrderedPageMutationKindV1, OrderedPageMutationRequestV1, TombstoneDropProofV1,
+  compact_ordered_page_window_v1, default_index_directory_layout_v1, default_index_page_layout_v1, mutate_ordered_page_batch_v1,
+  mutate_ordered_page_v1, rewrite_artifact_directory_paths_v1, validate_index_copy_on_write_closure_v1,
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
@@ -247,6 +247,82 @@ fn cow_upsert_of_identical_bytes_is_an_idempotent_noop() {
 
   assert!(plan.is_unchanged());
   assert_eq!(plan.next_page_id, 40);
+}
+
+#[test]
+fn cow_batch_applies_sorted_mutations_once_and_relinks_a_split_neighbor() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let source_records = vec![posting_record(10, 10, 900, false), posting_record(50, 50, 900, false)];
+    let source = posting_page(hash_algorithm, &owner_id, 7, 11, 0, 12, &source_records);
+    let next_records = vec![posting_record(90, 90, 64, false)];
+    let next = posting_page(hash_algorithm, &owner_id, 7, 12, 11, 0, &next_records);
+    let inserted = [posting_record(20, 20, 900, false), posting_record(30, 30, 900, false), posting_record(40, 40, 900, false)];
+    let mutations = inserted.iter().map(|record| OrderedPageMutationKindV1::UpsertLive(record)).collect::<Vec<_>>();
+    let layout = aeordb::engine::v4::index_copy_on_write::IndexPageLayoutV1 {
+      target_bytes: 4 * 1_024,
+      split_above_bytes: 5 * 1_024,
+      merge_below_bytes: 1_024,
+      ..default_index_page_layout_v1()
+    };
+
+    let plan = mutate_ordered_page_batch_v1(&OrderedPageBatchMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source,
+      next_posting_page: Some(&next),
+      generation: 8,
+      next_page_id: 13,
+      mutations: &mutations,
+      layout,
+    })
+    .unwrap();
+
+    assert_eq!(plan.replacements.len(), 2);
+    let emitted = &plan.replacements[0].artifacts;
+    assert!(emitted.len() > 1);
+    assert_eq!(plan.allocated_page_ids.len(), emitted.len() - 1);
+    assert_eq!(plan.next_page_id, 13 + u64::try_from(plan.allocated_page_ids.len()).unwrap());
+    assert_eq!(
+      emitted.iter().flat_map(|artifact| decoded_coordinates(&artifact.value, hash_algorithm)).collect::<Vec<_>>(),
+      vec![(10, false), (20, false), (30, false), (40, false), (50, false)]
+    );
+    let rewritten_next = decode_ordered_page(&plan.replacements[1].artifacts[0].value, hash_algorithm).unwrap();
+    assert_eq!(rewritten_next.page_id, 12);
+    let last_emitted = decode_ordered_page(&emitted.last().unwrap().value, hash_algorithm).unwrap();
+    assert_eq!(rewritten_next.previous_page_id, last_emitted.page_id);
+    validate_posting_page_link(&last_emitted, &rewritten_next, hash_algorithm).unwrap();
+    assert_eq!(source, posting_page(hash_algorithm, &owner_id, 7, 11, 0, 12, &source_records));
+    assert_eq!(next, posting_page(hash_algorithm, &owner_id, 7, 12, 11, 0, &next_records));
+  }
+}
+
+#[test]
+fn cow_batch_rejects_empty_unsorted_duplicate_and_missing_tombstone_inputs() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let owner_id = owner(hash_algorithm);
+  let source = posting_page(hash_algorithm, &owner_id, 4, 1, 0, 0, &[posting_record(10, 10, 32, false)]);
+  let high = posting_record(30, 30, 32, false);
+  let low = posting_record(20, 20, 32, false);
+  let duplicate = posting_record(20, 20, 32, true);
+  let missing = posting_record(99, 99, 32, true);
+  let empty = [];
+  let unordered = [OrderedPageMutationKindV1::UpsertLive(&high), OrderedPageMutationKindV1::UpsertLive(&low)];
+  let repeated = [OrderedPageMutationKindV1::UpsertLive(&low), OrderedPageMutationKindV1::TombstoneExisting(&duplicate)];
+  let missing_tombstone = [OrderedPageMutationKindV1::TombstoneExisting(&missing)];
+  let request = |mutations| OrderedPageBatchMutationRequestV1 {
+    hash_algorithm,
+    source_page: source.as_slice(),
+    next_posting_page: None,
+    generation: 5,
+    next_page_id: 2,
+    mutations,
+    layout: default_index_page_layout_v1(),
+  };
+
+  assert_eq!(mutate_ordered_page_batch_v1(&request(&empty)).unwrap_err().code(), "index_cow_batch_empty");
+  assert_eq!(mutate_ordered_page_batch_v1(&request(&unordered)).unwrap_err().code(), "index_cow_batch_order");
+  assert_eq!(mutate_ordered_page_batch_v1(&request(&repeated)).unwrap_err().code(), "index_cow_batch_order");
+  assert_eq!(mutate_ordered_page_batch_v1(&request(&missing_tombstone)).unwrap_err().code(), "index_cow_tombstone_missing");
 }
 
 #[test]

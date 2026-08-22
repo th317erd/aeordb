@@ -1104,6 +1104,10 @@
         - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
           - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
+          - [x] Add one bounded multi-mutation page COW path and make the single-mutation API delegate to it.
+          - [ ] Traverse selected roots through a sparse immutable-artifact source plus bounded successor overlay; never materialize an owner-wide page set.
+          - [ ] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
+          - [ ] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
           - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
