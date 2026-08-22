@@ -330,6 +330,9 @@ fn rotation_selection_decouples_global_checkpoint_and_local_workspace_sequences(
   let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
   assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
   fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor_path = fixture.publisher.workspace_path().to_path_buf();
+  let predecessor_object_path = fs::read_dir(predecessor_path.join("objects/runtime")).unwrap().next().unwrap().unwrap().path();
+  let predecessor_object_bytes = fs::read(&predecessor_object_path).unwrap();
   let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
   let coverage = IndexRuntimeImmutableCoverageProofV1 {
     runtime_id: RUNTIME_ID,
@@ -345,6 +348,8 @@ fn rotation_selection_decouples_global_checkpoint_and_local_workspace_sequences(
   let selected = fixture.publisher.publish_rotation_successor(rotated).unwrap();
   assert_eq!(selected.checkpoint_sequence, 2);
   assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
+  assert_eq!(fs::read(predecessor_object_path).unwrap(), predecessor_object_bytes);
+  assert_eq!(fs::read_dir(predecessor_path.join("manifests")).unwrap().count(), 1);
   let checkpoint_bytes = {
     let state = fixture.state.lock().unwrap();
     state.immutable.get(&selected.checkpoint_key).unwrap().clone()
@@ -541,6 +546,289 @@ fn rotation_postcommit_error_reopens_the_exact_checkpoint_and_workspace_before_s
   assert_eq!(fixture.publisher.workspace_path(), successor_path);
   assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
   assert_eq!(fixture.state.lock().unwrap().selector_calls, 2);
+}
+
+#[test]
+fn rotation_checkpoint_crash_prefix_restarts_from_old_authority_and_reuses_exact_artifact() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor_path = fixture.publisher.workspace_path().to_path_buf();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa6; 16],
+    covered_through_publication_sequence: 40,
+  };
+  fixture.state.lock().unwrap().cancel_on_immutable_sync = Some(fixture.cancellation.clone());
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection);
+  assert_eq!(fixture.publisher.workspace_path(), predecessor_path);
+  {
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.selected.as_ref().unwrap().checkpoint_sequence, 1);
+    assert_eq!(state.selector_calls, 1);
+    assert_eq!(state.immutable.len(), 2);
+  }
+
+  let database = fixture._directory.path().join("source.aeordb");
+  let scratch = fixture._directory.path().join("scratch");
+  let state = Arc::clone(&fixture.state);
+  let clock = Arc::clone(&fixture.clock);
+  drop(fixture.publisher);
+  state.lock().unwrap().cancel_on_immutable_sync = None;
+  let restart_cancellation = CancellationToken::new();
+  let restart_memory = memory();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovery_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &restart_memory,
+    &restart_cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("old selected workspace was not recoverable after an unselected rotation checkpoint");
+  };
+  assert_eq!(recovered.workspace_head().unwrap().selected_descriptor().workspace_path(), predecessor_path);
+  let virtual_clock: Arc<dyn VirtualClock> = clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, recovery_store, virtual_clock).unwrap();
+  clock.advance(10_000);
+
+  let retried = resumed.build_rotation_successor(coverage, &[]).unwrap();
+  assert_eq!(retried.successor_workspace().workspace_path(), successor_path);
+  assert_eq!(resumed.publish_rotation_successor(retried).unwrap().checkpoint_sequence, 2);
+  assert_eq!(resumed.workspace_path(), successor_path);
+  let state = state.lock().unwrap();
+  assert_eq!(state.selector_calls, 2);
+  assert_eq!(state.immutable.len(), 2, "restart generated different bytes for the already durable rotation checkpoint");
+}
+
+#[test]
+fn empty_rotation_checkpoint_crash_prefix_reuses_the_exact_empty_successor() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor_path = fixture.publisher.workspace_path().to_path_buf();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa9; 16],
+    covered_through_publication_sequence: 41,
+  };
+  fixture.state.lock().unwrap().cancel_on_immutable_sync = Some(fixture.cancellation.clone());
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert!(rotated.successor_workspace().head().is_none());
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::CancelledBeforeSelection);
+  assert_eq!(fixture.publisher.workspace_path(), predecessor_path);
+  {
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.selected.as_ref().unwrap().checkpoint_sequence, 1);
+    assert_eq!(state.selector_calls, 1);
+    assert_eq!(state.immutable.len(), 2);
+  }
+
+  let database = fixture._directory.path().join("source.aeordb");
+  let scratch = fixture._directory.path().join("scratch");
+  let state = Arc::clone(&fixture.state);
+  let clock = Arc::clone(&fixture.clock);
+  drop(fixture.publisher);
+  state.lock().unwrap().cancel_on_immutable_sync = None;
+  let restart_memory = memory();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovery_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &restart_memory,
+    &CancellationToken::new(),
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("old selected workspace was not recoverable after an unselected empty rotation checkpoint");
+  };
+  assert_eq!(recovered.workspace_head().unwrap().selected_descriptor().workspace_path(), predecessor_path);
+  let virtual_clock: Arc<dyn VirtualClock> = clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, recovery_store, virtual_clock).unwrap();
+  clock.advance(10_000);
+
+  let retried = resumed.build_rotation_successor(coverage, &[]).unwrap();
+  assert!(retried.successor_workspace().head().is_none());
+  assert_eq!(retried.successor_workspace().workspace_path(), successor_path);
+  assert_eq!(resumed.publish_rotation_successor(retried).unwrap().checkpoint_sequence, 2);
+  assert_eq!(resumed.workspace_path(), successor_path);
+  assert!(resumed.workspace_head().is_none());
+  let state = state.lock().unwrap();
+  assert_eq!(state.selector_calls, 2);
+  assert_eq!(state.immutable.len(), 2, "restart generated different bytes for the already durable empty-rotation checkpoint");
+}
+
+#[test]
+fn rotation_selector_uncertainty_and_foreign_selection_never_swap_the_old_workspace() {
+  for behavior in [SelectorBehavior::CommitThenDropCheckpoint, SelectorBehavior::UnreadableAfterError] {
+    let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    fixture.coordinator.complete_success(&first).unwrap();
+    let predecessor = fixture.publisher.workspace_head().unwrap().selected_descriptor();
+    let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+    let coverage = IndexRuntimeImmutableCoverageProofV1 {
+      runtime_id: RUNTIME_ID,
+      generation: 1,
+      source_namespace_root: &source_root,
+      coverage_epoch_id: [0xa7; 16],
+      covered_through_publication_sequence: 40,
+    };
+    fixture.state.lock().unwrap().selector_behavior = behavior;
+    let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+    let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+    assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::CommitUnknown);
+    assert_eq!(fixture.publisher.workspace_head().unwrap().selected_descriptor(), predecessor);
+  }
+
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor = fixture.publisher.workspace_head().unwrap().selected_descriptor();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa8; 16],
+    covered_through_publication_sequence: 40,
+  };
+  {
+    let mut state = fixture.state.lock().unwrap();
+    state.selector_behavior = SelectorBehavior::Refuse;
+    let foreign = IndexCheckpointRootV1::new(99, vec![0xf1; ALGORITHM.hash_length()]).unwrap();
+    state.move_selected_on_load = Some((state.selected_loads + 2, foreign));
+  }
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::CommitUnknown);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().selected_descriptor(), predecessor);
+}
+
+#[test]
+fn rotation_immutable_sync_refusal_retains_one_exact_retry() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  fixture.publisher.publish(&first).unwrap();
+  fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor = fixture.publisher.workspace_head().unwrap().selected_descriptor();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xaa; 16],
+    covered_through_publication_sequence: 40,
+  };
+  fixture.state.lock().unwrap().refuse_immutable_sync = true;
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().selected_descriptor(), predecessor);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 1);
+
+  fixture.state.lock().unwrap().refuse_immutable_sync = false;
+  let retried = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert_eq!(retried.successor_workspace().workspace_path(), successor_path);
+  assert_eq!(fixture.publisher.publish_rotation_successor(retried).unwrap().checkpoint_sequence, 2);
+  assert_eq!(fixture.publisher.workspace_path(), successor_path);
+  assert_eq!(fixture.state.lock().unwrap().immutable.len(), 2);
+}
+
+#[test]
+fn rotation_corrupt_successor_object_or_manifest_never_reaches_the_selector() {
+  for corruption in ["object", "manifest"] {
+    let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    fixture.coordinator.complete_success(&first).unwrap();
+    let predecessor = fixture.publisher.workspace_head().unwrap().selected_descriptor();
+    let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+    let coverage = IndexRuntimeImmutableCoverageProofV1 {
+      runtime_id: RUNTIME_ID,
+      generation: 1,
+      source_namespace_root: &source_root,
+      coverage_epoch_id: [0xab; 16],
+      covered_through_publication_sequence: 40,
+    };
+    let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+    let successor_path = rotated.successor_workspace().workspace_path();
+    let path = if corruption == "object" {
+      fs::read_dir(successor_path.join("objects/runtime")).unwrap().next().unwrap().unwrap().path()
+    } else {
+      fs::read_dir(successor_path.join("manifests")).unwrap().next().unwrap().unwrap().path()
+    };
+    let mut bytes = fs::read(&path).unwrap();
+    let offset = bytes.len() - 1;
+    bytes[offset] ^= 0x80;
+    fs::write(path, bytes).unwrap();
+
+    let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+    assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::Corrupt);
+    assert_eq!(fixture.publisher.workspace_head().unwrap().selected_descriptor(), predecessor);
+    assert_eq!(fixture.state.lock().unwrap().selector_calls, 1);
+  }
+}
+
+#[test]
+fn rotation_publication_and_recovery_preserve_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha3_512] {
+    let (mut fixture, first) = Fixture::new_for(algorithm, SelectorBehavior::Commit);
+    fixture.publisher.publish(&first).unwrap();
+    fixture.coordinator.complete_success(&first).unwrap();
+    let source_root = digest_parts(algorithm, &[b"source-root"]);
+    let coverage = IndexRuntimeImmutableCoverageProofV1 {
+      runtime_id: RUNTIME_ID,
+      generation: 1,
+      source_namespace_root: &source_root,
+      coverage_epoch_id: [0xa9; 16],
+      covered_through_publication_sequence: 40,
+    };
+    let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+    let selected = fixture.publisher.publish_rotation_successor(rotated).unwrap();
+    assert_eq!(selected.checkpoint_sequence, 2);
+    assert_eq!(selected.checkpoint_key.len(), algorithm.hash_length());
+
+    let database = fixture._directory.path().join("source.aeordb");
+    let scratch = fixture._directory.path().join("scratch");
+    let state = Arc::clone(&fixture.state);
+    drop(fixture.publisher);
+    let recovery_memory = memory();
+    let mut recovery_store = FakeStore::for_algorithm(Arc::clone(&state), algorithm);
+    let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+      &mut recovery_store,
+      &database,
+      IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, algorithm).unwrap(),
+      &owner_for(algorithm),
+      IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+      &recovery_memory,
+      &CancellationToken::new(),
+    )
+    .unwrap();
+    let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+      panic!("rotated workspace did not recover for {algorithm:?}");
+    };
+    assert_eq!(recovered.selected().checkpoint_key.len(), algorithm.hash_length());
+    assert_eq!(recovered.workspace_head().unwrap().manifest_sequence(), 1);
+  }
 }
 
 #[test]
@@ -1587,10 +1875,23 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   let native_journal = include_str!("../../src/engine/v4/index_native_journal_source.rs");
   let server = include_str!("../../src/server/mod.rs");
   let directory_ops = include_str!("../../src/engine/directory_ops.rs");
+  let installation = include_str!("../../src/engine/v4/index_runtime_installation.rs");
   let immutable = source.find("self.store.put_immutable(&pending.checkpoint)").unwrap();
   let selector = source.find("self.store.publish_selected_synced").unwrap();
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
   assert_eq!(source.matches("publish_selected_synced").count(), 1, "rotation added a second checkpoint selector");
+  assert_eq!(source.matches("fn publish_rotation_successor(").count(), 1, "rotation added a second publication writer");
+  assert_eq!(workspace.matches("fn open_rotation_successor(").count(), 1, "rotation added a second successor workspace writer");
+  assert_eq!(
+    installation.matches("recover_index_runtime_dirty_overlay_with_task_sink_v1(").count(),
+    1,
+    "runtime installation added another recovered-task owner",
+  );
+  assert_eq!(recovery.matches("DurableIndexRuntimeWorkspaceV1::resume_empty_rotation(").count(), 1);
+  for runtime_source in [source, recovery, workspace] {
+    assert!(!runtime_source.contains("tokio::spawn"), "workspace rotation added an independent async owner");
+    assert!(!runtime_source.contains("thread::spawn"), "workspace rotation added an independent thread owner");
+  }
   assert!(!source.contains("V4FirstAuthorityPublisher"));
   assert!(!source.contains("latest_object_kind"));
   assert_eq!(workspace.matches("fn append_object(").count(), 1);

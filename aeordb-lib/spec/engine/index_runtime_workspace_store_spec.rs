@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::HashAlgorithm;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_coordinator::{IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1};
 use aeordb::engine::v4::index_page::OrderedIndexRoleV1;
@@ -950,6 +950,69 @@ fn rotation_successor_streams_only_unresolved_batches_and_exact_pending_tasks() 
 }
 
 #[test]
+fn rotated_restart_replay_is_bounded_by_pending_tasks_not_completed_history() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let mut workspace = DurableIndexRuntimeWorkspaceV1::create(
+    &database,
+    identity(),
+    options(scratch.clone(), 16 * 1024 * 1024, 128),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let semantic = digest_parts(ALGORITHM, &[b"rotation-semantic"]);
+  let mut pending_operation_ids = Vec::new();
+  for sequence in 1..=66u8 {
+    let mut operation_id = [0x61; 16];
+    operation_id[15] = sequence;
+    let mut object_id = [0x71; 16];
+    object_id[15] = sequence;
+    workspace
+      .append_producer_task(object_id, 100 + u64::from(sequence), &producer_task(operation_id, u64::from(sequence), &root, &semantic))
+      .unwrap();
+    if sequence > 64 {
+      pending_operation_ids.push(operation_id);
+    }
+  }
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x93; 16],
+    covered_through_publication_sequence: 64,
+  };
+
+  let rotated = workspace.build_rotation_successor(9, 7, &root, coverage, &pending_operation_ids).unwrap();
+  assert_eq!(rotated.summary().observed_objects, 66);
+  assert_eq!(rotated.summary().discarded_objects, 64);
+  assert_eq!(rotated.summary().retained_pending_tasks, 2);
+  let selected = rotated.successor_workspace().head().unwrap().selected_descriptor();
+  drop(rotated);
+  let mut recovered = RecoveredTasks::default();
+  let reopened = DurableIndexRuntimeWorkspaceV1::resume_with_recovered_task_sink(
+    identity().database_id(),
+    identity().destination_physical_instance_id(),
+    ALGORITHM,
+    selected,
+    options(scratch, 16 * 1024 * 1024, 128),
+    CancellationToken::new(),
+    &memory,
+    &mut recovered,
+  )
+  .unwrap();
+  assert_eq!(reopened.head().unwrap().producer_task_count(), 2);
+  assert_eq!(recovered.tasks.len(), 2);
+  let mut recovered_operation_ids = recovered.tasks.iter().map(|task| task.0).collect::<Vec<_>>();
+  recovered_operation_ids.sort_unstable();
+  assert_eq!(recovered_operation_ids, pending_operation_ids);
+}
+
+#[test]
 fn rotation_successor_represents_an_empty_clean_workspace_without_a_synthetic_object() {
   let directory = tempdir().unwrap();
   let database = database_file(directory.path());
@@ -1025,6 +1088,50 @@ fn rotation_successor_conflicts_and_cancellation_never_mutate_the_predecessor() 
   let expected_canceled_path =
     workspace.workspace_path().parent().unwrap().join(format!("{}-r000000000000000a", hex::encode(identity().workspace_id())));
   assert!(!expected_canceled_path.exists());
+  assert_eq!(fs::read(source_path).unwrap(), source_before);
+}
+
+#[test]
+fn rotation_memory_pressure_preserves_the_predecessor_and_retries_after_release() {
+  let directory = tempdir().unwrap();
+  let database = database_file(directory.path());
+  let scratch = directory.path().join("scratch");
+  fs::create_dir(&scratch).unwrap();
+  let memory = memory(16 * 1024 * 1024);
+  let (_coordinator, unresolved) = batch_at(&memory, ALGORITHM, 50);
+  let mut workspace =
+    DurableIndexRuntimeWorkspaceV1::create(&database, identity(), options(scratch, 8 * 1024 * 1024, 16), CancellationToken::new(), &memory)
+      .unwrap();
+  workspace.append_runtime_batch([0x51; 16], 100, &unresolved).unwrap();
+  let predecessor = workspace.head().unwrap().selected_descriptor();
+  let source_path = object_path(workspace.workspace_path(), [0x51; 16]);
+  let source_before = fs::read(&source_path).unwrap();
+  let root = digest_parts(ALGORITHM, &[b"rotation-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: identity().runtime_id(),
+    generation: 7,
+    source_namespace_root: &root,
+    coverage_epoch_id: [0x92; 16],
+    covered_through_publication_sequence: 45,
+  };
+  let before_pressure = memory.snapshot().unwrap();
+  let policy = before_pressure.policy.unwrap();
+  let pressure_bytes = policy.soft_limit_bytes.checked_sub(before_pressure.accounted_bytes).unwrap();
+  let pressure = memory.reserve(MemoryOwner::Query, pressure_bytes, AdmissionClass::Workload).unwrap();
+
+  let error = match workspace.build_rotation_successor(9, 7, &root, coverage, &[]) {
+    Ok(_) => panic!("rotation unexpectedly succeeded under shared memory pressure"),
+    Err(error) => error,
+  };
+  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Memory(_)));
+  assert_eq!(workspace.head().unwrap().selected_descriptor(), predecessor);
+  assert_eq!(fs::read(&source_path).unwrap(), source_before);
+  drop(pressure);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, before_pressure.reserved_bytes);
+
+  let rotated = workspace.build_rotation_successor(9, 7, &root, coverage, &[]).unwrap();
+  assert_eq!(rotated.predecessor_selected(), &predecessor);
+  assert_eq!(rotated.successor_workspace().head().unwrap().manifest_sequence(), 1);
   assert_eq!(fs::read(source_path).unwrap(), source_before);
 }
 

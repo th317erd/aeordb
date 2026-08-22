@@ -324,7 +324,9 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       ));
     }
     successor_workspace.validate_selected_state(successor_selected.as_ref()).map_err(map_workspace_before_selection)?;
-    let timestamp_ms = self.clock.now_ms().max(self.selected_updated_at_ms);
+    // Rotation adds no new logical work. Retaining the selected authority time
+    // makes an unselected checkpoint byte-exact across process restart.
+    let timestamp_ms = self.selected_updated_at_ms;
     if timestamp_ms == 0 {
       return Err(corrupt("index_workspace_clock", "workspace rotation clock returned zero"));
     }
