@@ -30,7 +30,7 @@ use aeordb::engine::v4::index_recovery_store::{NativeIndexOperationDescriptorV1,
 use aeordb::engine::v4::index_record::{ScopeReverseRecordV1, encode_scope_reverse_record};
 use aeordb::engine::v4::index_runtime_dirty_overlay_recovery::{
   IndexRuntimeDirtyOverlayRecoveryErrorV1, IndexRuntimeDirtyOverlayRecoveryOutcomeV1, IndexRuntimeDirtyOverlayRecoveryReasonV1,
-  recover_index_runtime_dirty_overlay_v1,
+  recover_index_runtime_dirty_overlay_for_workspace_v1, recover_index_runtime_dirty_overlay_v1,
 };
 use aeordb::engine::v4::index_runtime_batch_publisher::{
   DurableIndexRuntimeBatchPublisherV1, INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1, IndexRuntimeCheckpointStoreV1,
@@ -39,6 +39,7 @@ use aeordb::engine::v4::index_runtime_owner::{IndexRuntimeBatchPublisherV1, Inde
 use aeordb::engine::v4::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceOptionsV1,
 };
+use aeordb::engine::v4::index_runtime_workspace_rotation::IndexRuntimeImmutableCoverageProofV1;
 use aeordb::engine::v4::index_runtime_workspace::{
   IndexWorkspaceRuntimeBatchPayload, decode_index_workspace_runtime_batch_payload, decode_index_workspace_object_v1,
 };
@@ -322,6 +323,224 @@ fn cumulative_runtime_batches_publish_truthful_external_heads_selector_last() {
   assert_eq!(external.durable_sequence, 2);
   assert!(external.durable_bytes > 0);
   assert!(Path::new(external.path).is_absolute());
+}
+
+#[test]
+fn rotation_selection_decouples_global_checkpoint_and_local_workspace_sequences() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa1; 16],
+    covered_through_publication_sequence: 40,
+  };
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert_eq!(rotated.rotation_sequence(), 2);
+  assert_eq!(rotated.successor_workspace().head().unwrap().manifest_sequence(), 1);
+  let selected = fixture.publisher.publish_rotation_successor(rotated).unwrap();
+  assert_eq!(selected.checkpoint_sequence, 2);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
+  let checkpoint_bytes = {
+    let state = fixture.state.lock().unwrap();
+    state.immutable.get(&selected.checkpoint_key).unwrap().clone()
+  };
+  let checkpoint = decode_index_task_checkpoint(&checkpoint_bytes, ALGORITHM).unwrap();
+  assert_eq!(checkpoint.checkpoint_sequence, 2);
+  assert_eq!(checkpoint.completed_work, 2);
+  assert_eq!(checkpoint.total_work_hint, 2);
+  assert_eq!(checkpoint.external.unwrap().durable_sequence, 1);
+
+  let state = Arc::clone(&fixture.state);
+  let database = fixture._directory.path().join("source.aeordb");
+  let scratch = fixture._directory.path().join("scratch");
+  drop(fixture.publisher);
+  let recovery_memory = memory();
+  let cancellation = CancellationToken::new();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovery_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &recovery_memory,
+    &cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("rotated nonempty workspace was not resumable with divergent global and local sequences");
+  };
+  assert_eq!(recovered.selected().checkpoint_sequence, 2);
+  assert_eq!(recovered.workspace_head().unwrap().manifest_sequence(), 1);
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(state), virtual_clock).unwrap();
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 42, 1_020);
+  let second = fixture.coordinator.begin_flush(1_030, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(resumed.publish(&second).unwrap().checkpoint_sequence, 3);
+  assert_eq!(resumed.workspace_head().unwrap().manifest_sequence(), 2);
+}
+
+#[test]
+fn empty_rotation_recovers_without_a_synthetic_object_and_restarts_local_sequence() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa2; 16],
+    covered_through_publication_sequence: 41,
+  };
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert!(rotated.successor_workspace().head().is_none());
+  let selected = fixture.publisher.publish_rotation_successor(rotated).unwrap();
+  assert_eq!(selected.checkpoint_sequence, 2);
+  assert!(fixture.publisher.workspace_head().is_none());
+  let checkpoint_bytes = {
+    let state = fixture.state.lock().unwrap();
+    state.immutable.get(&selected.checkpoint_key).unwrap().clone()
+  };
+  let checkpoint = decode_index_task_checkpoint(&checkpoint_bytes, ALGORITHM).unwrap();
+  assert_eq!(checkpoint.completed_work, 2);
+  assert_eq!(checkpoint.total_work_hint, 2);
+  assert!(checkpoint.external.is_none());
+
+  let state = Arc::clone(&fixture.state);
+  let database = fixture._directory.path().join("source.aeordb");
+  let scratch = fixture._directory.path().join("scratch");
+  drop(fixture.publisher);
+  let recovery_memory = memory();
+  let cancellation = CancellationToken::new();
+  let mut recovery_store = FakeStore::new(Arc::clone(&state));
+  let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovery_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &recovery_memory,
+    &cancellation,
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("empty selected rotation was not resumable");
+  };
+  assert_eq!(recovered.selected().checkpoint_sequence, 2);
+  assert!(recovered.workspace_head().is_none());
+
+  let virtual_clock: Arc<dyn VirtualClock> = fixture.clock.clone();
+  let mut resumed = DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, FakeStore::new(state), virtual_clock).unwrap();
+  fixture.clock.advance(10);
+  admit(&mut fixture.coordinator, 2, 42, 1_020);
+  let second = fixture.coordinator.begin_flush(1_030, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  assert_eq!(resumed.publish(&second).unwrap().checkpoint_sequence, 3);
+  assert_eq!(resumed.workspace_head().unwrap().manifest_sequence(), 1);
+}
+
+#[test]
+fn empty_rotation_recovery_requires_identity_context_and_an_exact_empty_skeleton() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa5; 16],
+    covered_through_publication_sequence: 41,
+  };
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  assert_eq!(fixture.publisher.publish_rotation_successor(rotated).unwrap().checkpoint_sequence, 2);
+
+  let state = Arc::clone(&fixture.state);
+  let database = fixture._directory.path().join("source.aeordb");
+  let scratch = fixture._directory.path().join("scratch");
+  drop(fixture.publisher);
+  let contextless =
+    recover_dirty_overlay(FakeStore::new(Arc::clone(&state)), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
+  assert_recovery_reason(contextless, IndexRuntimeDirtyOverlayRecoveryReasonV1::CheckpointContractMismatch);
+
+  fs::write(successor_path.join("unexpected-retained-state"), b"not empty").unwrap();
+  let mut recovery_store = FakeStore::new(state);
+  let malformed = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovery_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, DESTINATION_ID, WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &owner(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &memory(),
+    &CancellationToken::new(),
+  )
+  .unwrap();
+  assert_recovery_reason(malformed, IndexRuntimeDirtyOverlayRecoveryReasonV1::WorkspaceCorrupt);
+}
+
+#[test]
+fn rotation_selector_refusal_retains_the_old_workspace_until_exact_retry() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let predecessor_path = fixture.publisher.workspace_path().to_path_buf();
+  let predecessor = fixture.publisher.workspace_head().unwrap().selected_descriptor();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa3; 16],
+    covered_through_publication_sequence: 40,
+  };
+  fixture.state.lock().unwrap().selector_behavior = SelectorBehavior::Refuse;
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  let error = fixture.publisher.publish_rotation_successor(rotated).unwrap_err();
+  assert_eq!(error.class(), IndexRuntimePublicationErrorClassV1::RetryableBeforeSelection);
+  assert_eq!(fixture.publisher.workspace_path(), predecessor_path);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().selected_descriptor(), predecessor);
+  assert_eq!(fixture.state.lock().unwrap().selected.as_ref().unwrap().checkpoint_sequence, 1);
+  assert!(successor_path.exists());
+
+  fixture.state.lock().unwrap().selector_behavior = SelectorBehavior::Commit;
+  let retried = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert_eq!(retried.successor_workspace().workspace_path(), successor_path);
+  assert_eq!(fixture.publisher.publish_rotation_successor(retried).unwrap().checkpoint_sequence, 2);
+  assert_eq!(fixture.publisher.workspace_path(), successor_path);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
+}
+
+#[test]
+fn rotation_postcommit_error_reopens_the_exact_checkpoint_and_workspace_before_swapping() {
+  let (mut fixture, first) = Fixture::new(SelectorBehavior::Commit);
+  assert_eq!(fixture.publisher.publish(&first).unwrap().checkpoint_sequence, 1);
+  fixture.coordinator.complete_success(&first).unwrap();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xa4; 16],
+    covered_through_publication_sequence: 40,
+  };
+  fixture.state.lock().unwrap().selector_behavior = SelectorBehavior::CommitThenError;
+
+  let rotated = fixture.publisher.build_rotation_successor(coverage, &[]).unwrap();
+  let successor_path = rotated.successor_workspace().workspace_path().to_path_buf();
+  assert_eq!(fixture.publisher.publish_rotation_successor(rotated).unwrap().checkpoint_sequence, 2);
+  assert_eq!(fixture.publisher.workspace_path(), successor_path);
+  assert_eq!(fixture.publisher.workspace_head().unwrap().manifest_sequence(), 1);
+  assert_eq!(fixture.state.lock().unwrap().selector_calls, 2);
 }
 
 #[test]
@@ -898,7 +1117,12 @@ fn dirty_overlay_recovery_rejects_every_near_match_contract_shape() {
     let state = Arc::clone(&fixture.state);
     drop(fixture.publisher);
     let outcome = recover_dirty_overlay(FakeStore::new(state), &memory(), &CancellationToken::new(), 16 * 1024 * 1024, 32).unwrap();
-    assert_recovery_reason(outcome, IndexRuntimeDirtyOverlayRecoveryReasonV1::CheckpointContractMismatch);
+    let expected = if matches!(deviation, DirtyCheckpointDeviation::ExternalSequence) {
+      IndexRuntimeDirtyOverlayRecoveryReasonV1::WorkspaceCorrupt
+    } else {
+      IndexRuntimeDirtyOverlayRecoveryReasonV1::CheckpointContractMismatch
+    };
+    assert_recovery_reason(outcome, expected);
   }
 }
 
@@ -1243,7 +1467,7 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
   let (directory, database, first_authority) = native_first_authority("runtime-batch-native");
   first_authority.publish(&first_authority_request()).unwrap();
   let first_authority = Arc::new(first_authority);
-  let memory = memory();
+  let runtime_memory = memory();
   let cancellation = CancellationToken::new();
   let retirement = Arc::new(Mutex::new(
     RetirementJournalOwnerV1::new_chain(
@@ -1253,7 +1477,7 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
       901,
       RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
       &cancellation,
-      &memory,
+      &runtime_memory,
     )
     .unwrap(),
   ));
@@ -1271,30 +1495,34 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
   .unwrap();
   let clock = Arc::new(MockClock::new(1, 1_725_000_000_000));
   let virtual_clock: Arc<dyn VirtualClock> = clock.clone();
-  let native_store = NativeIndexRecoveryStoreV1::new(descriptor, Arc::clone(&first_authority), retirement, virtual_clock.clone()).unwrap();
+  let native_store =
+    NativeIndexRecoveryStoreV1::new(descriptor.clone(), Arc::clone(&first_authority), Arc::clone(&retirement), virtual_clock.clone())
+      .unwrap();
   let scratch = directory.path().join("scratch");
   fs::create_dir(&scratch).unwrap();
   let workspace = DurableIndexRuntimeWorkspaceV1::create(
     &database,
     IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, [0x51; 16], WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
-    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch.clone()), 16 * 1024 * 1024, 0, 32).unwrap(),
     cancellation.clone(),
-    &memory,
+    &runtime_memory,
   )
   .unwrap();
-  let mut coordinator = coordinator(&memory);
+  let mut coordinator = coordinator(&runtime_memory);
   admit(&mut coordinator, 1, 41, 1_001);
   let batch = coordinator.begin_flush(1_010, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
+  let source_root = digest_parts(ALGORITHM, &[b"source-root"]);
+  let runtime_owner = IndexRecoveryOwnerV1::new(DATABASE_ID, index_id.clone(), OPERATION_ID).unwrap();
   let mut runtime_publisher = DurableIndexRuntimeBatchPublisherV1::new_unselected(
     ALGORITHM,
-    IndexRecoveryOwnerV1::new(DATABASE_ID, index_id.clone(), OPERATION_ID).unwrap(),
-    digest_parts(ALGORITHM, &[b"source-root"]),
+    runtime_owner.clone(),
+    source_root.clone(),
     1,
     1_725_000_000_000,
     workspace,
     native_store,
     cancellation,
-    virtual_clock,
+    virtual_clock.clone(),
   )
   .unwrap();
   let receipt = runtime_publisher.publish(&batch).unwrap();
@@ -1306,15 +1534,48 @@ fn real_native_authority_selects_the_external_runtime_checkpoint_last() {
   let second = coordinator.begin_flush(1_030, Some(IndexFlushReasonV1::Explicit), false).unwrap().unwrap();
   let second_receipt = runtime_publisher.publish(&second).unwrap();
   assert_eq!(second_receipt.checkpoint_sequence, 2);
+  coordinator.complete_success(&second).unwrap();
+
+  let coverage = IndexRuntimeImmutableCoverageProofV1 {
+    runtime_id: RUNTIME_ID,
+    generation: 1,
+    source_namespace_root: &source_root,
+    coverage_epoch_id: [0xb1; 16],
+    covered_through_publication_sequence: 41,
+  };
+  let rotated = runtime_publisher.build_rotation_successor(coverage, &[]).unwrap();
+  assert_eq!(rotated.successor_workspace().head().unwrap().manifest_sequence(), 1);
+  assert_eq!(runtime_publisher.publish_rotation_successor(rotated).unwrap().checkpoint_sequence, 3);
 
   let selected = first_authority.load_index_operation_control(&DATABASE_ID, &index_id, &OPERATION_ID).unwrap().unwrap();
-  assert_eq!(selected.control_sequence, 2);
+  assert_eq!(selected.control_sequence, 3);
   let length = first_authority.index_artifact_length(&selected.checkpoint_artifact).unwrap().unwrap();
   let bytes = first_authority.load_index_artifact(&selected.checkpoint_artifact, length).unwrap().unwrap();
   let checkpoint = decode_index_task_checkpoint(&bytes, ALGORITHM).unwrap();
   assert_eq!(checkpoint.key, selected.checkpoint_artifact);
-  assert_eq!(checkpoint.external.unwrap().durable_sequence, 2);
-  assert_eq!(runtime_publisher.workspace_head().unwrap().manifest_sequence(), 2);
+  assert_eq!(checkpoint.checkpoint_sequence, 3);
+  assert_eq!(checkpoint.external.unwrap().durable_sequence, 1);
+  assert_eq!(runtime_publisher.workspace_head().unwrap().manifest_sequence(), 1);
+
+  drop(runtime_publisher);
+  let recovered_memory = memory();
+  let mut recovered_store = NativeIndexRecoveryStoreV1::new(descriptor, first_authority, retirement, virtual_clock.clone()).unwrap();
+  let recovered = recover_index_runtime_dirty_overlay_for_workspace_v1(
+    &mut recovered_store,
+    &database,
+    IndexRuntimeWorkspaceIdentityV1::new(DATABASE_ID, [0x51; 16], WORKSPACE_ID, RUNTIME_ID, ALGORITHM).unwrap(),
+    &runtime_owner,
+    IndexRuntimeWorkspaceOptionsV1::new(Some(scratch), 16 * 1024 * 1024, 0, 32).unwrap(),
+    &recovered_memory,
+    &CancellationToken::new(),
+  )
+  .unwrap();
+  let IndexRuntimeDirtyOverlayRecoveryOutcomeV1::Resumable(recovered) = recovered else {
+    panic!("native selected rotation was not resumable");
+  };
+  assert_eq!(recovered.selected().checkpoint_sequence, 3);
+  assert_eq!(recovered.workspace_head().unwrap().manifest_sequence(), 1);
+  assert!(DurableIndexRuntimeBatchPublisherV1::new_resumed(recovered, recovered_store, virtual_clock).is_ok());
 }
 
 #[test]
@@ -1326,9 +1587,10 @@ fn runtime_publisher_uses_one_existing_selector_and_one_existing_timer_cadence()
   let native_journal = include_str!("../../src/engine/v4/index_native_journal_source.rs");
   let server = include_str!("../../src/server/mod.rs");
   let directory_ops = include_str!("../../src/engine/directory_ops.rs");
-  let immutable = source.find("self.store.put_immutable(&checkpoint)").unwrap();
+  let immutable = source.find("self.store.put_immutable(&pending.checkpoint)").unwrap();
   let selector = source.find("self.store.publish_selected_synced").unwrap();
   assert!(immutable < selector, "runtime checkpoint selector appears before immutable publication");
+  assert_eq!(source.matches("publish_selected_synced").count(), 1, "rotation added a second checkpoint selector");
   assert!(!source.contains("V4FirstAuthorityPublisher"));
   assert!(!source.contains("latest_object_kind"));
   assert_eq!(workspace.matches("fn append_object(").count(), 1);

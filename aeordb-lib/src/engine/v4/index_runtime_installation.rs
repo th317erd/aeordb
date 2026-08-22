@@ -852,15 +852,21 @@ fn build_runtime_publisher(
   now_ms: u64,
 ) -> Result<(NativeIndexRuntimeBatchPublisherV1, bool), NativeIndexRuntimeInstallationErrorV1> {
   let owner = IndexRecoveryOwnerV1::new(identity.database_id, options.descriptor.index_id().to_vec(), options.descriptor.operation_id())?;
+  let workspace_identity = IndexRuntimeWorkspaceIdentityV1::new(
+    identity.database_id,
+    identity.destination_physical_instance_id,
+    options.workspace_id,
+    coordinator_id,
+    identity.hash_algorithm,
+  )?;
   let mut store = NativeIndexRecoveryStoreV1::new(options.descriptor.clone(), publisher, retirement_owner, Arc::clone(&clock))?;
   check_cancellation(cancellation)?;
   if store.load_selected(&owner)?.is_some() {
     let mut task_sink = NativeIndexRecoveredTaskSinkV1 { owner: runtime_owner, now_ms };
     let recovered = recover_index_runtime_dirty_overlay_with_task_sink_v1(
       &mut store,
-      identity.hash_algorithm,
-      identity.database_id,
-      identity.destination_physical_instance_id,
+      engine.database_path(),
+      workspace_identity,
       &owner,
       options.workspace.clone(),
       &engine.memory_coordinator(),
@@ -884,8 +890,8 @@ fn build_runtime_publisher(
       ));
     }
     let publisher = NativeIndexRuntimeBatchPublisherV1::new_resumed(recovered, store, clock)?;
-    let workspace_identity = publisher.workspace_identity();
-    if publisher.runtime_id() != coordinator_id || workspace_identity.workspace_id() != options.workspace_id {
+    let resumed_workspace_identity = publisher.workspace_identity();
+    if publisher.runtime_id() != coordinator_id || resumed_workspace_identity.workspace_id() != options.workspace_id {
       return Err(invalid(
         "native_index_runtime_publisher_resume_identity",
         "selected runtime workspace does not match the requested runtime and workspace identities",
@@ -896,13 +902,7 @@ fn build_runtime_publisher(
 
   let workspace = DurableIndexRuntimeWorkspaceV1::create(
     engine.database_path(),
-    IndexRuntimeWorkspaceIdentityV1::new(
-      identity.database_id,
-      identity.destination_physical_instance_id,
-      options.workspace_id,
-      coordinator_id,
-      identity.hash_algorithm,
-    )?,
+    workspace_identity,
     options.workspace.clone(),
     cancellation.clone(),
     &engine.memory_coordinator(),

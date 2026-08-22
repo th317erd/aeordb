@@ -767,6 +767,60 @@ impl DurableIndexRuntimeWorkspaceV1 {
     capacities.into_iter().try_fold(0usize, usize::checked_add)
   }
 
+  pub(super) fn validate_selected_state(
+    &self,
+    selected: Option<&IndexRuntimeWorkspaceSelectedHeadV1>,
+  ) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&self.cancellation)?;
+    match selected {
+      Some(selected) => {
+        if self.head.as_ref().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor).as_ref() != Some(selected) {
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+            "workspace in-memory head disagrees with the checkpoint-selected descriptor".to_string(),
+          ));
+        }
+        let head = self.head.as_ref().ok_or_else(|| {
+          IndexRuntimeWorkspaceStoreErrorV1::State("selected descriptor requires a cumulative workspace head".to_string())
+        })?;
+        if self.scan_object_inventory(None)?.count != head.cumulative_object_count
+          || self.scan_manifest_inventory()? != head.manifest_sequence()
+        {
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+            "checkpoint-selected workspace has missing or unselected physical state".to_string(),
+          ));
+        }
+        let reopened = ReopenedIndexRuntimeWorkspaceV1::open(
+          &self.workspace_path,
+          self.identity.database_id,
+          self.identity.destination_physical_instance_id,
+          self.identity.hash_algorithm,
+          selected.clone(),
+          IndexRuntimeWorkspaceReopenOptionsV1::new(self.options.maximum_stored_bytes, self.options.maximum_object_count)?,
+          self.cancellation.clone(),
+          &self.memory,
+        )?;
+        if reopened.runtime_id() != self.identity.runtime_id
+          || reopened.manifest_sequence() != head.manifest_sequence()
+          || reopened.runtime_batch_count() != head.runtime_batch_count
+          || reopened.producer_task_count() != head.producer_task_count
+        {
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+            "checkpoint-selected workspace reopened with a different semantic closure".to_string(),
+          ));
+        }
+      }
+      None => {
+        if self.head.is_some() {
+          return Err(IndexRuntimeWorkspaceStoreErrorV1::State(
+            "clean checkpoint-selected workspace unexpectedly has a cumulative head".to_string(),
+          ));
+        }
+        validate_exact_empty_workspace_readonly(&self.workspace_path)?;
+      }
+    }
+    Ok(())
+  }
+
   pub fn create(
     database_path: &Path,
     identity: IndexRuntimeWorkspaceIdentityV1,
@@ -796,6 +850,37 @@ impl DurableIndexRuntimeWorkspaceV1 {
       manifests_path,
       runtime_objects_path,
       producer_objects_path,
+      head: None,
+      append_state: WorkspaceAppendStateV1::Clean,
+    })
+  }
+
+  pub(super) fn resume_empty_rotation(
+    database_path: &Path,
+    identity: IndexRuntimeWorkspaceIdentityV1,
+    rotation_sequence: u64,
+    options: IndexRuntimeWorkspaceOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, IndexRuntimeWorkspaceStoreErrorV1> {
+    check_cancellation(&cancellation)?;
+    validate_canonical_native_path(database_path, "index runtime empty-rotation database path")?;
+    validate_regular_database_path(database_path, "index runtime empty-rotation database")?;
+    let base_workspace_path = workspace_root_path(database_path, identity, &options)?;
+    let workspace_path = rotation_successor_path(&base_workspace_path, rotation_sequence)?;
+    validate_exact_empty_workspace_readonly(&workspace_path)?;
+    ensure_capacity(&workspace_path, 0, options.minimum_free_bytes)?;
+    let manifests_path = workspace_path.join(MANIFEST_DIRECTORY);
+    let objects_path = workspace_path.join("objects");
+    Ok(Self {
+      identity,
+      options,
+      cancellation,
+      memory: memory.clone(),
+      workspace_path,
+      manifests_path,
+      runtime_objects_path: objects_path.join(RUNTIME_OBJECT_DIRECTORY),
+      producer_objects_path: objects_path.join(PRODUCER_OBJECT_DIRECTORY),
       head: None,
       append_state: WorkspaceAppendStateV1::Clean,
     })
@@ -1783,6 +1868,7 @@ fn create_workspace_root(
   identity: IndexRuntimeWorkspaceIdentityV1,
   options: &IndexRuntimeWorkspaceOptionsV1,
 ) -> Result<PathBuf, IndexRuntimeWorkspaceStoreErrorV1> {
+  let workspace = workspace_root_path(database_path, identity, options)?;
   if let Some(base) = &options.scratch_root {
     validate_existing_directory(base, "index runtime scratch root")?;
     ensure_capacity(base, 0, options.minimum_free_bytes)?;
@@ -1792,19 +1878,32 @@ fn create_workspace_root(
     } else {
       create_private_directory_synced(&database_directory, base)?;
     }
-    let workspace = database_directory.join(hex::encode(identity.workspace_id));
     ensure_private_directory_synced(&workspace, &database_directory, "index runtime workspace directory")?;
     return Ok(workspace);
   }
   let parent = database_path.parent().ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database path has no parent".to_string()))?;
   ensure_capacity(parent, 0, options.minimum_free_bytes)?;
-  let file_name = database_path
-    .file_name()
-    .and_then(|name| name.to_str())
-    .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database filename is not canonical UTF-8".to_string()))?;
-  let workspace =
-    parent.join(format!(".{file_name}-index-runtime-{}-{}", hex::encode(identity.database_id), hex::encode(identity.workspace_id)));
   ensure_private_directory_synced(&workspace, parent, "index runtime workspace directory")?;
+  Ok(workspace)
+}
+
+fn workspace_root_path(
+  database_path: &Path,
+  identity: IndexRuntimeWorkspaceIdentityV1,
+  options: &IndexRuntimeWorkspaceOptionsV1,
+) -> Result<PathBuf, IndexRuntimeWorkspaceStoreErrorV1> {
+  let workspace = if let Some(base) = &options.scratch_root {
+    base.join(hex::encode(identity.database_id)).join(hex::encode(identity.workspace_id))
+  } else {
+    let parent =
+      database_path.parent().ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database path has no parent".to_string()))?;
+    let file_name = database_path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .ok_or_else(|| IndexRuntimeWorkspaceStoreErrorV1::Path("database filename is not canonical UTF-8".to_string()))?;
+    parent.join(format!(".{file_name}-index-runtime-{}-{}", hex::encode(identity.database_id), hex::encode(identity.workspace_id)))
+  };
+  validate_canonical_native_path(&workspace, "index runtime workspace path")?;
   Ok(workspace)
 }
 
@@ -1825,6 +1924,52 @@ fn validate_reusable_empty_workspace(workspace: &Path) -> Result<(), IndexRuntim
     if path_present(&path)? {
       validate_directory_entries(&path, &[], role)?;
     }
+  }
+  Ok(())
+}
+
+fn validate_exact_empty_workspace_readonly(workspace: &Path) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_exact_directory_entries_readonly(workspace, &[MANIFEST_DIRECTORY, "objects"], "index runtime empty workspace")?;
+  let objects = workspace.join("objects");
+  validate_exact_directory_entries_readonly(
+    &objects,
+    &[RUNTIME_OBJECT_DIRECTORY, PRODUCER_OBJECT_DIRECTORY],
+    "index runtime empty object directory",
+  )?;
+  validate_exact_directory_entries_readonly(&workspace.join(MANIFEST_DIRECTORY), &[], "index runtime empty manifest directory")?;
+  validate_exact_directory_entries_readonly(&objects.join(RUNTIME_OBJECT_DIRECTORY), &[], "index runtime empty batch directory")?;
+  validate_exact_directory_entries_readonly(&objects.join(PRODUCER_OBJECT_DIRECTORY), &[], "index runtime empty producer-task directory")?;
+  Ok(())
+}
+
+fn validate_exact_directory_entries_readonly(path: &Path, expected: &[&str], role: &str) -> Result<(), IndexRuntimeWorkspaceStoreErrorV1> {
+  validate_private_directory_readonly(path, role)?;
+  if expected.len() >= u64::BITS as usize {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} exact inventory exceeds its fixed validation mask")));
+  }
+  let mut observed = 0u64;
+  let entries =
+    fs::read_dir(path).map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "exact empty workspace inventory", source })?;
+  for entry in entries {
+    let entry =
+      entry.map_err(|source| IndexRuntimeWorkspaceStoreErrorV1::Io { operation: "exact empty workspace inventory entry", source })?;
+    let name = entry
+      .file_name()
+      .into_string()
+      .map_err(|name| IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} contains a non-UTF-8 entry {name:?}")))?;
+    let Some(position) = expected.iter().position(|expected| *expected == name) else {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} contains unexpected retained state {name}")));
+    };
+    let bit = 1u64 << position;
+    if observed & bit != 0 {
+      return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} contains duplicate retained state {name}")));
+    }
+    observed |= bit;
+    validate_private_directory_readonly(&entry.path(), role)?;
+  }
+  let expected_mask = if expected.is_empty() { 0 } else { (1u64 << expected.len()) - 1 };
+  if observed != expected_mask {
+    return Err(IndexRuntimeWorkspaceStoreErrorV1::State(format!("{role} is missing required empty-workspace directories")));
   }
   Ok(())
 }

@@ -29,8 +29,9 @@ use super::index_runtime_dirty_overlay_recovery::{
 };
 use super::index_runtime_workspace_store::{
   DurableIndexRuntimeWorkspaceV1, IndexRuntimeWorkspaceHeadV1, IndexRuntimeWorkspaceIdentityV1, IndexRuntimeWorkspaceSelectedHeadV1,
-  IndexRuntimeWorkspaceStoreErrorV1,
+  IndexRuntimeWorkspaceRotationSuccessorV1, IndexRuntimeWorkspaceStoreErrorV1,
 };
+use super::index_runtime_workspace_rotation::IndexRuntimeImmutableCoverageProofV1;
 use super::index_task::{
   ExternalWorkspaceDescriptorWriteV1, IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, decode_mutation_journal,
   encode_index_task_checkpoint,
@@ -77,6 +78,7 @@ pub enum IndexRuntimeBatchPublisherBuildErrorV1 {
 enum WorkspacePublicationIdentityV1 {
   RuntimeBatch { batch_id: u64 },
   ProducerTask { operation_id: [u8; 16] },
+  Rotation { rotation_sequence: u64 },
 }
 
 #[derive(Clone)]
@@ -85,6 +87,7 @@ struct PendingWorkspacePublicationV1 {
   timestamp_ms: u64,
   next: IndexCheckpointRootV1,
   checkpoint: EncodedImmutableIndexArtifactV1,
+  selected_workspace: Option<IndexRuntimeWorkspaceSelectedHeadV1>,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +112,7 @@ pub struct DurableIndexRuntimeBatchPublisherV1<Store> {
   selected_workspace: Option<IndexRuntimeWorkspaceSelectedHeadV1>,
   prepared: Option<PreparedWorkspacePublicationV1>,
   pending: Option<PendingWorkspacePublicationV1>,
+  pending_replacement_workspace: Option<DurableIndexRuntimeWorkspaceV1>,
   workspace: DurableIndexRuntimeWorkspaceV1,
   store: Store,
   cancellation: CancellationToken,
@@ -163,6 +167,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       selected_workspace: None,
       prepared: None,
       pending: None,
+      pending_replacement_workspace: None,
       workspace,
       store,
       cancellation,
@@ -189,10 +194,9 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       || parts.generation == 0
       || parts.started_at_ms == 0
       || parts.updated_at_ms < parts.started_at_ms
-      || parts.workspace.head().is_none()
     {
       return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
-        "resumed publisher identity, source root, generation, cancellation, or workspace head is invalid".to_string(),
+        "resumed publisher identity, source root, generation, cancellation, or selected state is invalid".to_string(),
       ));
     }
     let observed = store.load_selected(&parts.owner).map_err(IndexRuntimeBatchPublisherBuildErrorV1::Store)?;
@@ -206,14 +210,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
         "resumed publisher selected checkpoint changed after bounded recovery".to_string(),
       ));
     }
-    let selected_workspace = parts.workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor).ok_or_else(|| {
-      IndexRuntimeBatchPublisherBuildErrorV1::Invalid("resumed publisher has no selected workspace descriptor".to_string())
-    })?;
-    if selected_workspace.durable_sequence() != parts.selected.checkpoint_sequence {
-      return Err(IndexRuntimeBatchPublisherBuildErrorV1::Invalid(
-        "resumed publisher checkpoint and workspace sequences disagree".to_string(),
-      ));
-    }
+    let selected_workspace = parts.workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor);
     Ok(Self {
       hash_algorithm: workspace_identity.hash_algorithm(),
       owner: parts.owner,
@@ -222,9 +219,10 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       started_at_ms: parts.started_at_ms,
       selected_updated_at_ms: parts.updated_at_ms,
       selected: Some(parts.selected),
-      selected_workspace: Some(selected_workspace),
+      selected_workspace,
       prepared: None,
       pending: None,
+      pending_replacement_workspace: None,
       workspace: parts.workspace,
       store,
       cancellation: parts.cancellation,
@@ -251,6 +249,98 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
 
   pub(crate) fn selected_checkpoint(&self) -> Option<&IndexCheckpointRootV1> {
     self.selected.as_ref()
+  }
+
+  pub fn build_rotation_successor(
+    &self,
+    coverage: IndexRuntimeImmutableCoverageProofV1<'_>,
+    pending_operation_ids: &[[u8; 16]],
+  ) -> Result<IndexRuntimeWorkspaceRotationSuccessorV1, IndexRuntimePublicationErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(cancelled("index_workspace_rotation_cancelled", "workspace rotation was canceled before successor construction"));
+    }
+    if self.prepared.is_some() {
+      return Err(corrupt(
+        "index_workspace_rotation_prepared",
+        "workspace rotation cannot begin while an ordinary publication owns an unselected prefix",
+      ));
+    }
+    let rotation_sequence = self.expected_global_sequence()?;
+    if self.pending.as_ref().is_some_and(|pending| pending.identity != (WorkspacePublicationIdentityV1::Rotation { rotation_sequence })) {
+      return Err(corrupt("index_workspace_rotation_pending", "workspace rotation cannot replace a different pending publication"));
+    }
+    let selected_workspace = self
+      .selected_workspace
+      .as_ref()
+      .ok_or_else(|| corrupt("index_workspace_rotation_empty", "an unselected or clean workspace has no cumulative history to rotate"))?;
+    if self.workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor).as_ref() != Some(selected_workspace) {
+      return Err(corrupt(
+        "index_workspace_rotation_head",
+        "workspace rotation predecessor disagrees with the selected local workspace descriptor",
+      ));
+    }
+    self
+      .workspace
+      .build_rotation_successor(rotation_sequence, self.generation, &self.source_root, coverage, pending_operation_ids)
+      .map_err(map_workspace_before_selection)
+  }
+
+  pub fn publish_rotation_successor(
+    &mut self,
+    rotated: IndexRuntimeWorkspaceRotationSuccessorV1,
+  ) -> Result<IndexCheckpointRootV1, IndexRuntimePublicationErrorV1> {
+    let identity = WorkspacePublicationIdentityV1::Rotation { rotation_sequence: rotated.rotation_sequence() };
+    if let Some(selected) = self.resolve_already_selected_pending(identity)? {
+      return Ok(selected.next);
+    }
+    if self.cancellation.is_cancelled() {
+      return Err(cancelled("index_workspace_rotation_cancelled", "workspace rotation was canceled before checkpoint publication"));
+    }
+    self.require_expected_selection()?;
+    if self.prepared.is_some() || self.pending.is_some() || self.pending_replacement_workspace.is_some() {
+      return Err(corrupt("index_workspace_rotation_state", "workspace rotation encountered another prepared or pending publication"));
+    }
+    let expected_sequence = self.expected_global_sequence()?;
+    let selected_workspace = self
+      .selected_workspace
+      .as_ref()
+      .ok_or_else(|| corrupt("index_workspace_rotation_empty", "an unselected or clean workspace has no selected predecessor"))?;
+    if rotated.rotation_sequence() != expected_sequence || rotated.predecessor_selected() != selected_workspace {
+      return Err(corrupt(
+        "index_workspace_rotation_predecessor",
+        "rotation successor does not bind the exact selected checkpoint succession and local predecessor",
+      ));
+    }
+    let summary = rotated.summary();
+    let successor_workspace = rotated.into_successor_workspace();
+    if successor_workspace.identity() != self.workspace.identity() {
+      return Err(corrupt("index_workspace_rotation_identity", "rotation successor belongs to another runtime workspace identity"));
+    }
+    let successor_selected = successor_workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor);
+    if successor_selected.as_ref().map_or(0, IndexRuntimeWorkspaceSelectedHeadV1::durable_sequence) != summary.retained_objects() {
+      return Err(corrupt(
+        "index_workspace_rotation_summary",
+        "rotation successor local sequence disagrees with the retained-work summary",
+      ));
+    }
+    successor_workspace.validate_selected_state(successor_selected.as_ref()).map_err(map_workspace_before_selection)?;
+    let timestamp_ms = self.clock.now_ms().max(self.selected_updated_at_ms);
+    if timestamp_ms == 0 {
+      return Err(corrupt("index_workspace_clock", "workspace rotation clock returned zero"));
+    }
+    let checkpoint = self.encode_checkpoint(expected_sequence, successor_selected.as_ref(), timestamp_ms)?;
+    let next = IndexCheckpointRootV1::new(expected_sequence, checkpoint.key.clone())
+      .map_err(|error| corrupt("index_workspace_checkpoint_root", error.to_string()))?;
+    self.pending = Some(PendingWorkspacePublicationV1 {
+      identity,
+      timestamp_ms,
+      next: next.clone(),
+      checkpoint,
+      selected_workspace: successor_selected,
+    });
+    self.pending_replacement_workspace = Some(successor_workspace);
+    self.persist_and_select_pending(identity)?;
+    Ok(next)
   }
 
   /// Persist one immutable mutation journal and establish its data barrier
@@ -356,45 +446,47 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     if timestamp_ms == 0 || timestamp_ms < self.selected_updated_at_ms {
       return Err(corrupt("index_workspace_timestamp", "durable workspace object timestamp is zero or predates the selected checkpoint"));
     }
-    let expected_sequence = self
-      .selected
-      .as_ref()
-      .map_or(Some(1), |selected| selected.checkpoint_sequence.checked_add(1))
-      .ok_or_else(|| corrupt("index_workspace_sequence", "selected checkpoint sequence is exhausted"))?;
-    if head.manifest_sequence() != expected_sequence || head.cumulative_object_count() != expected_sequence {
-      return Err(corrupt("index_workspace_sequence", "cumulative workspace sequence or object count disagrees with selector succession"));
-    }
-    let checkpoint = self.encode_checkpoint(head, timestamp_ms)?;
-    let next = IndexCheckpointRootV1::new(expected_sequence, checkpoint.key.clone())
-      .map_err(|error| corrupt("index_workspace_checkpoint_root", error.to_string()))?;
-    self.pending = Some(PendingWorkspacePublicationV1 { identity, timestamp_ms, next: next.clone(), checkpoint: checkpoint.clone() });
-
-    self.store.put_immutable(&checkpoint).map_err(map_store_before_selection)?;
-    self.store.sync_immutable().map_err(map_store_before_selection)?;
-    if self.cancellation.is_cancelled() {
-      return Err(cancelled(
-        "index_workspace_cancelled",
-        "workspace publication was canceled after immutable checkpoint durability and before selection",
+    let expected_sequence = self.expected_global_sequence()?;
+    let expected_local_sequence = self.expected_local_sequence()?;
+    if head.manifest_sequence() != expected_local_sequence || head.cumulative_object_count() != expected_local_sequence {
+      return Err(corrupt(
+        "index_workspace_sequence",
+        "cumulative workspace sequence or object count disagrees with local workspace succession",
       ));
     }
-    match self.store.publish_selected_synced(&self.owner, self.selected.as_ref(), &next) {
-      Ok(()) => self.complete_selected(identity, next, timestamp_ms),
-      Err(selection_error) => self.resolve_selection_error(identity, next, timestamp_ms, selection_error),
-    }
+    let selected_workspace = head.selected_descriptor();
+    let checkpoint = self.encode_checkpoint(expected_sequence, Some(&selected_workspace), timestamp_ms)?;
+    let next = IndexCheckpointRootV1::new(expected_sequence, checkpoint.key.clone())
+      .map_err(|error| corrupt("index_workspace_checkpoint_root", error.to_string()))?;
+    self.pending =
+      Some(PendingWorkspacePublicationV1 { identity, timestamp_ms, next, checkpoint, selected_workspace: Some(selected_workspace) });
+    self.persist_and_select_pending(identity)
   }
 
   fn encode_checkpoint(
     &self,
-    head: &IndexRuntimeWorkspaceHeadV1,
+    checkpoint_sequence: u64,
+    selected_workspace: Option<&IndexRuntimeWorkspaceSelectedHeadV1>,
     timestamp_ms: u64,
   ) -> Result<super::index_artifact::EncodedImmutableIndexArtifactV1, IndexRuntimePublicationErrorV1> {
-    let selected = head.selected_descriptor();
-    let path = persisted_workspace_path(selected.workspace_path())?;
+    let persisted_path = selected_workspace.map(|selected| persisted_workspace_path(selected.workspace_path())).transpose()?;
+    let external = match (selected_workspace, persisted_path.as_deref()) {
+      (Some(selected), Some(path)) => Some(ExternalWorkspaceDescriptorWriteV1 {
+        workspace_id: selected.workspace_id(),
+        manifest_digest: selected.manifest_digest(),
+        durable_sequence: selected.durable_sequence(),
+        durable_bytes: selected.durable_bytes(),
+        path,
+      }),
+      (None, None) => None,
+      _ => return Err(corrupt("runtime_batch_workspace_path", "workspace descriptor path preparation is inconsistent")),
+    };
+    let completed_work = checkpoint_sequence;
     let required_capabilities = dirty_overlay_capabilities_v1();
     encode_index_task_checkpoint(&IndexTaskCheckpointWriteV1 {
       hash_algorithm: self.hash_algorithm,
       task_id: self.owner.operation_id(),
-      checkpoint_sequence: selected.durable_sequence(),
+      checkpoint_sequence,
       generation: self.generation,
       task_kind: IndexTaskKindV1::Reconcile,
       state: IndexTaskStateV1::Running,
@@ -409,17 +501,11 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       journal_floor_sequence: 0,
       journal_audited_through: 0,
       next_document_ordinal: 0,
-      completed_work: head.cumulative_object_count(),
-      total_work_hint: head.cumulative_object_count(),
+      completed_work,
+      total_work_hint: completed_work,
       resume_key: INDEX_RUNTIME_DIRTY_OVERLAY_RESUME_KEY_V1,
       attachments: &[],
-      external: Some(ExternalWorkspaceDescriptorWriteV1 {
-        workspace_id: selected.workspace_id(),
-        manifest_digest: selected.manifest_digest(),
-        durable_sequence: selected.durable_sequence(),
-        durable_bytes: selected.durable_bytes(),
-        path: &path,
-      }),
+      external,
     })
     .map_err(|error| corrupt("runtime_batch_checkpoint_encode", error.to_string()))
   }
@@ -447,6 +533,47 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     Ok(prepared)
   }
 
+  fn expected_global_sequence(&self) -> Result<u64, IndexRuntimePublicationErrorV1> {
+    self
+      .selected
+      .as_ref()
+      .map_or(Some(1), |selected| selected.checkpoint_sequence.checked_add(1))
+      .ok_or_else(|| corrupt("index_workspace_sequence", "selected checkpoint sequence is exhausted"))
+  }
+
+  fn expected_local_sequence(&self) -> Result<u64, IndexRuntimePublicationErrorV1> {
+    self
+      .selected_workspace
+      .as_ref()
+      .map_or(Some(1), |selected| selected.durable_sequence().checked_add(1))
+      .ok_or_else(|| corrupt("index_workspace_local_sequence", "selected workspace sequence is exhausted"))
+  }
+
+  fn persist_and_select_pending(
+    &mut self,
+    identity: WorkspacePublicationIdentityV1,
+  ) -> Result<SelectedWorkspacePublicationV1, IndexRuntimePublicationErrorV1> {
+    let pending = self
+      .pending
+      .clone()
+      .ok_or_else(|| corrupt("index_workspace_pending_missing", "checkpoint selection has no retained pending publication"))?;
+    if pending.identity != identity {
+      return Err(corrupt("index_workspace_pending_identity", "checkpoint selection belongs to another pending publication"));
+    }
+    self.store.put_immutable(&pending.checkpoint).map_err(map_store_before_selection)?;
+    self.store.sync_immutable().map_err(map_store_before_selection)?;
+    if self.cancellation.is_cancelled() {
+      return Err(cancelled(
+        "index_workspace_cancelled",
+        "workspace publication was canceled after immutable checkpoint durability and before selection",
+      ));
+    }
+    match self.store.publish_selected_synced(&self.owner, self.selected.as_ref(), &pending.next) {
+      Ok(()) => self.complete_selected(identity, pending.next, pending.timestamp_ms),
+      Err(selection_error) => self.resolve_selection_error(identity, pending.next, pending.timestamp_ms, selection_error),
+    }
+  }
+
   fn resolve_already_selected_pending(
     &mut self,
     identity: WorkspacePublicationIdentityV1,
@@ -455,7 +582,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       return Ok(None);
     };
     if pending.identity != identity {
-      return Err(corrupt("index_workspace_pending_identity", "pending checkpoint belongs to another runtime batch or producer task"));
+      return Err(corrupt("index_workspace_pending_identity", "pending checkpoint belongs to another workspace publication"));
     }
     let observed = self
       .store
@@ -466,7 +593,7 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
       return self.complete_selected(identity, pending.next, pending.timestamp_ms).map(Some);
     }
     if observed == self.selected {
-      Ok(None)
+      self.persist_and_select_pending(identity).map(Some)
     } else {
       Err(commit_unknown(
         "index_workspace_pending_foreign_selector",
@@ -539,11 +666,13 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
         "selected successor checkpoint bytes disagree with the exact pending artifact",
       ));
     }
-    let head =
-      self.workspace.head().ok_or_else(|| commit_unknown("index_workspace_head", "selected successor has no cumulative workspace head"))?;
-    if head.manifest_sequence() != pending.next.checkpoint_sequence {
-      return Err(commit_unknown("index_workspace_head", "selected successor sequence disagrees with the cumulative workspace head"));
-    }
+    let workspace = match self.pending_replacement_workspace.as_ref() {
+      Some(replacement) => replacement,
+      None => &self.workspace,
+    };
+    workspace.validate_selected_state(pending.selected_workspace.as_ref()).map_err(|error| {
+      commit_unknown("index_workspace_head", format!("selected successor workspace closure cannot be reopened exactly: {error}"))
+    })?;
     Ok(())
   }
 
@@ -554,19 +683,35 @@ impl<Store: IndexRuntimeCheckpointStoreV1> DurableIndexRuntimeBatchPublisherV1<S
     timestamp_ms: u64,
   ) -> Result<SelectedWorkspacePublicationV1, IndexRuntimePublicationErrorV1> {
     if self.pending.as_ref().is_none_or(|pending| pending.identity != identity || pending.next != next) {
+      return Err(corrupt("index_workspace_pending_mismatch", "selected successor does not match the retained workspace publication"));
+    }
+    let pending = self
+      .pending
+      .as_ref()
+      .ok_or_else(|| corrupt("index_workspace_pending_missing", "selected successor has no retained publication evidence"))?
+      .clone();
+    let candidate_workspace = match self.pending_replacement_workspace.as_ref() {
+      Some(replacement) => replacement,
+      None => &self.workspace,
+    };
+    if candidate_workspace.head().map(IndexRuntimeWorkspaceHeadV1::selected_descriptor).as_ref() != pending.selected_workspace.as_ref() {
       return Err(corrupt(
-        "index_workspace_pending_mismatch",
-        "selected successor does not match the retained runtime batch or producer task",
+        "index_workspace_head",
+        "selected successor in-memory workspace state disagrees with its retained checkpoint descriptor",
       ));
     }
-    let selected_workspace = self
-      .workspace
-      .head()
-      .filter(|head| head.manifest_sequence() == next.checkpoint_sequence)
-      .map(IndexRuntimeWorkspaceHeadV1::selected_descriptor)
-      .ok_or_else(|| corrupt("index_workspace_head", "selected successor has no exact cumulative workspace head"))?;
+    let is_rotation = matches!(identity, WorkspacePublicationIdentityV1::Rotation { .. });
+    if is_rotation != self.pending_replacement_workspace.is_some() {
+      return Err(corrupt(
+        "index_workspace_replacement_mismatch",
+        "selected successor replacement ownership disagrees with its publication kind",
+      ));
+    }
+    if let Some(replacement) = self.pending_replacement_workspace.take() {
+      self.workspace = replacement;
+    }
     self.selected = Some(next.clone());
-    self.selected_workspace = Some(selected_workspace);
+    self.selected_workspace = pending.selected_workspace;
     self.selected_updated_at_ms = timestamp_ms;
     self.prepared = None;
     self.pending = None;
