@@ -11,7 +11,7 @@ use aeordb::engine::v4::index_page::{
   checked_ordered_record_order_key_length, decode_artifact_directory, decode_ordered_page, decode_ordered_record, decode_posting_record,
   encode_artifact_directory, encode_ordered_page, encode_posting_record, ordered_record_order_key, validate_posting_page_link,
 };
-use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, encode_scope_document_record};
+use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, ScopeReverseRecordV1, encode_scope_document_record, encode_scope_reverse_record};
 use aeordb::engine::v4::reader::MalformedInputClass;
 
 fn owner(hash_algorithm: HashAlgorithm) -> Vec<u8> {
@@ -71,6 +71,30 @@ fn scope_page(hash_algorithm: HashAlgorithm, owner_id: &[u8], generation: u64, r
   encode_ordered_page(&OrderedPageWriteV1 {
     hash_algorithm,
     role: OrderedIndexRoleV1::ScopeOrdinal,
+    owner_id,
+    generation,
+    page_id: 0,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &record_slices,
+  })
+  .unwrap()
+  .value
+}
+
+fn scope_reverse_record(hash_algorithm: HashAlgorithm, document_ordinal: u64, path: &str) -> Vec<u8> {
+  let file_key = digest_parts(hash_algorithm, &[b"file:", path.as_bytes()]);
+  encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal, file_key: &file_key }, hash_algorithm).unwrap()
+}
+
+fn scope_reverse_page(hash_algorithm: HashAlgorithm, owner_id: &[u8], generation: u64, records: &[Vec<u8>]) -> Vec<u8> {
+  let mut record_slices = records.iter().map(Vec::as_slice).collect::<Vec<_>>();
+  record_slices.sort_unstable_by_key(|record| {
+    ordered_record_order_key(&decode_ordered_record(record, hash_algorithm, OrderedIndexRoleV1::ScopeReverse).unwrap()).unwrap()
+  });
+  encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm,
+    role: OrderedIndexRoleV1::ScopeReverse,
     owner_id,
     generation,
     page_id: 0,
@@ -380,6 +404,95 @@ fn cow_delete_requires_an_existing_exact_key_and_writes_a_tombstone() {
     .class(),
     MalformedInputClass::CrossRecordClosureMismatch
   );
+}
+
+#[test]
+fn scope_reverse_remove_existing_physically_deletes_the_key_and_retires_the_last_page() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let first = scope_reverse_record(hash_algorithm, 1, "/first");
+    let second = scope_reverse_record(hash_algorithm, 2, "/second");
+    let source = scope_reverse_page(hash_algorithm, &owner_id, 7, &[first.clone(), second.clone()]);
+
+    let plan = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 0,
+      mutation: OrderedPageMutationKindV1::RemoveExisting(&first),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    let rewritten = decode_ordered_page(&plan.replacements[0].artifacts[0].value, hash_algorithm).unwrap();
+    assert_eq!(rewritten.live_count, 1);
+    assert_eq!(rewritten.tombstone_count, 0);
+    assert_eq!(rewritten.records.len(), 1);
+    assert_eq!(rewritten.records.iter().next().unwrap().unwrap().encoded, second);
+
+    let last_source = scope_reverse_page(hash_algorithm, &owner_id, 7, std::slice::from_ref(&first));
+    let retired = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &last_source,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 0,
+      mutation: OrderedPageMutationKindV1::RemoveExisting(&first),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    assert_eq!(retired.replacements.len(), 1);
+    assert!(retired.replacements[0].artifacts.is_empty());
+
+    let leaf = leaf_directory_for_role(
+      hash_algorithm,
+      OrderedIndexRoleV1::ScopeReverse,
+      &owner_id,
+      7,
+      &[last_source.as_slice()],
+      PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    );
+    let path = ArtifactDirectoryPathV1 { source_page_key: &retired.replacements[0].source_key, directories: &[leaf.as_slice()] };
+    let directory = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &retired,
+      paths: &[path],
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    assert!(directory.root_key.is_none());
+    assert_eq!(directory.live_count, 0);
+    assert_eq!(directory.tombstone_count, 0);
+    assert_eq!(directory.page_count, 0);
+
+    let missing_source = scope_reverse_page(hash_algorithm, &owner_id, 7, std::slice::from_ref(&second));
+    let missing = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &missing_source,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 0,
+      mutation: OrderedPageMutationKindV1::RemoveExisting(&first),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap_err();
+    assert_eq!(missing.code(), "index_cow_remove_missing");
+
+    let posting = posting_record(1, 1, 16, false);
+    let posting_source = posting_page(hash_algorithm, &owner_id, 7, 1, 0, 0, std::slice::from_ref(&posting));
+    let wrong_role = mutate_ordered_page_v1(&OrderedPageMutationRequestV1 {
+      hash_algorithm,
+      source_page: &posting_source,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 2,
+      mutation: OrderedPageMutationKindV1::RemoveExisting(&posting),
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap_err();
+    assert_eq!(wrong_role.code(), "index_cow_remove_role");
+  }
 }
 
 #[test]

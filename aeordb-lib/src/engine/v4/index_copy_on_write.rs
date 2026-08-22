@@ -62,17 +62,22 @@ pub const fn default_index_directory_layout_v1() -> IndexDirectoryLayoutV1 {
 pub enum OrderedPageMutationKindV1<'a> {
   UpsertLive(&'a [u8]),
   TombstoneExisting(&'a [u8]),
+  RemoveExisting(&'a [u8]),
 }
 
 impl<'a> OrderedPageMutationKindV1<'a> {
   fn encoded_record(self) -> &'a [u8] {
     match self {
-      Self::UpsertLive(record) | Self::TombstoneExisting(record) => record,
+      Self::UpsertLive(record) | Self::TombstoneExisting(record) | Self::RemoveExisting(record) => record,
     }
   }
 
   fn expects_tombstone(self) -> bool {
     matches!(self, Self::TombstoneExisting(_))
+  }
+
+  fn removes_existing(self) -> bool {
+    matches!(self, Self::RemoveExisting(_))
   }
 }
 
@@ -226,6 +231,7 @@ struct DecodedOrderedMutationV1<'a> {
   encoded: &'a [u8],
   order_key: Vec<u8>,
   tombstone: bool,
+  remove_existing: bool,
 }
 
 pub fn mutate_ordered_page_v1(request: &OrderedPageMutationRequestV1<'_>) -> FormatResult<OrderedPageMutationPlanV1> {
@@ -255,6 +261,14 @@ pub fn mutate_ordered_page_batch_v1(request: &OrderedPageBatchMutationRequestV1<
   if !changed {
     return Ok(OrderedPageMutationPlanV1 {
       replacements: Vec::new(),
+      allocated_page_ids: Vec::new(),
+      retired_page_ids: Vec::new(),
+      next_page_id: request.next_page_id,
+    });
+  }
+  if records.is_empty() {
+    return Ok(OrderedPageMutationPlanV1 {
+      replacements: vec![ordered_page_replacement_with_retirement(&source, Vec::new(), true)?],
       allocated_page_ids: Vec::new(),
       retired_page_ids: Vec::new(),
       next_page_id: request.next_page_id,
@@ -2078,6 +2092,9 @@ fn decode_ordered_mutation_batch<'a>(
     if record.tombstone != mutation.expects_tombstone() {
       return Err(closure_error("index_cow_mutation_tombstone", "mutation kind disagrees with the encoded record tombstone flag"));
     }
+    if mutation.removes_existing() && role != OrderedIndexRoleV1::ScopeReverse {
+      return Err(closure_error("index_cow_remove_role", "physical ordered-record removal is permitted only for scope-reverse rows"));
+    }
     let order_key = ordered_record_order_key(&record)?;
     if let Some(previous) = decoded.last() {
       if compare_order_keys(request.hash_algorithm, role, &previous.order_key, &order_key)? != Ordering::Less {
@@ -2093,7 +2110,12 @@ fn decode_ordered_mutation_batch<'a>(
         format!("mutation keys exceed the {}-byte operation cap", request.layout.maximum_workspace_bytes),
       ));
     }
-    decoded.push(DecodedOrderedMutationV1 { encoded: mutation.encoded_record(), order_key, tombstone: record.tombstone });
+    decoded.push(DecodedOrderedMutationV1 {
+      encoded: mutation.encoded_record(),
+      order_key,
+      tombstone: record.tombstone,
+      remove_existing: mutation.removes_existing(),
+    });
   }
   Ok(decoded)
 }
@@ -2159,10 +2181,12 @@ fn merge_ordered_mutation_batch(
       Ordering::Equal => {
         let source = sources.next().ok_or_else(|| closure_error("index_cow_batch_source", "source iterator ended unexpectedly"))?;
         let mutation = mutations.next().ok_or_else(|| closure_error("index_cow_batch_mutation", "mutation iterator ended unexpectedly"))?;
-        changed |= source.encoded != mutation.encoded;
-        if source.encoded == mutation.encoded {
+        if mutation.remove_existing {
+          changed = true;
+        } else if source.encoded == mutation.encoded {
           merged.push(source);
         } else {
+          changed = true;
           merged.push(OwnedOrderedRecordV1 {
             encoded: copy_batch_bytes(mutation.encoded, "mutation record")?,
             order_key: mutation.order_key,
@@ -2172,6 +2196,9 @@ fn merge_ordered_mutation_batch(
       }
       Ordering::Greater => {
         let mutation = mutations.next().ok_or_else(|| closure_error("index_cow_batch_mutation", "mutation iterator ended unexpectedly"))?;
+        if mutation.remove_existing {
+          return Err(closure_error("index_cow_remove_missing", "cannot physically remove an ordered record that is not present"));
+        }
         if mutation.tombstone {
           return Err(closure_error("index_cow_tombstone_missing", "cannot tombstone an ordered record that is not present"));
         }
