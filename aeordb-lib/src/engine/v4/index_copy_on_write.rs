@@ -8,6 +8,7 @@ use crate::engine::HashAlgorithm;
 use super::index_artifact::{
   EncodedImmutableIndexArtifactV1, checked_immutable_index_artifact_encoded_length, checked_immutable_index_artifact_representable_length,
 };
+use super::hash::IncrementalDigestV1;
 use super::index_page::{
   ArtifactDirectoryEntryV1, ArtifactDirectoryEntryWriteV1, ArtifactDirectoryNodeV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1,
   OrderedPageV1, OrderedPageWriteV1, PhysicalHintV1, compare_order_keys, decode_artifact_directory, decode_ordered_page,
@@ -78,6 +79,44 @@ impl<'a> OrderedPageMutationKindV1<'a> {
 
   fn removes_existing(self) -> bool {
     matches!(self, Self::RemoveExisting(_))
+  }
+
+  fn commitment_tag(self) -> u8 {
+    match self {
+      Self::UpsertLive(_) => 1,
+      Self::TombstoneExisting(_) => 2,
+      Self::RemoveExisting(_) => 3,
+    }
+  }
+}
+
+pub(crate) struct IndexMutationCommitmentV1 {
+  digest: IncrementalDigestV1,
+  count: u64,
+}
+
+impl IndexMutationCommitmentV1 {
+  pub(crate) fn new(hash_algorithm: HashAlgorithm) -> Self {
+    let mut digest = IncrementalDigestV1::new(hash_algorithm);
+    digest.update(b"aeordb.index-cow-mutations.v1\0");
+    Self { digest, count: 0 }
+  }
+
+  pub(crate) fn push(&mut self, mutation: OrderedPageMutationKindV1<'_>) -> FormatResult<()> {
+    let encoded = mutation.encoded_record();
+    let length = u64::try_from(encoded.len())
+      .map_err(|source| amplification_error("index_cow_mutation_commitment", format!("mutation length is not representable: {source}")))?;
+    self.digest.update(&[mutation.commitment_tag()]);
+    self.digest.update(&length.to_le_bytes());
+    self.digest.update(encoded);
+    self.count =
+      self.count.checked_add(1).ok_or_else(|| arithmetic_error("index_cow_mutation_commitment", "mutation commitment count overflowed"))?;
+    Ok(())
+  }
+
+  pub(crate) fn finish(mut self) -> Vec<u8> {
+    self.digest.update(&self.count.to_le_bytes());
+    self.digest.finalize()
   }
 }
 
@@ -189,6 +228,7 @@ pub struct IndexCopyOnWriteClosureRequestV1<'a> {
   pub hash_algorithm: HashAlgorithm,
   pub generation: u64,
   pub initial_next_page_id: u64,
+  pub applied_mutations: Option<&'a [OrderedPageMutationKindV1<'a>]>,
   pub source_pages: &'a [&'a [u8]],
   pub paths: &'a [ArtifactDirectoryPathV1<'a>],
   pub page_plan: &'a OrderedPageMutationPlanV1,
@@ -202,6 +242,7 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub owner_id: Vec<u8>,
   pub role: OrderedIndexRoleV1,
   pub generation: u64,
+  pub source_root_key: Vec<u8>,
   pub root_key: Option<Vec<u8>>,
   pub live_count: u64,
   pub tombstone_count: u64,
@@ -209,7 +250,9 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub logical_bytes: u64,
   pub minimum_page_id: u64,
   pub maximum_page_id: u64,
+  pub initial_next_page_id: u64,
   pub next_page_id: u64,
+  pub mutation_commitment: Option<Vec<u8>>,
   pub page_artifact_count: usize,
   pub directory_artifact_count: usize,
   pub source_page_bytes: usize,
@@ -217,7 +260,11 @@ pub struct IndexCopyOnWriteClosureSummaryV1 {
   pub page_artifact_bytes: usize,
   pub directory_artifact_bytes: usize,
   pub retained_encoded_bytes: usize,
+  _validated: IndexCopyOnWriteClosureSealV1,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexCopyOnWriteClosureSealV1;
 
 #[derive(Debug)]
 struct OwnedOrderedRecordV1 {
@@ -827,12 +874,14 @@ pub fn validate_index_copy_on_write_closure_v1(
       ),
     ));
   }
+  let mutation_commitment = validate_mutation_binding(request, &page_closure, retained_encoded_bytes)?;
   let root_key = request.directory_plan.root_key.as_deref().map(|key| copy_fallible_bytes(key, "closure root key")).transpose()?;
 
   Ok(IndexCopyOnWriteClosureSummaryV1 {
     owner_id: page_closure.owner_id,
     role: page_closure.role,
     generation: request.generation,
+    source_root_key: copy_fallible_bytes(&request.directory_plan.source_root_key, "closure source root key")?,
     root_key,
     live_count: request.directory_plan.live_count,
     tombstone_count: request.directory_plan.tombstone_count,
@@ -840,7 +889,9 @@ pub fn validate_index_copy_on_write_closure_v1(
     logical_bytes: request.directory_plan.logical_bytes,
     minimum_page_id: request.directory_plan.minimum_page_id,
     maximum_page_id: request.directory_plan.maximum_page_id,
+    initial_next_page_id: request.initial_next_page_id,
     next_page_id: request.page_plan.next_page_id,
+    mutation_commitment,
     page_artifact_count: page_closure.output_pages.len(),
     directory_artifact_count: request.directory_plan.artifacts.len(),
     source_page_bytes: page_closure.source_page_bytes,
@@ -848,6 +899,7 @@ pub fn validate_index_copy_on_write_closure_v1(
     page_artifact_bytes: page_closure.page_artifact_bytes,
     directory_artifact_bytes,
     retained_encoded_bytes,
+    _validated: IndexCopyOnWriteClosureSealV1,
   })
 }
 
@@ -856,9 +908,280 @@ struct ValidatedPageClosureV1<'a> {
   role: OrderedIndexRoleV1,
   owner_id: Vec<u8>,
   source_keys: BTreeSet<Vec<u8>>,
+  source_pages: Vec<OrderedPageV1<'a>>,
   output_pages: Vec<OrderedPageV1<'a>>,
   source_page_bytes: usize,
   page_artifact_bytes: usize,
+}
+
+#[derive(Debug)]
+struct BoundMutationRecordV1<'a> {
+  order_key: Vec<u8>,
+  encoded: &'a [u8],
+  tombstone: bool,
+  mutation: Option<OrderedPageMutationKindV1<'a>>,
+}
+
+fn validate_mutation_binding(
+  request: &IndexCopyOnWriteClosureRequestV1<'_>,
+  page_closure: &ValidatedPageClosureV1<'_>,
+  retained_encoded_bytes: usize,
+) -> FormatResult<Option<Vec<u8>>> {
+  let Some(mutations) = request.applied_mutations else {
+    return Ok(None);
+  };
+  if mutations.is_empty() {
+    return Err(closure_error("index_cow_mutation_binding_empty", "a mutation-bound closure has no mutations"));
+  }
+  let mut workspace_bytes = retained_encoded_bytes;
+  let source = collect_binding_records(
+    request.hash_algorithm,
+    page_closure.role,
+    &page_closure.source_pages,
+    request.directory_layout.maximum_workspace_bytes,
+    &mut workspace_bytes,
+  )?;
+  let output = collect_binding_records(
+    request.hash_algorithm,
+    page_closure.role,
+    &page_closure.output_pages,
+    request.directory_layout.maximum_workspace_bytes,
+    &mut workspace_bytes,
+  )?;
+  let (mutations, commitment) = collect_binding_mutations(
+    request.hash_algorithm,
+    page_closure.role,
+    mutations,
+    request.directory_layout.maximum_workspace_bytes,
+    &mut workspace_bytes,
+  )?;
+  validate_bound_record_stream(request.hash_algorithm, page_closure.role, &source, &mutations, &output)?;
+  Ok(Some(commitment))
+}
+
+fn collect_binding_records<'a>(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  pages: &'a [OrderedPageV1<'a>],
+  maximum_workspace_bytes: usize,
+  workspace_bytes: &mut usize,
+) -> FormatResult<Vec<BoundMutationRecordV1<'a>>> {
+  let count = pages.iter().try_fold(0usize, |count, page| {
+    count.checked_add(page.records.len()).ok_or_else(|| arithmetic_error("index_cow_mutation_binding_count", "record count overflowed"))
+  })?;
+  charge_binding_workspace(
+    workspace_bytes,
+    count
+      .checked_mul(size_of::<BoundMutationRecordV1<'_>>())
+      .ok_or_else(|| arithmetic_error("index_cow_mutation_binding_count", "record metadata bytes overflowed"))?,
+    maximum_workspace_bytes,
+  )?;
+  let mut records: Vec<BoundMutationRecordV1<'a>> = Vec::new();
+  records
+    .try_reserve_exact(count)
+    .map_err(|source| amplification_error("index_cow_mutation_binding_records", format!("record reservation failed: {source}")))?;
+  let mut previous_page_upper: Option<&[u8]> = None;
+  for page in pages {
+    if page.role != role {
+      return Err(closure_error("index_cow_mutation_binding_role", "mutation-binding pages disagree on ordered role"));
+    }
+    if let Some(upper) = previous_page_upper {
+      if compare_order_keys(hash_algorithm, role, upper, page.lower_fence)? != Ordering::Less {
+        return Err(order_error("index_cow_mutation_binding_page_order", "mutation-binding pages are not in strict logical order"));
+      }
+    }
+    for record in page.records.iter() {
+      let record = record?;
+      let order_key = ordered_record_order_key(&record)?;
+      charge_binding_workspace(workspace_bytes, order_key.len(), maximum_workspace_bytes)?;
+      if let Some(previous) = records.last() {
+        if compare_order_keys(hash_algorithm, role, &previous.order_key, &order_key)? != Ordering::Less {
+          return Err(order_error("index_cow_mutation_binding_record_order", "mutation-binding records are not strictly ordered"));
+        }
+      }
+      records.push(BoundMutationRecordV1 { order_key, encoded: record.encoded, tombstone: record.tombstone, mutation: None });
+    }
+    previous_page_upper = Some(page.upper_fence);
+  }
+  Ok(records)
+}
+
+fn collect_binding_mutations<'a>(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  mutations: &'a [OrderedPageMutationKindV1<'a>],
+  maximum_workspace_bytes: usize,
+  workspace_bytes: &mut usize,
+) -> FormatResult<(Vec<BoundMutationRecordV1<'a>>, Vec<u8>)> {
+  charge_binding_workspace(
+    workspace_bytes,
+    mutations
+      .len()
+      .checked_mul(size_of::<BoundMutationRecordV1<'_>>())
+      .ok_or_else(|| arithmetic_error("index_cow_mutation_binding_count", "mutation metadata bytes overflowed"))?,
+    maximum_workspace_bytes,
+  )?;
+  let mut bound: Vec<BoundMutationRecordV1<'a>> = Vec::new();
+  bound
+    .try_reserve_exact(mutations.len())
+    .map_err(|source| amplification_error("index_cow_mutation_binding_records", format!("mutation reservation failed: {source}")))?;
+  let mut commitment = IndexMutationCommitmentV1::new(hash_algorithm);
+  for mutation in mutations {
+    let decoded = decode_ordered_record(mutation.encoded_record(), hash_algorithm, role)?;
+    if mutation.expects_tombstone() != decoded.tombstone
+      || (mutation.removes_existing() && (role != OrderedIndexRoleV1::ScopeReverse || decoded.tombstone))
+    {
+      return Err(closure_error("index_cow_mutation_binding_kind", "mutation kind disagrees with its exact ordered record or role"));
+    }
+    let order_key = ordered_record_order_key(&decoded)?;
+    charge_binding_workspace(workspace_bytes, order_key.len(), maximum_workspace_bytes)?;
+    if bound.last().is_some_and(|previous| previous.order_key.as_slice() >= order_key.as_slice()) {
+      return Err(order_error(
+        "index_cow_mutation_binding_frozen_order",
+        "bound mutations are not in strict canonical frozen-batch byte order",
+      ));
+    }
+    commitment.push(*mutation)?;
+    bound.push(BoundMutationRecordV1 { order_key, encoded: decoded.encoded, tombstone: decoded.tombstone, mutation: Some(*mutation) });
+  }
+  sort_bound_mutations_semantically(hash_algorithm, role, &mut bound)?;
+  for pair in bound.windows(2) {
+    if compare_order_keys(hash_algorithm, role, &pair[0].order_key, &pair[1].order_key)? != Ordering::Less {
+      return Err(order_error("index_cow_mutation_binding_order", "bound mutations are not semantically unique"));
+    }
+  }
+  Ok((bound, commitment.finish()))
+}
+
+fn sort_bound_mutations_semantically(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  records: &mut [BoundMutationRecordV1<'_>],
+) -> FormatResult<()> {
+  let len = records.len();
+  for root in (0..len / 2).rev() {
+    sift_bound_mutation_heap(hash_algorithm, role, records, root, len)?;
+  }
+  for end in (1..len).rev() {
+    records.swap(0, end);
+    sift_bound_mutation_heap(hash_algorithm, role, records, 0, end)?;
+  }
+  Ok(())
+}
+
+fn sift_bound_mutation_heap(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  records: &mut [BoundMutationRecordV1<'_>],
+  mut root: usize,
+  end: usize,
+) -> FormatResult<()> {
+  loop {
+    let Some(left) = root.checked_mul(2).and_then(|value| value.checked_add(1)) else {
+      return Err(arithmetic_error("index_cow_mutation_binding_sort", "mutation heap index overflowed"));
+    };
+    if left >= end {
+      return Ok(());
+    }
+    let mut greatest = root;
+    if compare_order_keys(hash_algorithm, role, &records[greatest].order_key, &records[left].order_key)? == Ordering::Less {
+      greatest = left;
+    }
+    let right = left + 1;
+    if right < end && compare_order_keys(hash_algorithm, role, &records[greatest].order_key, &records[right].order_key)? == Ordering::Less {
+      greatest = right;
+    }
+    if greatest == root {
+      return Ok(());
+    }
+    records.swap(root, greatest);
+    root = greatest;
+  }
+}
+
+fn validate_bound_record_stream(
+  hash_algorithm: HashAlgorithm,
+  role: OrderedIndexRoleV1,
+  source: &[BoundMutationRecordV1<'_>],
+  mutations: &[BoundMutationRecordV1<'_>],
+  output: &[BoundMutationRecordV1<'_>],
+) -> FormatResult<()> {
+  let mut source_index = 0usize;
+  let mut mutation_index = 0usize;
+  let mut output_index = 0usize;
+  while source_index < source.len() || mutation_index < mutations.len() {
+    let source_record = source.get(source_index);
+    let mutation_record = mutations.get(mutation_index);
+    let order = match (source_record, mutation_record) {
+      (Some(source), Some(mutation)) => compare_order_keys(hash_algorithm, role, &source.order_key, &mutation.order_key)?,
+      (Some(_), None) => Ordering::Less,
+      (None, Some(_)) => Ordering::Greater,
+      (None, None) => break,
+    };
+    let expected = match order {
+      Ordering::Less => {
+        source_index += 1;
+        source_record
+      }
+      Ordering::Greater => {
+        mutation_index += 1;
+        let mutation = mutation_record.ok_or_else(|| closure_error("index_cow_mutation_binding_stream", "missing mutation record"))?;
+        if !matches!(mutation.mutation, Some(OrderedPageMutationKindV1::UpsertLive(_))) {
+          return Err(closure_error("index_cow_mutation_binding_missing_source", "tombstone or remove mutation has no live source record"));
+        }
+        Some(mutation)
+      }
+      Ordering::Equal => {
+        source_index += 1;
+        mutation_index += 1;
+        let source = source_record.ok_or_else(|| closure_error("index_cow_mutation_binding_stream", "missing source record"))?;
+        let mutation = mutation_record.ok_or_else(|| closure_error("index_cow_mutation_binding_stream", "missing mutation record"))?;
+        match mutation.mutation {
+          Some(OrderedPageMutationKindV1::UpsertLive(_)) => Some(mutation),
+          Some(OrderedPageMutationKindV1::TombstoneExisting(_)) if !source.tombstone => Some(mutation),
+          Some(OrderedPageMutationKindV1::RemoveExisting(_)) if !source.tombstone => None,
+          _ => {
+            return Err(closure_error(
+              "index_cow_mutation_binding_source_state",
+              "tombstone or remove mutation does not replace a live source record",
+            ));
+          }
+        }
+      }
+    };
+    if let Some(expected) = expected {
+      let observed = output
+        .get(output_index)
+        .ok_or_else(|| closure_error("index_cow_mutation_binding_output", "mutation-bound output is missing an expected record"))?;
+      if expected.order_key != observed.order_key || expected.encoded != observed.encoded {
+        return Err(closure_error(
+          "index_cow_mutation_binding_output",
+          "mutation-bound output record does not match the exact replay result",
+        ));
+      }
+      output_index += 1;
+    }
+  }
+  if output_index != output.len() {
+    return Err(closure_error(
+      "index_cow_mutation_binding_output",
+      "mutation-bound output contains records absent from the exact replay result",
+    ));
+  }
+  Ok(())
+}
+
+fn charge_binding_workspace(workspace_bytes: &mut usize, additional: usize, maximum_workspace_bytes: usize) -> FormatResult<()> {
+  *workspace_bytes = workspace_bytes
+    .checked_add(additional)
+    .ok_or_else(|| arithmetic_error("index_cow_mutation_binding_workspace", "mutation-binding workspace bytes overflowed"))?;
+  if *workspace_bytes > maximum_workspace_bytes {
+    return Err(amplification_error(
+      "index_cow_mutation_binding_workspace",
+      format!("mutation binding exceeds the {maximum_workspace_bytes}-byte complete-operation cap"),
+    ));
+  }
+  Ok(())
 }
 
 fn validate_page_plan_closure<'a>(request: &'a IndexCopyOnWriteClosureRequestV1<'_>) -> FormatResult<ValidatedPageClosureV1<'a>> {
@@ -1023,6 +1346,7 @@ fn validate_page_plan_closure<'a>(request: &'a IndexCopyOnWriteClosureRequestV1<
     role,
     owner_id,
     source_keys,
+    source_pages: sources,
     output_pages,
     source_page_bytes: source_bytes,
     page_artifact_bytes: output_bytes,
@@ -2461,6 +2785,10 @@ fn identity_error(code: &'static str, context: impl Into<String>) -> FormatError
 
 fn closure_error(code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(MalformedInputClass::CrossRecordClosureMismatch, code, context)
+}
+
+fn order_error(code: &'static str, context: impl Into<String>) -> FormatError {
+  FormatError::new(MalformedInputClass::NoncanonicalOrderOrDuplicate, code, context)
 }
 
 fn arithmetic_error(code: &'static str, context: impl Into<String>) -> FormatError {

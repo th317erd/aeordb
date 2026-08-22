@@ -8,16 +8,28 @@ use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
 
-use super::index_artifact::{EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, decode_immutable_index_artifact};
+use super::index_artifact::{
+  EncodedImmutableIndexArtifactV1, ImmutableIndexArtifactKindV1, IndexManifestWriteV1, decode_immutable_index_artifact,
+  decode_index_manifest, encode_index_manifest,
+};
+use super::index_coordinator::{
+  IndexMembershipOwnerClassV1, IndexMembershipStateV1, IndexMutationOperationV1, PublishedIndexMembershipTransitionV1,
+  PublishedIndexMutationV1,
+};
+use super::index_copy_on_write::{IndexCopyOnWriteClosureSummaryV1, IndexMutationCommitmentV1, OrderedPageMutationKindV1};
 use super::index_generation_publication::{INDEX_GENERATION_DEPENDENCY_HARD_CAP_V1, INDEX_GENERATION_TOTAL_BYTES_HARD_CAP_V1};
+use super::index_manifest::{
+  CoverageVersionV1, FieldIndexManifestBodyV1, IndexManifestBodyV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1,
+};
 use super::index_page::{
   ArtifactDirectoryEntryV1, ArtifactDirectoryNodeV1, OrderedIndexRoleV1, OrderedPageV1, compare_order_keys, decode_artifact_directory,
-  decode_ordered_page, validate_posting_page_link,
+  decode_ordered_page, decode_ordered_record, ordered_record_order_key, validate_posting_page_link,
 };
 use super::reader::{FormatError, MalformedInputClass};
 
 pub const INDEX_BATCH_PATH_MAXIMUM_DEPTH_V1: usize = 16;
 pub const INDEX_BATCH_PATH_MAXIMUM_INPUT_BYTES_V1: usize = 32 * 1_024 * 1_024;
+pub const INDEX_BATCH_MAXIMUM_TRANSITIONS_V1: usize = 16 * 1_024 * 1_024;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum IndexBatchArtifactReadErrorV1 {
@@ -80,6 +92,641 @@ impl From<FormatError> for IndexBatchApplicationErrorV1 {
   fn from(source: FormatError) -> Self {
     Self::Malformed(source)
   }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexManifestSuccessorRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub source_manifest: &'a [u8],
+  pub generation: u64,
+  pub parent_manifest_key: Option<&'a [u8]>,
+  pub coverage: CoverageVersionV1<'a>,
+  pub next_document_ordinal: Option<u64>,
+  pub mutations: &'a [PublishedIndexMutationV1],
+  pub transitions: &'a [PublishedIndexMembershipTransitionV1],
+  pub role_summaries: &'a [IndexCopyOnWriteClosureSummaryV1],
+}
+
+pub fn synthesize_successor_index_manifest_v1(
+  request: &IndexManifestSuccessorRequestV1<'_>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<EncodedImmutableIndexArtifactV1, IndexBatchApplicationErrorV1> {
+  check_cancelled(is_cancelled)?;
+  let source = decode_index_manifest(request.source_manifest, request.hash_algorithm)?;
+  if request.generation == 0 || request.generation <= source.generation {
+    return Err(manifest_closure_error("successor generation is not newer than the source manifest generation"));
+  }
+  validate_successor_coverage(&request.coverage, request.hash_algorithm)?;
+  let owner_class = manifest_owner_class(&source.details)?;
+  let transition_deltas = validate_manifest_transitions(request, source.owner_id, owner_class, is_cancelled)?;
+  let mutation_closure = validate_manifest_mutations(request, source.owner_id, owner_class, is_cancelled)?;
+  if transition_deltas.required_roles & !mutation_closure.role_mask != 0 {
+    return Err(manifest_closure_error("membership-changing transitions are missing their required ordered-record mutations"));
+  }
+  let required_roles = mutation_closure.role_mask | transition_deltas.required_roles;
+  validate_manifest_role_summaries(request, &source.details, source.owner_id, owner_class, required_roles, &mutation_closure)?;
+  check_cancelled(is_cancelled)?;
+
+  let body = match &source.details {
+    IndexManifestBodyV1::ScopeCatalog(body) => {
+      let successor = synthesize_scope_manifest_body(request, body, &transition_deltas)?;
+      IndexManifestBodyV1::ScopeCatalog(successor)
+    }
+    IndexManifestBodyV1::ValueStore(body) => {
+      let successor = synthesize_value_manifest_body(request, body, &transition_deltas)?;
+      IndexManifestBodyV1::ValueStore(successor)
+    }
+    IndexManifestBodyV1::FieldIndex(body) => {
+      let successor = synthesize_field_manifest_body(request, body, &transition_deltas)?;
+      IndexManifestBodyV1::FieldIndex(successor)
+    }
+    IndexManifestBodyV1::FieldNvt(_) => return Err(manifest_closure_error("FieldNvt manifests are not ordered-batch owners")),
+  };
+  check_cancelled(is_cancelled)?;
+  encode_index_manifest(&IndexManifestWriteV1 {
+    hash_algorithm: request.hash_algorithm,
+    generation: request.generation,
+    owner_id: source.owner_id,
+    body,
+  })
+  .map_err(Into::into)
+}
+
+#[derive(Debug, Default)]
+struct ManifestTransitionDeltasV1 {
+  live_additions: u64,
+  live_removals: u64,
+  unindexable_additions: u64,
+  unindexable_removals: u64,
+  required_roles: u16,
+  maximum_document_ordinal: u64,
+}
+
+struct ManifestMutationClosureV1 {
+  role_mask: u16,
+  commitments: [Option<Vec<u8>>; 8],
+}
+
+impl ManifestMutationClosureV1 {
+  fn commitment(&self, role: OrderedIndexRoleV1) -> Option<&[u8]> {
+    self.commitments.get(usize::from(role.id())).and_then(Option::as_deref)
+  }
+}
+
+fn validate_successor_coverage(
+  coverage: &CoverageVersionV1<'_>,
+  hash_algorithm: HashAlgorithm,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  let hash_width = hash_algorithm.hash_length();
+  if coverage.source_namespace_root.len() != hash_width
+    || coverage.source_namespace_root.iter().all(|byte| *byte == 0)
+    || coverage.coverage_epoch_id.len() != 16
+    || coverage.coverage_epoch_id.iter().all(|byte| *byte == 0)
+    || coverage.coverage_publication_sequence == 0
+  {
+    return Err(manifest_closure_error("successor coverage identity is incomplete or disagrees with the hash profile"));
+  }
+  Ok(())
+}
+
+fn synthesize_scope_manifest_body<'a>(
+  request: &'a IndexManifestSuccessorRequestV1<'a>,
+  source: &'a ScopeCatalogManifestBodyV1<'a>,
+  deltas: &ManifestTransitionDeltasV1,
+) -> Result<ScopeCatalogManifestBodyV1<'a>, IndexBatchApplicationErrorV1> {
+  if request.parent_manifest_key.is_some() {
+    return Err(manifest_closure_error("ScopeCatalog successor must not name a parent manifest"));
+  }
+  let next_document_ordinal = request
+    .next_document_ordinal
+    .ok_or_else(|| manifest_closure_error("ScopeCatalog successor is missing its document-ordinal high-water"))?;
+  let minimum_next_document_ordinal =
+    deltas.maximum_document_ordinal.checked_add(1).ok_or_else(|| manifest_closure_error("ScopeCatalog document ordinal overflowed"))?;
+  if next_document_ordinal < source.next_document_ordinal || next_document_ordinal < minimum_next_document_ordinal {
+    return Err(manifest_closure_error("ScopeCatalog document-ordinal high-water regressed or does not cover the batch"));
+  }
+  let live_document_count =
+    apply_counter_delta(source.live_document_count, deltas.live_additions, deltas.live_removals, "scope live-document count")?;
+  let ordinal = role_summary(request, OrderedIndexRoleV1::ScopeOrdinal);
+  let reverse = role_summary(request, OrderedIndexRoleV1::ScopeReverse);
+  if ordinal.is_some_and(|summary| summary.live_count != live_document_count)
+    || reverse.is_some_and(|summary| summary.live_count != live_document_count || summary.tombstone_count != 0)
+  {
+    return Err(manifest_closure_error("ScopeCatalog role summaries disagree with exact live-document membership"));
+  }
+  Ok(ScopeCatalogManifestBodyV1 {
+    required_reader_capabilities: source.required_reader_capabilities,
+    coverage: request.coverage.clone(),
+    next_document_ordinal,
+    ordinal_directory_root: successor_root(ordinal, source.ordinal_directory_root),
+    reverse_directory_root: successor_root(reverse, source.reverse_directory_root),
+    live_document_count,
+    retained_tombstone_count: ordinal.map_or(source.retained_tombstone_count, |summary| summary.tombstone_count),
+    ordinal_page_count: ordinal.map_or(source.ordinal_page_count, |summary| summary.page_count),
+    reverse_page_count: reverse.map_or(source.reverse_page_count, |summary| summary.page_count),
+    scope_definition: source.scope_definition,
+  })
+}
+
+fn synthesize_value_manifest_body<'a>(
+  request: &'a IndexManifestSuccessorRequestV1<'a>,
+  source: &'a ValueStoreManifestBodyV1<'a>,
+  deltas: &ManifestTransitionDeltasV1,
+) -> Result<ValueStoreManifestBodyV1<'a>, IndexBatchApplicationErrorV1> {
+  if request.next_document_ordinal.is_some() {
+    return Err(manifest_closure_error("ValueStore successor must not carry a ScopeCatalog ordinal high-water"));
+  }
+  let parent = require_parent_manifest(request)?;
+  let value_document_count =
+    apply_counter_delta(source.value_document_count, deltas.live_additions, deltas.live_removals, "value-store distinct-document count")?;
+  let unindexable_document_count = apply_counter_delta(
+    source.unindexable_document_count,
+    deltas.unindexable_additions,
+    deltas.unindexable_removals,
+    "value-store unindexable-document count",
+  )?;
+  let values = role_summary(request, OrderedIndexRoleV1::Value);
+  let states = role_summary(request, OrderedIndexRoleV1::ValueDocumentState);
+  if states.is_some_and(|summary| summary.live_count != unindexable_document_count) {
+    return Err(manifest_closure_error("ValueStore state summary disagrees with exact unindexable membership"));
+  }
+  let next_page_id = final_next_page_id(request, source.next_page_id);
+  Ok(ValueStoreManifestBodyV1 {
+    required_reader_capabilities: source.required_reader_capabilities,
+    coverage: request.coverage.clone(),
+    scope_catalog_manifest: parent,
+    value_directory_root: successor_root(values, source.value_directory_root),
+    document_state_directory_root: successor_root(states, source.document_state_directory_root),
+    next_page_id,
+    value_page_count: values.map_or(source.value_page_count, |summary| summary.page_count),
+    state_page_count: states.map_or(source.state_page_count, |summary| summary.page_count),
+    value_document_count,
+    unindexable_document_count,
+    live_value_count: values.map_or(source.live_value_count, |summary| summary.live_count),
+    value_tombstone_count: values.map_or(source.value_tombstone_count, |summary| summary.tombstone_count),
+    state_tombstone_count: states.map_or(source.state_tombstone_count, |summary| summary.tombstone_count),
+    live_canonical_value_bytes: values.map_or(source.live_canonical_value_bytes, |summary| summary.logical_bytes),
+    value_store_definition: source.value_store_definition,
+  })
+}
+
+fn synthesize_field_manifest_body<'a>(
+  request: &'a IndexManifestSuccessorRequestV1<'a>,
+  source: &'a FieldIndexManifestBodyV1<'a>,
+  deltas: &ManifestTransitionDeltasV1,
+) -> Result<FieldIndexManifestBodyV1<'a>, IndexBatchApplicationErrorV1> {
+  if request.next_document_ordinal.is_some() {
+    return Err(manifest_closure_error("FieldIndex successor must not carry a ScopeCatalog ordinal high-water"));
+  }
+  let parent = require_parent_manifest(request)?;
+  let posting_document_count =
+    apply_counter_delta(source.posting_document_count, deltas.live_additions, deltas.live_removals, "field-index distinct-document count")?;
+  let unindexable_document_count = apply_counter_delta(
+    source.unindexable_document_count,
+    deltas.unindexable_additions,
+    deltas.unindexable_removals,
+    "field-index unindexable-document count",
+  )?;
+  let postings = role_summary(request, OrderedIndexRoleV1::Posting);
+  let states = role_summary(request, OrderedIndexRoleV1::IndexDocumentState);
+  if states.is_some_and(|summary| summary.live_count != unindexable_document_count) {
+    return Err(manifest_closure_error("FieldIndex state summary disagrees with exact unindexable membership"));
+  }
+  let posting_root = successor_root(postings, source.posting_directory_root);
+  let (first_page_id, last_page_id) = match postings {
+    Some(summary) if summary.root_key.is_some() => (summary.minimum_page_id, summary.maximum_page_id),
+    Some(_) => (0, 0),
+    None => (source.first_page_id, source.last_page_id),
+  };
+  let next_page_id = final_next_page_id(request, source.next_page_id);
+  Ok(FieldIndexManifestBodyV1 {
+    required_reader_capabilities: source.required_reader_capabilities,
+    coverage: request.coverage.clone(),
+    value_store_manifest: parent,
+    posting_directory_root: posting_root,
+    document_state_directory_root: successor_root(states, source.document_state_directory_root),
+    first_page_id,
+    last_page_id,
+    next_page_id,
+    posting_page_count: postings.map_or(source.posting_page_count, |summary| summary.page_count),
+    state_page_count: states.map_or(source.state_page_count, |summary| summary.page_count),
+    live_posting_count: postings.map_or(source.live_posting_count, |summary| summary.live_count),
+    posting_tombstone_count: postings.map_or(source.posting_tombstone_count, |summary| summary.tombstone_count),
+    posting_document_count,
+    unindexable_document_count,
+    state_tombstone_count: states.map_or(source.state_tombstone_count, |summary| summary.tombstone_count),
+    live_canonical_posting_bytes: postings.map_or(source.live_canonical_posting_bytes, |summary| summary.logical_bytes),
+    field_index_definition: source.field_index_definition,
+  })
+}
+
+fn role_summary<'a>(
+  request: &'a IndexManifestSuccessorRequestV1<'a>,
+  role: OrderedIndexRoleV1,
+) -> Option<&'a IndexCopyOnWriteClosureSummaryV1> {
+  request.role_summaries.iter().find(|summary| summary.role == role)
+}
+
+fn successor_root<'a>(summary: Option<&'a IndexCopyOnWriteClosureSummaryV1>, source_root: Option<&'a [u8]>) -> Option<&'a [u8]> {
+  match summary {
+    Some(summary) => summary.root_key.as_deref(),
+    None => source_root,
+  }
+}
+
+fn require_parent_manifest<'a>(request: &'a IndexManifestSuccessorRequestV1<'a>) -> Result<&'a [u8], IndexBatchApplicationErrorV1> {
+  let parent =
+    request.parent_manifest_key.ok_or_else(|| manifest_closure_error("successor manifest is missing its parent manifest key"))?;
+  if parent.len() != request.hash_algorithm.hash_length() || parent.iter().all(|byte| *byte == 0) {
+    return Err(manifest_closure_error("successor parent manifest key disagrees with the hash profile"));
+  }
+  Ok(parent)
+}
+
+fn final_next_page_id(request: &IndexManifestSuccessorRequestV1<'_>, source_next_page_id: u64) -> u64 {
+  request.role_summaries.last().map_or(source_next_page_id, |summary| summary.next_page_id)
+}
+
+fn source_next_page_id(source: &IndexManifestBodyV1<'_>) -> u64 {
+  match source {
+    IndexManifestBodyV1::ScopeCatalog(_) | IndexManifestBodyV1::FieldNvt(_) => 0,
+    IndexManifestBodyV1::ValueStore(body) => body.next_page_id,
+    IndexManifestBodyV1::FieldIndex(body) => body.next_page_id,
+  }
+}
+
+fn source_role_root_matches(source: &IndexManifestBodyV1<'_>, role: OrderedIndexRoleV1, expected: &[u8]) -> bool {
+  match (source, role) {
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeOrdinal) => body.ordinal_directory_root == Some(expected),
+    (IndexManifestBodyV1::ScopeCatalog(body), OrderedIndexRoleV1::ScopeReverse) => body.reverse_directory_root == Some(expected),
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::Value) => body.value_directory_root == Some(expected),
+    (IndexManifestBodyV1::ValueStore(body), OrderedIndexRoleV1::ValueDocumentState) => body.document_state_directory_root == Some(expected),
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::Posting) => body.posting_directory_root == Some(expected),
+    (IndexManifestBodyV1::FieldIndex(body), OrderedIndexRoleV1::IndexDocumentState) => body.document_state_directory_root == Some(expected),
+    _ => false,
+  }
+}
+
+fn apply_counter_delta(current: u64, additions: u64, removals: u64, context: &'static str) -> Result<u64, IndexBatchApplicationErrorV1> {
+  current
+    .checked_sub(removals)
+    .and_then(|remaining| remaining.checked_add(additions))
+    .ok_or_else(|| manifest_closure_error(format!("{context} underflowed or overflowed")))
+}
+
+fn checked_increment(value: u64, context: &'static str) -> Result<u64, IndexBatchApplicationErrorV1> {
+  value.checked_add(1).ok_or_else(|| manifest_closure_error(format!("{context} overflowed")))
+}
+
+fn role_bit(role: OrderedIndexRoleV1) -> u16 {
+  1u16 << role.id()
+}
+
+fn live_transition_role_mask(owner_class: IndexMembershipOwnerClassV1) -> u16 {
+  match owner_class {
+    IndexMembershipOwnerClassV1::ScopeCatalog => role_bit(OrderedIndexRoleV1::ScopeOrdinal) | role_bit(OrderedIndexRoleV1::ScopeReverse),
+    IndexMembershipOwnerClassV1::ValueStore => role_bit(OrderedIndexRoleV1::Value),
+    IndexMembershipOwnerClassV1::FieldIndex => role_bit(OrderedIndexRoleV1::Posting),
+  }
+}
+
+fn unindexable_transition_role_mask(owner_class: IndexMembershipOwnerClassV1) -> Result<u16, IndexBatchApplicationErrorV1> {
+  match owner_class {
+    IndexMembershipOwnerClassV1::ValueStore => Ok(role_bit(OrderedIndexRoleV1::ValueDocumentState)),
+    IndexMembershipOwnerClassV1::FieldIndex => Ok(role_bit(OrderedIndexRoleV1::IndexDocumentState)),
+    IndexMembershipOwnerClassV1::ScopeCatalog => Err(manifest_closure_error("ScopeCatalog membership cannot be unindexable")),
+  }
+}
+
+fn manifest_owner_class(body: &IndexManifestBodyV1<'_>) -> Result<IndexMembershipOwnerClassV1, IndexBatchApplicationErrorV1> {
+  match body {
+    IndexManifestBodyV1::ScopeCatalog(_) => Ok(IndexMembershipOwnerClassV1::ScopeCatalog),
+    IndexManifestBodyV1::ValueStore(_) => Ok(IndexMembershipOwnerClassV1::ValueStore),
+    IndexManifestBodyV1::FieldIndex(_) => Ok(IndexMembershipOwnerClassV1::FieldIndex),
+    IndexManifestBodyV1::FieldNvt(_) => Err(manifest_closure_error("FieldNvt manifests have no ordered membership owner")),
+  }
+}
+
+fn validate_manifest_mutations(
+  request: &IndexManifestSuccessorRequestV1<'_>,
+  owner_id: &[u8],
+  owner_class: IndexMembershipOwnerClassV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<ManifestMutationClosureV1, IndexBatchApplicationErrorV1> {
+  validate_transition_count(request.transitions.len())?;
+  let mut observed_shapes_by_transition = Vec::new();
+  observed_shapes_by_transition
+    .try_reserve_exact(request.transitions.len())
+    .map_err(|error| IndexBatchApplicationErrorV1::Allocation(format!("transition role closure reservation failed: {error}")))?;
+  observed_shapes_by_transition.resize(request.transitions.len(), 0u16);
+  let mut commitments: [Option<IndexMutationCommitmentV1>; 8] = std::array::from_fn(|_| None);
+  let mut role_mask = 0u16;
+  let mut previous_role = 0u8;
+  let mut previous_order_key: Option<&[u8]> = None;
+  for (mutation_index, mutation) in request.mutations.iter().enumerate() {
+    if mutation_index > 0 && mutation_index % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    if mutation.index_id() != owner_id
+      || mutation.role().owner_class() != owner_class.id()
+      || mutation.publication_sequence() == 0
+      || mutation.publication_sequence() > request.coverage.coverage_publication_sequence
+      || mutation.operation_id() == [0; 16]
+      || mutation.role() == OrderedIndexRoleV1::NvtTile
+    {
+      return Err(manifest_closure_error("mutation owner, role, or publication identity disagrees with the successor manifest"));
+    }
+    let role = mutation.role().id();
+    if role < previous_role || (role == previous_role && previous_order_key.is_some_and(|key| key >= mutation.order_key())) {
+      return Err(manifest_closure_error("manifest mutations are not in strict canonical owner/role/order-key order"));
+    }
+    let decoded = decode_ordered_record(mutation.encoded_record(), request.hash_algorithm, mutation.role())?;
+    let canonical_order_key = ordered_record_order_key(&decoded)?;
+    if canonical_order_key != mutation.order_key() {
+      return Err(manifest_closure_error("mutation order key does not match its canonical ordered record"));
+    }
+    if mutation.operation() == IndexMutationOperationV1::RemoveExisting
+      && (mutation.role() != OrderedIndexRoleV1::ScopeReverse || decoded.tombstone)
+    {
+      return Err(manifest_closure_error("remove-existing is legal only for a live ScopeReverse record"));
+    }
+    let transition_index =
+      match request.transitions.binary_search_by_key(&decoded.document_ordinal, |transition| transition.document_ordinal()) {
+        Ok(index) => index,
+        Err(insertion_index) => {
+          return Err(manifest_closure_error(format!(
+            "mutation has no exact owner/document membership transition; canonical insertion index is {insertion_index}",
+          )));
+        }
+      };
+    let transition = &request.transitions[transition_index];
+    if transition.publication_sequence() != mutation.publication_sequence() || transition.operation_id() != mutation.operation_id() {
+      return Err(manifest_closure_error("mutation publication identity disagrees with its owner/document transition"));
+    }
+    validate_mutation_transition_shape(mutation, &decoded, transition)?;
+    let kind = manifest_mutation_kind(mutation, decoded.tombstone);
+    let commitment = commitments
+      .get_mut(usize::from(mutation.role().id()))
+      .ok_or_else(|| manifest_closure_error("ordered-record role has no mutation-commitment slot"))?;
+    commitment.get_or_insert_with(|| IndexMutationCommitmentV1::new(request.hash_algorithm)).push(kind)?;
+    role_mask |= role_bit(mutation.role());
+    observed_shapes_by_transition[transition_index] |= mutation_shape_bit(mutation, decoded.tombstone)?;
+    previous_role = role;
+    previous_order_key = Some(mutation.order_key());
+  }
+  if request.transitions.iter().zip(observed_shapes_by_transition).try_fold(false, |missing, (transition, observed)| {
+    let required = transition_shape_mask(owner_class, transition.before(), transition.after())?;
+    Ok::<bool, IndexBatchApplicationErrorV1>(missing || required & !observed != 0)
+  })? {
+    return Err(manifest_closure_error("one or more membership transitions are missing their exact ordered-record mutation shapes"));
+  }
+  Ok(ManifestMutationClosureV1 { role_mask, commitments: commitments.map(|commitment| commitment.map(IndexMutationCommitmentV1::finish)) })
+}
+
+fn manifest_mutation_kind<'a>(mutation: &'a PublishedIndexMutationV1, tombstone: bool) -> OrderedPageMutationKindV1<'a> {
+  if mutation.operation() == IndexMutationOperationV1::RemoveExisting {
+    OrderedPageMutationKindV1::RemoveExisting(mutation.encoded_record())
+  } else if tombstone {
+    OrderedPageMutationKindV1::TombstoneExisting(mutation.encoded_record())
+  } else {
+    OrderedPageMutationKindV1::UpsertLive(mutation.encoded_record())
+  }
+}
+
+const MUTATION_SHAPE_LIVE_UPSERT: u8 = 0;
+const MUTATION_SHAPE_TOMBSTONE_UPSERT: u8 = 1;
+const MUTATION_SHAPE_REMOVE_EXISTING: u8 = 2;
+
+fn mutation_shape(role: OrderedIndexRoleV1, shape: u8) -> Result<u16, IndexBatchApplicationErrorV1> {
+  let bit = match (role, shape) {
+    (OrderedIndexRoleV1::ScopeOrdinal, MUTATION_SHAPE_LIVE_UPSERT) => 0,
+    (OrderedIndexRoleV1::ScopeOrdinal, MUTATION_SHAPE_TOMBSTONE_UPSERT) => 1,
+    (OrderedIndexRoleV1::ScopeReverse, MUTATION_SHAPE_LIVE_UPSERT) => 2,
+    (OrderedIndexRoleV1::ScopeReverse, MUTATION_SHAPE_REMOVE_EXISTING) => 3,
+    (OrderedIndexRoleV1::Value, MUTATION_SHAPE_LIVE_UPSERT) => 4,
+    (OrderedIndexRoleV1::Value, MUTATION_SHAPE_TOMBSTONE_UPSERT) => 5,
+    (OrderedIndexRoleV1::ValueDocumentState, MUTATION_SHAPE_LIVE_UPSERT) => 6,
+    (OrderedIndexRoleV1::ValueDocumentState, MUTATION_SHAPE_TOMBSTONE_UPSERT) => 7,
+    (OrderedIndexRoleV1::Posting, MUTATION_SHAPE_LIVE_UPSERT) => 8,
+    (OrderedIndexRoleV1::Posting, MUTATION_SHAPE_TOMBSTONE_UPSERT) => 9,
+    (OrderedIndexRoleV1::IndexDocumentState, MUTATION_SHAPE_LIVE_UPSERT) => 10,
+    (OrderedIndexRoleV1::IndexDocumentState, MUTATION_SHAPE_TOMBSTONE_UPSERT) => 11,
+    _ => return Err(manifest_closure_error("ordered-record role has an impossible membership mutation shape")),
+  };
+  Ok(1u16 << bit)
+}
+
+fn mutation_shape_bit(mutation: &PublishedIndexMutationV1, tombstone: bool) -> Result<u16, IndexBatchApplicationErrorV1> {
+  let shape = match mutation.operation() {
+    IndexMutationOperationV1::RemoveExisting => MUTATION_SHAPE_REMOVE_EXISTING,
+    IndexMutationOperationV1::Upsert if tombstone => MUTATION_SHAPE_TOMBSTONE_UPSERT,
+    IndexMutationOperationV1::Upsert => MUTATION_SHAPE_LIVE_UPSERT,
+  };
+  mutation_shape(mutation.role(), shape)
+}
+
+fn validate_mutation_transition_shape(
+  mutation: &PublishedIndexMutationV1,
+  decoded: &super::index_page::OrderedRecordV1<'_>,
+  transition: &PublishedIndexMembershipTransitionV1,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  let before = transition.before();
+  let after = transition.after();
+  let valid = match mutation.role() {
+    OrderedIndexRoleV1::ScopeOrdinal => mutation.operation() == IndexMutationOperationV1::Upsert && decoded.tombstone != after.live,
+    OrderedIndexRoleV1::ScopeReverse => match mutation.operation() {
+      IndexMutationOperationV1::RemoveExisting => before.live,
+      IndexMutationOperationV1::Upsert => after.live && !decoded.tombstone,
+    },
+    OrderedIndexRoleV1::Value | OrderedIndexRoleV1::Posting => {
+      mutation.operation() == IndexMutationOperationV1::Upsert
+        && if !before.live && after.live {
+          !decoded.tombstone
+        } else if before.live && !after.live {
+          decoded.tombstone
+        } else {
+          before.live && after.live
+        }
+    }
+    OrderedIndexRoleV1::ValueDocumentState | OrderedIndexRoleV1::IndexDocumentState => {
+      mutation.operation() == IndexMutationOperationV1::Upsert
+        && if after.unindexable {
+          !decoded.tombstone
+        } else if before.unindexable {
+          decoded.tombstone
+        } else {
+          false
+        }
+    }
+    OrderedIndexRoleV1::NvtTile => false,
+  };
+  if !valid {
+    return Err(manifest_closure_error("ordered-record mutation shape contradicts its exact owner/document membership transition"));
+  }
+  Ok(())
+}
+
+fn transition_shape_mask(
+  owner_class: IndexMembershipOwnerClassV1,
+  before: IndexMembershipStateV1,
+  after: IndexMembershipStateV1,
+) -> Result<u16, IndexBatchApplicationErrorV1> {
+  let mut shapes = 0u16;
+  match owner_class {
+    IndexMembershipOwnerClassV1::ScopeCatalog => {
+      if after.live {
+        shapes |= mutation_shape(OrderedIndexRoleV1::ScopeOrdinal, MUTATION_SHAPE_LIVE_UPSERT)?;
+        shapes |= mutation_shape(OrderedIndexRoleV1::ScopeReverse, MUTATION_SHAPE_LIVE_UPSERT)?;
+      } else if before.live {
+        shapes |= mutation_shape(OrderedIndexRoleV1::ScopeOrdinal, MUTATION_SHAPE_TOMBSTONE_UPSERT)?;
+        shapes |= mutation_shape(OrderedIndexRoleV1::ScopeReverse, MUTATION_SHAPE_REMOVE_EXISTING)?;
+      }
+    }
+    IndexMembershipOwnerClassV1::ValueStore => {
+      shapes |= semantic_transition_shape_mask(before, after, OrderedIndexRoleV1::Value, OrderedIndexRoleV1::ValueDocumentState)?;
+    }
+    IndexMembershipOwnerClassV1::FieldIndex => {
+      shapes |= semantic_transition_shape_mask(before, after, OrderedIndexRoleV1::Posting, OrderedIndexRoleV1::IndexDocumentState)?;
+    }
+  }
+  Ok(shapes)
+}
+
+fn semantic_transition_shape_mask(
+  before: IndexMembershipStateV1,
+  after: IndexMembershipStateV1,
+  live_role: OrderedIndexRoleV1,
+  unindexable_role: OrderedIndexRoleV1,
+) -> Result<u16, IndexBatchApplicationErrorV1> {
+  let mut shapes = 0u16;
+  if after.live {
+    shapes |= mutation_shape(live_role, MUTATION_SHAPE_LIVE_UPSERT)?;
+  } else if before.live {
+    shapes |= mutation_shape(live_role, MUTATION_SHAPE_TOMBSTONE_UPSERT)?;
+  }
+  if after.unindexable {
+    shapes |= mutation_shape(unindexable_role, MUTATION_SHAPE_LIVE_UPSERT)?;
+  } else if before.unindexable {
+    shapes |= mutation_shape(unindexable_role, MUTATION_SHAPE_TOMBSTONE_UPSERT)?;
+  }
+  Ok(shapes)
+}
+
+fn validate_manifest_transitions(
+  request: &IndexManifestSuccessorRequestV1<'_>,
+  owner_id: &[u8],
+  owner_class: IndexMembershipOwnerClassV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<ManifestTransitionDeltasV1, IndexBatchApplicationErrorV1> {
+  validate_transition_count(request.transitions.len())?;
+  let mut deltas = ManifestTransitionDeltasV1::default();
+  for (transition_index, transition) in request.transitions.iter().enumerate() {
+    if transition_index > 0 && transition_index % 4_096 == 0 {
+      check_cancelled(is_cancelled)?;
+    }
+    if transition.owner_id() != owner_id
+      || transition.owner_class() != owner_class
+      || transition.publication_sequence() == 0
+      || transition.publication_sequence() > request.coverage.coverage_publication_sequence
+      || transition.operation_id() == [0; 16]
+      || transition.document_ordinal() == 0
+      || transition.document_ordinal() <= deltas.maximum_document_ordinal
+      || transition.before().live && transition.before().unindexable
+      || transition.after().live && transition.after().unindexable
+      || owner_class == IndexMembershipOwnerClassV1::ScopeCatalog && (transition.before().unindexable || transition.after().unindexable)
+    {
+      return Err(manifest_closure_error("membership transitions are not a strict canonical closure for the manifest owner"));
+    }
+    let transition_roles = transition_role_mask(owner_class, transition.before(), transition.after())?;
+    if transition.before().live != transition.after().live {
+      if transition.after().live {
+        deltas.live_additions = checked_increment(deltas.live_additions, "live membership additions")?;
+      } else {
+        deltas.live_removals = checked_increment(deltas.live_removals, "live membership removals")?;
+      }
+    }
+    if transition.before().unindexable != transition.after().unindexable {
+      if transition.after().unindexable {
+        deltas.unindexable_additions = checked_increment(deltas.unindexable_additions, "unindexable membership additions")?;
+      } else {
+        deltas.unindexable_removals = checked_increment(deltas.unindexable_removals, "unindexable membership removals")?;
+      }
+    }
+    deltas.required_roles |= transition_roles;
+    deltas.maximum_document_ordinal = transition.document_ordinal();
+  }
+  Ok(deltas)
+}
+
+fn transition_role_mask(
+  owner_class: IndexMembershipOwnerClassV1,
+  before: super::index_coordinator::IndexMembershipStateV1,
+  after: super::index_coordinator::IndexMembershipStateV1,
+) -> Result<u16, IndexBatchApplicationErrorV1> {
+  let mut roles = 0u16;
+  if before.live != after.live {
+    roles |= live_transition_role_mask(owner_class);
+  }
+  if before.unindexable != after.unindexable {
+    roles |= unindexable_transition_role_mask(owner_class)?;
+  }
+  Ok(roles)
+}
+
+fn validate_transition_count(count: usize) -> Result<(), IndexBatchApplicationErrorV1> {
+  if count > INDEX_BATCH_MAXIMUM_TRANSITIONS_V1 {
+    return Err(IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+      MalformedInputClass::AllocationAmplification,
+      "index_batch_transition_count",
+      format!("{count} transitions exceed the {INDEX_BATCH_MAXIMUM_TRANSITIONS_V1}-transition hard cap"),
+    )));
+  }
+  Ok(())
+}
+
+fn validate_manifest_role_summaries(
+  request: &IndexManifestSuccessorRequestV1<'_>,
+  source: &IndexManifestBodyV1<'_>,
+  owner_id: &[u8],
+  owner_class: IndexMembershipOwnerClassV1,
+  required_roles: u16,
+  mutation_closure: &ManifestMutationClosureV1,
+) -> Result<(), IndexBatchApplicationErrorV1> {
+  let mut observed_roles = 0u16;
+  let mut previous_role = 0u8;
+  let mut next_page_id = source_next_page_id(source);
+  for summary in request.role_summaries {
+    if summary.owner_id != owner_id
+      || summary.role.owner_class() != owner_class.id()
+      || summary.role == OrderedIndexRoleV1::NvtTile
+      || summary.generation != request.generation
+      || summary.role.id() <= previous_role
+      || !source_role_root_matches(source, summary.role, &summary.source_root_key)
+    {
+      return Err(manifest_closure_error("COW role summary owner, role, generation, order, or source root is invalid"));
+    }
+    if summary.mutation_commitment.as_deref() != mutation_closure.commitment(summary.role) {
+      return Err(manifest_closure_error("COW role summary is not bound to the exact frozen-batch mutation set"));
+    }
+    if summary.role.uses_page_id() {
+      if summary.initial_next_page_id != next_page_id || summary.next_page_id < summary.initial_next_page_id {
+        return Err(manifest_closure_error("COW role summaries do not form one nonoverlapping PageID allocation chain"));
+      }
+      if summary.root_key.is_some() && (summary.minimum_page_id == 0 || summary.maximum_page_id >= summary.next_page_id) {
+        return Err(manifest_closure_error("COW role summary PageID bounds exceed the successor high-water"));
+      }
+      next_page_id = summary.next_page_id;
+    } else if summary.initial_next_page_id != 0 || summary.next_page_id != 0 || summary.minimum_page_id != 0 || summary.maximum_page_id != 0
+    {
+      return Err(manifest_closure_error("non-PageID COW role summary carries PageID state"));
+    }
+    observed_roles |= role_bit(summary.role);
+    previous_role = summary.role.id();
+  }
+  if observed_roles != required_roles {
+    return Err(manifest_closure_error("mutation and transition roles do not have one exact COW summary each"));
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,6 +1341,14 @@ fn closure_error(context: impl Into<String>) -> IndexBatchApplicationErrorV1 {
   IndexBatchApplicationErrorV1::Malformed(FormatError::new(
     MalformedInputClass::CrossRecordClosureMismatch,
     "index_batch_path_closure",
+    context,
+  ))
+}
+
+fn manifest_closure_error(context: impl Into<String>) -> IndexBatchApplicationErrorV1 {
+  IndexBatchApplicationErrorV1::Malformed(FormatError::new(
+    MalformedInputClass::CrossRecordClosureMismatch,
+    "index_batch_manifest_closure",
     context,
   ))
 }

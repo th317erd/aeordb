@@ -1105,6 +1105,7 @@ fn bounded_compaction_closure_reopens_without_mutating_or_retaining_the_source_g
     hash_algorithm,
     generation: 8,
     initial_next_page_id: 50,
+    applied_mutations: None,
     source_pages: &closure_sources,
     paths: &paths,
     page_plan: &page_plan,

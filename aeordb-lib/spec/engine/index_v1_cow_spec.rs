@@ -1416,6 +1416,7 @@ fn cow_compaction_can_retire_a_fully_proven_tombstone_window_and_its_directory_r
     hash_algorithm,
     generation: 8,
     initial_next_page_id: 40,
+    applied_mutations: None,
     source_pages: &source_pages,
     paths: &paths,
     page_plan: &page_plan,
@@ -1722,10 +1723,12 @@ fn cow_whole_plan_validator_closes_source_pages_directory_and_root_summary() {
     })
     .unwrap();
     let source_pages = [&source_page[..]];
+    let applied_mutations = [OrderedPageMutationKindV1::UpsertLive(&inserted)];
     let request = IndexCopyOnWriteClosureRequestV1 {
       hash_algorithm,
       generation: 8,
       initial_next_page_id: 40,
+      applied_mutations: Some(&applied_mutations),
       source_pages: &source_pages,
       paths: &paths,
       page_plan: &page_plan,
@@ -1738,11 +1741,14 @@ fn cow_whole_plan_validator_closes_source_pages_directory_and_root_summary() {
     assert_eq!(summary.owner_id, owner_id);
     assert_eq!(summary.role, OrderedIndexRoleV1::Posting);
     assert_eq!(summary.generation, 8);
+    assert_eq!(summary.source_root_key, decode_artifact_directory(&source_root, hash_algorithm).unwrap().key);
     assert_eq!(summary.root_key, directory_plan.root_key);
     assert_eq!(summary.live_count, 3);
     assert_eq!(summary.tombstone_count, 0);
     assert_eq!(summary.page_count, 1);
+    assert_eq!(summary.initial_next_page_id, 40);
     assert_eq!(summary.next_page_id, 40);
+    assert_eq!(summary.mutation_commitment.as_ref().map(Vec::len), Some(hash_algorithm.hash_length()));
     assert_eq!(summary.page_artifact_count, 1);
     assert_eq!(summary.directory_artifact_count, 1);
     assert_eq!(summary.source_page_bytes, source_page.len());
@@ -1753,6 +1759,80 @@ fn cow_whole_plan_validator_closes_source_pages_directory_and_root_summary() {
       summary.retained_encoded_bytes,
       summary.source_page_bytes + summary.directory_path_bytes + summary.page_artifact_bytes + summary.directory_artifact_bytes
     );
+
+    let wrong_record = posting_record(4, 4, 16, false);
+    let wrong_mutations = [OrderedPageMutationKindV1::UpsertLive(&wrong_record)];
+    let error =
+      validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 { applied_mutations: Some(&wrong_mutations), ..request })
+        .unwrap_err();
+    assert_eq!(error.code(), "index_cow_mutation_binding_output");
+  }
+}
+
+#[test]
+fn cow_mutation_binding_preserves_frozen_byte_order_while_replaying_semantic_order() {
+  for hash_algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let owner_id = owner(hash_algorithm);
+    let source_page = scope_page(hash_algorithm, &owner_id, 7, &[scope_document_record(hash_algorithm, 512, "/source")]);
+    let source_root = leaf_directory_for_role(
+      hash_algorithm,
+      OrderedIndexRoleV1::ScopeOrdinal,
+      &owner_id,
+      7,
+      &[&source_page],
+      PhysicalHintV1 { wal_offset: 400, total_length: 500, write_sequence: 6 },
+    );
+    let ordinal_1 = scope_document_record(hash_algorithm, 1, "/one");
+    let ordinal_256 = scope_document_record(hash_algorithm, 256, "/two-fifty-six");
+    let semantic_mutations = [OrderedPageMutationKindV1::UpsertLive(&ordinal_1), OrderedPageMutationKindV1::UpsertLive(&ordinal_256)];
+    let page_plan = mutate_ordered_page_batch_v1(&OrderedPageBatchMutationRequestV1 {
+      hash_algorithm,
+      source_page: &source_page,
+      next_posting_page: None,
+      generation: 8,
+      next_page_id: 0,
+      mutations: &semantic_mutations,
+      layout: default_index_page_layout_v1(),
+    })
+    .unwrap();
+    let source_key = decode_ordered_page(&source_page, hash_algorithm).unwrap().key;
+    let directories = [&source_root[..]];
+    let paths = [ArtifactDirectoryPathV1 { source_page_key: &source_key, directories: &directories }];
+    let directory_plan = rewrite_artifact_directory_paths_v1(&ArtifactDirectoryMutationRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      page_plan: &page_plan,
+      paths: &paths,
+      layout: default_index_directory_layout_v1(),
+    })
+    .unwrap();
+    let source_pages = [&source_page[..]];
+
+    // AIRB orders canonical mutation keys by persisted bytes. Little-endian 256
+    // therefore precedes 1 even though the ordered page compares them numerically.
+    let frozen_mutations = [OrderedPageMutationKindV1::UpsertLive(&ordinal_256), OrderedPageMutationKindV1::UpsertLive(&ordinal_1)];
+    let request = IndexCopyOnWriteClosureRequestV1 {
+      hash_algorithm,
+      generation: 8,
+      initial_next_page_id: 0,
+      applied_mutations: Some(&frozen_mutations),
+      source_pages: &source_pages,
+      paths: &paths,
+      page_plan: &page_plan,
+      directory_plan: &directory_plan,
+      page_layout: default_index_page_layout_v1(),
+      directory_layout: default_index_directory_layout_v1(),
+    };
+    let summary = validate_index_copy_on_write_closure_v1(&request).unwrap();
+    assert_eq!(summary.live_count, 3);
+    assert_eq!(summary.mutation_commitment.as_ref().map(Vec::len), Some(hash_algorithm.hash_length()));
+
+    let error = validate_index_copy_on_write_closure_v1(&IndexCopyOnWriteClosureRequestV1 {
+      applied_mutations: Some(&semantic_mutations),
+      ..request
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "index_cow_mutation_binding_frozen_order");
   }
 }
 
@@ -1805,6 +1885,7 @@ fn cow_whole_plan_validator_closes_scope_pages_without_page_id_state() {
       hash_algorithm,
       generation: 8,
       initial_next_page_id: 0,
+      applied_mutations: None,
       source_pages: &source_pages,
       paths: &paths,
       page_plan: &page_plan,
@@ -1816,11 +1897,13 @@ fn cow_whole_plan_validator_closes_scope_pages_without_page_id_state() {
 
     assert_eq!(summary.owner_id, owner_id);
     assert_eq!(summary.role, OrderedIndexRoleV1::ScopeOrdinal);
+    assert_eq!(summary.source_root_key, decode_artifact_directory(&source_root, hash_algorithm).unwrap().key);
     assert_eq!(summary.live_count, 3);
     assert_eq!(summary.tombstone_count, 0);
     assert_eq!(summary.page_count, 1);
     assert_eq!(summary.minimum_page_id, 0);
     assert_eq!(summary.maximum_page_id, 0);
+    assert_eq!(summary.initial_next_page_id, 0);
     assert_eq!(summary.next_page_id, 0);
   }
 }
@@ -1861,6 +1944,7 @@ fn cow_whole_plan_validator_rejects_mutated_page_and_root_authority() {
       hash_algorithm,
       generation: 8,
       initial_next_page_id: 40,
+      applied_mutations: None,
       source_pages: &source_pages,
       paths: &paths,
       page_plan: candidate_page_plan,
@@ -1959,6 +2043,7 @@ fn cow_whole_plan_validator_requires_dependency_order_for_rewritten_directories(
     hash_algorithm,
     generation: 8,
     initial_next_page_id: 40,
+    applied_mutations: None,
     source_pages: &source_pages,
     paths: &paths,
     page_plan: &page_plan,
@@ -1974,6 +2059,7 @@ fn cow_whole_plan_validator_requires_dependency_order_for_rewritten_directories(
     hash_algorithm,
     generation: 8,
     initial_next_page_id: 40,
+    applied_mutations: None,
     source_pages: &source_pages,
     paths: &paths,
     page_plan: &page_plan,
@@ -2031,6 +2117,7 @@ fn cow_whole_plan_validator_binds_source_order_and_outward_page_id_high_water() 
       hash_algorithm,
       generation: 8,
       initial_next_page_id,
+      applied_mutations: None,
       source_pages,
       paths: &paths,
       page_plan: &page_plan,
@@ -2161,6 +2248,7 @@ fn property_apply_plan(
     hash_algorithm,
     generation,
     initial_next_page_id,
+    applied_mutations: None,
     source_pages: &source_pages,
     paths: &paths,
     page_plan,

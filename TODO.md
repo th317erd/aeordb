@@ -1102,7 +1102,7 @@
           - [x] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
           - [x] Freeze dependency-before-manifest-before-pointer ordering and the distinct soft/hard durability receipts before connecting first authority.
         - [ ] P6-3b: apply each frozen mutation batch to bounded immutable ordered pages/directories and exact scope/value/field manifests through the P5 COW owners.
-          - [ ] P6-3b0: close the frozen-batch semantic gap before manifest application.
+          - [x] P6-3b0: close the frozen-batch semantic gap before manifest application.
             - [x] Freeze and independently fixture an AIRB v2 payload that preserves explicit upsert/remove mutation operations and exact per-owner/document live/unindexable transitions while retaining AIRB v1 readers.
               - [x] Stream AIRB v2 workspace writes and bounded two-pass reopen validation without materializing the payload or owner-wide transition state.
             - [x] Route scope-reverse departure/move through the explicit remove operation; never invent an illegal persisted reverse tombstone.
@@ -1111,15 +1111,16 @@
               - [x] Admit one complete semantic group transactionally; reject mixed grouped/legacy state and leave no bytes or records behind on malformed, pressure, or publication-bound refusal.
               - [x] Freeze, retry, complete, and restore only whole groups, composing a failed frozen transition with any newer active successor.
               - [x] Preserve transition-only groups and strict canonical mutation/transition publication without payload-sized staging.
-            - [ ] Prove distinct-document manifest counters and reverse-map removal without owner-wide scans, stale counters, or whole-index buffering.
+            - [x] Prove distinct-document manifest counters and reverse-map removal without owner-wide scans, stale counters, or whole-index buffering.
               - [x] Add fail-closed scope-reverse remove-by-key COW, including last-page retirement and no persisted reverse tombstone.
               - [x] Permit exact tombstone-only value/posting/state manifest closures while retaining all root/count invariants.
-              - [ ] Apply canonical owner transitions to exact successor manifest counters and reject missing/mismatched role summaries.
+              - [x] Apply canonical owner transitions to exact successor manifest counters and reject missing/mismatched role summaries.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
           - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.
           - [x] Add one bounded multi-mutation page COW path and make the single-mutation API delegate to it.
           - [x] Traverse selected roots through a sparse immutable-artifact source plus bounded successor overlay; never materialize an owner-wide page set.
-          - [ ] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
+          - [x] Synthesize exact successor ScopeCatalog/ValueStore/FieldIndex manifests from validated per-role COW summaries and one explicit coverage version.
+          - [ ] Close absent-root bootstrap, idempotent no-op mutations, and mutation sets spanning more than four page paths in the full sparse applicator.
           - [ ] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
