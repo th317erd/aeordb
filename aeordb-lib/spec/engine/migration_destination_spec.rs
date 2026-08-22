@@ -1305,6 +1305,46 @@ fn legacy_index_writer_bypasses_are_closed_to_reviewed_compatibility_adapters() 
 }
 
 #[test]
+fn standalone_unbounded_index_cleanup_worker_cannot_return() {
+  let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+  let cleanup = fs::read_to_string(manifest_root.join("src/engine/index_cleanup.rs")).unwrap();
+  for forbidden in ["UnboundedSender", "unbounded_channel", "cleanup_loop", "spawn_index_cleanup_worker", "IndexCleanupSender"] {
+    assert!(!cleanup.contains(forbidden), "standalone cleanup worker authority returned through {forbidden}");
+  }
+
+  let state = fs::read_to_string(manifest_root.join("src/server/state.rs")).unwrap();
+  assert!(!state.contains("IndexCleanupSender"));
+  assert!(!state.contains("index_cleanup:"));
+
+  let server = fs::read_to_string(manifest_root.join("src/server/mod.rs")).unwrap();
+  assert!(!server.contains("spawn_index_cleanup_worker"));
+  let routes = fs::read_to_string(manifest_root.join("src/server/engine_routes.rs")).unwrap();
+  assert!(!routes.contains(".index_cleanup.queue("));
+
+  let engine = fs::read_to_string(manifest_root.join("src/engine/mod.rs")).unwrap();
+  assert!(!engine.contains("pub use index_cleanup::{"));
+}
+
+#[test]
+fn installed_producer_cadence_and_legacy_buffer_callers_are_closed() {
+  let engine_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine");
+  let expected: [(&str, &[(&str, usize)]); 8] = [
+    ("IndexProducerCoordinatorV1::new(", &[("v4/index_runtime_owner.rs", 1)]),
+    ("state.producer.admit(", &[("v4/index_runtime_owner.rs", 1)]),
+    ("state.producer.admit_or_spill(", &[("v4/index_runtime_owner.rs", 1)]),
+    ("state.producer.lease_next(", &[("v4/index_runtime_owner.rs", 1)]),
+    ("NativeIndexRuntimeCadenceV1::new(", &[("v4/index_runtime_installation.rs", 1)]),
+    ("self.cadence.admit_task(", &[("v4/index_runtime_installation.rs", 1)]),
+    ("self.cadence.service_bounded_producers(", &[("v4/index_runtime_installation.rs", 1)]),
+    ("IndexWriteBuffer::new(", &[("directory_ops.rs", 1), ("task_worker.rs", 1)]),
+  ];
+  for (needle, callers) in expected {
+    let callers: BTreeMap<_, _> = callers.iter().map(|(file, count)| ((*file).to_string(), *count)).collect();
+    assert_eq!(source_occurrences_by_file(&engine_root, needle), callers, "unreviewed production caller for {needle}");
+  }
+}
+
+#[test]
 fn native_runtime_atomic_installation_rejects_invalid_publisher_authority_without_exposing_a_partial_runtime() {
   let fixture = RuntimeFixture::new("runtime-atomic-installation");
   let runtime_id = [0x61; 16];

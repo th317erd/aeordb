@@ -1083,6 +1083,10 @@
               - [x] P6-2c-d6c: route online repair and remaining explicit maintenance callers; prove inactive-runtime compatibility and failure direction.
               - [x] P6-2c-d6d: audit every direct v3 writer and record the sole retained legacy query-compatibility surface before d7 removes the standalone queue.
             - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
+              - [x] Prove the detached unbounded cleanup channel, worker, server state, route enqueue, and public re-export are absent while post-commit cleanup remains covered.
+              - [x] Freeze the sole production coordinator construction/admission/lease, cadence construction/admission/service, and legacy index-buffer construction callers.
+              - [x] Run focused delete/index/runtime gates before affected, architecture, suppression, static, broad, resource, and real-world qualification.
+              - [ ] Qualify the exact landed commit on native macOS arm64 and Windows x86_64 MSVC; retain the Windows gate until the reverse endpoint is reachable.
           - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.

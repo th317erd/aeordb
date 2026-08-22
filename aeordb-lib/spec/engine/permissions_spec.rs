@@ -751,8 +751,7 @@ fn acknowledged_group_write_invalidates_engine_owned_membership_cache() {
 
 #[tokio::test]
 async fn test_crudlify_op_from_http_method() {
-  // AppState ctor calls spawn_index_cleanup_worker which spawns a tokio
-  // task — must run inside a tokio runtime.
+  // AppState construction shares the runtime-backed server dependencies.
   use axum::http::Method;
   use aeordb::auth::permission_middleware::http_to_crudlify;
   use aeordb::server::state::AppState;
@@ -781,7 +780,6 @@ async fn test_crudlify_op_from_http_method() {
     api_key_cache,
     peer_manager: Arc::new(aeordb::engine::PeerManager::new()),
     sync_engine: None,
-    index_cleanup: aeordb::engine::index_cleanup::spawn_index_cleanup_worker(engine),
     startup_time: chrono::Utc::now().timestamp_millis() as u64,
     startup_instant: std::time::Instant::now(),
     db_path: String::new(),

@@ -7,7 +7,8 @@ use tower::ServiceExt;
 
 use aeordb::auth::jwt::{JwtManager, TokenClaims, DEFAULT_EXPIRY_SECONDS};
 use aeordb::engine::{
-  save_lifecycle_config, CompressionAlgorithm, DirectoryOps, EntryType, LifecycleConfig, RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
+  save_lifecycle_config, CompressionAlgorithm, DirectoryOps, EntryType, IndexFieldConfig, IndexManager, LifecycleConfig, PathIndexConfig,
+  RequestContext, StorageEngine, DEFAULT_CHUNK_SIZE,
 };
 use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner, MemoryOwnerSnapshot};
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
@@ -785,6 +786,52 @@ async fn test_engine_delete_file_returns_200() {
 
   let json = body_json(response.into_body()).await;
   assert_eq!(json["deleted"], true);
+}
+
+#[tokio::test]
+async fn http_delete_removes_legacy_index_entries_before_responding_without_a_cleanup_worker() {
+  let (app, jwt_manager, engine, _temp_dir) = test_app();
+  let auth = bearer_token(&jwt_manager);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: None,
+    indexes: vec![IndexFieldConfig { name: "@filename".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+  };
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/indexed-delete/.aeordb-config/indexes.json",
+      &config.serialize(),
+      Some("application/json"),
+    )
+    .unwrap();
+
+  let response = app
+    .oneshot(
+      Request::builder()
+        .method("PUT")
+        .uri("/files/indexed-delete/file.txt")
+        .header("content-type", "text/plain")
+        .header("authorization", &auth)
+        .body(Body::from("delete indexed file"))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::CREATED);
+  let manager = IndexManager::new(&engine);
+  assert_eq!(manager.load_index("/indexed-delete", "@filename").unwrap().unwrap().len(), 1);
+
+  let response = rebuild_app(&jwt_manager, &engine)
+    .oneshot(
+      Request::builder().method("DELETE").uri("/files/indexed-delete/file.txt").header("authorization", &auth).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(manager.load_index("/indexed-delete", "@filename").unwrap().unwrap().len(), 0);
 }
 
 #[tokio::test]

@@ -536,7 +536,6 @@ fn try_create_app_with_all_and_task_queue_inner(
 
   let group_cache = engine.group_cache.clone();
   let api_key_cache = auth_engine.api_key_cache.clone();
-  let index_cleanup = crate::engine::index_cleanup::spawn_index_cleanup_worker(Arc::clone(&engine));
   let peer_manager = Arc::new(PeerManager::new());
 
   tracing::debug!(node_id, "Loaded initialized node_id");
@@ -588,7 +587,6 @@ fn try_create_app_with_all_and_task_queue_inner(
     event_bus,
     group_cache,
     api_key_cache,
-    index_cleanup,
     task_queue,
     peer_manager,
     sync_engine: Some(sync_engine),

@@ -166,7 +166,6 @@ pub use fuzzy::{extract_trigrams, extract_trigrams_no_pad, trigram_similarity, a
 pub use phonetic::{soundex, dmetaphone_primary, dmetaphone_alt};
 pub use index_config::{IndexFieldConfig, PathIndexConfig, create_converter_from_config};
 pub use index_config_resolver::{glob_matches, IndexConfigResolver};
-pub use index_cleanup::{IndexCleanupSender, spawn_index_cleanup_worker};
 pub use index_store::{
   IndexEntry, FieldIndex, IndexManager, IndexWriteBuffer, IndexWriteBufferOptions, IndexWriteBufferStats,
   DEFAULT_INDEX_BUFFER_FLUSH_INTERVAL, DEFAULT_INDEX_BUFFER_FLUSH_WRITES,

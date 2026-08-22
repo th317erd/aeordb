@@ -8,7 +8,6 @@ use crate::auth::JwtManager;
 use crate::auth::RateLimiter;
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{GroupLoader, ApiKeyLoader};
-use crate::engine::index_cleanup::IndexCleanupSender;
 use crate::engine::PeerManager;
 use crate::engine::StorageEngine;
 use crate::engine::EventBus;
@@ -28,7 +27,6 @@ pub struct AppState {
   pub event_bus: Arc<EventBus>,
   pub group_cache: Arc<Cache<GroupLoader>>,
   pub api_key_cache: Arc<Cache<ApiKeyLoader>>,
-  pub index_cleanup: IndexCleanupSender,
   pub task_queue: Option<Arc<TaskQueue>>,
   pub peer_manager: Arc<PeerManager>,
   /// Sync engine for peer-to-peer replication. Available when at least one
