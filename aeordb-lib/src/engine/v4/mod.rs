@@ -54,6 +54,7 @@ pub mod index_coordinator;
 pub mod index_coordinator_recovery;
 pub mod index_copy_on_write;
 pub mod index_definition_runtime;
+pub mod index_generation_authority;
 pub mod index_generation_publication;
 pub mod index_maintenance_scan;
 pub mod index_manifest;

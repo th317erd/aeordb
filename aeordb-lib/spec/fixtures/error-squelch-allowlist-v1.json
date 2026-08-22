@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1523,
+  "maximum_occurrences": 1532,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -8846,7 +8846,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 5238,
+      "line": 5749,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8856,7 +8856,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8863,
+      "line": 9374,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8866,12 +8866,102 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 8866,
+      "line": 9377,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
       "pattern": "u64 :: try_from (evidence . detected_at_ms) . map_err (| _ | { corrupt_evidence_sink_invalid (\"corrupt_gc_evidence_timestamp\" , \"corrupt-evidence detection time is outside the storage range\") })",
       "review": "typed-format-failure"
+    },
+    {
+      "id": "esq-v1-77b52a8718a1ce68125a-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12770,
+      "column": 57,
+      "enclosing_item": "inspect_loaded_index_active_pointer_pair",
+      "kind": "result_to_option",
+      "pattern": "decoded . as_ref () . ok ()",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-77b52a8718a1ce68125a-01",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12771,
+      "column": 57,
+      "enclosing_item": "inspect_loaded_index_active_pointer_pair",
+      "kind": "result_to_option",
+      "pattern": "decoded . as_ref () . ok ()",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-41403beafa536f4f0cf3-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12772,
+      "column": 19,
+      "enclosing_item": "inspect_loaded_index_active_pointer_pair",
+      "kind": "default_on_error",
+      "pattern": "pointer_a . map (| pointer | index_active_pointer_closure_valid (file , kv , header , pointer)) . transpose () ? . unwrap_or (false)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-cd65f40600b3429494a0-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12773,
+      "column": 19,
+      "enclosing_item": "inspect_loaded_index_active_pointer_pair",
+      "kind": "default_on_error",
+      "pattern": "pointer_b . map (| pointer | index_active_pointer_closure_valid (file , kv , header , pointer)) . transpose () ? . unwrap_or (false)",
+      "review": "bounded-authority-default"
+    },
+    {
+      "id": "esq-v1-399bd4bfd9641810b75f-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12851,
+      "column": 3,
+      "enclosing_item": "index_active_pointer_closure_valid",
+      "kind": "success_only_conditional",
+      "pattern": "let Ok (target) = decode_index_manifest (& target_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-a9e4abdc8124216b29f4-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12870,
+      "column": 3,
+      "enclosing_item": "index_active_pointer_closure_valid",
+      "kind": "success_only_conditional",
+      "pattern": "let Ok (value) = decode_index_manifest (& value_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-c96d3eb9c507b3a501d1-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12882,
+      "column": 3,
+      "enclosing_item": "index_active_pointer_closure_valid",
+      "kind": "success_only_conditional",
+      "pattern": "let Ok (scope) = decode_index_manifest (& scope_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-6754e0619ed59001fb03-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12887,
+      "column": 10,
+      "enclosing_item": "index_active_pointer_closure_valid",
+      "kind": "result_status_probe",
+      "pattern": "validate_correctness_manifest_chain (& scope , & value , & target , header . hash_algorithm) . is_ok ()",
+      "review": "candidate-format-probe"
+    },
+    {
+      "id": "esq-v1-11fc5403e50b0c36463a-00",
+      "file": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "line": 12917,
+      "column": 5,
+      "enclosing_item": "index_manifest_immediate_roots_valid",
+      "kind": "success_only_conditional",
+      "pattern": "let Ok (root) = decode_artifact_directory (& root_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
+      "review": "candidate-format-probe"
     },
     {
       "id": "esq-v1-df09a83fabeeaa08df7d-00",
@@ -9946,7 +10036,7 @@
     {
       "id": "esq-v1-a28f6e7883c522a78290-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 748,
+      "line": 763,
       "column": 6,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -9956,7 +10046,7 @@
     {
       "id": "esq-v1-23c0c5c76c2da038f4d8-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 756,
+      "line": 771,
       "column": 21,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -9966,7 +10056,7 @@
     {
       "id": "esq-v1-0195be9fa48347affbf6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 806,
+      "line": 821,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -9976,7 +10066,7 @@
     {
       "id": "esq-v1-a4e65f0b3cb6397e41a1-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 811,
+      "line": 826,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -9986,7 +10076,7 @@
     {
       "id": "esq-v1-8011b0945b21bcbcdcd6-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 816,
+      "line": 831,
       "column": 25,
       "enclosing_item": "u64_at",
       "kind": "panic_method",

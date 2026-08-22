@@ -1128,9 +1128,9 @@
           - [x] Return a storage-neutral frozen-batch application closure whose success is publication-ready and whose every failure leaves coordinator ownership untouched.
         - [ ] P6-3c: bind immutable dependencies, manifests, and inactive pointers to first authority with crash-resumable soft and hard publication.
           - [x] P6-3c1: add one first-authority A/B active-pointer reader/writer with exact closure selection, retry, replacement retirement, and reopen proof.
-          - [ ] P6-3c2: execute publication-ready frozen-batch closures through dependency/manifest/pointer ordering and reconcile every crash prefix.
+          - [x] P6-3c2: execute publication-ready frozen-batch closures through dependency/manifest/pointer ordering and reconcile every crash prefix.
           - [ ] P6-3c3: route bounded artifact compaction through the same producer lease, immutable applicator, and first-authority publisher.
-          - [ ] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
+          - [x] Reopen every crash prefix as exactly prior authority, complete successor authority, or retained reconciliation work; never advertise a partial closure.
           - [ ] Install artifact-compaction execution through the same canonical producer lease and publisher authority.
         - [ ] P6-3d: rotate cumulative runtime workspaces only after immutable coverage proves represented batches/tasks, carrying forward exactly pending work.
           - [ ] Bound restart replay independently of historical completed task count and preserve selected-chain idempotence across rotation crashes.
