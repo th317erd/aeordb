@@ -99,7 +99,7 @@ fn immutable_index_artifact_writer_matches_every_independent_fixture_and_key() {
     immutable_count += 1;
   }
 
-  assert_eq!(immutable_count, 54);
+  assert_eq!(immutable_count, 58);
   assert_eq!(mutable_pointer_count, 12);
 }
 

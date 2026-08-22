@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -21,8 +21,9 @@ use aeordb::engine::v4::index_nvt::{
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryV1, ArtifactDirectoryEntryWriteV1, ArtifactDirectoryNodeV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1,
   OrderedPageV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1, decode_artifact_directory, decode_ordered_page,
-  encode_artifact_directory, encode_ordered_page, encode_posting_record,
+  decode_posting_record, encode_artifact_directory, encode_ordered_page, encode_posting_record,
 };
+use aeordb::engine::v4::index_record::decode_canonical_value_record;
 use aeordb::engine::v4::index_task::{
   IndexTaskAttachmentClosureBuilderV1, IndexTaskAttachmentRoleV1, IndexTaskAttachmentWriteV1, IndexTaskCheckpointV1,
   IndexTaskCheckpointWriteV1, IndexTaskKindV1, IndexTaskStateV1, decode_index_task_checkpoint, decode_mutation_journal,
@@ -64,6 +65,32 @@ fn profile_name(hash_algorithm: HashAlgorithm) -> &'static str {
 
 fn fixture_bytes(hash_algorithm: HashAlgorithm, suffix: &str) -> Vec<u8> {
   fs::read(fixture_root().join(format!("aidx-{}-{suffix}", profile_name(hash_algorithm)))).unwrap()
+}
+
+fn fixture_live_document_count(hash_algorithm: HashAlgorithm, suffix: &str, role: OrderedIndexRoleV1) -> u64 {
+  let bytes = fixture_bytes(hash_algorithm, suffix);
+  let page = decode_ordered_page(&bytes, hash_algorithm).unwrap();
+  assert_eq!(page.role, role);
+  let ordinals = page
+    .records
+    .iter()
+    .map(|record| {
+      let record = record.unwrap();
+      match role {
+        OrderedIndexRoleV1::Value => {
+          let value = decode_canonical_value_record(record.encoded, hash_algorithm).unwrap();
+          (!value.tombstone).then_some(value.document_ordinal)
+        }
+        OrderedIndexRoleV1::Posting => {
+          let posting = decode_posting_record(record.encoded).unwrap();
+          (!posting.tombstone).then_some(posting.document_ordinal)
+        }
+        _ => panic!("fixture live-document count requires a value or posting page"),
+      }
+    })
+    .flatten()
+    .collect::<BTreeSet<_>>();
+  u64::try_from(ordinals.len()).unwrap()
 }
 
 fn sample_posting_record(coordinate: u64, tombstone: bool) -> Vec<u8> {
@@ -384,7 +411,9 @@ fn persist_fixture_generation(hash_algorithm: HashAlgorithm) -> StoredShadowGene
 
   let value_root = root_summary(&roots, IndexTaskAttachmentRoleV1::ValueDirectoryRoot);
   let value_state_root = root_summary(&roots, IndexTaskAttachmentRoleV1::ValueStateDirectoryRoot);
+  let value_document_count = fixture_live_document_count(hash_algorithm, "value-page-valid.bin", OrderedIndexRoleV1::Value);
   assert_eq!(value_root.owner_id, value_state_root.owner_id);
+  assert!(value_document_count <= value_root.live_count);
   let value_fixture_bytes = fixture_bytes(hash_algorithm, "value-store-manifest-populated.bin");
   let value_fixture = decode_index_manifest(&value_fixture_bytes, hash_algorithm).unwrap();
   let IndexManifestBodyV1::ValueStore(value_fixture_body) = value_fixture.details else {
@@ -401,6 +430,7 @@ fn persist_fixture_generation(hash_algorithm: HashAlgorithm) -> StoredShadowGene
       document_state_directory_root: Some(&value_state_root.key),
       value_page_count: value_root.page_count,
       state_page_count: value_state_root.page_count,
+      value_document_count,
       unindexable_document_count: value_state_root.live_count,
       live_value_count: value_root.live_count,
       value_tombstone_count: value_root.tombstone_count,
@@ -413,7 +443,9 @@ fn persist_fixture_generation(hash_algorithm: HashAlgorithm) -> StoredShadowGene
 
   let posting_root = root_summary(&roots, IndexTaskAttachmentRoleV1::PostingDirectoryRoot);
   let index_state_root = root_summary(&roots, IndexTaskAttachmentRoleV1::IndexStateDirectoryRoot);
+  let posting_document_count = fixture_live_document_count(hash_algorithm, "posting-page-valid.bin", OrderedIndexRoleV1::Posting);
   assert_eq!(posting_root.owner_id, index_state_root.owner_id);
+  assert!(posting_document_count <= posting_root.live_count);
   let field_fixture_bytes = fixture_bytes(hash_algorithm, "field-index-manifest-populated.bin");
   let field_fixture = decode_index_manifest(&field_fixture_bytes, hash_algorithm).unwrap();
   let IndexManifestBodyV1::FieldIndex(field_fixture_body) = field_fixture.details else {
@@ -436,6 +468,7 @@ fn persist_fixture_generation(hash_algorithm: HashAlgorithm) -> StoredShadowGene
       state_page_count: index_state_root.page_count,
       live_posting_count: posting_root.live_count,
       posting_tombstone_count: posting_root.tombstone_count,
+      posting_document_count,
       unindexable_document_count: index_state_root.live_count,
       state_tombstone_count: index_state_root.tombstone_count,
       live_canonical_posting_bytes: posting_root.logical_bytes,

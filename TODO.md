@@ -1113,7 +1113,7 @@
               - [x] Preserve transition-only groups and strict canonical mutation/transition publication without payload-sized staging.
             - [ ] Prove distinct-document manifest counters and reverse-map removal without owner-wide scans, stale counters, or whole-index buffering.
               - [x] Add fail-closed scope-reverse remove-by-key COW, including last-page retirement and no persisted reverse tombstone.
-              - [ ] Permit exact tombstone-only value/posting/state manifest closures while retaining all root/count invariants.
+              - [x] Permit exact tombstone-only value/posting/state manifest closures while retaining all root/count invariants.
               - [ ] Apply canonical owner transitions to exact successor manifest counters and reject missing/mismatched role summaries.
           - [ ] Group the canonical batch by owner/role without buffering an index, load only affected page/directory paths, and preserve exact PageId/high-water/tombstone invariants.
           - [ ] Publish one cross-manifest correctness closure with byte-identical coverage and retain every batch on missing/corrupt/pressure/cancellation failure.

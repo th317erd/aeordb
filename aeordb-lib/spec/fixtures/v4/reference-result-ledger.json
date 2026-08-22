@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p6-3b-airb-v2-membership-transitions",
+  "tool_revision": "p6-3b-tombstone-only-manifests",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -352,6 +352,18 @@
       "result": "pass"
     },
     {
+      "fixture_id": "aidx-blake3-256-value-store-manifest-tombstone-only",
+      "expected": "index:manifest:value-store:generation=4867:roots=populated",
+      "observed": "index:manifest:value-store:generation=4867:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-blake3-256-field-index-manifest-tombstone-only",
+      "expected": "index:manifest:field-index:generation=4099:roots=populated",
+      "observed": "index:manifest:field-index:generation=4099:roots=populated",
+      "result": "pass"
+    },
+    {
       "fixture_id": "aidx-sha512-field-index-pointer-a",
       "expected": "index:pointer:field-index:slot-a:sequence=1",
       "observed": "index:pointer:field-index:slot-a:sequence=1",
@@ -433,6 +445,18 @@
       "fixture_id": "aidx-sha512-field-nvt-manifest-populated",
       "expected": "index:manifest:field-nvt:generation=4354:roots=populated",
       "observed": "index:manifest:field-nvt:generation=4354:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-value-store-manifest-tombstone-only",
+      "expected": "index:manifest:value-store:generation=4867:roots=populated",
+      "observed": "index:manifest:value-store:generation=4867:roots=populated",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "aidx-sha512-field-index-manifest-tombstone-only",
+      "expected": "index:manifest:field-index:generation=4099:roots=populated",
+      "observed": "index:manifest:field-index:generation=4099:roots=populated",
       "result": "pass"
     },
     {

@@ -102,7 +102,7 @@ impl PointerKind {
 }
 
 pub fn fixture_cases() -> Vec<IndexFixtureCase> {
-  let mut cases = Vec::with_capacity(56);
+  let mut cases = Vec::with_capacity(60);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     for kind in [PointerKind::FieldIndex, PointerKind::FieldNvt, PointerKind::ScopeCatalog] {
       for slot in [0u8, 1u8] {
@@ -129,6 +129,18 @@ pub fn fixture_cases() -> Vec<IndexFixtureCase> {
         profile,
         expected: manifest_expected(kind, decoded.generation, populated),
         relation: Some(manifest_relation(kind, populated)),
+        canonical_key: Some(hex::encode(decoded.key)),
+        bytes,
+      });
+    }
+    for (kind, bytes) in tombstone_only_manifest_fixture_graph(profile) {
+      let decoded = decode_manifest(profile, &bytes).expect("tombstone-only fixture manifest must decode");
+      cases.push(IndexFixtureCase {
+        id: tombstone_only_manifest_fixture_id(profile, kind),
+        format: IndexFormat::IndexArtifactV1,
+        profile,
+        expected: manifest_expected(kind, decoded.generation, true),
+        relation: Some(tombstone_only_manifest_relation(kind)),
         canonical_key: Some(hex::encode(decoded.key)),
         bytes,
       });
@@ -294,6 +306,47 @@ fn manifest_fixture_graph(profile: HashProfile) -> Vec<(ManifestKind, bool, Vec<
     (ManifestKind::FieldNvt, false, nvt_empty),
     (ManifestKind::FieldNvt, true, nvt_populated),
   ]
+}
+
+fn tombstone_only_manifest_fixture_graph(profile: HashProfile) -> Vec<(ManifestKind, Vec<u8>)> {
+  let h = profile.width();
+  let scope_definition = definitions::sample_scope_definition();
+  let scope_id = definitions::scope_id(profile, &scope_definition);
+  let scope = build_scope_manifest(profile, &scope_id, 0x1202, true, &scope_definition);
+
+  let value_definition = value_store::sample_value_store_definition_for_scope(profile, &scope_id);
+  let value_store_id = value_store::value_store_id_bytes(profile, &value_definition);
+  let mut value = build_value_manifest(
+    profile,
+    &value_store_id,
+    0x1303,
+    true,
+    &immutable_key(profile, ManifestKind::ScopeCatalog.id(), &scope),
+    &value_definition,
+  );
+  let value_body = AIDX_HEADER_LENGTH + h + 8;
+  for offset in [96, 104, 112, 136] {
+    put_u64(&mut value, value_body + offset + 4 * h, 0);
+  }
+  write_trailing_crc(&mut value);
+
+  let field_definition = field_index::sample_field_index_definition_for_value_store(profile, &value_store_id);
+  let index_id = field_index::index_id(profile, &field_definition);
+  let mut field = build_field_manifest(
+    profile,
+    &index_id,
+    0x1003,
+    true,
+    &immutable_key(profile, ManifestKind::ValueStore.id(), &value),
+    &field_definition,
+  );
+  let field_body = AIDX_HEADER_LENGTH + h + 8;
+  for offset in [112, 128, 136, 152] {
+    put_u64(&mut field, field_body + offset + 4 * h, 0);
+  }
+  write_trailing_crc(&mut field);
+
+  vec![(ManifestKind::ValueStore, value), (ManifestKind::FieldIndex, field)]
 }
 
 fn build_scope_manifest(profile: HashProfile, owner: &[u8], generation: u64, populated: bool, definition: &[u8]) -> Vec<u8> {
@@ -617,10 +670,15 @@ fn decode_value_manifest_body(profile: HashProfile, owner: &[u8], body: &[u8]) -
   let states = validate_root(presence, 2, &body[72 + 3 * h..72 + 4 * h])?;
   let value_counts = [80, 96, 112, 120, 136].map(|offset| read_u64(body, offset + 4 * h)).into_iter().collect::<Result<Vec<_>, _>>()?;
   let state_counts = [88, 104, 128].map(|offset| read_u64(body, offset + 4 * h)).into_iter().collect::<Result<Vec<_>, _>>()?;
+  let value_live_counts_disagree = (value_counts[1] == 0) != (value_counts[2] == 0);
   if (!values && value_counts.iter().any(|count| *count != 0))
-    || (values && (value_counts[0] == 0 || value_counts[1] == 0 || value_counts[2] == 0))
+    || (values
+      && (value_counts[0] == 0
+        || (value_counts[2] == 0 && value_counts[3] == 0)
+        || value_live_counts_disagree
+        || value_counts[1] > value_counts[2]))
     || (!states && state_counts.iter().any(|count| *count != 0))
-    || (states && (state_counts[0] == 0 || state_counts[1] == 0))
+    || (states && (state_counts[0] == 0 || (state_counts[1] == 0 && state_counts[2] == 0)))
   {
     return Err("value_manifest_count");
   }
@@ -654,6 +712,7 @@ fn decode_field_manifest_body(profile: HashProfile, owner: &[u8], body: &[u8]) -
   let next = read_u64(body, 88 + 4 * h)?;
   let posting_counts = [96, 112, 120, 128, 152].map(|offset| read_u64(body, offset + 4 * h)).into_iter().collect::<Result<Vec<_>, _>>()?;
   let state_counts = [104, 136, 144].map(|offset| read_u64(body, offset + 4 * h)).into_iter().collect::<Result<Vec<_>, _>>()?;
+  let posting_live_counts_disagree = (posting_counts[3] == 0) != (posting_counts[1] == 0);
   if (!postings && (first != 0 || last != 0 || posting_counts.iter().any(|count| *count != 0)))
     || (postings
       && (first == 0
@@ -661,10 +720,11 @@ fn decode_field_manifest_body(profile: HashProfile, owner: &[u8], body: &[u8]) -
         || first > last
         || next <= last
         || posting_counts[0] == 0
-        || posting_counts[1] == 0
-        || posting_counts[3] == 0))
+        || (posting_counts[1] == 0 && posting_counts[2] == 0)
+        || posting_live_counts_disagree
+        || posting_counts[3] > posting_counts[1]))
     || (!states && state_counts.iter().any(|count| *count != 0))
-    || (states && (state_counts[0] == 0 || state_counts[1] == 0))
+    || (states && (state_counts[0] == 0 || (state_counts[1] == 0 && state_counts[2] == 0)))
   {
     return Err("field_manifest_count");
   }
@@ -717,6 +777,10 @@ fn manifest_fixture_id(profile: HashProfile, kind: ManifestKind, populated: bool
   Box::leak(format!("aidx-{}-{}-manifest-{}", profile.label(), kind.name(), if populated { "populated" } else { "empty" }).into_boxed_str())
 }
 
+fn tombstone_only_manifest_fixture_id(profile: HashProfile, kind: ManifestKind) -> &'static str {
+  Box::leak(format!("aidx-{}-{}-manifest-tombstone-only", profile.label(), kind.name()).into_boxed_str())
+}
+
 fn manifest_expected(kind: ManifestKind, generation: u64, populated: bool) -> &'static str {
   Box::leak(
     format!("index:manifest:{}:generation={generation}:roots={}", kind.name(), if populated { "populated" } else { "empty" })
@@ -734,6 +798,14 @@ fn manifest_relation(kind: ManifestKind, populated: bool) -> &'static str {
     (ManifestKind::FieldIndex, true) => "manifest:FieldIndexV1:populated",
     (ManifestKind::FieldNvt, false) => "manifest:FieldNvtV1:empty",
     (ManifestKind::FieldNvt, true) => "manifest:FieldNvtV1:populated",
+  }
+}
+
+fn tombstone_only_manifest_relation(kind: ManifestKind) -> &'static str {
+  match kind {
+    ManifestKind::ValueStore => "manifest:ValueStoreV1:tombstone-only",
+    ManifestKind::FieldIndex => "manifest:FieldIndexV1:tombstone-only",
+    _ => panic!("only value-store and field-index manifests retain tombstone-only ordered roots"),
   }
 }
 

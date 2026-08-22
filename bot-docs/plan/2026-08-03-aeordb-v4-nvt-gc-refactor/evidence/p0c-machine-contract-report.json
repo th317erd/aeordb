@@ -4,7 +4,7 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "fe24a9a219e570fefa9f3ff82c4cf92603a9c36b6f4341c1fc688cb7671db29d",
+  "generated_rust_sha256": "31a3a94a6aa8cb21b4d8fbcc989c130f705739c5c151b3fd557e8b19aac63cab",
   "generated_rust_bytes": 61905,
   "counts": {
     "route_classes": 7,
@@ -15,11 +15,11 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 155,
+    "reference_tests_passed": 149,
     "production_tests_passed": 5,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 450,
+    "fixture_cases_verified": 454,
     "route_registrations_inventoried": 95,
     "documentation_pages_inventoried": 38,
     "v4_writers_activated": false

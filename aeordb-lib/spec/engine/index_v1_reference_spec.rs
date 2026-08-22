@@ -1227,6 +1227,20 @@ fn typed_manifest_codecs_round_trip_every_independent_manifest_fixture() {
         assert_eq!(encoded.key, decoded.key, "{name}");
       }
     }
+    for kind in ["value-store", "field-index"] {
+      let name = format!("aidx-{profile}-{kind}-manifest-tombstone-only.bin");
+      let expected = index_artifact_fixture(&name);
+      let decoded = decode_index_manifest(&expected, hash_algorithm).unwrap();
+      let encoded = encode_index_manifest(&IndexManifestWriteV1 {
+        hash_algorithm,
+        generation: decoded.generation,
+        owner_id: decoded.owner_id,
+        body: decoded.details.clone(),
+      })
+      .unwrap();
+      assert_eq!(encoded.value, expected, "{name}");
+      assert_eq!(encoded.key, decoded.key, "{name}");
+    }
   }
 }
 
@@ -1958,6 +1972,188 @@ fn typed_manifest_writers_reject_identity_capability_and_root_count_corruption()
       .class(),
       MalformedInputClass::IdentityKeyOrGenerationMismatch
     );
+  }
+}
+
+fn assert_manifest_closure_error(hash_algorithm: HashAlgorithm, generation: u64, owner_id: &[u8], body: IndexManifestBodyV1<'_>) {
+  assert_eq!(
+    encode_index_manifest(&IndexManifestWriteV1 { hash_algorithm, generation, owner_id, body }).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+}
+
+#[test]
+fn typed_manifest_writers_accept_tombstone_only_roots_but_reject_empty_present_roots() {
+  for (profile, hash_algorithm) in [("blake3-256", HashAlgorithm::Blake3_256), ("sha512", HashAlgorithm::Sha512)] {
+    let value_bytes = index_artifact_fixture(&format!("aidx-{profile}-value-store-manifest-populated.bin"));
+    let value = decode_index_manifest(&value_bytes, hash_algorithm).unwrap();
+
+    let mut tombstone_only_value = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut tombstone_only_value else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.value_document_count = 0;
+    body.live_value_count = 0;
+    body.value_tombstone_count = 1;
+    body.live_canonical_value_bytes = 0;
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: value.generation,
+      owner_id: value.owner_id,
+      body: tombstone_only_value,
+    })
+    .unwrap();
+
+    let mut tombstone_only_value_state = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut tombstone_only_value_state else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 1;
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: value.generation,
+      owner_id: value.owner_id,
+      body: tombstone_only_value_state,
+    })
+    .unwrap();
+
+    let mut empty_value_root = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut empty_value_root else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.value_document_count = 0;
+    body.live_value_count = 0;
+    body.value_tombstone_count = 0;
+    body.live_canonical_value_bytes = 0;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, empty_value_root);
+
+    let mut missing_value_page = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut missing_value_page else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.value_page_count = 0;
+    body.value_document_count = 0;
+    body.live_value_count = 0;
+    body.value_tombstone_count = 1;
+    body.live_canonical_value_bytes = 0;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, missing_value_page);
+
+    let mut mismatched_value_documents = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut mismatched_value_documents else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.value_document_count = 0;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, mismatched_value_documents);
+
+    let mut excessive_value_documents = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut excessive_value_documents else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.value_document_count = body.live_value_count + 1;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, excessive_value_documents);
+
+    let mut empty_value_state_root = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut empty_value_state_root else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 0;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, empty_value_state_root);
+
+    let mut missing_value_state_page = value.details.clone();
+    let IndexManifestBodyV1::ValueStore(body) = &mut missing_value_state_page else {
+      panic!("fixture is a value-store manifest");
+    };
+    body.state_page_count = 0;
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 1;
+    assert_manifest_closure_error(hash_algorithm, value.generation, value.owner_id, missing_value_state_page);
+
+    let field_bytes = index_artifact_fixture(&format!("aidx-{profile}-field-index-manifest-populated.bin"));
+    let field = decode_index_manifest(&field_bytes, hash_algorithm).unwrap();
+
+    let mut tombstone_only_posting = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut tombstone_only_posting else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.live_posting_count = 0;
+    body.posting_tombstone_count = 1;
+    body.posting_document_count = 0;
+    body.live_canonical_posting_bytes = 0;
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: field.generation,
+      owner_id: field.owner_id,
+      body: tombstone_only_posting,
+    })
+    .unwrap();
+
+    let mut tombstone_only_index_state = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut tombstone_only_index_state else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 1;
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm,
+      generation: field.generation,
+      owner_id: field.owner_id,
+      body: tombstone_only_index_state,
+    })
+    .unwrap();
+
+    let mut empty_posting_root = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut empty_posting_root else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.live_posting_count = 0;
+    body.posting_tombstone_count = 0;
+    body.posting_document_count = 0;
+    body.live_canonical_posting_bytes = 0;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, empty_posting_root);
+
+    let mut missing_posting_page = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut missing_posting_page else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.posting_page_count = 0;
+    body.live_posting_count = 0;
+    body.posting_tombstone_count = 1;
+    body.posting_document_count = 0;
+    body.live_canonical_posting_bytes = 0;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, missing_posting_page);
+
+    let mut mismatched_posting_documents = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut mismatched_posting_documents else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.posting_document_count = 0;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, mismatched_posting_documents);
+
+    let mut excessive_posting_documents = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut excessive_posting_documents else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.posting_document_count = body.live_posting_count + 1;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, excessive_posting_documents);
+
+    let mut empty_index_state_root = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut empty_index_state_root else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 0;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, empty_index_state_root);
+
+    let mut missing_index_state_page = field.details.clone();
+    let IndexManifestBodyV1::FieldIndex(body) = &mut missing_index_state_page else {
+      panic!("fixture is a field-index manifest");
+    };
+    body.state_page_count = 0;
+    body.unindexable_document_count = 0;
+    body.state_tombstone_count = 1;
+    assert_manifest_closure_error(hash_algorithm, field.generation, field.owner_id, missing_index_state_page);
   }
 }
 

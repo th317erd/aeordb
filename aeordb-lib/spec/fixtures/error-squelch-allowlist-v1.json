@@ -9996,7 +9996,7 @@
     {
       "id": "esq-v1-15d151593cd091165a43-00",
       "file": "aeordb-lib/src/engine/v4/index_manifest.rs",
-      "line": 560,
+      "line": 569,
       "column": 27,
       "enclosing_item": "decode_correctness_prefix",
       "kind": "error_conversion",

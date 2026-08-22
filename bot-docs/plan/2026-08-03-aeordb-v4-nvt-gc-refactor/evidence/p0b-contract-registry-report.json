@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p6-3b0-airb-v2",
+  "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "8db1547c142fbbb94a7c13bb4396900918db3dbde3c6a4cf8eb4df2815c19720",
-  "fixture_manifest_sha256": "f143510f9ad61732460633cfb9a48231dccfff3ec76c214d1f50f965f33b7609",
+  "source_sha256": "340e5a50f3affbd5b60485cbb2327d1a7f343ca922692ea13dab5288d918a54d",
+  "fixture_manifest_sha256": "4a0d2358760354136805ebf346c3a4fc98c2007c519fd2207679d8b88e8c77d0",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 24,
-    "fixtures": 450,
+    "fixtures": 454,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,7 +55,7 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 155,
+    "tests_passed": 149,
     "reviewer_status": "pending-owner-review-before-production-writer"
   }
 }

@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "stage": "p6-3b-airb-v2-membership-transitions",
+  "stage": "p6-3b-tombstone-only-manifests",
   "reference_tool": {
     "name": "aeordb-v4-reference",
-    "revision": "p6-3b-airb-v2-membership-transitions",
+    "revision": "p6-3b-tombstone-only-manifests",
     "production_dependencies": [],
     "provenance": "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency",
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 450,
+  "fixture_count": 454,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -883,6 +883,36 @@
       "relation": "manifest:FieldNvtV1:populated"
     },
     {
+      "id": "aidx-blake3-256-value-store-manifest-tombstone-only",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "index-artifact-v1/aidx-blake3-256-value-store-manifest-tombstone-only.bin",
+      "annotated_hex": "index-artifact-v1/aidx-blake3-256-value-store-manifest-tombstone-only.hex",
+      "byte_length": 617,
+      "sha256": "801763038d1f8ae170a6fafa9e66f05c0e0a919fab4523667b4a3683357e1ff4",
+      "blake3": "01b6142dd1fc5841994e09cf697443ea5667e480fcb950f53697552c1ea45a90",
+      "canonical_key": "7e6d1dc990c020181d0ac11ed9e719e8d3bf82a0448ff6db8ec331076ebd9f47",
+      "expected": "index:manifest:value-store:generation=4867:roots=populated",
+      "relation": "manifest:ValueStoreV1:tombstone-only"
+    },
+    {
+      "id": "aidx-blake3-256-field-index-manifest-tombstone-only",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "index-artifact-v1/aidx-blake3-256-field-index-manifest-tombstone-only.bin",
+      "annotated_hex": "index-artifact-v1/aidx-blake3-256-field-index-manifest-tombstone-only.hex",
+      "byte_length": 657,
+      "sha256": "bad53f7be91172aa0815a5d9c3ee4d68eea578bc08fb5b3d6e7a908f12b06dfe",
+      "blake3": "5ed1c5c7fc42fce30815ad10e5cb552cef550fdb9423ae77426a762f08174eea",
+      "canonical_key": "357ac54b035721ef6b2210d30990702c0632feedf19148e68dd09aa7956062e4",
+      "expected": "index:manifest:field-index:generation=4099:roots=populated",
+      "relation": "manifest:FieldIndexV1:tombstone-only"
+    },
+    {
       "id": "aidx-sha512-field-index-pointer-a",
       "format_id": "index-artifact-v1",
       "family": "IndexArtifactV1",
@@ -1091,6 +1121,36 @@
       "canonical_key": "0718c5a21674f79452a9d1dec615f47be9839c3ae28025516a199503e95cd00b14ae9eab0936a7cc746b5b6ca60e99ce8ca17eb4fb9b26f7145c81a1e85c6f24",
       "expected": "index:manifest:field-nvt:generation=4354:roots=populated",
       "relation": "manifest:FieldNvtV1:populated"
+    },
+    {
+      "id": "aidx-sha512-value-store-manifest-tombstone-only",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "index-artifact-v1/aidx-sha512-value-store-manifest-tombstone-only.bin",
+      "annotated_hex": "index-artifact-v1/aidx-sha512-value-store-manifest-tombstone-only.hex",
+      "byte_length": 809,
+      "sha256": "56037e3872ed45d91fe45f53135357c01a22d8c757abe55186d22fec86508f6a",
+      "blake3": "d936e9afd70d096209eac2a3c586aa93f1b3c7e519c603be85a5161a41593d73",
+      "canonical_key": "7ac0d2e6c5c705aa96ebfec234a86e066c98c1f3ae0e93933f5f2f5c6f4063be6c0ad5590f764e24455c08a7a2edeae8c2b4af3de6ffd5f5ddeafdb84e7129f5",
+      "expected": "index:manifest:value-store:generation=4867:roots=populated",
+      "relation": "manifest:ValueStoreV1:tombstone-only"
+    },
+    {
+      "id": "aidx-sha512-field-index-manifest-tombstone-only",
+      "format_id": "index-artifact-v1",
+      "family": "IndexArtifactV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "index-artifact-v1/aidx-sha512-field-index-manifest-tombstone-only.bin",
+      "annotated_hex": "index-artifact-v1/aidx-sha512-field-index-manifest-tombstone-only.hex",
+      "byte_length": 849,
+      "sha256": "95f906efe155268c5f686317c4f25448b824f24207cf3de6742d2af1140b1bd5",
+      "blake3": "3bf0a8546c6d48f2d6e15296aafaf6ad955160cc2ae22166cabd913f9b889f3f",
+      "canonical_key": "6fc918b02d16758a3208b9cd96f0459b7f6bbc17b4b9330c4b4f9cece81e315faeccfebe0b7ed88542a3da036bbd00b8e85b4a7a33f8bb4ead0905b0eaaf6117",
+      "expected": "index:manifest:field-index:generation=4099:roots=populated",
+      "relation": "manifest:FieldIndexV1:tombstone-only"
     },
     {
       "id": "aidx-blake3-256-scope-ordinal-page-valid",

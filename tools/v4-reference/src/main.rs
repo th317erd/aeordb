@@ -53,8 +53,8 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p6-3b-airb-v2-membership-transitions";
-const FIXTURE_STAGE: &str = "p6-3b-airb-v2-membership-transitions";
+const TOOL_REVISION: &str = "p6-3b-tombstone-only-manifests";
+const FIXTURE_STAGE: &str = "p6-3b-tombstone-only-manifests";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
 const CRC_OFFSET: usize = 1_020;

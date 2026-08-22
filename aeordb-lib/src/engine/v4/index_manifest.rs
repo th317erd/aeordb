@@ -242,14 +242,20 @@ fn decode_value_manifest_body<'a>(
   let value_tombstone_count = u64_at(body, 120 + 4 * hash_width)?;
   let state_tombstone_count = u64_at(body, 128 + 4 * hash_width)?;
   let live_canonical_value_bytes = u64_at(body, 136 + 4 * hash_width)?;
+  let value_live_counts_disagree = (value_document_count == 0) != (live_value_count == 0);
   if (value_directory_root.is_none()
     && [value_page_count, value_document_count, live_value_count, value_tombstone_count, live_canonical_value_bytes]
       .iter()
       .any(|count| *count != 0))
-    || (value_directory_root.is_some() && (value_page_count == 0 || value_document_count == 0 || live_value_count == 0))
+    || (value_directory_root.is_some()
+      && (value_page_count == 0
+        || (live_value_count == 0 && value_tombstone_count == 0)
+        || value_live_counts_disagree
+        || value_document_count > live_value_count))
     || (document_state_directory_root.is_none()
       && [state_page_count, unindexable_document_count, state_tombstone_count].iter().any(|count| *count != 0))
-    || (document_state_directory_root.is_some() && (state_page_count == 0 || unindexable_document_count == 0))
+    || (document_state_directory_root.is_some()
+      && (state_page_count == 0 || (unindexable_document_count == 0 && state_tombstone_count == 0)))
   {
     return Err(closure_error("value manifest roots and counts disagree"));
   }
@@ -310,6 +316,7 @@ fn decode_field_manifest_body<'a>(
   let unindexable_document_count = u64_at(body, 136 + 4 * hash_width)?;
   let state_tombstone_count = u64_at(body, 144 + 4 * hash_width)?;
   let live_canonical_posting_bytes = u64_at(body, 152 + 4 * hash_width)?;
+  let posting_live_counts_disagree = (posting_document_count == 0) != (live_posting_count == 0);
   if (posting_directory_root.is_none()
     && (first_page_id != 0
       || last_page_id != 0
@@ -322,11 +329,13 @@ fn decode_field_manifest_body<'a>(
         || first_page_id > last_page_id
         || next_page_id <= last_page_id
         || posting_page_count == 0
-        || live_posting_count == 0
-        || posting_document_count == 0))
+        || (live_posting_count == 0 && posting_tombstone_count == 0)
+        || posting_live_counts_disagree
+        || posting_document_count > live_posting_count))
     || (document_state_directory_root.is_none()
       && [state_page_count, unindexable_document_count, state_tombstone_count].iter().any(|count| *count != 0))
-    || (document_state_directory_root.is_some() && (state_page_count == 0 || unindexable_document_count == 0))
+    || (document_state_directory_root.is_some()
+      && (state_page_count == 0 || (unindexable_document_count == 0 && state_tombstone_count == 0)))
   {
     return Err(closure_error("field manifest roots, page IDs, and counts disagree"));
   }
