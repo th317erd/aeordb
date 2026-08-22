@@ -3,7 +3,7 @@
 - **Status:** active; P6-1/P6-2 and P6-3a complete; P6-3b immutable index application in progress
 - **Current landing unit:** P6-3b0 atomic owner/document semantic-group admission and durable AIRB v2 publication
 - **Entry commit:** `20e1aa9` (`Persist soft mutation journals safely`)
-- **Last green commit:** `02286c1` (`Converge index maintenance producers`)
+- **Last green commit:** `1f9cbdd` (`Preserve atomic index semantic groups`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
 - **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
