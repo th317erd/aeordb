@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1532,
+  "maximum_occurrences": 1531,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -6074,16 +6074,6 @@
       "review": "optional-data-default"
     },
     {
-      "id": "esq-v1-423287ee3ed2d3ef7c12-00",
-      "file": "aeordb-lib/src/engine/permission_resolver.rs",
-      "line": 145,
-      "column": 26,
-      "enclosing_item": "impl PermissionResolver < 'a >::check_direct_permission",
-      "kind": "default_on_error",
-      "pattern": "path . trim_end_matches ('/') . rsplit ('/') . next () . unwrap_or (\"\")",
-      "review": "optional-data-default"
-    },
-    {
       "id": "esq-v1-83c89baa2b0ef15703ec-00",
       "file": "aeordb-lib/src/engine/permissions.rs",
       "line": 146,
@@ -11236,7 +11226,7 @@
     {
       "id": "esq-v1-cca4aa854c71b6848fed-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 1008,
+      "line": 1013,
       "column": 14,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",
@@ -11246,7 +11236,7 @@
     {
       "id": "esq-v1-8e07aab909c0b553b8cd-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 1010,
+      "line": 1015,
       "column": 18,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",

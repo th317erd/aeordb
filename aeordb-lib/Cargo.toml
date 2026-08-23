@@ -898,6 +898,10 @@ name = "v4_read_view_spec"
 path = "spec/engine/v4_read_view_spec.rs"
 
 [[test]]
+name = "v4_read_view_authorization_spec"
+path = "spec/engine/v4_read_view_authorization_spec.rs"
+
+[[test]]
 name = "v4_read_view_native_spec"
 path = "spec/engine/v4_read_view_native_spec.rs"
 

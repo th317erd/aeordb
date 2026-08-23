@@ -563,6 +563,8 @@ impl ReadViewAuthorizationErrorV1 {
 pub enum ReadViewAuthorizationFailureV1 {
   #[error("selected-root read authorization was denied")]
   Denied,
+  #[error("selected-root read authorization was canceled")]
+  Canceled,
   #[error("selected-root read authorization is unavailable: {0}")]
   Unavailable(String),
   #[error("selected-root read authorization is corrupt: {0}")]
@@ -573,6 +575,7 @@ impl ReadViewAuthorizationFailureV1 {
   pub const fn code(&self) -> &'static str {
     match self {
       Self::Denied => "read_authorization_denied",
+      Self::Canceled => "read_view_canceled",
       Self::Unavailable(_) => "read_authorization_unavailable",
       Self::Corrupt(_) => "read_authorization_corrupt",
     }
@@ -916,9 +919,11 @@ where
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }
 
-    let authorization = authorizer
-      .restrict_to_selected_root(current_authorization.authorization(), &loaded, cancellation)
-      .map_err(|error| authorized_error(error.into()))?;
+    let authorization =
+      authorizer.restrict_to_selected_root(current_authorization.authorization(), &loaded, cancellation).map_err(|error| match error {
+        ReadViewAuthorizationFailureV1::Canceled => authorized_error(ReadViewAuthorizedFailureV1::Canceled),
+        other => authorized_error(other.into()),
+      })?;
     if cancellation.is_cancelled() {
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }

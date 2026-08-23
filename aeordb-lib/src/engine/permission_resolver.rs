@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::GroupLoader;
 use crate::engine::errors::EngineResult;
-use crate::engine::permissions::{merge_flags, parse_crudlify_flags};
+use crate::engine::permissions::{PathPermissions, merge_flags, parse_crudlify_flags};
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::user::is_root;
 
@@ -98,87 +98,8 @@ impl<'a> PermissionResolver<'a> {
       return Ok(true);
     }
 
-    // Normalize: callers may pass paths without a leading slash (e.g. the
-    // permission middleware strips "/files/" leaving "foo/bar/baz.txt").
-    // path_levels returns levels WITH a leading slash, so we must align.
-    let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
-    let path = normalized.as_str();
-
-    // Get user's group memberships.
     let user_groups = self.group_cache.get(user_id, self.engine)?;
-
-    // Start with everything denied.
-    let mut state = [false; 8];
-
-    // Walk path levels from root to target.
-    let levels = path_levels(path);
-
-    for level in &levels {
-      let permissions = self.engine.permissions_cache.get(level, self.engine)?;
-
-      let permissions = match permissions {
-        Some(permissions) => permissions,
-        None => continue, // No .aeordb-permissions file = no change at this level.
-      };
-
-      let mut level_allow: [Option<bool>; 8] = [None; 8];
-      let mut level_deny: [Option<bool>; 8] = [None; 8];
-
-      for link in &permissions.links {
-        // If link has a path_pattern, only apply when:
-        // 1. This level is the immediate parent of the target path
-        // 2. The target's filename matches the pattern
-        if let Some(ref pattern) = link.path_pattern {
-          let target_parent = {
-            let trimmed = path.trim_end_matches('/');
-            match trimmed.rfind('/') {
-              Some(0) => "/".to_string(),
-              Some(idx) => trimmed[..idx].to_string(),
-              None => "/".to_string(),
-            }
-          };
-          let normalized_level = level.trim_end_matches('/');
-          let normalized_parent = target_parent.trim_end_matches('/');
-          if normalized_level != normalized_parent {
-            continue;
-          }
-          let filename = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-          if filename != pattern {
-            continue;
-          }
-        }
-
-        let is_member = user_groups.contains(&link.group);
-
-        if is_member {
-          let allow_flags = parse_crudlify_flags(&link.allow);
-          let deny_flags = parse_crudlify_flags(&link.deny);
-          merge_flags(&mut level_allow, &allow_flags);
-          merge_flags(&mut level_deny, &deny_flags);
-        } else if link.others_allow.is_some() || link.others_deny.is_some() {
-          if let Some(ref others_allow) = link.others_allow {
-            let flags = parse_crudlify_flags(others_allow);
-            merge_flags(&mut level_allow, &flags);
-          }
-          if let Some(ref others_deny) = link.others_deny {
-            let flags = parse_crudlify_flags(others_deny);
-            merge_flags(&mut level_deny, &flags);
-          }
-        }
-      }
-
-      // Apply: allow adds, deny removes. Deny wins at same level.
-      for index in 0..8 {
-        if level_allow[index] == Some(true) {
-          state[index] = true;
-        }
-        if level_deny[index] == Some(true) {
-          state[index] = false;
-        }
-      }
-    }
-
-    Ok(state[operation as usize])
+    evaluate_ordered_path_permissions(&user_groups, path, operation, |level| self.engine.permissions_cache.get(level, self.engine))
   }
 
   /// True if the user has any permission grant at or below `path`.
@@ -214,6 +135,74 @@ impl<'a> PermissionResolver<'a> {
     }
     let index = self.engine.grants_index_cache.get(&(), self.engine)?;
     Ok(index.accessible_child_names(&user_groups, &normalized))
+  }
+}
+
+/// Evaluate inherited permission documents in root-to-target order.
+///
+/// The loader boundary keeps the permission algebra independent of whether
+/// documents come from current caches or a captured immutable namespace.
+pub fn evaluate_ordered_path_permissions<E, F>(user_groups: &[String], path: &str, operation: CrudlifyOp, mut load: F) -> Result<bool, E>
+where
+  F: FnMut(&String) -> Result<Option<PathPermissions>, E>,
+{
+  let normalized = normalize_permission_path(path);
+  let path = normalized.as_str();
+  let target_parent = permission_target_parent(path);
+  let filename = path.trim_end_matches('/').rsplit('/').next();
+  let mut state = [false; 8];
+
+  for level in path_levels(path) {
+    let Some(permissions) = load(&level)? else { continue };
+    let mut level_allow: [Option<bool>; 8] = [None; 8];
+    let mut level_deny: [Option<bool>; 8] = [None; 8];
+
+    for link in &permissions.links {
+      if let Some(pattern) = &link.path_pattern {
+        if level.trim_end_matches('/') != target_parent.trim_end_matches('/') || filename != Some(pattern.as_str()) {
+          continue;
+        }
+      }
+
+      if user_groups.contains(&link.group) {
+        merge_flags(&mut level_allow, &parse_crudlify_flags(&link.allow));
+        merge_flags(&mut level_deny, &parse_crudlify_flags(&link.deny));
+      } else if link.others_allow.is_some() || link.others_deny.is_some() {
+        if let Some(others_allow) = &link.others_allow {
+          merge_flags(&mut level_allow, &parse_crudlify_flags(others_allow));
+        }
+        if let Some(others_deny) = &link.others_deny {
+          merge_flags(&mut level_deny, &parse_crudlify_flags(others_deny));
+        }
+      }
+    }
+
+    for index in 0..8 {
+      if level_allow[index] == Some(true) {
+        state[index] = true;
+      }
+      if level_deny[index] == Some(true) {
+        state[index] = false;
+      }
+    }
+  }
+
+  Ok(state[operation as usize])
+}
+
+pub fn normalize_permission_path(path: &str) -> String {
+  if path.starts_with('/') {
+    path.to_string()
+  } else {
+    format!("/{path}")
+  }
+}
+
+fn permission_target_parent(path: &str) -> &str {
+  let trimmed = path.trim_end_matches('/');
+  match trimmed.rfind('/') {
+    Some(0) | None => "/",
+    Some(index) => &trimmed[..index],
   }
 }
 

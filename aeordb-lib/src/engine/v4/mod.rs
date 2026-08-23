@@ -120,6 +120,7 @@ pub mod parser_plan;
 pub mod position;
 pub(crate) mod private_workspace;
 pub mod read_view;
+pub mod read_view_authorization;
 pub mod reader;
 pub mod root_authority;
 pub mod scope;

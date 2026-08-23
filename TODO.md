@@ -1174,7 +1174,13 @@
             - [x] Classify retained, pending-delete, logically retired, and physically reclaimed roots with dynamic configured grace.
             - [x] Reserve query memory before selector/entity allocation and release it exactly on success, refusal, corruption, and cancellation.
             - [x] Reject malformed, incomplete, ambiguous, cross-database, and candidate/expiry-conflicting authority without reading sibling subtrees.
-          - [ ] P7-1b3: extract one shared permission evaluator and implement current-authorization plus selected-root restrictive intersection without grant expansion.
+          - [x] P7-1b3: extract one shared permission evaluator and implement current-authorization plus selected-root restrictive intersection without grant expansion.
+            - [x] Add compile-red focused proof for ordered permission inheritance, current identity reuse, restrictive decision intersection, cancellation, and typed denial/corruption/unavailability.
+            - [x] Extract one storage-neutral ordered `.aeordb-permissions` evaluator and make the current `PermissionResolver` delegate without changing direct, path-form, or ancestor-navigation behavior.
+            - [x] Freeze a request-owned current path authorization snapshot containing the current groups, operation, path, credential/concealment policy, and direct-or-filtered decision.
+            - [x] Add one selected-root permission-source boundary and intersect its decision with current authority; selected authority may remove access or child names but can never add either.
+            - [x] Prove current denial reads no selected-root source, share/root current-only policy remains explicit, and ordinary API/user requests evaluate selected documents with current group identity.
+            - [x] Run affected permission/auth/share/SSE/plugin regressions, broad/static gates, update evidence, commit, and push the green landing unit.
           - [ ] P7-1b4: prove the combined native resolver against real v4 files, concurrent authority movement, pin lifetime, concealment, pressure, and architecture uniqueness.
         - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
