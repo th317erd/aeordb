@@ -113,8 +113,10 @@ fn candidate(
 fn scope(value_store: Vec<u8>, indexes: Vec<QueryPlanningIndexCandidateV1>, authoritative_document_count: u64) -> QueryPlanningScopeV1 {
   let encoded_scope_definition = scope_fixture();
   let scope_definition = decode_scope_definition(&encoded_scope_definition, HashAlgorithm::Blake3_256).unwrap();
+  let value_store_id = decode_value_store_definition(&value_store, HashAlgorithm::Blake3_256).unwrap().value_store_id;
   QueryPlanningScopeV1 {
     scope_id: scope_definition.scope_id,
+    value_store_id,
     encoded_scope_definition,
     encoded_value_store_definition: value_store,
     semantic_availability: IndexSemanticQueryAvailabilityV1::Complete,
@@ -545,6 +547,7 @@ fn sha512_hash_literals_compile_to_full_width_bytes() {
     complete: true,
     scopes: vec![QueryPlanningScopeV1 {
       scope_id: scope_definition.scope_id,
+      value_store_id: value_definition.value_store_id,
       encoded_scope_definition: encoded_scope,
       encoded_value_store_definition: value_store,
       semantic_availability: IndexSemanticQueryAvailabilityV1::Complete,
@@ -791,6 +794,11 @@ fn malformed_catalog_identity_order_and_definition_closure_fail_closed() {
   let mut wrong_value = base.clone();
   wrong_value.scopes[0].encoded_value_store_definition = definitions("@size", "u64_order_v1").0;
   let error = error_for(&[wrong_value], default_query_planning_limits_v1());
+  assert_eq!(error.code(), "query_value_definition_mismatch");
+
+  let mut wrong_value_identity = base.clone();
+  wrong_value_identity.scopes[0].value_store_id[0] ^= 1;
+  let error = error_for(&[wrong_value_identity], default_query_planning_limits_v1());
   assert_eq!(error.code(), "query_value_definition_mismatch");
 
   let mut wrong_index = base.clone();

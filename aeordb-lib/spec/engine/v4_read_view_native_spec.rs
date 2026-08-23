@@ -10,6 +10,7 @@ use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
+use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
 use aeordb::engine::v4::entity::EntryTypeV4;
 use aeordb::engine::v4::first_authority::{
   FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1,
@@ -18,6 +19,11 @@ use aeordb::engine::v4::first_authority::{
 };
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::hash::digest_parts;
+use aeordb::engine::v4::index_producer_collector::{
+  IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
+  IndexParserOutcomeV1,
+};
+use aeordb::engine::v4::index_source::{PluginMapperExecutorV1, PluginMapperOutcomeV1, PluginMapperRequestV1, SourceOperationalResultV1};
 use aeordb::engine::v4::namespace::{
   EncodedSemanticObjectV1, SemanticAvailabilityV1, SemanticStateWriteV1, decode_namespace_root, decode_semantic_object,
   encode_semantic_state_object,
@@ -25,21 +31,24 @@ use aeordb::engine::v4::namespace::{
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::read_view::{
   CurrentReadAuthorizationV1, ReadViewAuthorizationErrorV1, ReadViewConcealmentV1, ReadViewCredentialKindV1, ReadViewResolverV1,
-  ReadViewSelectorV1, ReadableRootStateV1, RootLifecycleObservationV1, RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1,
+  ReadViewSelectorV1, ReadableRootStateV1, ResolvedReadViewV1, RootLifecycleObservationV1, RootPinCoordinatorErrorV1,
+  RootReadPinCoordinatorV1,
 };
 use aeordb::engine::v4::read_view_authorization::{
   CapturedCurrentPathAuthorizationSourceV1, CurrentPathAuthorizationV1, PathAuthorizationDecisionV1, ReadViewPermissionAuthorizerV1,
+  ResolvedPathAuthorizationV1,
 };
 use aeordb::engine::v4::read_view_native::{
-  NativeReadViewSourceV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedSemanticByteLimitsV1,
-  NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1, default_native_selected_semantic_limits_v1,
+  NativeReadViewSourceV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReaderV1,
+  NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1, NativeSelectedSourceLimitsV1,
+  NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1, default_native_selected_semantic_limits_v1,
 };
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::permission_resolver::CrudlifyOp;
 use aeordb::engine::permissions::{PathPermissions, PermissionLink};
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::{DiskKVStore, HashAlgorithm};
 use tokio_util::sync::CancellationToken;
 
@@ -280,12 +289,21 @@ fn complete_semantic_graph(algorithm: HashAlgorithm) -> CompleteSemanticGraph {
 }
 
 fn complete_semantic_graph_with_scope(algorithm: HashAlgorithm, scope: Vec<u8>) -> CompleteSemanticGraph {
+  complete_semantic_graph_with_definitions(algorithm, scope, "metadata-hash-corrected", "typed_exact_blake3_v1")
+}
+
+fn complete_semantic_graph_with_definitions(
+  algorithm: HashAlgorithm,
+  scope: Vec<u8>,
+  value_store_fixture: &str,
+  field_index_fixture: &str,
+) -> CompleteSemanticGraph {
   let hash_width = algorithm.hash_length();
   let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
-  let mut value_store = semantic_definition_fixture(algorithm, "value-store-definition-v1", "avst", "metadata-hash-corrected");
+  let mut value_store = semantic_definition_fixture(algorithm, "value-store-definition-v1", "avst", value_store_fixture);
   value_store[32..32 + hash_width].copy_from_slice(&scope_id);
   let value_store_id = decode_value_store_definition(&value_store, algorithm).unwrap().value_store_id;
-  let mut field_index = semantic_definition_fixture(algorithm, "field-index-definition-v1", "afix", "typed_exact_blake3_v1");
+  let mut field_index = semantic_definition_fixture(algorithm, "field-index-definition-v1", "afix", field_index_fixture);
   field_index[32..32 + hash_width].copy_from_slice(&value_store_id);
   let field_index_id = decode_field_index_definition(&field_index, algorithm).unwrap().index_id;
   let definitions =
@@ -325,6 +343,124 @@ fn complete_semantic_graph_with_scope(algorithm: HashAlgorithm, scope: Vec<u8>) 
   .unwrap();
   objects.push(state.clone());
   CompleteSemanticGraph { objects, state, scope_id, value_store_id, field_index_id }
+}
+
+fn publish_content_file_tree(
+  publisher: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  expected_head_hash: Vec<u8>,
+  name: &str,
+  content: &[u8],
+  transaction_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+  publish_content_file_tree_with_chunk(publisher, algorithm, expected_head_hash, name, content, transaction_id, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_content_file_tree_with_chunk(
+  publisher: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  expected_head_hash: Vec<u8>,
+  name: &str,
+  content: &[u8],
+  transaction_id: [u8; 16],
+  publish_chunk: bool,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+  let timestamp = 1_700_000_000_500;
+  let path = format!("/docs/{name}");
+  let chunk_hash = digest_parts(algorithm, &[b"chunk:", content]);
+  let record = FileRecord {
+    path,
+    content_type: Some("application/json".to_string()),
+    total_size: content.len() as u64,
+    created_at: timestamp,
+    updated_at: timestamp,
+    metadata: Vec::new(),
+    content_hash: digest_parts(algorithm, &[content]),
+    chunk_hashes: vec![chunk_hash.clone()],
+  };
+  let record_bytes = record.serialize_for_version(algorithm.hash_length(), 1).unwrap();
+  let record_revision = digest_parts(algorithm, &[b"filec:", &record_bytes]);
+  let docs_value = serialize_child_entries(
+    &[ChildEntry {
+      entry_type: EntryTypeV4::FileRecord.to_u8(),
+      hash: record_revision.clone(),
+      total_size: content.len() as u64,
+      created_at: timestamp,
+      updated_at: timestamp,
+      name: name.to_string(),
+      content_type: Some("application/json".to_string()),
+      virtual_time: 1,
+      node_id: 1,
+    }],
+    algorithm.hash_length(),
+  )
+  .unwrap();
+  let docs_hash = digest_parts(algorithm, &[b"dirc:", &docs_value]);
+  let root_value = serialize_child_entries(
+    &[ChildEntry {
+      entry_type: EntryTypeV4::DirectoryIndex.to_u8(),
+      hash: docs_hash.clone(),
+      total_size: docs_value.len() as u64,
+      created_at: timestamp,
+      updated_at: timestamp,
+      name: "docs".to_string(),
+      content_type: None,
+      virtual_time: 1,
+      node_id: 1,
+    }],
+    algorithm.hash_length(),
+  )
+  .unwrap();
+  let root_hash = digest_parts(algorithm, &[b"dirc:", &root_value]);
+  let record_entity = ImmutableEntityWriteV1 {
+    entity_version: 1,
+    entry_type: EntryTypeV4::FileRecord,
+    flags: 0,
+    key: &record_revision,
+    stored_value: &record_bytes,
+  };
+  let docs_entity = ImmutableEntityWriteV1 {
+    entity_version: 0,
+    entry_type: EntryTypeV4::DirectoryIndex,
+    flags: 0,
+    key: &docs_hash,
+    stored_value: &docs_value,
+  };
+  let root_entity = ImmutableEntityWriteV1 {
+    entity_version: 0,
+    entry_type: EntryTypeV4::DirectoryIndex,
+    flags: 0,
+    key: &root_hash,
+    stored_value: &root_value,
+  };
+  let chunk_entity =
+    ImmutableEntityWriteV1 { entity_version: 0, entry_type: EntryTypeV4::Chunk, flags: 0, key: &chunk_hash, stored_value: content };
+  let entities =
+    if publish_chunk { vec![chunk_entity, record_entity, docs_entity, root_entity] } else { vec![record_entity, docs_entity, root_entity] };
+  publisher
+    .publish_immutable_entity_batch(ImmutableEntityBatchPublicationRequestV1 {
+      database_id: &[0x31; 16],
+      entities: &entities,
+      publication_timestamp_ms: timestamp as u64,
+    })
+    .unwrap();
+  let selected_root = publisher
+    .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+      database_id: [0x31; 16],
+      transaction_id,
+      created_at_ms: timestamp as u64 + 1,
+      expected_head_hash,
+      namespace_tree: PreparedNamespaceTreeV0 { root_hash, stored_value: root_value },
+      semantic_state: semantic_state(algorithm, aeordb::engine::v4::namespace::SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured),
+      required_capabilities: [0; 32],
+      typed_closure_digest: digest_parts(algorithm, &[b"selected source content closure"]),
+      authority_identity: b"HEAD".to_vec(),
+    })
+    .unwrap()
+    .namespace_root
+    .root_hash;
+  (selected_root, record_revision, chunk_hash)
 }
 
 fn publish_complete_semantic_root(
@@ -689,6 +825,131 @@ enum FileTreeCorruption {
   LastRole,
 }
 
+struct SelectedSourceFixture {
+  _directory: tempfile::TempDir,
+  path: PathBuf,
+  source: Arc<NativeReadViewSourceV1>,
+  memory: Arc<MemoryCoordinator>,
+  pins: RootReadPinCoordinatorV1,
+  cancellation: CancellationToken,
+  view: ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
+  graph: CompleteSemanticGraph,
+  field_name: String,
+  chunk_offset: Option<(u64, u32)>,
+}
+
+impl SelectedSourceFixture {
+  fn reader(&self) -> NativeSelectedNamespaceReaderV1<'_> {
+    self
+      .source
+      .selected_namespace_reader(
+        &self.view,
+        NativeSelectedNamespaceLimitsV1::new(16, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
+      )
+      .unwrap()
+  }
+
+  fn assert_released(self) {
+    let Self { source, memory, pins, view, .. } = self;
+    drop(view);
+    drop(source);
+    assert_eq!(pins.active_pin_count().unwrap(), 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+fn selected_source_fixture(value_store_fixture: &str, scope_glob: Option<&str>, body: &[u8], publish_chunk: bool) -> SelectedSourceFixture {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, path, publisher) = publisher(algorithm);
+  let first = publisher.publish(&first_request(algorithm)).unwrap();
+  let (content_root, _, chunk_hash) = publish_content_file_tree_with_chunk(
+    &publisher,
+    algorithm,
+    first.namespace_root.root_hash,
+    "messages.json",
+    body,
+    [0x68; 16],
+    publish_chunk,
+  );
+  let chunk_offset = publisher.locator(&chunk_hash).unwrap().map(|locator| (locator.offset, locator.total_length));
+  let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
+  let scope = semantic_scope_definition(algorithm, "/docs", scope_glob);
+  let graph = complete_semantic_graph_with_definitions(algorithm, scope, value_store_fixture, "typed_exact_blake3_v1");
+  let field_name = match value_store_fixture {
+    "metadata-hash-corrected" => "@hash",
+    "json-corrected" => "messages",
+    "mapper-corrected" => "summary",
+    other => panic!("selected source test fixture has no field mapping for {other}"),
+  }
+  .to_string();
+  let selected_root = publish_complete_semantic_root(&publisher, algorithm, &content_root_value, content_root, &graph);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(256 * 1024 * 1024, 512 * 1024 * 1024, 1, 1024 * 1024).unwrap()));
+  let source = Arc::new(NativeReadViewSourceV1::new(Arc::new(publisher), Arc::clone(&memory), 86_400_000));
+  let pins = RootReadPinCoordinatorV1::new(Arc::clone(&memory), algorithm, 8, 16).unwrap();
+  let current = CurrentReadAuthorizationV1::new(
+    CurrentPathAuthorizationV1::for_root("/docs/", CrudlifyOp::List),
+    ReadViewCredentialKindV1::Ordinary,
+    ReadViewConcealmentV1::Conceal,
+  );
+  let authorizer = ReadViewPermissionAuthorizerV1::new(CapturedCurrentPathAuthorizationSourceV1::new(Ok(current)), source.as_ref().clone());
+  let resolver = ReadViewResolverV1::new(Arc::clone(&source), pins.clone(), all_capabilities_profile());
+  let cancellation = CancellationToken::new();
+  let view = resolver.resolve(ReadViewSelectorV1::ExplicitRoot(&selected_root), &authorizer, &cancellation).unwrap();
+  SelectedSourceFixture { _directory: directory, path, source, memory, pins, cancellation, view, graph, field_name, chunk_offset }
+}
+
+struct ParsedNullParser;
+
+impl IndexParserExecutorV1 for ParsedNullParser {
+  fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+    Ok(IndexParserOutcomeV1::Parsed(CanonicalConfigValueV1::Null))
+  }
+}
+
+struct DependencyUnavailableParser;
+
+impl IndexParserExecutorV1 for DependencyUnavailableParser {
+  fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+    Err(IndexParserExecutionErrorV1::dependency_unavailable(
+      "selected_test_parser_dependency",
+      "selected parser dependency is deliberately unavailable",
+    ))
+  }
+}
+
+struct DeterministicFailureParser;
+
+impl IndexParserExecutorV1 for DeterministicFailureParser {
+  fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+    Ok(IndexParserOutcomeV1::DeterministicUnindexable(IndexParserDeterministicFailureV1::malformed_document(
+      b"selected deterministic parser evidence".to_vec(),
+      1,
+    )))
+  }
+}
+
+struct CancelAfterParser<'token> {
+  cancellation: &'token CancellationToken,
+}
+
+impl IndexParserExecutorV1 for CancelAfterParser<'_> {
+  fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+    self.cancellation.cancel();
+    Ok(IndexParserOutcomeV1::Parsed(CanonicalConfigValueV1::Null))
+  }
+}
+
+struct SelectedValueMapper;
+
+impl PluginMapperExecutorV1 for SelectedValueMapper {
+  fn invoke(&self, request: PluginMapperRequestV1<'_>) -> SourceOperationalResultV1<PluginMapperOutcomeV1> {
+    assert_eq!(request.dependency_ordinal, 2);
+    assert_eq!(request.document, &CanonicalConfigValueV1::Null);
+    let value = encode_canonical_value(&CanonicalConfigValueV1::String("mapped".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+    Ok(PluginMapperOutcomeV1::Values(vec![value]))
+  }
+}
+
 #[test]
 fn native_resolver_owns_real_authority_memory_and_pin_at_both_hash_widths() {
   for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
@@ -921,6 +1182,436 @@ fn selected_semantic_catalog_uses_the_historical_root_and_query_memory_after_hea
   for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
     assert_selected_semantic_catalog_uses_historical_root(algorithm);
   }
+}
+
+#[test]
+fn selected_source_evaluation_reads_historical_chunks_and_retains_exact_query_memory() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, _path, publisher) = publisher(algorithm);
+    let first = publisher.publish(&first_request(algorithm)).unwrap();
+    let historical_body = br#"{"messages":[{"user":"historical"}]}"#;
+    let current_body = br#"{"messages":[{"user":"current"}]}"#;
+    let (content_root, historical_revision, _) =
+      publish_content_file_tree(&publisher, algorithm, first.namespace_root.root_hash, "messages.json", historical_body, [0x66; 16]);
+    let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
+    let scope = semantic_scope_definition(algorithm, "/docs", Some("*.json"));
+    let graph = complete_semantic_graph_with_definitions(algorithm, scope, "json-corrected", "typed_exact_blake3_v1");
+    let historical_root = publish_complete_semantic_root(&publisher, algorithm, &content_root_value, content_root, &graph);
+    publish_content_file_tree(&publisher, algorithm, historical_root.clone(), "messages.json", current_body, [0x67; 16]);
+
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(256 * 1024 * 1024, 512 * 1024 * 1024, 1, 1024 * 1024).unwrap()));
+    let source = Arc::new(NativeReadViewSourceV1::new(Arc::new(publisher), Arc::clone(&memory), 86_400_000));
+    let pins = RootReadPinCoordinatorV1::new(Arc::clone(&memory), algorithm, 8, 16).unwrap();
+    let current = CurrentReadAuthorizationV1::new(
+      CurrentPathAuthorizationV1::for_root("/docs/", CrudlifyOp::List),
+      ReadViewCredentialKindV1::Ordinary,
+      ReadViewConcealmentV1::Conceal,
+    );
+    let authorizer =
+      ReadViewPermissionAuthorizerV1::new(CapturedCurrentPathAuthorizationSourceV1::new(Ok(current)), source.as_ref().clone());
+    let resolver = ReadViewResolverV1::new(Arc::clone(&source), pins.clone(), all_capabilities_profile());
+    let view = resolver.resolve(ReadViewSelectorV1::ExplicitRoot(&historical_root), &authorizer, &CancellationToken::new()).unwrap();
+    let namespace_limits = NativeSelectedNamespaceLimitsV1::new(16, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap();
+    let reader = source.selected_namespace_reader(&view, namespace_limits).unwrap();
+    let catalogs = reader.load_planner_catalogs("/docs", &["messages"], default_native_selected_semantic_limits_v1()).unwrap();
+    let page = reader.scan_files("/docs", None).unwrap();
+    let row = &page.rows()[0];
+    assert_eq!(row.record_revision(), historical_revision);
+    let before = memory.snapshot().unwrap().owner(aeordb::engine::memory_coordinator::MemoryOwner::Query).unwrap().reserved_bytes;
+
+    let evaluation = reader
+      .evaluate_authoritative_source(
+        row,
+        &catalogs.catalogs()[0],
+        &graph.scope_id,
+        NativeSelectedSourceParserV1::Native,
+        None,
+        NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+      )
+      .unwrap();
+
+    let expected =
+      encode_canonical_value(&CanonicalConfigValueV1::String("historical".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+    let NativeSelectedSourceOutcomeV1::Values(values) = evaluation.outcome() else {
+      panic!("historical selected source was not evaluated to values");
+    };
+    assert_eq!(values, &[expected]);
+    assert_eq!(evaluation.selected_root(), historical_root);
+    assert_eq!(evaluation.semantic_state_root(), graph.state.object_id);
+    assert_eq!(evaluation.scope_id(), graph.scope_id);
+    assert_eq!(evaluation.value_store_id(), graph.value_store_id);
+    assert_eq!(evaluation.file_key(), row.file_key());
+    assert_eq!(evaluation.record_revision(), historical_revision);
+    let during = memory.snapshot().unwrap().owner(aeordb::engine::memory_coordinator::MemoryOwner::Query).unwrap().reserved_bytes;
+    assert!(during > before);
+    drop(evaluation);
+    assert_eq!(memory.snapshot().unwrap().owner(aeordb::engine::memory_coordinator::MemoryOwner::Query).unwrap().reserved_bytes, before);
+
+    drop(page);
+    drop(catalogs);
+    drop(reader);
+    drop(view);
+    assert_eq!(pins.active_pin_count().unwrap(), 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn selected_source_metadata_and_scope_filter_never_read_missing_chunks() {
+  let metadata = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"unpublished metadata body", false);
+  let reader = metadata.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[metadata.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let evaluation = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &metadata.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  assert!(matches!(evaluation.outcome(), NativeSelectedSourceOutcomeV1::Values(values) if values.len() == 1));
+  drop(evaluation);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  metadata.assert_released();
+
+  let filtered = selected_source_fixture("json-corrected", Some("*.txt"), b"unpublished filtered body", false);
+  let reader = filtered.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[filtered.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let evaluation = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &filtered.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  assert_eq!(evaluation.outcome(), &NativeSelectedSourceOutcomeV1::OutOfScope);
+  drop(evaluation);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  filtered.assert_released();
+}
+
+#[test]
+fn selected_source_missing_and_corrupt_chunks_are_corruption_not_missing() {
+  let missing = selected_source_fixture("json-corrected", Some("*.json"), br#"{"messages":[{"user":"missing"}]}"#, false);
+  let reader = missing.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[missing.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let error = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &missing.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "selected_source_corrupt_chunk_missing");
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  missing.assert_released();
+
+  let corrupt = selected_source_fixture("json-corrected", Some("*.json"), br#"{"messages":[{"user":"corrupt"}]}"#, true);
+  let (offset, total_length) = corrupt.chunk_offset.expect("published chunk must have a locator");
+  let mut file = OpenOptions::new().read(true).write(true).open(&corrupt.path).unwrap();
+  file.seek(SeekFrom::Start(offset + u64::from(total_length) - 1)).unwrap();
+  file.write_all(&[0x7f]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let reader = corrupt.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[corrupt.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let error = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &corrupt.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert!(error.code().starts_with("selected_source_corrupt_"));
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  corrupt.assert_released();
+}
+
+#[test]
+fn selected_source_preserves_parser_dependency_and_deterministic_outcomes() {
+  let fixture = selected_source_fixture("json-corrected", Some("*.json"), b"body is intentionally unavailable", false);
+  let reader = fixture.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = fixture.memory.snapshot().unwrap().reserved_bytes;
+
+  let dependency = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &fixture.graph.scope_id,
+      NativeSelectedSourceParserV1::Explicit(&DependencyUnavailableParser),
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(dependency.class(), NativeSelectedNamespaceReadErrorClassV1::Unavailable);
+  assert_eq!(dependency.code(), "selected_test_parser_dependency");
+  assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+
+  let evaluation = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &fixture.graph.scope_id,
+      NativeSelectedSourceParserV1::Explicit(&DeterministicFailureParser),
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  assert!(
+    matches!(evaluation.outcome(), NativeSelectedSourceOutcomeV1::ParserUnindexable(failure) if failure.evidence() == b"selected deterministic parser evidence")
+  );
+  assert!(fixture.memory.snapshot().unwrap().reserved_bytes > baseline);
+  drop(evaluation);
+  assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  fixture.assert_released();
+
+  let malformed = selected_source_fixture("json-corrected", Some("*.json"), br#"{"messages":[}"#, true);
+  let reader = malformed.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[malformed.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let evaluation = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &malformed.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  assert!(matches!(evaluation.outcome(), NativeSelectedSourceOutcomeV1::ParserUnindexable(_)));
+  drop(evaluation);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  malformed.assert_released();
+}
+
+#[test]
+fn selected_source_mapper_is_explicit_and_never_collapses_dependency_loss_to_missing() {
+  let fixture = selected_source_fixture("mapper-corrected", Some("*.json"), b"mapper parser body is supplied by its exact executor", false);
+  let reader = fixture.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = fixture.memory.snapshot().unwrap().reserved_bytes;
+  let unavailable = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &fixture.graph.scope_id,
+      NativeSelectedSourceParserV1::Explicit(&ParsedNullParser),
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(unavailable.class(), NativeSelectedNamespaceReadErrorClassV1::Unavailable);
+  assert_eq!(unavailable.code(), "plugin_mapper_unavailable");
+  assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+
+  let evaluation = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &fixture.graph.scope_id,
+      NativeSelectedSourceParserV1::Explicit(&ParsedNullParser),
+      Some(&SelectedValueMapper),
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  let expected = encode_canonical_value(&CanonicalConfigValueV1::String("mapped".to_string()), CanonicalValueBounds::SOURCE_VALUE).unwrap();
+  assert!(matches!(evaluation.outcome(), NativeSelectedSourceOutcomeV1::Values(values) if values == &[expected]));
+  drop(evaluation);
+  assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  fixture.assert_released();
+}
+
+#[test]
+fn selected_source_cancellation_pressure_and_cross_view_inputs_fail_closed_without_leaks() {
+  let cancelled = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"cancelled", false);
+  let reader = cancelled.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[cancelled.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = cancelled.memory.snapshot().unwrap().reserved_bytes;
+  cancelled.cancellation.cancel();
+  let error = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &cancelled.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Cancelled);
+  assert_eq!(cancelled.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  cancelled.assert_released();
+
+  let after_parser = selected_source_fixture("json-corrected", Some("*.json"), b"cancelled after parser", false);
+  let reader = after_parser.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[after_parser.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = after_parser.memory.snapshot().unwrap().reserved_bytes;
+  let error = {
+    let parser = CancelAfterParser { cancellation: &after_parser.cancellation };
+    reader.evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &after_parser.graph.scope_id,
+      NativeSelectedSourceParserV1::Explicit(&parser),
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+  }
+  .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Cancelled);
+  assert_eq!(after_parser.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  after_parser.assert_released();
+
+  let pressured = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"pressured", false);
+  let reader = pressured.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[pressured.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = pressured.memory.snapshot().unwrap().reserved_bytes;
+  let error = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &pressured.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(1).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_source_retained_bytes");
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
+  let ordinary_limit = 511 * 1024 * 1024;
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, ordinary_limit - baseline - 1, AdmissionClass::Workload).unwrap();
+  let error = reader
+    .evaluate_authoritative_source(
+      &page.rows()[0],
+      &catalogs.catalogs()[0],
+      &pressured.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_source_receipt_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  pressured.assert_released();
+
+  let left = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"left", false);
+  let right = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"right and therefore a different root", false);
+  let left_reader = left.reader();
+  let right_reader = right.reader();
+  let left_catalogs =
+    left_reader.load_planner_catalogs("/docs", &[left.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let right_catalogs =
+    right_reader.load_planner_catalogs("/docs", &[right.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let left_page = left_reader.scan_files("/docs", None).unwrap();
+  let right_page = right_reader.scan_files("/docs", None).unwrap();
+  let foreign_row = left_reader
+    .evaluate_authoritative_source(
+      &right_page.rows()[0],
+      &left_catalogs.catalogs()[0],
+      &left.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(foreign_row.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(foreign_row.code(), "selected_source_row_authority");
+  let foreign_catalog = left_reader
+    .evaluate_authoritative_source(
+      &left_page.rows()[0],
+      &right_catalogs.catalogs()[0],
+      &left.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(foreign_catalog.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(foreign_catalog.code(), "selected_source_catalog_authority");
+  let mut wrong_value_store = left_catalogs.catalogs()[0].clone();
+  wrong_value_store.scopes[0].value_store_id[0] ^= 1;
+  let wrong_value_store = left_reader
+    .evaluate_authoritative_source(
+      &left_page.rows()[0],
+      &wrong_value_store,
+      &left.graph.scope_id,
+      NativeSelectedSourceParserV1::Native,
+      None,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap_err();
+  assert_eq!(wrong_value_store.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(wrong_value_store.code(), "authoritative_source_identity");
+  drop(left_page);
+  drop(right_page);
+  drop(left_catalogs);
+  drop(right_catalogs);
+  drop(left_reader);
+  drop(right_reader);
+  left.assert_released();
+  right.assert_released();
 }
 
 #[test]
@@ -1476,6 +2167,9 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(source_text.iter().map(|source| source.matches("impl SelectedRootPermissionSourceV1 for").count()).sum::<usize>(), 1,);
   assert_eq!(source_text.iter().map(|source| source.matches("load_immutable_entity_at_captured_header(").count()).sum::<usize>(), 2,);
   let native = fs::read_to_string(source_root.join("engine/v4/read_view_native.rs")).unwrap();
+  assert_eq!(native.matches("pub enum NativeSelectedSourceParserV1").count(), 1);
+  assert_eq!(native.matches("pub fn evaluate_authoritative_source(").count(), 1);
+  assert_eq!(native.matches("impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1").count(), 1);
   for (needle, expected) in
     [("fn resolve_path(", 1), ("fn visit_directory_children", 1), ("fn load_file_record(", 1), ("FileRecord::deserialize(", 1)]
   {

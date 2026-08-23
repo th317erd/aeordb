@@ -33,13 +33,32 @@ const PARSER_WORKSPACE_MULTIPLIER: u64 = 4;
 const CORRECTED_ARCHIVE_EXPANSION_MULTIPLIER: u64 = 4;
 const CORRECTED_ARCHIVE_WORKSPACE_MULTIPLIER: u64 = 4;
 
-pub struct NativeIndexParserExecutorV1<'engine> {
-  engine: &'engine StorageEngine,
+#[doc(hidden)]
+pub fn native_parser_body_reservation_bytes_v1(total_size: u64) -> Result<u64, IndexParserExecutionErrorV1> {
+  total_size
+    .checked_mul(2)
+    .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
+    .ok_or_else(|| host_failure("native_parser_body_accounting", "body reservation overflowed"))
 }
 
-impl<'engine> NativeIndexParserExecutorV1<'engine> {
-  pub const fn new(engine: &'engine StorageEngine) -> Self {
-    Self { engine }
+#[doc(hidden)]
+pub trait NativeIndexParserBodySourceV1: Send + Sync {
+  fn hash_algorithm(&self) -> crate::engine::HashAlgorithm;
+
+  fn load_body(
+    &self,
+    request: &IndexParserExecutionRequestV1<'_>,
+    workspace_bytes: u64,
+  ) -> Result<NativeIndexParserBodyV1, IndexParserExecutionErrorV1>;
+}
+
+pub struct NativeIndexParserExecutorV1<'source> {
+  source: &'source dyn NativeIndexParserBodySourceV1,
+}
+
+impl<'source> NativeIndexParserExecutorV1<'source> {
+  pub const fn new(source: &'source dyn NativeIndexParserBodySourceV1) -> Self {
+    Self { source }
   }
 
   fn parse_automatic(&self, request: &IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
@@ -94,7 +113,7 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
     let expands_archive = corrected && native_parser_expands_archive_corrected(mime_essence.as_deref(), extension.as_deref());
     let workspace_bytes =
       parser_workspace_bytes(request.file_record().total_size, corrected, expands_archive, &raw.policy, &native.policy)?;
-    let body = self.read_body(request, workspace_bytes)?;
+    let body = self.source.load_body(request, workspace_bytes)?;
     match parse_raw_json(&body, raw, corrected, is_json_media_type(mime_essence.as_deref(), stored_content_type, corrected))? {
       RawJsonAttemptV1::Parsed(value) => return Ok(IndexParserOutcomeV1::Parsed(value)),
       RawJsonAttemptV1::Deterministic(outcome) => return Ok(outcome),
@@ -157,12 +176,18 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
       None => Ok(IndexParserOutcomeV1::NotApplicable),
     }
   }
+}
 
-  fn read_body(
+impl NativeIndexParserBodySourceV1 for StorageEngine {
+  fn hash_algorithm(&self) -> crate::engine::HashAlgorithm {
+    self.hash_algo()
+  }
+
+  fn load_body(
     &self,
     request: &IndexParserExecutionRequestV1<'_>,
     workspace_bytes: u64,
-  ) -> Result<ParserBodyV1, IndexParserExecutionErrorV1> {
+  ) -> Result<NativeIndexParserBodyV1, IndexParserExecutionErrorV1> {
     check_cancelled(request, "native_parser_cancelled_before_body")?;
     let record = request.file_record();
     if request.maximum_document_input_bytes() == 0 {
@@ -170,18 +195,12 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
     }
     let expected_size = usize::try_from(record.total_size)
       .map_err(|error| host_failure("native_parser_input_platform", format!("document size does not fit this platform: {error}")))?;
-    let retained_bytes = record
-      .total_size
-      .checked_mul(2)
-      .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
-      .ok_or_else(|| host_failure("native_parser_body_accounting", "body reservation overflowed"))?;
+    let retained_bytes = native_parser_body_reservation_bytes_v1(record.total_size)?;
     let reservation = self
-      .engine
       .memory_coordinator()
       .reserve(MemoryOwner::StreamingRead, retained_bytes.max(1), AdmissionClass::Maintenance)
       .map_err(map_body_memory_error)?;
     let workspace = self
-      .engine
       .memory_coordinator()
       .reserve(MemoryOwner::ParserPlugin, workspace_bytes.max(1), AdmissionClass::Maintenance)
       .map_err(map_parser_memory_error)?;
@@ -189,17 +208,16 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
     body
       .try_reserve_exact(expected_size)
       .map_err(|error| host_failure("native_parser_body_allocation", format!("cannot reserve bounded file body: {error}")))?;
-    let mut hasher = self.engine.hash_algo().incremental_hasher().map_err(map_engine_error)?;
+    let mut hasher = self.hash_algo().incremental_hasher().map_err(map_engine_error)?;
     for chunk_hash in &record.chunk_hashes {
       check_cancelled(request, "native_parser_cancelled_during_body")?;
-      if chunk_hash.len() != self.engine.hash_algo().hash_length() {
+      if chunk_hash.len() != self.hash_algo().hash_length() {
         return Err(host_failure("native_parser_chunk_hash", "FileRecord contains a foreign-width chunk hash"));
       }
       let remaining = expected_size
         .checked_sub(body.len())
         .ok_or_else(|| host_failure("native_parser_body_length", "decoded body already exceeds the FileRecord size"))?;
       let chunk = self
-        .engine
         .read_chunk_verified_including_deleted_bounded(chunk_hash, remaining)
         .map_err(map_engine_error)?
         .ok_or_else(|| host_failure("native_parser_chunk_missing", format!("required chunk {} is missing", hex::encode(chunk_hash))))?;
@@ -218,18 +236,18 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
       ));
     }
     if !record.content_hash.is_empty()
-      && (record.content_hash.len() != self.engine.hash_algo().hash_length() || hasher.finalize() != record.content_hash)
+      && (record.content_hash.len() != self.hash_algo().hash_length() || hasher.finalize() != record.content_hash)
     {
       return Err(host_failure("native_parser_content_hash", "decoded body does not match the FileRecord whole-content hash"));
     }
     check_cancelled(request, "native_parser_cancelled_after_body")?;
-    Ok(ParserBodyV1 { bytes: body, _body_reservation: reservation, _workspace_reservation: workspace })
+    Ok(NativeIndexParserBodyV1::new(body, reservation, workspace))
   }
 }
 
 impl IndexParserExecutorV1 for NativeIndexParserExecutorV1<'_> {
   fn parse(&self, request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
-    validate_request(self.engine, &request)?;
+    validate_request(self.source.hash_algorithm(), &request)?;
     check_cancelled(&request, "native_parser_cancelled")?;
     if request.file_record().total_size > request.maximum_document_input_bytes() || request.file_record().total_size > u32::MAX as u64 {
       return deterministic_policy("document_input_limit", request.file_record().total_size);
@@ -287,13 +305,20 @@ fn parser_workspace_bytes(
   Ok(body_workspace.max(archive_workspace).max(json_workspace))
 }
 
-struct ParserBodyV1 {
+#[doc(hidden)]
+pub struct NativeIndexParserBodyV1 {
   bytes: Vec<u8>,
   _body_reservation: MemoryReservation,
   _workspace_reservation: MemoryReservation,
 }
 
-impl std::ops::Deref for ParserBodyV1 {
+impl NativeIndexParserBodyV1 {
+  pub fn new(bytes: Vec<u8>, body_reservation: MemoryReservation, workspace_reservation: MemoryReservation) -> Self {
+    Self { bytes, _body_reservation: body_reservation, _workspace_reservation: workspace_reservation }
+  }
+}
+
+impl std::ops::Deref for NativeIndexParserBodyV1 {
   type Target = [u8];
 
   fn deref(&self) -> &Self::Target {
@@ -777,8 +802,11 @@ fn evidence(code: &'static str) -> Result<Vec<u8>, IndexParserExecutionErrorV1> 
     .map_err(|error| host_failure("native_parser_evidence", error.to_string()))
 }
 
-fn validate_request(engine: &StorageEngine, request: &IndexParserExecutionRequestV1<'_>) -> Result<(), IndexParserExecutionErrorV1> {
-  let hash_width = engine.hash_algo().hash_length();
+fn validate_request(
+  hash_algorithm: crate::engine::HashAlgorithm,
+  request: &IndexParserExecutionRequestV1<'_>,
+) -> Result<(), IndexParserExecutionErrorV1> {
+  let hash_width = hash_algorithm.hash_length();
   if request.namespace_root().len() != hash_width
     || request.record_revision_hash().len() != hash_width
     || request.namespace_root().iter().all(|byte| *byte == 0)
@@ -952,4 +980,4 @@ fn host_failure(code: &'static str, context: impl Into<String>) -> IndexParserEx
   IndexParserExecutionErrorV1::host_failure(code, context)
 }
 
-const _: () = assert!(size_of::<NativeIndexParserExecutorV1<'static>>() <= size_of::<usize>());
+const _: () = assert!(size_of::<NativeIndexParserExecutorV1<'static>>() <= 2 * size_of::<usize>());

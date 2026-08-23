@@ -8,10 +8,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 use crate::engine::path_utils::normalize_path;
 
-use super::config_value::{
-  CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1, CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value,
-  encode_canonical_value,
-};
+use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value, encode_canonical_value};
 use super::contract_generated::stable_reason_v1;
 use super::dependency::DependencyTableV1;
 use super::field_definition::decode_field_index_definition;
@@ -27,14 +24,14 @@ use super::index_record::{
   CanonicalValueRecordV1, DocumentStateOwnerV1, DocumentStateRecordV1, ScopeDocumentRecordV1, ScopeReverseRecordV1,
   encode_canonical_value_record, encode_document_state_record, encode_scope_document_record, encode_scope_reverse_record,
 };
-use super::index_source::{
-  PluginMapperExecutorV1, SourceDocumentV1, SourceExtractionV1, SourceOperationalErrorClassV1, SourceOperationalErrorV1,
-  ValueStoreRuntimeV1,
-};
-use super::parser_plan::{ParserPlanKind, ParserResolutionPlanV1};
+use super::index_source::{PluginMapperExecutorV1, SourceOperationalErrorClassV1};
+use super::parser_plan::ParserResolutionPlanV1;
 use super::scope::{ScopeDefinitionV1, decode_scope_definition, scope_matches_path};
+use super::source_evaluator::{
+  AuthoritativeSourceDocumentV1, AuthoritativeSourceEvaluationErrorV1, AuthoritativeSourceEvaluationV1, AuthoritativeSourceEvaluatorV1,
+  AuthoritativeSourceMemoryPolicyV1,
+};
 use super::source_selector::SourceSelectorKind;
-use super::value_store::{ValueStoreDefinitionV1, decode_value_store_definition};
 
 const STATE_STAGE_PARSER: u8 = 1;
 const STATE_STAGE_SELECTOR: u8 = 2;
@@ -144,6 +141,14 @@ impl IndexParserDeterministicFailureV1 {
 
   pub fn parser_output_contract(evidence: Vec<u8>, observed_canonical_bytes: u64, observed_work_units: u64) -> Self {
     Self { reason: 0x0003, evidence, observed_value_count: 0, observed_canonical_bytes, observed_work_units, dependency_ordinal: 0 }
+  }
+
+  pub fn evidence(&self) -> &[u8] {
+    &self.evidence
+  }
+
+  pub(crate) fn evidence_capacity(&self) -> usize {
+    self.evidence.capacity()
   }
 }
 
@@ -584,28 +589,17 @@ impl IndexProducerCollectorV1 {
     mapper: Option<&dyn PluginMapperExecutorV1>,
     is_cancelled: &dyn Fn() -> bool,
   ) -> Result<(), IndexProducerCollectorErrorV1> {
-    let definition = match decode_value_store_definition(value.encoded_definition, self.hash_algorithm) {
-      Ok(definition) if definition.value_store_id == value.expected_value_store_id && definition.scope_id == scope.scope_id => definition,
-      Ok(_) => {
-        report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        for field in &value.field_indexes {
-          report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        }
-        return Ok(());
-      }
+    let evaluator = match AuthoritativeSourceEvaluatorV1::from_encoded(
+      value.encoded_definition,
+      self.hash_algorithm,
+      &scope.scope_id,
+      value.expected_value_store_id,
+      self.memory.clone(),
+      AuthoritativeSourceMemoryPolicyV1::producer(),
+    ) {
+      Ok(evaluator) => evaluator,
       Err(error) => {
-        tracing::warn!(code = error.code(), context = %error.context(), "ValueStore configuration is malformed");
-        report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        for field in &value.field_indexes {
-          report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        }
-        return Ok(());
-      }
-    };
-    let runtime = match ValueStoreRuntimeV1::from_encoded(value.encoded_definition, self.hash_algorithm) {
-      Ok(runtime) => runtime,
-      Err(error) => {
-        tracing::warn!(code = error.code(), context = %error.context(), "ValueStore runtime rejected decoded configuration");
+        tracing::warn!(%error, "ValueStore runtime rejected decoded configuration");
         report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
         for field in &value.field_indexes {
           report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
@@ -618,7 +612,7 @@ impl IndexProducerCollectorV1 {
       let document = transition
         .before
         .ok_or_else(|| IndexProducerCollectorErrorV1::InvalidRequest("in-scope transition has no before document".to_string()))?;
-      self.evaluate_source(&runtime, &definition, document, parser, mapper, is_cancelled)?
+      self.evaluate_source(&evaluator, document, parser, mapper, is_cancelled)?
     } else {
       SourceEvaluationV1::Missing
     };
@@ -626,7 +620,7 @@ impl IndexProducerCollectorV1 {
       let document = transition
         .after
         .ok_or_else(|| IndexProducerCollectorErrorV1::InvalidRequest("in-scope transition has no after document".to_string()))?;
-      self.evaluate_source(&runtime, &definition, document, parser, mapper, is_cancelled)?
+      self.evaluate_source(&evaluator, document, parser, mapper, is_cancelled)?
     } else {
       SourceEvaluationV1::Missing
     };
@@ -662,57 +656,36 @@ impl IndexProducerCollectorV1 {
 
   fn evaluate_source(
     &self,
-    runtime: &ValueStoreRuntimeV1<'_>,
-    definition: &ValueStoreDefinitionV1<'_>,
+    evaluator: &AuthoritativeSourceEvaluatorV1<'_>,
     document: IndexCollectorDocumentV1<'_>,
     parser: &dyn IndexParserExecutorV1,
     mapper: Option<&dyn PluginMapperExecutorV1>,
     is_cancelled: &dyn Fn() -> bool,
   ) -> Result<SourceEvaluationV1, IndexProducerCollectorErrorV1> {
-    if is_cancelled() {
-      return Err(IndexProducerCollectorErrorV1::Cancelled);
-    }
-    let parser_memory = if definition.parser_plan.kind == ParserPlanKind::None {
-      None
-    } else {
-      Some(self.reserve_parser_transient(parser_transient_bytes(&definition.parser_plan)?)?)
-    };
-    let parsed = if definition.parser_plan.kind == ParserPlanKind::None {
-      None
-    } else {
-      match parser.parse(IndexParserExecutionRequestV1::new(
-        document.namespace_root,
-        document.record_revision_hash,
-        document.file_record,
-        &definition.parser_plan,
-        &definition.dependencies,
-        definition.max_document_input_bytes,
-        is_cancelled,
-      )) {
-        Ok(IndexParserOutcomeV1::Parsed(value)) => Some(value),
-        Ok(IndexParserOutcomeV1::NotApplicable) => return Ok(SourceEvaluationV1::Missing),
-        Ok(IndexParserOutcomeV1::DeterministicUnindexable(failure)) => {
-          let reservation = parser_memory.ok_or_else(|| {
-            IndexProducerCollectorErrorV1::InvalidRequest("parser produced output for a parser-free ValueStore".to_string())
-          })?;
-          return self.parser_failure(failure).map(|state| SourceEvaluationV1::Frozen(state.with_reservation(reservation)));
-        }
-        Err(error) => return parser_operational(error),
+    match evaluator.evaluate(
+      AuthoritativeSourceDocumentV1 {
+        namespace_root: document.namespace_root,
+        record_revision_hash: document.record_revision_hash,
+        file_record: document.file_record,
+      },
+      parser,
+      mapper,
+      is_cancelled,
+    ) {
+      Ok(AuthoritativeSourceEvaluationV1::Missing) => Ok(SourceEvaluationV1::Missing),
+      Ok(AuthoritativeSourceEvaluationV1::Values { values, reservation, .. }) => {
+        Ok(SourceEvaluationV1::Values { values, _reservation: reservation })
       }
-    };
-    if is_cancelled() {
-      return Err(IndexProducerCollectorErrorV1::Cancelled);
-    }
-    let transient_bytes = source_transient_bytes(definition)?;
-    let transient = self.reserve_transient(transient_bytes)?;
-    match runtime.extract(SourceDocumentV1 { file_record: document.file_record, parsed_value: parsed.as_ref() }, mapper, is_cancelled) {
-      Ok(SourceExtractionV1::Missing) => Ok(SourceEvaluationV1::Missing),
-      Ok(SourceExtractionV1::Values(values)) => Ok(SourceEvaluationV1::Values { values, _reservation: transient }),
-      Ok(SourceExtractionV1::DeterministicUnindexable { code, .. }) => Ok(match source_state(definition.selector.kind, code)? {
-        Some(state) => SourceEvaluationV1::Frozen(state.with_reservation(transient)),
-        None => SourceEvaluationV1::Degraded,
-      }),
-      Err(error) => source_operational(error),
+      Ok(AuthoritativeSourceEvaluationV1::ParserUnindexable { failure, reservation, .. }) => {
+        self.parser_failure(failure).map(|state| SourceEvaluationV1::Frozen(state.with_reservation(reservation)))
+      }
+      Ok(AuthoritativeSourceEvaluationV1::SourceUnindexable { code, reservation, .. }) => {
+        Ok(match source_state(evaluator.definition().selector.kind, code)? {
+          Some(state) => SourceEvaluationV1::Frozen(state.with_reservation(reservation)),
+          None => SourceEvaluationV1::Degraded,
+        })
+      }
+      Err(error) => authoritative_source_operational(error),
     }
   }
 
@@ -1017,13 +990,6 @@ impl IndexProducerCollectorV1 {
     self
       .memory
       .reserve(MemoryOwner::Task, bytes, AdmissionClass::Workload)
-      .map_err(|error| IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()))
-  }
-
-  fn reserve_parser_transient(&self, bytes: u64) -> Result<MemoryReservation, IndexProducerCollectorErrorV1> {
-    self
-      .memory
-      .reserve(MemoryOwner::ParserPlugin, bytes, AdmissionClass::Maintenance)
       .map_err(|error| IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()))
   }
 }
@@ -1357,11 +1323,21 @@ fn parser_operational(error: IndexParserExecutionErrorV1) -> Result<SourceEvalua
   }
 }
 
-fn source_operational(error: SourceOperationalErrorV1) -> Result<SourceEvaluationV1, IndexProducerCollectorErrorV1> {
-  match error.class() {
-    SourceOperationalErrorClassV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
-    SourceOperationalErrorClassV1::DependencyUnavailable => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::DEPENDENCY_UNAVAILABLE)),
-    SourceOperationalErrorClassV1::HostFailure => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::RETRYABLE_IO)),
+fn authoritative_source_operational(
+  error: AuthoritativeSourceEvaluationErrorV1,
+) -> Result<SourceEvaluationV1, IndexProducerCollectorErrorV1> {
+  match error {
+    AuthoritativeSourceEvaluationErrorV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
+    AuthoritativeSourceEvaluationErrorV1::ResourcePressure(context) => Err(IndexProducerCollectorErrorV1::ResourcePressure(context)),
+    AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code, context } => {
+      Err(IndexProducerCollectorErrorV1::InvalidRequest(format!("{code}: {context}")))
+    }
+    AuthoritativeSourceEvaluationErrorV1::Parser(error) => parser_operational(error),
+    AuthoritativeSourceEvaluationErrorV1::Source(error) => match error.class() {
+      SourceOperationalErrorClassV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
+      SourceOperationalErrorClassV1::DependencyUnavailable => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::DEPENDENCY_UNAVAILABLE)),
+      SourceOperationalErrorClassV1::HostFailure => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::RETRYABLE_IO)),
+    },
   }
 }
 
@@ -1443,16 +1419,6 @@ fn validate_evidence(evidence: &[u8]) -> Result<(), IndexProducerCollectorErrorV
     .map_err(|error| IndexProducerCollectorErrorV1::InvalidRequest(format!("parser evidence is not canonical bounded config: {error}")))
 }
 
-fn source_transient_bytes(definition: &ValueStoreDefinitionV1<'_>) -> Result<u64, IndexProducerCollectorErrorV1> {
-  let vector_bytes = u64::from(definition.max_source_values_per_document)
-    .checked_mul(size_of::<Vec<u8>>() as u64)
-    .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("source transient vector bytes"))?;
-  definition
-    .max_canonical_source_bytes_per_document
-    .checked_add(vector_bytes)
-    .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("source transient bytes"))
-}
-
 fn field_transient_bytes(
   definition: &super::field_definition::FieldIndexDefinitionV1<'_>,
   values: &[Vec<u8>],
@@ -1480,24 +1446,6 @@ fn field_transient_bytes(
     .and_then(|bytes| bytes.checked_add(value_structures))
     .and_then(|bytes| bytes.checked_add(source_bytes))
     .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("field transient bytes"))
-}
-
-fn parser_transient_bytes(plan: &ParserResolutionPlanV1<'_>) -> Result<u64, IndexProducerCollectorErrorV1> {
-  let mut maximum = None;
-  for candidate in &plan.candidates {
-    let structure_bytes = candidate
-      .policy
-      .max_structure_nodes
-      .checked_mul(CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1)
-      .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("parser structure bytes"))?;
-    let bytes = candidate
-      .policy
-      .max_response_bytes
-      .checked_add(structure_bytes)
-      .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("parser transient bytes"))?;
-    maximum = Some(maximum.map_or(bytes, |current: u64| current.max(bytes)));
-  }
-  maximum.ok_or_else(|| IndexProducerCollectorErrorV1::InvalidRequest("non-none parser plan has no candidates".to_string()))
 }
 
 fn posting_identity_ref_bytes(compiled: &CompiledIndexDocumentV1) -> Result<u64, IndexProducerCollectorErrorV1> {

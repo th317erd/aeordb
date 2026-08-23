@@ -314,10 +314,17 @@ fn explicit_wasm_plan_fails_closed_before_reading_file_chunks() {
 fn native_parser_architecture_uses_only_frozen_request_authority() {
   let source = include_str!("../../src/engine/v4/index_native_parser.rs");
   let collector = include_str!("../../src/engine/v4/index_producer_collector.rs");
+  let evaluator = include_str!("../../src/engine/v4/source_evaluator.rs");
+  let selected = include_str!("../../src/engine/v4/read_view_native.rs");
   assert!(source.contains("request.parser_plan()"));
   assert!(source.contains("request.dependencies()"));
   assert!(source.contains("CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1"));
-  assert!(collector.contains("CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1"));
+  assert!(evaluator.contains("CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1"));
+  assert_eq!(source.matches("pub trait NativeIndexParserBodySourceV1").count(), 1);
+  assert_eq!(source.matches("impl NativeIndexParserBodySourceV1 for StorageEngine").count(), 1);
+  assert_eq!(selected.matches("impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1").count(), 1);
+  assert!(!collector.contains(".runtime.extract("));
+  assert!(!collector.contains("parser.parse(IndexParserExecutionRequestV1::new("));
   assert!(!source.contains("IndexingPipeline"));
   assert!(!source.contains("parsers.json"));
   assert!(!source.contains("plugin_manager"));

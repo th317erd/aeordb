@@ -341,6 +341,7 @@ pub struct QueryPlanningIndexCandidateV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryPlanningScopeV1 {
   pub scope_id: Vec<u8>,
+  pub value_store_id: Vec<u8>,
   pub encoded_scope_definition: Vec<u8>,
   pub encoded_value_store_definition: Vec<u8>,
   pub semantic_availability: IndexSemanticQueryAvailabilityV1,
@@ -1053,7 +1054,10 @@ fn validate_scope_catalog(
   }
   let value_definition = decode_value_store_definition(&scope.encoded_value_store_definition, request.context.hash_algorithm())
     .map_err(|source| corrupt_source("query_value_definition_invalid", format!("{}: {}", source.code(), source.context())))?;
-  if value_definition.scope_id != scope.scope_id || value_definition.field_name != field_name {
+  if value_definition.value_store_id != scope.value_store_id
+    || value_definition.scope_id != scope.scope_id
+    || value_definition.field_name != field_name
+  {
     return Err(corrupt_source("query_value_definition_mismatch", "ValueStore definition does not belong to the catalog field and scope"));
   }
   if scope.indexes.len() > request.limits.maximum_candidates_per_scope {
