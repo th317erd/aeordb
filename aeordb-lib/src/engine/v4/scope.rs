@@ -121,6 +121,16 @@ pub fn scope_matches_path(scope: &ScopeDefinitionV1<'_>, path: &str) -> FormatRe
   }
 }
 
+pub fn scope_owner_overlaps_query_path(scope: &ScopeDefinitionV1<'_>, query_path: &str) -> FormatResult<bool> {
+  validate_canonical_absolute_path(scope.owner_path)?;
+  validate_canonical_absolute_path(query_path)?;
+  Ok(canonical_path_contains(scope.owner_path, query_path) || canonical_path_contains(query_path, scope.owner_path))
+}
+
+fn canonical_path_contains(parent: &str, child: &str) -> bool {
+  parent == "/" || parent == child || child.strip_prefix(parent).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 pub(crate) fn validate_canonical_absolute_path(path: &str) -> FormatResult<()> {
   if path == "/" {
     return Ok(());

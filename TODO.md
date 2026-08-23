@@ -1232,7 +1232,11 @@
         - [ ] P7-3b: implement one shared bounded native selected-root namespace reader for FileKey/revision/path rows, authoritative source values, and position universes.
           - [x] P7-3b1: retain the exact captured header in `ResolvedReadView` and implement one query-accounted selected-root namespace reader for canonical path lookup, bounded file pages, and FileKey/revision identity lookup.
           - [x] P7-3b2: route selected-root permission entity traversal through the shared reader and prove no second captured-header namespace walker remains.
-          - [ ] P7-3b3: load exact selected semantic catalogs under query admission and produce planner catalogs without borrowing current mutable semantic state.
+          - [x] P7-3b3: load exact selected semantic catalogs under query admission and produce planner catalogs without borrowing current mutable semantic state.
+            - [x] Add the red historical-root planner-catalog target and shared semantic-catalog traversal contract.
+            - [x] Load canonical semantic objects against the captured header with bounded query memory and typed failures.
+            - [x] Build complete, canonically ordered planner catalogs for only the authorized query path and requested fields.
+            - [x] Re-run producer semantic-source regressions to prove the shared walker preserves maintenance behavior.
           - [ ] P7-3b4: evaluate authoritative source values through the selected ValueStore runtime with explicit parser/mapper dependency, cancellation, and retained-byte outcomes.
           - [ ] P7-3b5: prove historical/current roots, flat/B-tree traversal, both hash widths, malformed/corrupt/missing closure, pressure, cancellation, identity absence/incompleteness, permission compatibility, and architecture uniqueness.
         - [ ] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.

@@ -8796,7 +8796,7 @@
     {
       "id": "esq-v1-3a9f9e6b451d1fc94f43-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 6035,
+      "line": 6075,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_retirement_journal_segment",
       "kind": "error_conversion",
@@ -8806,7 +8806,7 @@
     {
       "id": "esq-v1-f4ccba5da869e4e98393-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 9660,
+      "line": 9700,
       "column": 33,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8816,7 +8816,7 @@
     {
       "id": "esq-v1-e380cca4946b81a36b16-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 9663,
+      "line": 9703,
       "column": 32,
       "enclosing_item": "impl V4FirstAuthorityPublisher::publish_corrupt_evidence_synced",
       "kind": "error_conversion",
@@ -8826,7 +8826,7 @@
     {
       "id": "esq-v1-77b52a8718a1ce68125a-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13433,
+      "line": 13473,
       "column": 57,
       "enclosing_item": "inspect_loaded_index_active_pointer_pair",
       "kind": "result_to_option",
@@ -8836,7 +8836,7 @@
     {
       "id": "esq-v1-77b52a8718a1ce68125a-01",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13434,
+      "line": 13474,
       "column": 57,
       "enclosing_item": "inspect_loaded_index_active_pointer_pair",
       "kind": "result_to_option",
@@ -8846,7 +8846,7 @@
     {
       "id": "esq-v1-41403beafa536f4f0cf3-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13435,
+      "line": 13475,
       "column": 19,
       "enclosing_item": "inspect_loaded_index_active_pointer_pair",
       "kind": "default_on_error",
@@ -8856,7 +8856,7 @@
     {
       "id": "esq-v1-cd65f40600b3429494a0-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13436,
+      "line": 13476,
       "column": 19,
       "enclosing_item": "inspect_loaded_index_active_pointer_pair",
       "kind": "default_on_error",
@@ -8866,7 +8866,7 @@
     {
       "id": "esq-v1-399bd4bfd9641810b75f-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13514,
+      "line": 13554,
       "column": 3,
       "enclosing_item": "index_active_pointer_closure_valid",
       "kind": "success_only_conditional",
@@ -8876,7 +8876,7 @@
     {
       "id": "esq-v1-a9e4abdc8124216b29f4-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13533,
+      "line": 13573,
       "column": 3,
       "enclosing_item": "index_active_pointer_closure_valid",
       "kind": "success_only_conditional",
@@ -8886,7 +8886,7 @@
     {
       "id": "esq-v1-c96d3eb9c507b3a501d1-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13545,
+      "line": 13585,
       "column": 3,
       "enclosing_item": "index_active_pointer_closure_valid",
       "kind": "success_only_conditional",
@@ -8896,7 +8896,7 @@
     {
       "id": "esq-v1-6754e0619ed59001fb03-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13550,
+      "line": 13590,
       "column": 10,
       "enclosing_item": "index_active_pointer_closure_valid",
       "kind": "result_status_probe",
@@ -8906,7 +8906,7 @@
     {
       "id": "esq-v1-11fc5403e50b0c36463a-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13580,
+      "line": 13620,
       "column": 5,
       "enclosing_item": "index_manifest_immediate_roots_valid",
       "kind": "success_only_conditional",
@@ -11326,7 +11326,7 @@
     {
       "id": "esq-v1-c3d2081fb4a1ab6aa899-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 169,
+      "line": 179,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11336,7 +11336,7 @@
     {
       "id": "esq-v1-a73691e70be7a8d57627-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 176,
+      "line": 186,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",

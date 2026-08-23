@@ -1573,6 +1573,10 @@ fn normalize_query_literal(
 }
 
 fn canonical_field_name(field_name: &str) -> QueryPlanningResultV1<&str> {
+  canonical_query_field_name_v1(field_name)
+}
+
+pub fn canonical_query_field_name_v1(field_name: &str) -> QueryPlanningResultV1<&str> {
   if field_name.len() > QUERY_MAXIMUM_FIELD_NAME_BYTES_V1 {
     return Err(resource_error("query_field_name_limit", "query field name exceeds 4 KiB"));
   }

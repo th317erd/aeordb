@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::mem::size_of;
@@ -22,6 +22,10 @@ use super::first_authority::{
 };
 use super::hash::digest_parts;
 use super::namespace::{NamespaceTreeEdgeV0, SemanticAvailabilityV1};
+use super::query_planner::{
+  QueryPlanningErrorClassV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1, QueryPlanningScopeV1,
+  RootAwareQueryFieldCatalogV1, canonical_query_field_name_v1,
+};
 use super::read_view::{
   LoadedReadAuthorityV1, ReadViewAuthoritySourceV1, ReadViewAuthorizationFailureV1, ReadViewLifecycleErrorV1, ReadViewSourceErrorV1,
   ResolvedReadViewV1, RootLifecycleObservationV1,
@@ -30,6 +34,13 @@ use super::read_view_authorization::{
   PathAuthorizationDecisionV1, ResolvedPathAuthorizationV1, SelectedRootPermissionRequestV1, SelectedRootPermissionSourceV1,
 };
 use super::root_authority::ImmutableNamespaceAuthorityV1;
+use super::scope::{decode_scope_definition, scope_owner_overlaps_query_path};
+use super::semantic_catalog::{
+  SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1,
+  SemanticCatalogTraversalBoundsV1, SemanticCatalogWalkStatsV1, validate_semantic_definition_identity_v1,
+};
+use super::value_store::decode_value_store_definition;
+use super::field_definition::decode_field_index_definition;
 
 // The frozen namespace authority permits a 48 MiB tree entity. Reserve enough
 // for that entity, its decoded form, transient validation copies, and the
@@ -55,6 +66,15 @@ const SELECTED_NAMESPACE_MAXIMUM_DEPTH: usize = 128;
 const SELECTED_NAMESPACE_MAXIMUM_WORK_STEPS: u64 = 10_000_000;
 const SELECTED_NAMESPACE_MAXIMUM_IDENTITY_DOCUMENTS: u64 = 10_000_000;
 const SELECTED_NAMESPACE_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
+const SELECTED_SEMANTIC_MAXIMUM_REQUESTED_FIELDS: usize = 1_024;
+const SELECTED_SEMANTIC_MAXIMUM_SCOPES: usize = 4_096;
+const SELECTED_SEMANTIC_MAXIMUM_VALUE_STORES: usize = 262_144;
+const SELECTED_SEMANTIC_MAXIMUM_FIELD_INDEXES: usize = 262_144;
+const SELECTED_SEMANTIC_MAXIMUM_CATALOG_ITEMS: u64 = 1_000_000;
+const SELECTED_SEMANTIC_MAXIMUM_WORK_STEPS: u64 = 10_000_000;
+const SELECTED_SEMANTIC_MAXIMUM_DEFINITION_BYTES: u64 = 64 * 1024 * 1024;
+const SELECTED_SEMANTIC_MAXIMUM_RETAINED_BYTES: u64 = 128 * 1024 * 1024;
+const SELECTED_SEMANTIC_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One production source for captured v4 authority, lifecycle, and selected
 /// permission reads. Callers must use the same process memory coordinator for
@@ -113,6 +133,106 @@ impl NativeSelectedNamespaceLimitsV1 {
       maximum_work_steps,
       maximum_identity_documents,
     })
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSelectedSemanticCountLimitsV1 {
+  maximum_requested_fields: usize,
+  maximum_scopes: usize,
+  maximum_value_stores: usize,
+  maximum_field_indexes: usize,
+  maximum_catalog_items: u64,
+  maximum_work_steps: u64,
+}
+
+impl NativeSelectedSemanticCountLimitsV1 {
+  pub fn new(
+    maximum_requested_fields: usize,
+    maximum_scopes: usize,
+    maximum_value_stores: usize,
+    maximum_field_indexes: usize,
+    maximum_catalog_items: u64,
+    maximum_work_steps: u64,
+  ) -> Result<Self, NativeSelectedNamespaceReadErrorV1> {
+    if maximum_requested_fields == 0
+      || maximum_requested_fields > SELECTED_SEMANTIC_MAXIMUM_REQUESTED_FIELDS
+      || maximum_scopes == 0
+      || maximum_scopes > SELECTED_SEMANTIC_MAXIMUM_SCOPES
+      || maximum_value_stores == 0
+      || maximum_value_stores > SELECTED_SEMANTIC_MAXIMUM_VALUE_STORES
+      || maximum_field_indexes == 0
+      || maximum_field_indexes > SELECTED_SEMANTIC_MAXIMUM_FIELD_INDEXES
+      || maximum_catalog_items == 0
+      || maximum_catalog_items > SELECTED_SEMANTIC_MAXIMUM_CATALOG_ITEMS
+      || maximum_work_steps == 0
+      || maximum_work_steps > SELECTED_SEMANTIC_MAXIMUM_WORK_STEPS
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_semantic_count_limits",
+        "selected semantic count limits must be nonzero and remain within protocol maxima",
+      ));
+    }
+    Ok(Self {
+      maximum_requested_fields,
+      maximum_scopes,
+      maximum_value_stores,
+      maximum_field_indexes,
+      maximum_catalog_items,
+      maximum_work_steps,
+    })
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSelectedSemanticByteLimitsV1 {
+  maximum_definition_bytes: u64,
+  maximum_retained_bytes: u64,
+}
+
+impl NativeSelectedSemanticByteLimitsV1 {
+  pub fn new(maximum_definition_bytes: u64, maximum_retained_bytes: u64) -> Result<Self, NativeSelectedNamespaceReadErrorV1> {
+    if maximum_definition_bytes == 0
+      || maximum_definition_bytes > SELECTED_SEMANTIC_MAXIMUM_DEFINITION_BYTES
+      || maximum_retained_bytes == 0
+      || maximum_retained_bytes > SELECTED_SEMANTIC_MAXIMUM_RETAINED_BYTES
+      || maximum_retained_bytes < maximum_definition_bytes
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_semantic_byte_limits",
+        "selected semantic byte limits must be nonzero, cover definitions, and remain within protocol maxima",
+      ));
+    }
+    Ok(Self { maximum_definition_bytes, maximum_retained_bytes })
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSelectedSemanticLimitsV1 {
+  counts: NativeSelectedSemanticCountLimitsV1,
+  bytes: NativeSelectedSemanticByteLimitsV1,
+}
+
+impl NativeSelectedSemanticLimitsV1 {
+  pub const fn new(counts: NativeSelectedSemanticCountLimitsV1, bytes: NativeSelectedSemanticByteLimitsV1) -> Self {
+    Self { counts, bytes }
+  }
+}
+
+pub fn default_native_selected_semantic_limits_v1() -> NativeSelectedSemanticLimitsV1 {
+  NativeSelectedSemanticLimitsV1 {
+    counts: NativeSelectedSemanticCountLimitsV1 {
+      maximum_requested_fields: SELECTED_SEMANTIC_MAXIMUM_REQUESTED_FIELDS,
+      maximum_scopes: SELECTED_SEMANTIC_MAXIMUM_SCOPES,
+      maximum_value_stores: SELECTED_SEMANTIC_MAXIMUM_VALUE_STORES,
+      maximum_field_indexes: SELECTED_SEMANTIC_MAXIMUM_FIELD_INDEXES,
+      maximum_catalog_items: SELECTED_SEMANTIC_MAXIMUM_CATALOG_ITEMS,
+      maximum_work_steps: SELECTED_SEMANTIC_MAXIMUM_WORK_STEPS,
+    },
+    bytes: NativeSelectedSemanticByteLimitsV1 {
+      maximum_definition_bytes: SELECTED_SEMANTIC_MAXIMUM_DEFINITION_BYTES,
+      maximum_retained_bytes: SELECTED_SEMANTIC_MAXIMUM_RETAINED_BYTES,
+    },
   }
 }
 
@@ -327,6 +447,27 @@ impl NativeSelectedNamespaceIdentityResultV1 {
   }
 }
 
+pub struct NativeSelectedSemanticCatalogV1 {
+  selected_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  catalogs: Vec<RootAwareQueryFieldCatalogV1>,
+  _memory: MemoryReservation,
+}
+
+impl NativeSelectedSemanticCatalogV1 {
+  pub fn selected_root(&self) -> &[u8] {
+    &self.selected_root
+  }
+
+  pub fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub fn catalogs(&self) -> &[RootAwareQueryFieldCatalogV1] {
+    &self.catalogs
+  }
+}
+
 pub struct NativeSelectedNamespaceReaderV1<'view> {
   source: NativeReadViewSourceV1,
   view: &'view ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
@@ -342,6 +483,45 @@ struct AccountedLoadedImmutableEntityV1 {
 struct LoadedSelectedFileRecordV1 {
   entity_version: u8,
   record: FileRecord,
+}
+
+#[derive(Clone)]
+struct SelectedSemanticScopeDefinitionV1 {
+  encoded_definition: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct SelectedSemanticValueStoreDefinitionV1 {
+  value_store_id: Vec<u8>,
+  encoded_definition: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct SelectedSemanticFieldIndexDefinitionV1 {
+  encoded_definition: Vec<u8>,
+}
+
+struct CapturedSelectedSemanticObjectSourceV1<'reader, 'view> {
+  reader: &'reader NativeSelectedNamespaceReaderV1<'view>,
+}
+
+impl SemanticCatalogObjectSourceV1 for CapturedSelectedSemanticObjectSourceV1<'_, '_> {
+  fn load_semantic_object(&self, kind_id: u16, object_id: &[u8]) -> Result<Option<Vec<u8>>, SemanticCatalogReadErrorV1> {
+    self
+      .reader
+      .source
+      .publisher
+      .load_semantic_object_at_captured_header(self.reader.view.captured_header(), kind_id, object_id, self.reader.view.cancellation())
+      .map_err(|error| {
+        if error.code() == "captured_authority_cancelled" {
+          SemanticCatalogReadErrorV1::cancelled(error.code(), error.to_string())
+        } else if authority_error_is_unavailable(&error) {
+          SemanticCatalogReadErrorV1::unavailable(error.code(), error.to_string())
+        } else {
+          SemanticCatalogReadErrorV1::corrupt(error.code(), error.to_string())
+        }
+      })
+  }
 }
 
 impl std::ops::Deref for AccountedLoadedImmutableEntityV1 {
@@ -548,6 +728,287 @@ impl NativeSelectedNamespaceReaderV1<'_> {
     }
     self.check_cancelled()?;
     self.build_identity_result(state.found, result_memory)
+  }
+
+  pub fn load_planner_catalogs(
+    &self,
+    query_path: &str,
+    requested_fields: &[&str],
+    limits: NativeSelectedSemanticLimitsV1,
+  ) -> Result<NativeSelectedSemanticCatalogV1, NativeSelectedNamespaceReadErrorV1> {
+    self.validate_path(query_path, true)?;
+    self.validate_authorized_scope(query_path)?;
+    self.check_cancelled()?;
+    if requested_fields.is_empty() || requested_fields.len() > limits.counts.maximum_requested_fields {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_semantic_requested_fields",
+        "selected semantic catalog requests must contain a bounded nonempty field set",
+      ));
+    }
+    for field in requested_fields {
+      self.check_cancelled()?;
+      canonical_query_field_name_v1(field).map_err(map_query_field_error)?;
+    }
+
+    let SemanticAvailabilityV1::Complete {
+      catalog_root, catalog_record_count, catalog_node_count, definition_count, dependency_count, ..
+    } = &self.view.authority().semantic_state.availability
+    else {
+      return Err(NativeSelectedNamespaceReadErrorV1::unavailable(
+        "selected_semantic_content_only",
+        "selected root does not retain complete semantic definitions",
+      ));
+    };
+    if *catalog_record_count == 0 {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_semantic_field_missing",
+        "selected semantic state has no definitions for the requested fields",
+      ));
+    }
+    validate_selected_semantic_counts(*catalog_record_count, *catalog_node_count, *definition_count, *dependency_count, limits)?;
+
+    let mut result_memory =
+      self
+        .source
+        .memory
+        .reserve(MemoryOwner::Query, limits.bytes.maximum_retained_bytes, AdmissionClass::Workload)
+        .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_result_memory", error.to_string()))?;
+    let _workspace = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, SELECTED_SEMANTIC_WORKSPACE_BYTES, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_workspace_memory", error.to_string()))?;
+    let mut required_fields = BTreeSet::new();
+    for field in requested_fields {
+      self.check_cancelled()?;
+      let canonical = canonical_query_field_name_v1(field).map_err(map_query_field_error)?;
+      required_fields.insert(try_clone_selected_string(canonical, "requested semantic field")?);
+    }
+    if required_fields.len() > limits.counts.maximum_requested_fields {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_semantic_requested_fields",
+        "selected semantic field set exceeds its admitted unique-field count",
+      ));
+    }
+    let object_source = CapturedSelectedSemanticObjectSourceV1 { reader: self };
+    let semantic_reader = SemanticCatalogReaderV1::new(self.view.hash_algorithm(), &object_source);
+    let expected = SelectedSemanticExpectedCountsV1 {
+      records: *catalog_record_count,
+      nodes: *catalog_node_count,
+      definitions: *definition_count,
+      dependencies: *dependency_count,
+    };
+    let traversal_bounds = SemanticCatalogTraversalBoundsV1::new(expected.records, expected.nodes).map_err(map_semantic_catalog_error)?;
+    let mut definition_bytes = 0u64;
+    let mut scopes = BTreeMap::new();
+    let stats = semantic_reader
+      .walk_catalog(catalog_root, traversal_bounds, &|| self.view.cancellation().is_cancelled(), |record| {
+        if record.record_kind != 3 {
+          return Ok(());
+        }
+        semantic_reader.with_definition(record, &|| self.view.cancellation().is_cancelled(), |definition| {
+          let scope = decode_scope_definition(definition, self.view.hash_algorithm())
+            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          validate_semantic_definition_identity_v1(record, &scope.scope_id)?;
+          let applies = scope_owner_overlaps_query_path(&scope, query_path)
+            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          if !applies {
+            return Ok(());
+          }
+          if scopes.len() >= limits.counts.maximum_scopes {
+            return Err(SemanticCatalogReadErrorV1::resource(
+              "selected_semantic_scope_limit",
+              "applicable selected semantic scopes exceed their admitted count",
+            ));
+          }
+          definition_bytes = add_selected_definition_bytes(definition_bytes, definition.len(), limits.bytes.maximum_definition_bytes)?;
+          let scope_id = try_clone_semantic_bytes(&scope.scope_id, "scope identity")?;
+          let retained =
+            SelectedSemanticScopeDefinitionV1 { encoded_definition: try_clone_semantic_bytes(definition, "scope definition")? };
+          if scopes.insert(scope_id, retained).is_some() {
+            return Err(SemanticCatalogReadErrorV1::corrupt(
+              "selected_semantic_scope_duplicate",
+              "selected semantic catalog repeats one applicable ScopeId",
+            ));
+          }
+          Ok(())
+        })
+      })
+      .map_err(map_semantic_catalog_error)?;
+    validate_selected_semantic_walk(stats, expected).map_err(map_semantic_catalog_error)?;
+
+    let mut values = BTreeMap::new();
+    let mut value_owners = BTreeSet::new();
+    let stats = semantic_reader
+      .walk_catalog(catalog_root, traversal_bounds, &|| self.view.cancellation().is_cancelled(), |record| {
+        if record.record_kind != 4 {
+          return Ok(());
+        }
+        semantic_reader.with_definition(record, &|| self.view.cancellation().is_cancelled(), |definition| {
+          let value = decode_value_store_definition(definition, self.view.hash_algorithm())
+            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          validate_semantic_definition_identity_v1(record, &value.value_store_id)?;
+          if !scopes.contains_key(value.scope_id) {
+            return Ok(());
+          }
+          let canonical = canonical_query_field_name_v1(value.field_name)
+            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          if canonical != value.field_name {
+            return Err(SemanticCatalogReadErrorV1::corrupt(
+              "selected_semantic_field_noncanonical",
+              "selected ValueStore definition uses a legacy field alias",
+            ));
+          }
+          if !required_fields.contains(canonical) {
+            return Ok(());
+          }
+          if values.len() >= limits.counts.maximum_value_stores {
+            return Err(SemanticCatalogReadErrorV1::resource(
+              "selected_semantic_value_store_limit",
+              "applicable selected ValueStores exceed their admitted count",
+            ));
+          }
+          definition_bytes = add_selected_definition_bytes(definition_bytes, definition.len(), limits.bytes.maximum_definition_bytes)?;
+          let field_name = try_clone_semantic_string(canonical, "ValueStore field name")?;
+          let scope_id = try_clone_semantic_bytes(value.scope_id, "ValueStore scope identity")?;
+          let value_store_id = try_clone_semantic_bytes(&value.value_store_id, "ValueStore identity")?;
+          let retained = SelectedSemanticValueStoreDefinitionV1 {
+            value_store_id: try_clone_semantic_bytes(&value_store_id, "retained ValueStore identity")?,
+            encoded_definition: try_clone_semantic_bytes(definition, "ValueStore definition")?,
+          };
+          let field_key = try_clone_semantic_string(&field_name, "ValueStore field key")?;
+          let scope_key = try_clone_semantic_bytes(&scope_id, "ValueStore scope key")?;
+          if values.insert((field_key, scope_key), retained).is_some() || !value_owners.insert(value_store_id) {
+            return Err(SemanticCatalogReadErrorV1::corrupt(
+              "selected_semantic_value_store_duplicate",
+              "selected semantic catalog repeats one field/scope ValueStore relationship",
+            ));
+          }
+          Ok(())
+        })
+      })
+      .map_err(map_semantic_catalog_error)?;
+    validate_selected_semantic_walk(stats, expected).map_err(map_semantic_catalog_error)?;
+
+    let mut indexes: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, SelectedSemanticFieldIndexDefinitionV1>> = BTreeMap::new();
+    let mut field_index_count = 0usize;
+    let stats = semantic_reader
+      .walk_catalog(catalog_root, traversal_bounds, &|| self.view.cancellation().is_cancelled(), |record| {
+        if record.record_kind != 5 {
+          return Ok(());
+        }
+        semantic_reader.with_definition(record, &|| self.view.cancellation().is_cancelled(), |definition| {
+          let field = decode_field_index_definition(definition, self.view.hash_algorithm())
+            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          validate_semantic_definition_identity_v1(record, &field.index_id)?;
+          if !value_owners.contains(field.value_store_id) {
+            return Ok(());
+          }
+          if field_index_count >= limits.counts.maximum_field_indexes {
+            return Err(SemanticCatalogReadErrorV1::resource(
+              "selected_semantic_field_index_limit",
+              "applicable selected FieldIndexes exceed their admitted count",
+            ));
+          }
+          definition_bytes = add_selected_definition_bytes(definition_bytes, definition.len(), limits.bytes.maximum_definition_bytes)?;
+          let value_store_id = try_clone_semantic_bytes(field.value_store_id, "FieldIndex ValueStore identity")?;
+          let index_id = try_clone_semantic_bytes(&field.index_id, "FieldIndex identity")?;
+          let retained =
+            SelectedSemanticFieldIndexDefinitionV1 { encoded_definition: try_clone_semantic_bytes(definition, "FieldIndex definition")? };
+          if indexes.entry(value_store_id).or_default().insert(index_id, retained).is_some() {
+            return Err(SemanticCatalogReadErrorV1::corrupt(
+              "selected_semantic_field_index_duplicate",
+              "selected semantic catalog repeats one FieldIndex identity",
+            ));
+          }
+          field_index_count += 1;
+          Ok(())
+        })
+      })
+      .map_err(map_semantic_catalog_error)?;
+    validate_selected_semantic_walk(stats, expected).map_err(map_semantic_catalog_error)?;
+    self.check_cancelled()?;
+
+    let mut catalogs = Vec::new();
+    catalogs.try_reserve_exact(required_fields.len()).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_result_allocation", format!("catalog allocation failed: {error}"))
+    })?;
+    for field_name in required_fields {
+      let mut planner_scopes = Vec::new();
+      for ((value_field, scope_id), value) in &values {
+        if value_field != &field_name {
+          continue;
+        }
+        let scope = scopes.get(scope_id).ok_or_else(|| {
+          NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_semantic_scope_closure",
+            "retained ValueStore lost its selected ScopeDefinition",
+          )
+        })?;
+        let selected_indexes = indexes.get(&value.value_store_id);
+        let index_count = selected_indexes.map_or(0, BTreeMap::len);
+        let mut planner_indexes = Vec::new();
+        planner_indexes.try_reserve_exact(index_count).map_err(|error| {
+          NativeSelectedNamespaceReadErrorV1::resource(
+            "selected_semantic_result_allocation",
+            format!("FieldIndex catalog allocation failed: {error}"),
+          )
+        })?;
+        if let Some(selected_indexes) = selected_indexes {
+          for (index_id, selected) in selected_indexes {
+            planner_indexes.push(QueryPlanningIndexCandidateV1 {
+              index_id: try_clone_selected_bytes(index_id, "planner FieldIndex identity")?,
+              encoded_field_definition: try_clone_selected_bytes(&selected.encoded_definition, "planner FieldIndex definition")?,
+              selected_generation: None,
+              estimates: QueryPlanningIndexEstimatesV1::new(0, 0, 0, 0, u64::MAX).map_err(map_query_catalog_error)?,
+              nvt_hint_available: false,
+            });
+          }
+        }
+        planner_scopes.push(QueryPlanningScopeV1 {
+          scope_id: try_clone_selected_bytes(scope_id, "planner scope identity")?,
+          encoded_scope_definition: try_clone_selected_bytes(&scope.encoded_definition, "planner scope definition")?,
+          encoded_value_store_definition: try_clone_selected_bytes(&value.encoded_definition, "planner ValueStore definition")?,
+          semantic_availability: super::index_coverage_planner::IndexSemanticQueryAvailabilityV1::Complete,
+          authoritative_document_count: u64::MAX,
+          indexes: planner_indexes,
+        });
+      }
+      if planner_scopes.is_empty() {
+        return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+          "selected_semantic_field_missing",
+          format!("selected semantic root has no applicable ValueStore for {field_name}"),
+        ));
+      }
+      catalogs.push(RootAwareQueryFieldCatalogV1 {
+        database_id: self.view.database_id(),
+        physical_instance_id: self.view.physical_instance_id(),
+        selected_namespace_root: try_clone_selected_bytes(&self.view.root_metadata().hash, "planner selected root")?,
+        semantic_state_root: try_clone_selected_bytes(&self.view.authority().semantic_state.object_id, "planner semantic root")?,
+        publication_sequence: self.view.authority().admission.publication_sequence,
+        field_name,
+        complete: true,
+        scopes: planner_scopes,
+      });
+    }
+    let selected_root = try_clone_selected_bytes(&self.view.root_metadata().hash, "selected semantic root receipt")?;
+    let semantic_state_root = try_clone_selected_bytes(&self.view.authority().semantic_state.object_id, "selected semantic state receipt")?;
+    let retained = selected_semantic_catalog_retained_bytes(&selected_root, &semantic_state_root, &catalogs)?;
+    if retained > limits.bytes.maximum_retained_bytes {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_semantic_retained_bytes",
+        "selected semantic planner catalogs exceed their retained-byte bound",
+      ));
+    }
+    result_memory
+      .shrink(result_memory.bytes().checked_sub(retained).ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_semantic_result_accounting",
+          "selected semantic result exceeds its memory reservation",
+        )
+      })?)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_semantic_result_accounting", error.to_string()))?;
+    Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, _memory: result_memory })
   }
 
   fn scan_reference(
@@ -801,6 +1262,180 @@ struct SelectedNamespaceIdentityStateV1<'request> {
   visited_documents: u64,
   work_steps: u64,
   found: Option<NativeSelectedNamespaceFileRowV1>,
+}
+
+#[derive(Clone, Copy)]
+struct SelectedSemanticExpectedCountsV1 {
+  records: u64,
+  nodes: u64,
+  definitions: u64,
+  dependencies: u64,
+}
+
+fn validate_selected_semantic_counts(
+  records: u64,
+  nodes: u64,
+  definitions: u64,
+  dependencies: u64,
+  limits: NativeSelectedSemanticLimitsV1,
+) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+  if nodes == 0 || definitions == 0 || definitions > records || dependencies > definitions {
+    return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+      "selected_semantic_counts",
+      "selected semantic-state counts cannot describe one complete catalog",
+    ));
+  }
+  if records > limits.counts.maximum_catalog_items || nodes > limits.counts.maximum_catalog_items {
+    return Err(NativeSelectedNamespaceReadErrorV1::resource(
+      "selected_semantic_catalog_items",
+      "selected semantic catalog exceeds its admitted record or node count",
+    ));
+  }
+  let work = records
+    .checked_add(nodes)
+    .and_then(|value| value.checked_mul(3))
+    .and_then(|value| value.checked_add(definitions))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_work", "selected semantic work count overflowed"))?;
+  if work > limits.counts.maximum_work_steps {
+    return Err(NativeSelectedNamespaceReadErrorV1::resource(
+      "selected_semantic_work",
+      "selected semantic catalog exceeds its admitted traversal work",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_selected_semantic_walk(
+  stats: SemanticCatalogWalkStatsV1,
+  expected: SelectedSemanticExpectedCountsV1,
+) -> Result<(), SemanticCatalogReadErrorV1> {
+  let dependencies = stats.class_counts[6]
+    .checked_add(stats.class_counts[7])
+    .ok_or_else(|| SemanticCatalogReadErrorV1::corrupt("semantic_catalog_count_overflow", "catalog dependency count overflow"))?;
+  if stats.records != expected.records || stats.nodes != expected.nodes || dependencies != expected.dependencies {
+    return Err(SemanticCatalogReadErrorV1::corrupt(
+      "semantic_catalog_counts",
+      format!(
+        "catalog walk observed {} records, {} nodes, and {} dependencies; expected {}, {}, and {}",
+        stats.records, stats.nodes, dependencies, expected.records, expected.nodes, expected.dependencies
+      ),
+    ));
+  }
+  let required_definitions = stats.class_counts[3]
+    .checked_add(stats.class_counts[4])
+    .and_then(|value| value.checked_add(stats.class_counts[5]))
+    .and_then(|value| value.checked_add(expected.dependencies))
+    .ok_or_else(|| SemanticCatalogReadErrorV1::corrupt("semantic_catalog_count_overflow", "required definition count overflow"))?;
+  if expected.definitions < required_definitions {
+    return Err(SemanticCatalogReadErrorV1::corrupt(
+      "semantic_catalog_counts",
+      "semantic-state definition count is smaller than its uniquely owned scope/value/field/dependency definitions",
+    ));
+  }
+  Ok(())
+}
+
+fn add_selected_definition_bytes(total: u64, bytes: usize, limit: u64) -> Result<u64, SemanticCatalogReadErrorV1> {
+  let bytes =
+    u64::try_from(bytes).map_err(|error| SemanticCatalogReadErrorV1::resource("selected_semantic_definition_bytes", error.to_string()))?;
+  let total = total.checked_add(bytes).ok_or_else(|| {
+    SemanticCatalogReadErrorV1::resource("selected_semantic_definition_bytes", "selected definition byte count overflowed")
+  })?;
+  if total > limit {
+    return Err(SemanticCatalogReadErrorV1::resource(
+      "selected_semantic_definition_bytes",
+      "selected semantic definitions exceed their admitted byte count",
+    ));
+  }
+  Ok(total)
+}
+
+fn try_clone_semantic_bytes(bytes: &[u8], label: &'static str) -> Result<Vec<u8>, SemanticCatalogReadErrorV1> {
+  let mut cloned = Vec::new();
+  cloned
+    .try_reserve_exact(bytes.len())
+    .map_err(|error| SemanticCatalogReadErrorV1::resource("selected_semantic_allocation", format!("cannot allocate {label}: {error}")))?;
+  cloned.extend_from_slice(bytes);
+  Ok(cloned)
+}
+
+fn try_clone_semantic_string(value: &str, label: &'static str) -> Result<String, SemanticCatalogReadErrorV1> {
+  String::from_utf8(try_clone_semantic_bytes(value.as_bytes(), label)?)
+    .map_err(|error| SemanticCatalogReadErrorV1::corrupt("selected_semantic_encoding", format!("cannot retain {label}: {error}")))
+}
+
+fn map_semantic_catalog_error(error: SemanticCatalogReadErrorV1) -> NativeSelectedNamespaceReadErrorV1 {
+  match error.class() {
+    SemanticCatalogReadErrorClassV1::Cancelled => NativeSelectedNamespaceReadErrorV1::cancelled(),
+    SemanticCatalogReadErrorClassV1::Unavailable => NativeSelectedNamespaceReadErrorV1::unavailable(error.code(), error.context()),
+    SemanticCatalogReadErrorClassV1::ResourceLimit => NativeSelectedNamespaceReadErrorV1::resource(error.code(), error.context()),
+    SemanticCatalogReadErrorClassV1::Corrupt => NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()),
+  }
+}
+
+fn map_query_field_error(error: super::query_planner::QueryPlanningErrorV1) -> NativeSelectedNamespaceReadErrorV1 {
+  match error.class() {
+    QueryPlanningErrorClassV1::ResourceLimit => NativeSelectedNamespaceReadErrorV1::resource(error.code(), error.context()),
+    QueryPlanningErrorClassV1::Cancelled => NativeSelectedNamespaceReadErrorV1::cancelled(),
+    QueryPlanningErrorClassV1::HistoricalViewUnavailable => NativeSelectedNamespaceReadErrorV1::unavailable(error.code(), error.context()),
+    QueryPlanningErrorClassV1::InvalidRequest => NativeSelectedNamespaceReadErrorV1::invalid(error.code(), error.context()),
+    QueryPlanningErrorClassV1::CorruptSource => NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()),
+  }
+}
+
+fn map_query_catalog_error(error: super::query_planner::QueryPlanningErrorV1) -> NativeSelectedNamespaceReadErrorV1 {
+  NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context())
+}
+
+fn selected_semantic_catalog_retained_bytes(
+  selected_root: &[u8],
+  semantic_state_root: &[u8],
+  catalogs: &[RootAwareQueryFieldCatalogV1],
+) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  let catalog_slots = catalogs.len().checked_mul(size_of::<RootAwareQueryFieldCatalogV1>()).ok_or_else(|| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner catalog slot accounting overflowed")
+  })?;
+  let mut retained = size_of::<NativeSelectedSemanticCatalogV1>()
+    .checked_add(selected_root.len())
+    .and_then(|value| value.checked_add(semantic_state_root.len()))
+    .and_then(|value| value.checked_add(catalog_slots))
+    .ok_or_else(|| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner catalog accounting overflowed")
+    })?;
+  for catalog in catalogs {
+    retained = retained
+      .checked_add(catalog.selected_namespace_root.capacity())
+      .and_then(|value| value.checked_add(catalog.semantic_state_root.capacity()))
+      .and_then(|value| value.checked_add(catalog.field_name.capacity()))
+      .and_then(|value| value.checked_add(catalog.scopes.capacity().checked_mul(size_of::<QueryPlanningScopeV1>())?))
+      .ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner field catalog accounting overflowed")
+      })?;
+    for scope in &catalog.scopes {
+      retained = retained
+        .checked_add(scope.scope_id.capacity())
+        .and_then(|value| value.checked_add(scope.encoded_scope_definition.capacity()))
+        .and_then(|value| value.checked_add(scope.encoded_value_store_definition.capacity()))
+        .and_then(|value| value.checked_add(scope.indexes.capacity().checked_mul(size_of::<QueryPlanningIndexCandidateV1>())?))
+        .ok_or_else(|| {
+          NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner scope accounting overflowed")
+        })?;
+      for index in &scope.indexes {
+        retained = retained
+          .checked_add(index.index_id.capacity())
+          .and_then(|value| value.checked_add(index.encoded_field_definition.capacity()))
+          .ok_or_else(|| {
+            NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner index accounting overflowed")
+          })?;
+      }
+    }
+  }
+  u64::try_from(retained).map_err(|error| {
+    NativeSelectedNamespaceReadErrorV1::resource(
+      "selected_semantic_retained_bytes",
+      format!("planner catalog retained bytes exceed u64: {error}"),
+    )
+  })
 }
 
 impl ReadViewAuthoritySourceV1 for NativeReadViewSourceV1 {

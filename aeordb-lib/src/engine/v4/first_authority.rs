@@ -3392,6 +3392,46 @@ impl V4FirstAuthorityPublisher {
     Ok(Some(loaded.body))
   }
 
+  /// Load one immutable semantic object against exactly one captured v4
+  /// header. Mutable HEAD may advance, but the selected physical identity and
+  /// captured write high-water remain the only read authority.
+  pub fn load_semantic_object_at_captured_header(
+    &self,
+    captured: &SelectedDatabaseHeaderV4,
+    kind_id: u16,
+    object_id: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let path = semantic_object_path(captured.header.hash_algorithm, kind_id, object_id)?;
+    let maximum_body_length = super::semantic_store::semantic_object_cap(kind_id)?;
+    let path_key = first_authority_file_path_hash(&path, captured.header.hash_algorithm);
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let current = self.observe()?;
+    validate_captured_authority_header(captured, &current.selected, &path_key)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, &current.selected.header)?;
+    let Some(loaded) =
+      load_canonical_system_file_at_path(&self.file, &kv, &captured.header, &path, SEMANTIC_OBJECT_CONTENT_TYPE, maximum_body_length)?
+    else {
+      return Ok(None);
+    };
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let object = decode_semantic_object(&loaded.body, captured.header.hash_algorithm)?;
+    if object.kind_id != kind_id || object.object_id != object_id {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_immutable_semantic_object_identity",
+        "semantic-object bytes disagree with their canonical captured-authority path",
+      ));
+    }
+    Ok(Some(loaded.body))
+  }
+
   pub fn load_immutable_system_control(
     &self,
     kind: SystemControlKindV1,

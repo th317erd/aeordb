@@ -13,11 +13,12 @@ use super::index_producer_source::{
   ResolvedIndexDocumentTransitionV1, ResolvedIndexScopeWorkV1,
 };
 use super::field_definition::decode_field_index_definition;
-use super::namespace::{
-  SemanticAvailabilityV1, SemanticCatalogNodeV1, SemanticCatalogRecordV1, SemanticObjectKind, decode_semantic_catalog_node,
-  decode_semantic_definition_record, decode_semantic_object,
+use super::namespace::{SemanticAvailabilityV1, SemanticCatalogRecordV1, SemanticObjectKind, decode_semantic_object};
+use super::scope::{decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path, validate_canonical_absolute_path};
+use super::semantic_catalog::{
+  SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1,
+  SemanticCatalogTraversalBoundsV1, SemanticCatalogWalkStatsV1 as CatalogWalkStatsV1, validate_semantic_definition_identity_v1,
 };
-use super::scope::{decode_scope_definition, scope_matches_path, validate_canonical_absolute_path};
 use super::semantic_store::V4SemanticObjectStore;
 use super::value_store::decode_value_store_definition;
 
@@ -339,25 +340,6 @@ struct CatalogExpectedCountsV1 {
   dependencies: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct CatalogWalkStatsV1 {
-  records: u64,
-  nodes: u64,
-  class_counts: [u64; 8],
-}
-
-#[derive(Debug, Clone)]
-struct OwnedCatalogChildV1 {
-  edge: u8,
-  record_count: u64,
-  object_id: Vec<u8>,
-}
-
-enum CatalogWalkFrameV1 {
-  Visit { object_id: Vec<u8>, expected_prefix: Vec<u8>, expected_records: u64 },
-  Children { prefix: Vec<u8>, children: Vec<OwnedCatalogChildV1>, next_child: usize },
-}
-
 impl CatalogIndexSemanticScopeSourceV1<'_> {
   fn resolve_complete(
     &self,
@@ -375,7 +357,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
 
     let mut definition_bytes = 0u64;
     let mut scopes = Vec::new();
-    let scope_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
+    let scope_stats = self.walk_catalog(catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 3 {
         return Ok(());
       }
@@ -413,7 +395,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(scope_stats, expected)?;
 
     let mut value_store_count = 0usize;
-    let value_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
+    let value_stats = self.walk_catalog(catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 4 {
         return Ok(());
       }
@@ -438,7 +420,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(value_stats, expected)?;
 
     let mut field_index_count = 0usize;
-    let field_stats = self.walk_catalog(catalog_root, request.is_cancelled, |record| {
+    let field_stats = self.walk_catalog(catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 5 {
         return Ok(());
       }
@@ -565,7 +547,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
 
     let mut definition_bytes = 0u64;
     let mut scopes = Vec::new();
-    let scope_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+    let scope_stats = self.walk_catalog(&catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 3 {
         return Ok(());
       }
@@ -573,7 +555,9 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
         let scope = decode_scope_definition(definition, self.hash_algorithm)
           .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
         validate_definition_identity(record, &scope.scope_id)?;
-        if !canonical_paths_overlap(scope.owner_path, request.maintenance_scope) {
+        if !scope_owner_overlaps_query_path(&scope, request.maintenance_scope)
+          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?
+        {
           return Ok(());
         }
         enforce_count_limit("scopes", scopes.len(), request.limits.max_scopes())?;
@@ -585,7 +569,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(scope_stats, expected)?;
 
     let mut value_store_count = 0usize;
-    let value_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+    let value_stats = self.walk_catalog(&catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 4 {
         return Ok(());
       }
@@ -608,7 +592,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     validate_walk_counts(value_stats, expected)?;
 
     let mut field_index_count = 0usize;
-    let field_stats = self.walk_catalog(&catalog_root, request.is_cancelled, |record| {
+    let field_stats = self.walk_catalog(&catalog_root, expected, request.is_cancelled, |record| {
       if record.record_kind != 5 {
         return Ok(());
       }
@@ -650,124 +634,14 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
   fn walk_catalog(
     &self,
     catalog_root: &[u8],
+    expected: CatalogExpectedCountsV1,
     is_cancelled: &dyn Fn() -> bool,
     mut visit_record: impl FnMut(SemanticCatalogRecordV1<'_>) -> Result<(), IndexSemanticScopeReadErrorV1>,
   ) -> Result<CatalogWalkStatsV1, IndexSemanticScopeReadErrorV1> {
-    let hash_width = self.hash_algorithm.hash_length();
-    let mut stack = vec![CatalogWalkFrameV1::Visit { object_id: catalog_root.to_vec(), expected_prefix: Vec::new(), expected_records: 0 }];
-    let mut stats = CatalogWalkStatsV1::default();
-    while let Some(frame) = stack.pop() {
-      if is_cancelled() {
-        return Err(IndexSemanticScopeReadErrorV1::cancelled("semantic_cancelled", "semantic catalog traversal was cancelled"));
-      }
-      if stack.len() > hash_width.saturating_mul(2) {
-        return Err(IndexSemanticScopeReadErrorV1::corrupt(
-          "semantic_catalog_depth",
-          "semantic catalog traversal exceeded the database hash width",
-        ));
-      }
-      match frame {
-        CatalogWalkFrameV1::Visit { object_id, expected_prefix, expected_records } => {
-          let bytes = self.load_catalog_node(&object_id)?;
-          let node = decode_semantic_catalog_node(&bytes, self.hash_algorithm)
-            .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
-          if node.object_id() != object_id {
-            return Err(IndexSemanticScopeReadErrorV1::corrupt(
-              "semantic_catalog_identity",
-              "semantic catalog node bytes do not match the requested object identity",
-            ));
-          }
-          stats.nodes = stats
-            .nodes
-            .checked_add(1)
-            .ok_or_else(|| IndexSemanticScopeReadErrorV1::corrupt("semantic_catalog_count_overflow", "catalog node count overflow"))?;
-          match node {
-            SemanticCatalogNodeV1::Leaf(leaf) => {
-              if !leaf.lookup_digest().starts_with(&expected_prefix)
-                || (expected_records != 0 && u64::from(leaf.record_count()) != expected_records)
-              {
-                return Err(IndexSemanticScopeReadErrorV1::corrupt(
-                  "semantic_catalog_leaf_closure",
-                  "semantic catalog leaf disagrees with its parent prefix or record count",
-                ));
-              }
-              for record in leaf.records() {
-                let record = record.map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
-                stats.records = stats.records.checked_add(1).ok_or_else(|| {
-                  IndexSemanticScopeReadErrorV1::corrupt("semantic_catalog_count_overflow", "catalog record count overflow")
-                })?;
-                stats.class_counts[usize::from(record.record_kind)] =
-                  stats.class_counts[usize::from(record.record_kind)].checked_add(1).ok_or_else(|| {
-                    IndexSemanticScopeReadErrorV1::corrupt("semantic_catalog_count_overflow", "catalog class count overflow")
-                  })?;
-                visit_record(record)?;
-              }
-            }
-            SemanticCatalogNodeV1::Internal(internal) => {
-              if usize::from(internal.depth()) != expected_prefix.len()
-                || (expected_records != 0 && internal.subtree_record_count() != expected_records)
-              {
-                return Err(IndexSemanticScopeReadErrorV1::corrupt(
-                  "semantic_catalog_internal_closure",
-                  "semantic catalog internal node disagrees with its parent depth or record count",
-                ));
-              }
-              let mut prefix = expected_prefix;
-              prefix.extend_from_slice(internal.prefix());
-              let mut children = Vec::new();
-              children.try_reserve_exact(usize::from(internal.child_count())).map_err(|error| {
-                IndexSemanticScopeReadErrorV1::retryable("semantic_catalog_allocation", format!("catalog child allocation failed: {error}"))
-              })?;
-              for child in internal.children() {
-                let child = child.map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
-                children.push(OwnedCatalogChildV1 {
-                  edge: child.edge,
-                  record_count: child.record_count,
-                  object_id: child.object_id.to_vec(),
-                });
-              }
-              stack.push(CatalogWalkFrameV1::Children { prefix, children, next_child: 0 });
-            }
-          }
-        }
-        CatalogWalkFrameV1::Children { prefix, children, next_child } => {
-          let Some(child) = children.get(next_child).cloned() else {
-            continue;
-          };
-          let mut child_prefix = prefix.clone();
-          child_prefix.push(child.edge);
-          if child_prefix.len() > hash_width {
-            return Err(IndexSemanticScopeReadErrorV1::corrupt(
-              "semantic_catalog_depth",
-              "semantic catalog child prefix exceeds the database hash width",
-            ));
-          }
-          stack.push(CatalogWalkFrameV1::Children { prefix, children, next_child: next_child + 1 });
-          stack.push(CatalogWalkFrameV1::Visit {
-            object_id: child.object_id,
-            expected_prefix: child_prefix,
-            expected_records: child.record_count,
-          });
-        }
-      }
-    }
-    Ok(stats)
-  }
-
-  fn load_catalog_node(&self, object_id: &[u8]) -> Result<Vec<u8>, IndexSemanticScopeReadErrorV1> {
-    let leaf = self.objects.load_semantic_object(0x0002, object_id)?;
-    let internal = self.objects.load_semantic_object(0x0003, object_id)?;
-    match (leaf, internal) {
-      (Some(bytes), None) | (None, Some(bytes)) => Ok(bytes),
-      (None, None) => Err(IndexSemanticScopeReadErrorV1::corrupt(
-        "semantic_catalog_missing",
-        format!("semantic catalog node {} is absent", hex::encode(object_id)),
-      )),
-      (Some(_), Some(_)) => Err(IndexSemanticScopeReadErrorV1::corrupt(
-        "semantic_catalog_ambiguous",
-        format!("semantic catalog node {} exists under both registered kinds", hex::encode(object_id)),
-      )),
-    }
+    let bounds = SemanticCatalogTraversalBoundsV1::new(expected.records, expected.nodes).map_err(map_catalog_error_to_index_semantic)?;
+    SemanticCatalogReaderV1::new(self.hash_algorithm, self)
+      .walk_catalog(catalog_root, bounds, is_cancelled, |record| visit_record(record).map_err(map_index_semantic_error_to_catalog))
+      .map_err(map_catalog_error_to_index_semantic)
   }
 
   fn with_definition<T>(
@@ -776,38 +650,44 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     is_cancelled: &dyn Fn() -> bool,
     inspect: impl FnOnce(&[u8]) -> Result<T, IndexSemanticScopeReadErrorV1>,
   ) -> Result<T, IndexSemanticScopeReadErrorV1> {
-    if is_cancelled() {
-      return Err(IndexSemanticScopeReadErrorV1::cancelled("semantic_cancelled", "semantic definition read was cancelled"));
+    SemanticCatalogReaderV1::new(self.hash_algorithm, self)
+      .with_definition(record, is_cancelled, |definition| inspect(definition).map_err(map_index_semantic_error_to_catalog))
+      .map_err(map_catalog_error_to_index_semantic)
+  }
+}
+
+impl SemanticCatalogObjectSourceV1 for CatalogIndexSemanticScopeSourceV1<'_> {
+  fn load_semantic_object(&self, kind_id: u16, object_id: &[u8]) -> Result<Option<Vec<u8>>, SemanticCatalogReadErrorV1> {
+    self.objects.load_semantic_object(kind_id, object_id).map_err(map_index_semantic_error_to_catalog)
+  }
+}
+
+fn map_index_semantic_error_to_catalog(error: IndexSemanticScopeReadErrorV1) -> SemanticCatalogReadErrorV1 {
+  match error.class() {
+    super::index_producer_source::IndexSemanticScopeReadErrorClassV1::Cancelled => {
+      SemanticCatalogReadErrorV1::cancelled(error.code(), error.context())
     }
-    let bytes = self.objects.load_semantic_object(0x0004, record.definition_object_id)?.ok_or_else(|| {
-      IndexSemanticScopeReadErrorV1::corrupt(
-        "semantic_definition_missing",
-        format!("semantic definition {} is absent", hex::encode(record.definition_object_id)),
-      )
-    })?;
-    let definition = decode_semantic_definition_record(&bytes, self.hash_algorithm)
-      .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
-    if definition.object_id != record.definition_object_id
-      || definition.class != record.record_kind
-      || definition.semantic_id != record.semantic_id
-    {
-      return Err(IndexSemanticScopeReadErrorV1::corrupt(
-        "semantic_definition_closure",
-        "semantic definition identity, class, or semantic ID disagrees with its catalog binding",
-      ));
+    super::index_producer_source::IndexSemanticScopeReadErrorClassV1::Retryable => {
+      SemanticCatalogReadErrorV1::unavailable(error.code(), error.context())
     }
-    inspect(definition.definition)
+    super::index_producer_source::IndexSemanticScopeReadErrorClassV1::Corrupt => {
+      SemanticCatalogReadErrorV1::corrupt(error.code(), error.context())
+    }
+  }
+}
+
+fn map_catalog_error_to_index_semantic(error: SemanticCatalogReadErrorV1) -> IndexSemanticScopeReadErrorV1 {
+  match error.class() {
+    SemanticCatalogReadErrorClassV1::Cancelled => IndexSemanticScopeReadErrorV1::cancelled(error.code(), error.context()),
+    SemanticCatalogReadErrorClassV1::Unavailable | SemanticCatalogReadErrorClassV1::ResourceLimit => {
+      IndexSemanticScopeReadErrorV1::retryable(error.code(), error.context())
+    }
+    SemanticCatalogReadErrorClassV1::Corrupt => IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()),
   }
 }
 
 fn validate_definition_identity(record: SemanticCatalogRecordV1<'_>, actual: &[u8]) -> Result<(), IndexSemanticScopeReadErrorV1> {
-  if actual != record.semantic_id || actual != record.owner_key {
-    return Err(IndexSemanticScopeReadErrorV1::corrupt(
-      "semantic_definition_identity",
-      "decoded semantic definition identity disagrees with its semantic ID or owner key",
-    ));
-  }
-  Ok(())
+  validate_semantic_definition_identity_v1(record, actual).map_err(map_catalog_error_to_index_semantic)
 }
 
 fn validate_walk_counts(stats: CatalogWalkStatsV1, expected: CatalogExpectedCountsV1) -> Result<(), IndexSemanticScopeReadErrorV1> {
@@ -892,12 +772,4 @@ fn semantic_limits_reservation_bytes(
     .and_then(|value| value.checked_add(identity_count.checked_mul(hash_width + 128)?))
     .and_then(|value| value.checked_add(hash_width * 4))
     .ok_or_else(|| IndexSemanticScopeReadErrorV1::corrupt("semantic_memory_overflow", "semantic reservation byte overflow"))
-}
-
-fn canonical_paths_overlap(left: &str, right: &str) -> bool {
-  canonical_path_contains(left, right) || canonical_path_contains(right, left)
-}
-
-fn canonical_path_contains(parent: &str, child: &str) -> bool {
-  parent == "/" || parent == child || child.strip_prefix(parent).is_some_and(|suffix| suffix.starts_with('/'))
 }

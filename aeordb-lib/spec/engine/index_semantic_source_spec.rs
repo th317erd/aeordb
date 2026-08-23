@@ -790,7 +790,7 @@ fn successful_semantic_read_retains_and_then_releases_its_task_reservation() {
 
 #[test]
 fn semantic_state_catalog_count_mismatches_fail_closed() {
-  for case in 0..4 {
+  for case in 0..5 {
     let mut graph = complete_graph();
     let mut record_count = graph.catalog_record_count;
     let mut node_count = graph.catalog_node_count;
@@ -801,6 +801,7 @@ fn semantic_state_catalog_count_mismatches_fail_closed() {
       1 => node_count += 1,
       2 => definition_count -= 1,
       3 => dependency_count += 1,
+      4 => node_count = 1,
       _ => unreachable!(),
     }
     replace_state_counts(&mut graph, record_count, node_count, definition_count, dependency_count);
@@ -821,6 +822,9 @@ fn semantic_state_catalog_count_mismatches_fail_closed() {
 
     assert!(matches!(error.code(), "semantic_catalog_counts" | "semantic_state_counts"));
     assert_eq!(error.class(), IndexSemanticScopeReadErrorClassV1::Corrupt);
+    if case == 4 {
+      assert_eq!(graph.objects.loads.load(Ordering::SeqCst), 3, "catalog traversal did not stop at the selected root's exact node bound");
+    }
     assert_eq!(task_reserved_bytes(&task_memory), 0);
   }
 }
