@@ -1209,7 +1209,7 @@
             - [x] Prove multi-megabyte request/response continuity, implicit HEAD, unchanged legacy-v3 response bytes/headers, unknown-route 404, undeclared-method 405, and configured CORS preflight behavior.
             - [x] Start a separate self-contained-auth instance and prove public health remains reachable while a protected route fails with 401 before handler execution.
             - [x] Re-run exact source/runtime route coverage, auth/CORS/route regressions, workspace/static gates, record evidence, commit, and push.
-      - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
+      - [x] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
         - [x] P7-2a: add the bounded production APOS writer and canonical route-order compiler, matching the independent both-width fixtures without activating a route schema.
         - [x] P7-2b: implement one logical total-order and bounded pagination-window model for directory, query, global-search, and aggregate rows.
           - [x] Freeze route-owned order builders and one complete-row comparator with permanent typed semantics and immutable identity ties.
@@ -1217,7 +1217,12 @@
           - [x] Retain at most `limit + 1` rows under the configured position-scan byte bound, including reverse `before` normalization.
           - [x] Fail closed on malformed rows, order/route drift, duplicate or out-of-order source rows, incomplete receipts, cancellation, arithmetic overflow, and resource refusal.
           - [x] Prove all four route orders and window algebra against an independent deterministic model before broad/static gates.
-        - [ ] P7-2c: resolve APOS positions against authorized selected-root result universes, recompute complete ties, and fail closed on root/order/row drift.
+        - [x] P7-2c: resolve APOS positions against authorized selected-root result universes, recompute complete ties, and fail closed on root/order/row drift.
+          - [x] Bind resolution to an already-authorized, request-pinned `ResolvedReadView`, exact database hash algorithm, explicit selected root, route, and order fingerprint before result-universe access.
+          - [x] Define one bounded storage-neutral universe-source contract for file-backed and synthetic aggregate identities; P7-3 physical adapters may not trust token tuple bytes.
+          - [x] Recompute and validate the complete logical row, immutable FileKey/synthetic identity, RecordRevision, comparator/state/payload tuple, and selected-root membership before returning an exclusive bound.
+          - [x] Fail closed with stable invalid-position, root/order mismatch, historical-unavailable, resource, corruption, and cancellation classes without route, storage, or legacy-query activation.
+          - [x] Prove both hash widths, every route shape, aggregate synthetic identities, preliminary no-I/O failures, absent/stale/forged positions, dishonest sources, pressure, and cancellation against an independent source model.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.

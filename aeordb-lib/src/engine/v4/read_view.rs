@@ -786,6 +786,7 @@ pub struct ReadViewRootMetadataV1 {
 pub struct ResolvedReadViewV1<A> {
   database_id: [u8; 16],
   physical_instance_id: [u8; 16],
+  hash_algorithm: HashAlgorithm,
   selected_header_slot: usize,
   header_slot_sequence: u64,
   write_sequence_high_water: u64,
@@ -821,6 +822,10 @@ impl<A> ResolvedReadViewV1<A> {
 
   pub const fn physical_instance_id(&self) -> [u8; 16] {
     self.physical_instance_id
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
   }
 
   pub const fn selected_header_slot(&self) -> usize {
@@ -979,6 +984,7 @@ where
     Ok(ResolvedReadViewV1 {
       database_id: header.header.database_id,
       physical_instance_id: header.header.physical_instance_id,
+      hash_algorithm: header.header.hash_algorithm,
       selected_header_slot: header.selected_slot,
       header_slot_sequence: header.header.slot_sequence,
       write_sequence_high_water: header.header.write_sequence_high_water,

@@ -302,8 +302,8 @@ pub fn compare_logical_order_rows_v1(
   left: LogicalOrderRowV1<'_>,
   right: LogicalOrderRowV1<'_>,
 ) -> PositionOrderResultV1<Ordering> {
-  validate_logical_row(order, left)?;
-  validate_logical_row(order, right)?;
+  validate_logical_order_row_v1(order, left)?;
+  validate_logical_order_row_v1(order, right)?;
   for (index, definition) in order.sort().iter().enumerate() {
     let comparison = compare_components(definition.comparator, &left.components[index], &right.components[index])?;
     let comparison = if comparison != Ordering::Equal
@@ -322,7 +322,7 @@ pub fn compare_logical_order_rows_v1(
   Ok(left.file_key_tie.cmp(right.file_key_tie).then_with(|| left.record_revision_tie.cmp(right.record_revision_tie)))
 }
 
-fn validate_logical_row(order: &CompiledRouteOrderV1, row: LogicalOrderRowV1<'_>) -> PositionOrderResultV1<()> {
+pub fn validate_logical_order_row_v1(order: &CompiledRouteOrderV1, row: LogicalOrderRowV1<'_>) -> PositionOrderResultV1<()> {
   validate_route_order_contract(order)?;
   if row.route != order.route() || row.components.len() != order.component_count() {
     return Err(PositionOrderErrorV1::corrupt(
@@ -748,11 +748,11 @@ pub fn execute_position_window_v1(
     (PositionWindowOriginV1::Start, None) => (PositionWindowSeekV1::First, PositionWindowDirectionV1::Forward),
     (PositionWindowOriginV1::AbsoluteRank(rank), None) => (PositionWindowSeekV1::AbsoluteRank(rank), PositionWindowDirectionV1::Forward),
     (PositionWindowOriginV1::After, Some(bound)) => {
-      validate_logical_row(order, bound)?;
+      validate_logical_order_row_v1(order, bound)?;
       (PositionWindowSeekV1::After(bound), PositionWindowDirectionV1::Forward)
     }
     (PositionWindowOriginV1::Before, Some(bound)) => {
-      validate_logical_row(order, bound)?;
+      validate_logical_order_row_v1(order, bound)?;
       (PositionWindowSeekV1::Before(bound), PositionWindowDirectionV1::Reverse)
     }
     (PositionWindowOriginV1::After | PositionWindowOriginV1::Before, None) => {
@@ -822,7 +822,7 @@ impl PositionWindowVisitorV1 for PositionWindowCollectorV1<'_> {
         format!("source emitted more than {} admitted rows", self.maximum_rows),
       ));
     }
-    validate_logical_row(self.order, row)?;
+    validate_logical_order_row_v1(self.order, row)?;
     if let Some(bound) = self.bound {
       let comparison = compare_logical_order_rows_v1(self.order, row, bound)?;
       let valid = match self.direction {
@@ -849,7 +849,7 @@ impl PositionWindowVisitorV1 for PositionWindowCollectorV1<'_> {
         ));
       }
     }
-    let row_bytes = retained_row_bytes(row)?;
+    let row_bytes = logical_order_row_retained_bytes_v1(row)?;
     let next = self
       .retained_bytes
       .checked_add(row_bytes)
@@ -867,7 +867,7 @@ impl PositionWindowVisitorV1 for PositionWindowCollectorV1<'_> {
   }
 }
 
-fn retained_row_bytes(row: LogicalOrderRowV1<'_>) -> PositionOrderResultV1<u64> {
+pub fn logical_order_row_retained_bytes_v1(row: LogicalOrderRowV1<'_>) -> PositionOrderResultV1<u64> {
   let mut total = size_of::<LogicalOrderRowOwnedV1>()
     .checked_add(ALLOCATION_OVERHEAD * 3)
     .and_then(|value| value.checked_add(row.file_key_tie.len()))

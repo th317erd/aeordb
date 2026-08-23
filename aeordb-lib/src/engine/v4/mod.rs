@@ -119,6 +119,7 @@ mod native_path;
 pub mod parser_plan;
 pub mod position;
 pub mod position_order;
+pub mod position_resolver;
 pub(crate) mod private_workspace;
 pub mod read_view;
 pub mod read_view_authorization;
