@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::control_store::{SYSTEM_CONTROL_CONTENT_TYPE, discover_mutable_control};
 use super::contract_generated::kv_tag;
-use super::database_header::DatabaseHeaderV4;
+use super::database_header::{DatabaseHeaderV4, SelectedDatabaseHeaderV4};
 use super::entity::{
   EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, checked_whole_entity_encoded_length, decode_whole_entity,
   encode_whole_entity,
@@ -109,7 +109,8 @@ use super::namespace::{
 use super::reader::FormatError;
 use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
 use super::root_authority::{
-  RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1, decode_root_admission_commit, decode_root_publication_prepare,
+  ImmutableNamespaceAuthorityInputV1, ImmutableNamespaceAuthorityV1, RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1,
+  decode_immutable_namespace_authority, decode_root_admission_commit, decode_root_publication_prepare,
   encode_root_admission_commit_control, encode_root_publication_prepare_control,
 };
 use super::semantic_store::{SEMANTIC_OBJECT_CONTENT_TYPE, semantic_object_path};
@@ -2970,6 +2971,110 @@ impl V4FirstAuthorityPublisher {
       key: entity.key.to_vec(),
       stored_value: entity.stored_value.to_vec(),
     }))
+  }
+
+  /// Load one complete immutable namespace authority against exactly one
+  /// previously captured v4 header. Mutable HEAD may advance while this read
+  /// is in flight, but no dependency published beyond the captured write
+  /// sequence is visible to the returned closure.
+  pub fn load_namespace_authority_at_captured_header(
+    &self,
+    captured: &SelectedDatabaseHeaderV4,
+    root_hash: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<Option<ImmutableNamespaceAuthorityV1>, FirstAuthorityPublicationErrorV1> {
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let current = self.observe()?;
+    validate_captured_authority_header(captured, &current.selected, root_hash)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, &current.selected.header)?;
+    let root_locator = kv.get(root_hash)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let Some(root_locator) = root_locator else {
+      return Ok(None);
+    };
+    if root_locator.type_flags != KV_TYPE_DIRECTORY {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_authority_root_role",
+        "requested namespace root identity resolves to another KV role",
+      ));
+    }
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let header = &captured.header;
+    let root_entity =
+      read_entity_bounded(&self.file, &kv, root_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
+        .ok_or_else(|| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "captured_authority_root_changed",
+            "requested NamespaceRoot disappeared after its locator was observed",
+          )
+        })?;
+    let root = decode_namespace_root_entity(&root_entity, header.hash_algorithm, header.write_sequence_high_water)?;
+    if root.root_hash != root_hash {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_authority_root_identity",
+        "decoded NamespaceRoot does not match the requested root identity",
+      ));
+    }
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let namespace_tree_entity = read_entity_bounded(
+      &self.file,
+      &kv,
+      &root.namespace_tree_root,
+      FIRST_AUTHORITY_NAMESPACE_TREE_CAP,
+      header.write_sequence_high_water,
+    )?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
+    let semantic_state = load_canonical_system_file_at_path(
+      &self.file,
+      &kv,
+      header,
+      &semantic_path,
+      SEMANTIC_OBJECT_CONTENT_TYPE,
+      super::semantic_store::semantic_object_cap(1)?,
+    )?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let admission =
+      load_system_file_slot(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, root_hash, SystemControlSlotV1::Immutable)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+
+    let authority = decode_immutable_namespace_authority(
+      ImmutableNamespaceAuthorityInputV1 {
+        expected_root_hash: root_hash,
+        expected_database_id: &header.database_id,
+        root_entity: Some(&root_entity),
+        namespace_tree_entity: namespace_tree_entity.as_deref(),
+        semantic_state_object: semantic_state.as_ref().map(|loaded| loaded.body.as_slice()),
+        admission_control: admission.as_ref().map(|loaded| loaded.body.as_slice()),
+      },
+      header.hash_algorithm,
+      header.write_sequence_high_water,
+    )
+    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
+    if authority.admission.selected_header_slot_sequence > header.slot_sequence
+      || authority.admission.publication_sequence == 0
+      || authority.admission.publication_sequence > header.write_sequence_high_water
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_authority_admission_sequence",
+        "root admission witness exceeds the captured header authority",
+      ));
+    }
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    Ok(Some(authority))
   }
 
   pub fn load_index_artifact(&self, key: &[u8], expected_value_length: u64) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
@@ -12299,6 +12404,69 @@ fn validate_kv_header_alignment(kv: &DiskKVStore, header: &DatabaseHeaderV4) -> 
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_kv_header_mismatch",
       "KV state does not match the selected v4 header",
+    ));
+  }
+  Ok(())
+}
+
+fn ensure_captured_authority_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_cancelled",
+      "captured namespace-authority read was canceled",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_captured_authority_header(
+  captured: &SelectedDatabaseHeaderV4,
+  current: &SelectedDatabaseHeaderV4,
+  root_hash: &[u8],
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if captured.redundancy_degraded || current.redundancy_degraded {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_header_degraded",
+      "captured namespace-authority reads require two valid v4 header slots",
+    ));
+  }
+  if captured.selected_slot > 1 || current.selected_slot > 1 {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_header_slot",
+      "captured namespace-authority header selected an invalid A/B slot",
+    ));
+  }
+  if captured.header.database_id != current.header.database_id {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_database",
+      "captured header belongs to another logical database",
+    ));
+  }
+  if captured.header.physical_instance_id != current.header.physical_instance_id {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_physical_instance",
+      "captured header belongs to another physical database instance",
+    ));
+  }
+  if captured.header.hash_algorithm != current.header.hash_algorithm {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_hash_algorithm",
+      "captured header uses another database hash algorithm",
+    ));
+  }
+  if root_hash.len() != captured.header.hash_algorithm.hash_length() || root_hash.iter().all(|byte| *byte == 0) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_root_hash",
+      "captured namespace-authority read requires one nonzero database-width root hash",
+    ));
+  }
+  if current.header.slot_sequence < captured.header.slot_sequence
+    || current.header.write_sequence_high_water < captured.header.write_sequence_high_water
+    || current.header.writer_fence_epoch < captured.header.writer_fence_epoch
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_regression",
+      "current v4 authority regressed behind the captured header",
     ));
   }
   Ok(())

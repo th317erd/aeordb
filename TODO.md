@@ -1167,6 +1167,10 @@
       - [ ] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.
         - [x] P7-1a: add the compile-red `root_api_reference_spec`, then implement the 95-registration/124-method contract plus pure selector/response/error model without activating service behavior.
         - [ ] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
+          - [x] P7-1b1: add one captured-header first-authority reader for exact immutable namespace/semantic/admission closure at either frozen hash width.
+          - [ ] P7-1b2: add bounded selected root-lifecycle lookup with dynamic grace, cancellation, corruption, and no-state baseline proof.
+          - [ ] P7-1b3: extract one shared permission evaluator and implement current-authorization plus selected-root restrictive intersection without grant expansion.
+          - [ ] P7-1b4: prove the combined native resolver against real v4 files, concurrent authority movement, pin lifetime, concealment, pressure, and architecture uniqueness.
         - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
