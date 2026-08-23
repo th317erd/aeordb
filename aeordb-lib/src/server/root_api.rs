@@ -14,7 +14,13 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::engine::HashAlgorithm;
+use crate::engine::root_operation::adapt_root_operation_v1;
 use crate::engine::v4::read_view::{ReadViewRootMetadataV1, ReadableRootStateV1};
+
+pub use crate::engine::root_operation::{
+  RootOperationAdapterV1 as RootRequestAdapterV1, RootOperationClassV1 as RootRouteClassV1,
+  RootOperationPlanErrorV1 as RootRequestPlanErrorV1, RootOperationProofV1 as ReadViewProofV1, RootServiceActivationV1, RootServiceModeV1,
+};
 
 use super::responses::{ErrorResponse, error_codes};
 
@@ -28,16 +34,6 @@ pub enum HttpMethodV1 {
   Patch,
   Delete,
   Head,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RootRouteClassV1 {
-  SingleRootNamespace,
-  MultiRoot,
-  ContentStaging,
-  HashRetrieval,
-  OperationalSystem,
-  Mutation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,16 +60,6 @@ pub enum AuthorizationOwnerV1 {
   RootOnly,
   CurrentThenSelectedPath,
   Handler,
-  PluginHost,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadViewProofV1 {
-  ResolvedReadView,
-  MultiRootResolver,
-  ContentTransport,
-  MutationRejectsGenericRoot,
-  NoNamespace,
   PluginHost,
 }
 
@@ -105,51 +91,11 @@ pub struct RouteRootContractWitnessV1 {
   pub operation: RouteRootOperationContractV1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RootRequestAdapterV1 {
-  ResolveSingleRoot,
-  ResolveMultipleRoots,
-  TransportContent,
-  RetrieveHashFromSelectedRoot,
-  ExecuteOperational,
-  PublishCurrentMutation,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RootServiceModeV1 {
-  LegacyV3Compatibility,
-}
-
-/// The sole HTTP root-operation service activation boundary.
-///
-/// P7 installs only the inactive-v4 compatibility mode. The private field
-/// prevents callers from manufacturing another mode before P8 adds a
-/// migration-qualified constructor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RootServiceActivationV1 {
-  mode: RootServiceModeV1,
-}
-
-impl RootServiceActivationV1 {
-  pub const fn inactive_v4() -> Self {
-    Self { mode: RootServiceModeV1::LegacyV3Compatibility }
-  }
-
-  pub const fn mode(self) -> RootServiceModeV1 {
-    self.mode
-  }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteRootRequestPlanV1 {
   pub witness: RouteRootContractWitnessV1,
   pub adapter: RootRequestAdapterV1,
   pub service_mode: RootServiceModeV1,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RootRequestPlanErrorV1 {
-  ClassProofMismatch { class: RootRouteClassV1, proof: ReadViewProofV1 },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -538,18 +484,8 @@ pub fn route_root_request_plan_v1(
   activation: RootServiceActivationV1,
 ) -> Result<RouteRootRequestPlanV1, RootRequestPlanErrorV1> {
   let operation = witness.operation;
-  let adapter = match (operation.class, operation.proof) {
-    (RootRouteClassV1::SingleRootNamespace, ReadViewProofV1::ResolvedReadView) => RootRequestAdapterV1::ResolveSingleRoot,
-    (RootRouteClassV1::MultiRoot, ReadViewProofV1::MultiRootResolver) => RootRequestAdapterV1::ResolveMultipleRoots,
-    (RootRouteClassV1::ContentStaging, ReadViewProofV1::ContentTransport) => RootRequestAdapterV1::TransportContent,
-    (RootRouteClassV1::HashRetrieval, ReadViewProofV1::ResolvedReadView) => RootRequestAdapterV1::RetrieveHashFromSelectedRoot,
-    (RootRouteClassV1::OperationalSystem, ReadViewProofV1::NoNamespace | ReadViewProofV1::PluginHost) => {
-      RootRequestAdapterV1::ExecuteOperational
-    }
-    (RootRouteClassV1::Mutation, ReadViewProofV1::MutationRejectsGenericRoot) => RootRequestAdapterV1::PublishCurrentMutation,
-    (class, proof) => return Err(RootRequestPlanErrorV1::ClassProofMismatch { class, proof }),
-  };
-  Ok(RouteRootRequestPlanV1 { witness, adapter, service_mode: activation.mode() })
+  let (adapter, service_mode) = adapt_root_operation_v1(operation.class, operation.proof, activation)?;
+  Ok(RouteRootRequestPlanV1 { witness, adapter, service_mode })
 }
 
 /// Attach the exact route contract to every matched request without parsing

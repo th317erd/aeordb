@@ -1198,7 +1198,11 @@
             - [x] Attach the typed request plan through the existing whole-router middleware without parsing selectors, buffering bodies, or accessing storage.
             - [x] Construct exactly one explicit legacy-v3/inactive-v4 service boundary in production router assembly and prove no active-v4 constructor exists before P8.
             - [x] Prove all explicit and implicit runtime operations adapt, failure closes, actual public/protected behavior remains unchanged, and architecture stays single-path.
-          - [ ] P7-1c3: freeze and integrate embedded storage, directory, query, builder, and plugin-host equivalents through the same root-operation vocabulary without routing internal maintenance reads as user namespace requests.
+          - [x] P7-1c3: freeze and integrate embedded storage, directory, query, builder, and plugin-host equivalents through the same root-operation vocabulary without routing internal maintenance reads as user namespace requests.
+            - [x] Extract route-neutral class/proof/adapter/activation types from the server module and retain server aliases without duplicate matching logic.
+            - [x] Freeze every public StorageEngine, DirectoryOps, QueryEngine, QueryBuilder, FieldQueryBuilder, PluginManager, and WasmPluginRuntime method plus every WASM host import.
+            - [x] Separate root-routed operations from local-only composition and internal maintenance; only root-routed operations may receive a six-class adapter.
+            - [x] Provide one inactive-v4 embedded router/factory, exact source-to-registry architecture proof, high-risk classification proof, and behavior-preserving broad gates.
           - [ ] P7-1c4: prove exact runtime/source coverage, current v3 behavior, 404/405/CORS/auth ordering, body streaming, architecture uniqueness, affected/broad/static gates, and a disposable live-server route matrix before landing and pushing.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.

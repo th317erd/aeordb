@@ -92,6 +92,7 @@ mod query_runtime_internal_spec;
 pub mod range_extract;
 pub mod rate_tracker;
 pub mod request_context;
+pub mod root_operation;
 pub mod rss_sampler;
 pub(crate) mod run_configuration;
 pub mod runtime_observability;
@@ -260,6 +261,12 @@ pub use lifecycle_config::{
   ensure_snapshot_writes_enabled, prune_expired_snapshots, PruneResult, SNAPSHOT_TYPE_KEY, SNAPSHOT_TYPE_AUTO, SNAPSHOT_TYPE_MANUAL,
 };
 pub use request_context::RequestContext;
+pub use root_operation::{
+  EmbeddedOperationDispositionV1, EmbeddedOperationExecutionV1, EmbeddedOperationOwnerV1, EmbeddedRootOperationErrorV1,
+  EmbeddedRootOperationGroupV1, EmbeddedRootOperationPlanV1, EmbeddedRootOperationRouterV1, RootOperationAdapterV1, RootOperationClassV1,
+  RootOperationPlanErrorV1, RootOperationProofV1, RootServiceActivationV1, RootServiceModeV1, adapt_root_operation_v1,
+  embedded_root_operation_groups_v1,
+};
 pub use rate_tracker::{RateTracker, RateSnapshot, RateTrackerSet, RateSetSnapshot};
 pub use webhook::{spawn_webhook_dispatcher, load_webhook_config, compute_signature, WebhookConfig, WebhookRegistry};
 pub use btree::{

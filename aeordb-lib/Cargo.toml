@@ -124,6 +124,7 @@ http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1"
 serial_test = "3"
+syn = { version = "2", features = ["full"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wat = "1"
@@ -1308,6 +1309,10 @@ path = "spec/http/root_route_runtime_spec.rs"
 [[test]]
 name = "root_request_adapter_spec"
 path = "spec/http/root_request_adapter_spec.rs"
+
+[[test]]
+name = "embedded_root_operation_spec"
+path = "spec/engine/embedded_root_operation_spec.rs"
 
 
 [lints]
