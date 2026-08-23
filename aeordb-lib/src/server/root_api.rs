@@ -4,7 +4,13 @@
 //! storage-neutral here lets the reference target prove the complete public
 //! surface before v4 service activation.
 
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+use axum::extract::{MatchedPath, Request};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
 use serde::Serialize;
 
 use crate::engine::HashAlgorithm;
@@ -85,6 +91,18 @@ pub struct RouteRootOperationContractV1 {
 pub struct RouteRootRegistrationContractV1 {
   pub path: &'static str,
   pub operations: &'static [RouteRootOperationContractV1],
+}
+
+/// The exact root-operation contract selected for one routed HTTP request.
+///
+/// The static path comes from the frozen registry rather than from caller
+/// input. The witness is available to downstream handlers and is mirrored to
+/// response extensions for integration proof; response extensions are not
+/// serialized onto the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteRootContractWitnessV1 {
+  pub path: &'static str,
+  pub operation: RouteRootOperationContractV1,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -453,6 +471,73 @@ static ROUTE_ROOT_CONTRACTS_V1: &[RouteRootRegistrationContractV1] = &[
   registration!("/sync/chunks", op!(Post, ContentStaging, None, None, Handler, ContentTransport)),
 ];
 
+static ROUTE_ROOT_RUNTIME_INDEX_V1: OnceLock<BTreeMap<(&'static str, HttpMethodV1), RouteRootContractWitnessV1>> = OnceLock::new();
+
 pub fn route_root_contracts_v1() -> &'static [RouteRootRegistrationContractV1] {
   ROUTE_ROOT_CONTRACTS_V1
+}
+
+/// Resolve one effective runtime method to its frozen route contract.
+///
+/// Axum's `get(...)` router also accepts `HEAD`. An explicitly registered
+/// `HEAD` contract wins; otherwise `HEAD` inherits the exact `GET` contract
+/// with only the effective method changed.
+pub fn route_root_operation_contract_v1(path: &str, method: &Method) -> Option<RouteRootOperationContractV1> {
+  route_root_contract_witness_v1(path, method).map(|witness| witness.operation)
+}
+
+/// Attach the exact route contract to every matched request without parsing
+/// selectors, buffering bodies, or activating a storage reader.
+pub async fn root_contract_middleware(mut request: Request, next: Next) -> Response {
+  let witness =
+    request.extensions().get::<MatchedPath>().and_then(|matched| route_root_contract_witness_v1(matched.as_str(), request.method()));
+  if let Some(witness) = witness {
+    request.extensions_mut().insert(witness);
+  }
+  let mut response = next.run(request).await;
+  if let Some(witness) = witness {
+    response.extensions_mut().insert(witness);
+  }
+  response
+}
+
+fn route_root_contract_witness_v1(path: &str, method: &Method) -> Option<RouteRootContractWitnessV1> {
+  let method = http_method_v1(method)?;
+  let index = route_root_runtime_index_v1();
+  if let Some(witness) = index.get(&(path, method)) {
+    return Some(*witness);
+  }
+  if method == HttpMethodV1::Head {
+    return index.get(&(path, HttpMethodV1::Get)).map(|witness| RouteRootContractWitnessV1 {
+      path: witness.path,
+      operation: RouteRootOperationContractV1 { method: HttpMethodV1::Head, ..witness.operation },
+    });
+  }
+  None
+}
+
+fn route_root_runtime_index_v1() -> &'static BTreeMap<(&'static str, HttpMethodV1), RouteRootContractWitnessV1> {
+  ROUTE_ROOT_RUNTIME_INDEX_V1.get_or_init(|| {
+    let mut index = BTreeMap::new();
+    for registration in ROUTE_ROOT_CONTRACTS_V1 {
+      for operation in registration.operations {
+        let key = (registration.path, operation.method);
+        let replaced = index.insert(key, RouteRootContractWitnessV1 { path: registration.path, operation: *operation });
+        debug_assert!(replaced.is_none(), "duplicate route-root runtime contract");
+      }
+    }
+    index
+  })
+}
+
+fn http_method_v1(method: &Method) -> Option<HttpMethodV1> {
+  match *method {
+    Method::GET => Some(HttpMethodV1::Get),
+    Method::POST => Some(HttpMethodV1::Post),
+    Method::PUT => Some(HttpMethodV1::Put),
+    Method::PATCH => Some(HttpMethodV1::Patch),
+    Method::DELETE => Some(HttpMethodV1::Delete),
+    Method::HEAD => Some(HttpMethodV1::Head),
+    _ => None,
+  }
 }

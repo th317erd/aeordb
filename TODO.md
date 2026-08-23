@@ -1192,6 +1192,10 @@
             - [x] Prove concurrent HEAD advancement is allowed while physical-instance/regression drift fails closed, active pins exclude retirement, and all reservations/pins release after success or failure.
             - [x] Prove architecture uniqueness, run affected/broad/static/native real-file gates, update evidence, commit, and push the green landing unit.
         - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
+          - [x] P7-1c1: bind every declared and implicit Axum method to one typed runtime route witness through a single whole-router middleware, including Axum's implicit `HEAD`-for-`GET` behavior.
+          - [ ] P7-1c2: add behavior-preserving request adapters for the six route classes and one explicit inactive-v4 activation boundary; no handler may infer a root class or bypass the frozen contract.
+          - [ ] P7-1c3: freeze and integrate embedded storage, directory, query, builder, and plugin-host equivalents through the same root-operation vocabulary without routing internal maintenance reads as user namespace requests.
+          - [ ] P7-1c4: prove exact runtime/source coverage, current v3 behavior, 404/405/CORS/auth ordering, body streaming, architecture uniqueness, affected/broad/static gates, and a disposable live-server route matrix before landing and pushing.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
