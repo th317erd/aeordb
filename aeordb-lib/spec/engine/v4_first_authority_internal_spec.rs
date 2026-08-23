@@ -1,6 +1,6 @@
 use super::*;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -21,10 +21,11 @@ use crate::engine::v4::gc::{
   encode_gc_active_control,
 };
 use crate::engine::v4::gc_lifecycle::{
-  RootExpiryManifestWriteV1, RootExpiryRecordWriteV1, RootLifecycleManifestWriteV1, RootLifecycleSupportClosureBuilderV1,
-  RootLifecycleSupportLimitsV1, RootRetirementCommitWriteV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1,
-  decode_root_object_reclaim_proof_v1, decode_root_retirement_commit_v1, encode_root_expiry_manifest_v1, encode_root_expiry_record_v1,
-  encode_root_lifecycle_manifest_v1, encode_root_retirement_commit_v1,
+  RootCandidateRecordWriteV1, RootExpiryManifestWriteV1, RootExpiryRecordWriteV1, RootLifecycleManifestWriteV1,
+  RootLifecycleSupportClosureBuilderV1, RootLifecycleSupportLimitsV1, RootRetirementCommitWriteV1, decode_root_expiry_manifest_v1,
+  decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1, decode_root_retirement_commit_v1,
+  encode_root_candidate_record_v1, encode_root_expiry_manifest_v1, encode_root_expiry_record_v1, encode_root_lifecycle_manifest_v1,
+  encode_root_retirement_commit_v1,
 };
 use crate::engine::v4::gc_mark::{MarkRunCheckpointWriteV1, encode_mark_run_checkpoint};
 use crate::engine::v4::gc_quarantine::{
@@ -5806,6 +5807,328 @@ fn publish_empty_lifecycle_authority_for_database(
   manifest
 }
 
+struct PublishedPendingLifecycleV1 {
+  page: EncodedImmutableGcArtifactV1,
+  sibling_page: EncodedImmutableGcArtifactV1,
+  directory: EncodedImmutableGcArtifactV1,
+  manifest: EncodedImmutableGcArtifactV1,
+}
+
+fn publish_pending_lifecycle_authority(
+  publisher: &V4FirstAuthorityPublisher,
+  retirement_owner: &mut RetirementJournalOwnerV1,
+  algorithm: HashAlgorithm,
+  root_hash: &[u8],
+) -> PublishedPendingLifecycleV1 {
+  let database_id = [0x31; 16];
+  let generation = 5;
+  let pending_since_ms = 1_700_000_000_000;
+  let authority_root_set_digest = digest_parts(algorithm, &[b"pending lifecycle authority roots"]);
+  let admission_commit_payload_hash = digest_parts(algorithm, &[b"pending lifecycle admission"]);
+  let row = encode_root_candidate_record_v1(&RootCandidateRecordWriteV1 {
+    hash_algorithm: algorithm,
+    namespace_root_hash: root_hash,
+    reason: 1,
+    pending_since_ms,
+    first_unreachable_generation: 4,
+    last_confirmed_unreachable_generation: generation,
+    grace_at_pending_ms: 86_400_000,
+    authority_root_set_digest: &authority_root_set_digest,
+    admission_commit_payload_hash: &admission_commit_payload_hash,
+  })
+  .unwrap();
+  let sibling_root_hash = digest_parts(algorithm, &[b"pending lifecycle unselected sibling"]);
+  assert_ne!(sibling_root_hash, root_hash);
+  let sibling_row = encode_root_candidate_record_v1(&RootCandidateRecordWriteV1 {
+    hash_algorithm: algorithm,
+    namespace_root_hash: &sibling_root_hash,
+    reason: 1,
+    pending_since_ms: pending_since_ms + 1,
+    first_unreachable_generation: 4,
+    last_confirmed_unreachable_generation: generation,
+    grace_at_pending_ms: 86_400_000,
+    authority_root_set_digest: &authority_root_set_digest,
+    admission_commit_payload_hash: &admission_commit_payload_hash,
+  })
+  .unwrap();
+  let page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootCandidates,
+    database_id: &database_id,
+    catalog_id: &[0x72; 16],
+    generation,
+    page_id: 1,
+    records: &[&row],
+  })
+  .unwrap();
+  let sibling_page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootCandidates,
+    database_id: &database_id,
+    catalog_id: &[0x72; 16],
+    generation,
+    page_id: 2,
+    records: &[&sibling_row],
+  })
+  .unwrap();
+  let GcStateArtifactV1::Page(decoded_page) = decode_gc_state_artifact(&page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let GcStateArtifactV1::Page(decoded_sibling_page) = decode_gc_state_artifact(&sibling_page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let mut entries = [
+    GcStateDirectoryEntryWriteV1 {
+      lower_fence: decoded_page.lower_fence,
+      upper_fence: decoded_page.upper_fence,
+      child_hash: &page.key,
+      child_generation: decoded_page.generation,
+      live_count: u64::from(decoded_page.record_count),
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: decoded_page.logical_bytes,
+      minimum_page_id: decoded_page.page_id,
+      maximum_page_id: decoded_page.page_id,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    },
+    GcStateDirectoryEntryWriteV1 {
+      lower_fence: decoded_sibling_page.lower_fence,
+      upper_fence: decoded_sibling_page.upper_fence,
+      child_hash: &sibling_page.key,
+      child_generation: decoded_sibling_page.generation,
+      live_count: u64::from(decoded_sibling_page.record_count),
+      tombstone_count: 0,
+      page_count: 1,
+      logical_bytes: decoded_sibling_page.logical_bytes,
+      minimum_page_id: decoded_sibling_page.page_id,
+      maximum_page_id: decoded_sibling_page.page_id,
+      physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    },
+  ];
+  entries.sort_by(|left, right| left.lower_fence.cmp(right.lower_fence));
+  let directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootCandidates,
+    database_id: &database_id,
+    catalog_id: decoded_page.catalog_id,
+    generation,
+    level: 0,
+    entries: &entries,
+  })
+  .unwrap();
+  for artifact in [&page, &sibling_page, &directory] {
+    publisher
+      .publish_root_lifecycle_support_artifact(RootLifecycleSupportPublicationRequestV1 {
+        database_id: &database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_000_100,
+      })
+      .unwrap();
+  }
+  let manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation,
+    published_at_ms: 1_700_000_000_100,
+    source_complete_mark_generation: generation,
+    authority_root_set_digest: &authority_root_set_digest,
+    candidate_directory_hash: Some(&directory.key),
+    root_expiry_manifest_hash: None,
+    next_page_id: 3,
+    candidate_count: 2,
+    pending_count: 2,
+    retired_evidence_count: 0,
+    candidate_bytes: u64::try_from(row.len() + sibling_row.len()).unwrap(),
+    expiry_bytes: 0,
+  })
+  .unwrap();
+  publisher
+    .publish_immutable_gc_artifact(
+      ImmutableGcArtifactPublicationV1 {
+        kind: GcArtifactKindV1::RootLifecycleManifest,
+        database_id: &database_id,
+        artifact_key: &manifest.key,
+        value: &manifest.value,
+        minimum_timestamp_ms: 1_700_000_000_100,
+        committed_postcondition_code: "root_lifecycle_manifest_committed_postcondition",
+      },
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  let control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::RootLifecycleActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 0,
+    sequence: 1,
+    generation,
+    target_manifest_hash: &manifest.key,
+  })
+  .unwrap();
+  let outcome = publisher
+    .publish_gc_active_control(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+        encoded_control: &control,
+        publication_timestamp_ms: 1_700_000_000_100,
+        monotonic_now_ms: 1_700_000_000_100,
+      },
+      retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  assert!(matches!(outcome, GcControlPublicationOutcomeV1::Complete(_)));
+  PublishedPendingLifecycleV1 { page, sibling_page, directory, manifest }
+}
+
+fn publish_conflicting_expiry_lifecycle_authority(
+  publisher: &V4FirstAuthorityPublisher,
+  retirement_owner: &mut RetirementJournalOwnerV1,
+  root_hash: &[u8],
+  pending: &PublishedPendingLifecycleV1,
+) {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x31; 16];
+  let generation = 6;
+  let retired_at_ms = 1_700_000_200_000;
+  let retirement_commit_hash = digest_parts(algorithm, &[b"conflicting retirement commit"]);
+  let expiry_row = encode_root_expiry_record_v1(&RootExpiryRecordWriteV1 {
+    hash_algorithm: algorithm,
+    namespace_root_hash: root_hash,
+    retired_at_ms,
+    last_pending_since_ms: 1_700_000_000_000,
+    final_mark_generation: generation,
+    reason: 1,
+    state: RootExpiryStateV1::LogicallyRetired,
+    retirement_commit_hash: &retirement_commit_hash,
+    root_object_reclaim_proof_hash: None,
+    evidence_expires_at_ms: None,
+  })
+  .unwrap();
+  let expiry_page = encode_gc_state_page_v1(&GcStatePageWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id: &database_id,
+    catalog_id: &[0x73; 16],
+    generation,
+    page_id: 1,
+    records: &[&expiry_row],
+  })
+  .unwrap();
+  let GcStateArtifactV1::Page(decoded_page) = decode_gc_state_artifact(&expiry_page.value, algorithm).unwrap() else {
+    unreachable!();
+  };
+  let entries = [GcStateDirectoryEntryWriteV1 {
+    lower_fence: decoded_page.lower_fence,
+    upper_fence: decoded_page.upper_fence,
+    child_hash: &expiry_page.key,
+    child_generation: decoded_page.generation,
+    live_count: u64::from(decoded_page.record_count),
+    tombstone_count: 0,
+    page_count: 1,
+    logical_bytes: decoded_page.logical_bytes,
+    minimum_page_id: decoded_page.page_id,
+    maximum_page_id: decoded_page.page_id,
+    physical_hint: GcPhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+  }];
+  let expiry_directory = encode_gc_state_directory_v1(&GcStateDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: GcDirectoryRoleV1::RootExpiry,
+    database_id: &database_id,
+    catalog_id: decoded_page.catalog_id,
+    generation,
+    level: 0,
+    entries: &entries,
+  })
+  .unwrap();
+  for artifact in [&expiry_page, &expiry_directory] {
+    publisher
+      .publish_root_lifecycle_support_artifact(RootLifecycleSupportPublicationRequestV1 {
+        database_id: &database_id,
+        artifact,
+        publication_timestamp_ms: 1_700_000_200_001,
+      })
+      .unwrap();
+  }
+  let expiry_bytes = u64::try_from(expiry_row.len()).unwrap();
+  let expiry_manifest = encode_root_expiry_manifest_v1(&RootExpiryManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation,
+    retention_ms: 30 * 24 * 60 * 60 * 1_000,
+    optional_byte_budget: 256 * 1024 * 1024,
+    directory_root_hash: Some(&expiry_directory.key),
+    next_page_id: 2,
+    record_count: 1,
+    logical_bytes: expiry_bytes,
+    mandatory_count: 1,
+    mandatory_bytes: expiry_bytes,
+    optional_count: 0,
+    optional_bytes: 0,
+    oldest_retired_at_ms: Some(retired_at_ms),
+    newest_retired_at_ms: Some(retired_at_ms),
+  })
+  .unwrap();
+  let prior = decode_root_lifecycle_manifest_v1(&pending.manifest.value, algorithm).unwrap();
+  let lifecycle_manifest = encode_root_lifecycle_manifest_v1(&RootLifecycleManifestWriteV1 {
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    generation,
+    published_at_ms: 1_700_000_200_001,
+    source_complete_mark_generation: generation,
+    authority_root_set_digest: prior.authority_root_set_digest,
+    candidate_directory_hash: Some(&pending.directory.key),
+    root_expiry_manifest_hash: Some(&expiry_manifest.key),
+    next_page_id: prior.next_page_id,
+    candidate_count: prior.candidate_count,
+    pending_count: prior.pending_count,
+    retired_evidence_count: 1,
+    candidate_bytes: prior.candidate_bytes,
+    expiry_bytes,
+  })
+  .unwrap();
+  for (kind, artifact) in
+    [(GcArtifactKindV1::RootExpiryCatalogManifest, &expiry_manifest), (GcArtifactKindV1::RootLifecycleManifest, &lifecycle_manifest)]
+  {
+    publisher
+      .publish_immutable_gc_artifact(
+        ImmutableGcArtifactPublicationV1 {
+          kind,
+          database_id: &database_id,
+          artifact_key: &artifact.key,
+          value: &artifact.value,
+          minimum_timestamp_ms: 1_700_000_200_001,
+          committed_postcondition_code: "root_lifecycle_conflict_committed_postcondition",
+        },
+        &mut NoopFirstAuthorityDependencyObserverV1,
+      )
+      .unwrap();
+  }
+  let control = encode_gc_active_control(&GcActiveControlWriteV1 {
+    kind: GcArtifactKindV1::RootLifecycleActiveControl,
+    hash_algorithm: algorithm,
+    database_id: &database_id,
+    slot: 1,
+    sequence: 2,
+    generation,
+    target_manifest_hash: &lifecycle_manifest.key,
+  })
+  .unwrap();
+  let outcome = publisher
+    .publish_gc_active_control(
+      GcControlPublicationRequestV1 {
+        expected_control_kind: GcArtifactKindV1::RootLifecycleActiveControl,
+        encoded_control: &control,
+        publication_timestamp_ms: 1_700_000_200_001,
+        monotonic_now_ms: 1_700_000_200_001,
+      },
+      retirement_owner,
+      &mut NoopFirstAuthorityDependencyObserverV1,
+    )
+    .unwrap();
+  assert!(matches!(outcome, GcControlPublicationOutcomeV1::Complete(_)));
+}
+
 fn prepare_guarded_root_retirement(
   publisher: &mut V4FirstAuthorityPublisher,
   retirement_owner: &mut RetirementJournalOwnerV1,
@@ -6938,6 +7261,156 @@ fn root_lifecycle_and_mark_controls_share_one_kind_scoped_replacement_path() {
 }
 
 #[test]
+fn selected_root_lifecycle_point_read_is_dynamic_bounded_and_corruption_safe() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, path, _coordinator, publisher) = create_environment("root-lifecycle-point-read", None);
+  let first = publisher.publish(&request()).unwrap();
+  let captured = first.observation.selected;
+  let target_root = first.namespace_root.root_hash;
+  let observation = publisher.observe().unwrap();
+  let mut successor = observation.selected.header.clone();
+  successor.updated_at_ms += 1;
+  successor.head_hash = digest_parts(algorithm, &[b"root lifecycle point-read current head"]);
+  publisher.header_publisher.publish_inactive_slot(&publisher.file, &observation, successor).unwrap();
+
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let pending = publish_pending_lifecycle_authority(&publisher, &mut retirement_owner, algorithm, &target_root);
+
+  for configured_grace in [43_200_000, 172_800_000] {
+    assert_eq!(
+      publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, configured_grace, &cancellation, &memory).unwrap(),
+      RootLifecycleObservationV1::PendingDelete {
+        pending_since_ms: 1_700_000_000_000,
+        grace_at_pending_ms: 86_400_000,
+        current_configured_grace_ms: configured_grace,
+      },
+    );
+    let snapshot = memory.snapshot().unwrap();
+    let query = snapshot.owner(MemoryOwner::Query).unwrap();
+    assert_eq!(query.reserved_bytes, 0);
+    assert_eq!(query.active_reservations, 0);
+  }
+  assert_eq!(
+    publisher
+      .observe_root_lifecycle_at_captured_header(
+        &captured,
+        &digest_parts(algorithm, &[b"admitted root absent from selected lifecycle state"]),
+        86_400_000,
+        &cancellation,
+        &memory,
+      )
+      .unwrap(),
+    RootLifecycleObservationV1::Retained,
+  );
+  assert!(publisher.locator(&pending.manifest.key).unwrap().is_some());
+
+  let constrained = MemoryCoordinator::new(MemoryPolicy::new(128 * 1024, 256 * 1024, 1, 64 * 1024).unwrap());
+  assert_eq!(
+    publisher
+      .observe_root_lifecycle_at_captured_header(&captured, &target_root, 86_400_000, &cancellation, &constrained)
+      .unwrap_err()
+      .code(),
+    "root_lifecycle_read_memory",
+  );
+  assert_eq!(constrained.snapshot().unwrap().reserved_bytes, 0);
+
+  let locator = publisher.locator(&pending.page.key).unwrap().unwrap();
+  let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+  let final_offset = locator.offset + u64::from(locator.total_length) - 1;
+  file.seek(SeekFrom::Start(final_offset)).unwrap();
+  let mut original = [0u8; 1];
+  file.read_exact(&mut original).unwrap();
+  file.seek(SeekFrom::Start(final_offset)).unwrap();
+  file.write_all(&[original[0] ^ 0x5a]).unwrap();
+  file.sync_all().unwrap();
+
+  let error = publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, 86_400_000, &cancellation, &memory).unwrap_err();
+  assert_ne!(error.code(), "root_lifecycle_read_memory");
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  file.seek(SeekFrom::Start(final_offset)).unwrap();
+  file.write_all(&original).unwrap();
+  file.sync_all().unwrap();
+  assert!(matches!(
+    publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, 86_400_000, &cancellation, &memory).unwrap(),
+    RootLifecycleObservationV1::PendingDelete { .. }
+  ));
+
+  let sibling_locator = publisher.locator(&pending.sibling_page.key).unwrap().unwrap();
+  let sibling_final_offset = sibling_locator.offset + u64::from(sibling_locator.total_length) - 1;
+  file.seek(SeekFrom::Start(sibling_final_offset)).unwrap();
+  let mut sibling_original = [0u8; 1];
+  file.read_exact(&mut sibling_original).unwrap();
+  file.seek(SeekFrom::Start(sibling_final_offset)).unwrap();
+  file.write_all(&[sibling_original[0] ^ 0xa5]).unwrap();
+  file.sync_all().unwrap();
+  assert!(matches!(
+    publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, 86_400_000, &cancellation, &memory).unwrap(),
+    RootLifecycleObservationV1::PendingDelete { .. }
+  ));
+  file.seek(SeekFrom::Start(sibling_final_offset)).unwrap();
+  file.write_all(&sibling_original).unwrap();
+  file.sync_all().unwrap();
+
+  publish_conflicting_expiry_lifecycle_authority(&publisher, &mut retirement_owner, &target_root, &pending);
+  assert_eq!(
+    publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, 86_400_000, &cancellation, &memory).unwrap_err().code(),
+    "root_lifecycle_read_conflict",
+  );
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn selected_root_lifecycle_point_read_supports_sha512_authority() {
+  let algorithm = HashAlgorithm::Sha512;
+  let (_directory, _path, _coordinator, publisher) =
+    create_environment_for_algorithm_at_kv_stage("root-lifecycle-point-read-sha512", None, [0x31; 16], algorithm, 0);
+  let first = publisher.publish(&request_for_database_and_algorithm([0x31; 16], algorithm)).unwrap();
+  let captured = first.observation.selected;
+  let target_root = first.namespace_root.root_hash;
+  let observation = publisher.observe().unwrap();
+  let mut successor = observation.selected.header.clone();
+  successor.updated_at_ms += 1;
+  successor.head_hash = digest_parts(algorithm, &[b"sha512 lifecycle successor"]);
+  publisher.header_publisher.publish_inactive_slot(&publisher.file, &observation, successor).unwrap();
+
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(32 * 1024 * 1024, 64 * 1024 * 1024, 1, 8 * 1024 * 1024).unwrap()));
+  let cancellation = CancellationToken::new();
+  let mut retirement_owner = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    [0x31; 16],
+    1,
+    401,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  let _pending = publish_pending_lifecycle_authority(&publisher, &mut retirement_owner, algorithm, &target_root);
+
+  assert_eq!(
+    publisher.observe_root_lifecycle_at_captured_header(&captured, &target_root, 172_800_000, &cancellation, &memory).unwrap(),
+    RootLifecycleObservationV1::PendingDelete {
+      pending_since_ms: 1_700_000_000_000,
+      grace_at_pending_ms: 86_400_000,
+      current_configured_grace_ms: 172_800_000,
+    },
+  );
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
 fn guarded_root_retirement_selects_control_last_and_exact_retry_does_not_recheck_stale_authority() {
   let (_directory, path, coordinator, mut publisher) = create_environment("guarded-root-retirement", None);
   let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(128 * 1024 * 1024, 192 * 1024 * 1024, 1, 32 * 1024 * 1024).unwrap()));
@@ -6983,6 +7456,19 @@ fn guarded_root_retirement_selects_control_last_and_exact_retry_does_not_recheck
   assert!(std::fs::metadata(&path).unwrap().len() >= file_length_before);
   assert_eq!(retirement_owner.status().pending_records, 0);
   assert_eq!(retirement_owner.status().durable_records, 1);
+  assert_eq!(
+    publisher
+      .observe_root_lifecycle_at_captured_header(
+        &receipt.observation.selected,
+        &prepared.target_root_hash,
+        172_800_000,
+        &cancellation,
+        &memory,
+      )
+      .unwrap(),
+    RootLifecycleObservationV1::LogicallyRetired,
+  );
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 
   let before_retry = publisher.observe().unwrap();
   let before_retry_frontier = coordinator.snapshot().unwrap().hard_frontier;
@@ -7194,6 +7680,19 @@ fn guarded_root_reclaim_selects_control_last_without_removing_any_physical_entit
   assert!(publisher.locator(&reclaim.lifecycle_manifest.key).unwrap().is_some());
   assert!(publisher.locator(&reclaim.lifecycle_control.key).unwrap().is_some());
   assert!(publisher.observe().unwrap().selected.header.slot_sequence > before.selected.header.slot_sequence);
+  assert_eq!(
+    publisher
+      .observe_root_lifecycle_at_captured_header(
+        &receipt.observation.selected,
+        &retirement.target_root_hash,
+        172_800_000,
+        &cancellation,
+        &memory,
+      )
+      .unwrap(),
+    RootLifecycleObservationV1::PhysicallyReclaimed,
+  );
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 
   let before_retry = publisher.observe().unwrap();
   let before_retry_frontier = coordinator.snapshot().unwrap().hard_frontier;

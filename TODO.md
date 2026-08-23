@@ -1168,7 +1168,12 @@
         - [x] P7-1a: add the compile-red `root_api_reference_spec`, then implement the 95-registration/124-method contract plus pure selector/response/error model without activating service behavior.
         - [ ] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
           - [x] P7-1b1: add one captured-header first-authority reader for exact immutable namespace/semantic/admission closure at either frozen hash width.
-          - [ ] P7-1b2: add bounded selected root-lifecycle lookup with dynamic grace, cancellation, corruption, and no-state baseline proof.
+          - [x] P7-1b2: add bounded selected root-lifecycle lookup with dynamic grace, cancellation, corruption, and no-state baseline proof.
+            - [x] Prove current HEAD is always live and both lifecycle controls absent is the retained pre-lifecycle baseline.
+            - [x] Select one complete A/B lifecycle manifest and point-walk only the requested root through candidate/expiry fences.
+            - [x] Classify retained, pending-delete, logically retired, and physically reclaimed roots with dynamic configured grace.
+            - [x] Reserve query memory before selector/entity allocation and release it exactly on success, refusal, corruption, and cancellation.
+            - [x] Reject malformed, incomplete, ambiguous, cross-database, and candidate/expiry-conflicting authority without reading sibling subtrees.
           - [ ] P7-1b3: extract one shared permission evaluator and implement current-authorization plus selected-root restrictive intersection without grant expansion.
           - [ ] P7-1b4: prove the combined native resolver against real v4 files, concurrent authority movement, pin lifetime, concealment, pressure, and architecture uniqueness.
         - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.

@@ -13,6 +13,8 @@ use aeordb::engine::v4::first_authority::{
 };
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, decode_namespace_root, encode_semantic_state_object};
+use aeordb::engine::v4::read_view::RootLifecycleObservationV1;
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::{DiskKVStore, HashAlgorithm};
 use tokio_util::sync::CancellationToken;
 
@@ -226,4 +228,45 @@ fn captured_header_reader_never_exposes_entities_published_after_its_high_water(
     .load_namespace_authority_at_captured_header(&captured_first, &successor.namespace_root.root_hash, &CancellationToken::new())
     .unwrap_err();
   assert_eq!(error.code(), "unreserved_write_sequence");
+}
+
+#[test]
+fn selected_lifecycle_point_reader_treats_current_head_as_live_and_absent_controls_as_retained() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, _path, publisher) = publisher(algorithm);
+    let receipt = publisher.publish(&first_request(algorithm)).unwrap();
+    let captured = receipt.observation.selected;
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(8 * 1024 * 1024, 16 * 1024 * 1024, 1, 1024 * 1024).unwrap());
+    let cancellation = CancellationToken::new();
+
+    assert_eq!(
+      publisher
+        .observe_root_lifecycle_at_captured_header(&captured, &receipt.namespace_root.root_hash, 86_400_000, &cancellation, &memory,)
+        .unwrap(),
+      RootLifecycleObservationV1::Live,
+    );
+    assert_eq!(
+      publisher
+        .observe_root_lifecycle_at_captured_header(
+          &captured,
+          &digest_parts(algorithm, &[b"admitted historical root without lifecycle state"]),
+          86_400_000,
+          &cancellation,
+          &memory,
+        )
+        .unwrap(),
+      RootLifecycleObservationV1::Retained,
+    );
+
+    let canceled = CancellationToken::new();
+    canceled.cancel();
+    assert_eq!(
+      publisher
+        .observe_root_lifecycle_at_captured_header(&captured, &receipt.namespace_root.root_hash, 86_400_000, &canceled, &memory,)
+        .unwrap_err()
+        .code(),
+      "root_lifecycle_read_canceled",
+    );
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
 }

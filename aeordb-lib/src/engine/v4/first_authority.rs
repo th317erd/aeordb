@@ -54,8 +54,9 @@ use super::gc_retirement::{
   RetirementJournalReplacementCoordinatorV1, RetirementJournalReplacementV1, RetirementJournalSinkErrorV1,
 };
 use super::gc_state::{
-  GcDirectoryRoleV1, GcStateArtifactV1, RetirementReasonV1, decode_gc_state_artifact, decode_retirement_journal_segment_v1,
-  retirement_journal_records_v1,
+  GcDirectoryRoleV1, GcStateArtifactV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, RetirementReasonV1, RootExpiryStateV1,
+  decode_gc_state_artifact, decode_retirement_journal_segment_v1, decode_root_candidate_record_v1, decode_root_expiry_record_v1,
+  retirement_journal_records_v1, validate_gc_directory_child, validate_gc_directory_page,
 };
 use super::gc_mark::{
   GcMarkArtifactV1, MARK_CHECKPOINT_VALUE_MAX, MarkResumeContextV1, decode_gc_mark_artifact, validate_mark_checkpoint_resume_context,
@@ -98,7 +99,8 @@ use super::gc_void_settlement::{
 };
 use super::gc_lifecycle::{
   RootLifecycleSupportClosureV1, decode_root_expiry_manifest_v1, decode_root_lifecycle_manifest_v1, decode_root_object_reclaim_proof_v1,
-  decode_root_retirement_commit_v1, validate_root_lifecycle_expiry_manifest,
+  decode_root_retirement_commit_v1, validate_root_expiry_manifest_directory, validate_root_lifecycle_candidate_directory,
+  validate_root_lifecycle_expiry_manifest,
 };
 use super::gc_root_reclaim::RootExpiryRetentionPermitV1;
 use super::gc_root_transition::RootRetirementIntentV1;
@@ -107,7 +109,7 @@ use super::namespace::{
   decode_namespace_root_entity, decode_namespace_tree_root_v0, decode_semantic_object, encode_namespace_root,
 };
 use super::reader::FormatError;
-use super::read_view::{RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
+use super::read_view::{RootLifecycleObservationV1, RootPinCoordinatorErrorV1, RootReadPinCoordinatorV1};
 use super::root_authority::{
   ImmutableNamespaceAuthorityInputV1, ImmutableNamespaceAuthorityV1, RootAdmissionCommitV1, RootAuthorityKindV1, RootPublicationPrepareV1,
   decode_immutable_namespace_authority, decode_root_admission_commit, decode_root_publication_prepare,
@@ -124,6 +126,8 @@ const IMMUTABLE_ENTITY_BATCH_COUNT_CAP: usize = DiskKVStore::MAX_ATOMIC_VISIBILI
 const IMMUTABLE_ENTITY_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
 const INDEX_ARTIFACT_BATCH_COUNT_CAP: usize = 4_097;
 const INDEX_ARTIFACT_BATCH_BYTES_CAP: usize = 64 * 1024 * 1024;
+const ROOT_LIFECYCLE_SELECTOR_ACCOUNTED_BYTES: u64 = 3 * 1024 * 1024;
+const ROOT_LIFECYCLE_QUERY_ENTITY_OVERHEAD_BYTES: u64 = 4 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedNamespaceTreeV0 {
@@ -2021,6 +2025,72 @@ impl From<MemoryCoordinatorError> for MarkRunCheckpointSelectionErrorV1 {
 }
 
 #[derive(Debug)]
+pub enum RootLifecyclePointReadErrorV1 {
+  Invalid { code: &'static str, message: String },
+  Authority(FirstAuthorityPublicationErrorV1),
+  Format(FormatError),
+  Memory(MemoryCoordinatorError),
+  Canceled,
+}
+
+impl RootLifecyclePointReadErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Invalid { code, .. } => code,
+      Self::Authority(source) => source.code(),
+      Self::Format(source) => source.code(),
+      Self::Memory(_) => "root_lifecycle_read_memory",
+      Self::Canceled => "root_lifecycle_read_canceled",
+    }
+  }
+
+  fn invalid(code: &'static str, message: impl Into<String>) -> Self {
+    Self::Invalid { code, message: message.into() }
+  }
+}
+
+impl Display for RootLifecyclePointReadErrorV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Authority(source) => write!(formatter, "root-lifecycle authority read failed: {source}"),
+      Self::Format(source) => write!(formatter, "root-lifecycle format is corrupt: {source}"),
+      Self::Memory(source) => write!(formatter, "root-lifecycle query memory admission failed: {source}"),
+      Self::Canceled => formatter.write_str("root-lifecycle point read was canceled"),
+    }
+  }
+}
+
+impl Error for RootLifecyclePointReadErrorV1 {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    match self {
+      Self::Authority(source) => Some(source),
+      Self::Format(source) => Some(source),
+      Self::Memory(source) => Some(source),
+      Self::Invalid { .. } | Self::Canceled => None,
+    }
+  }
+}
+
+impl From<FirstAuthorityPublicationErrorV1> for RootLifecyclePointReadErrorV1 {
+  fn from(source: FirstAuthorityPublicationErrorV1) -> Self {
+    Self::Authority(source)
+  }
+}
+
+impl From<FormatError> for RootLifecyclePointReadErrorV1 {
+  fn from(source: FormatError) -> Self {
+    Self::Format(source)
+  }
+}
+
+impl From<MemoryCoordinatorError> for RootLifecyclePointReadErrorV1 {
+  fn from(source: MemoryCoordinatorError) -> Self {
+    Self::Memory(source)
+  }
+}
+
+#[derive(Debug)]
 pub enum FirstAuthorityPublicationErrorV1 {
   Invalid { code: &'static str, message: String },
   Committed { code: &'static str, message: String, receipt: Box<FirstAuthorityPublicationReceiptV1> },
@@ -3075,6 +3145,51 @@ impl V4FirstAuthorityPublisher {
     }
     ensure_captured_authority_not_cancelled(cancellation)?;
     Ok(Some(authority))
+  }
+
+  /// Observe the current lifecycle state for one already-admitted namespace
+  /// root. The immutable root authority remains bound to `captured`, while
+  /// lifecycle state is intentionally selected from the current header.
+  pub fn observe_root_lifecycle_at_captured_header(
+    &self,
+    captured: &SelectedDatabaseHeaderV4,
+    root_hash: &[u8],
+    current_configured_grace_ms: u64,
+    cancellation: &CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<RootLifecycleObservationV1, RootLifecyclePointReadErrorV1> {
+    ensure_root_lifecycle_read_not_cancelled(cancellation)?;
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      RootLifecyclePointReadErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
+    })?;
+    ensure_root_lifecycle_read_not_cancelled(cancellation)?;
+
+    let current = self.observe()?;
+    validate_captured_authority_header(captured, &current.selected, root_hash)?;
+    if current.selected.header.head_hash == root_hash {
+      return Ok(RootLifecycleObservationV1::Live);
+    }
+    ensure_root_lifecycle_read_not_cancelled(cancellation)?;
+
+    let kv = self.lock_kv()?;
+    let header = &current.selected.header;
+    validate_kv_header_alignment(&kv, header)?;
+    let selector_memory = memory.reserve(MemoryOwner::Query, ROOT_LIFECYCLE_SELECTOR_ACCOUNTED_BYTES, AdmissionClass::Workload)?;
+    let selected = select_root_lifecycle_control_optional(&self.file, &kv, header).map_err(|source| {
+      RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_selector",
+        format!("selected root-lifecycle control is unavailable ({}): {source}", source.code()),
+      )
+    })?;
+    drop(selector_memory);
+    let Some(selected) = selected else {
+      return Ok(RootLifecycleObservationV1::Retained);
+    };
+    ensure_root_lifecycle_read_not_cancelled(cancellation)?;
+
+    let reader = RootLifecyclePointReadContextV1 { file: &self.file, kv: &kv, header, memory, cancellation };
+    reader.observe(&selected.target_manifest_hash, root_hash, current_configured_grace_ms)
   }
 
   pub fn load_index_artifact(&self, key: &[u8], expected_value_length: u64) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
@@ -11515,6 +11630,288 @@ impl RootLifecycleSupportReadContextV1<'_> {
   }
 }
 
+struct ChargedRootLifecycleQueryEntityV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+struct RootLifecyclePointReadContextV1<'a> {
+  file: &'a File,
+  kv: &'a DiskKVStore,
+  header: &'a DatabaseHeaderV4,
+  memory: &'a MemoryCoordinator,
+  cancellation: &'a CancellationToken,
+}
+
+impl RootLifecyclePointReadContextV1<'_> {
+  fn observe(
+    &self,
+    lifecycle_manifest_hash: &[u8],
+    root_hash: &[u8],
+    current_configured_grace_ms: u64,
+  ) -> Result<RootLifecycleObservationV1, RootLifecyclePointReadErrorV1> {
+    let lifecycle_entity = self.load_entity(lifecycle_manifest_hash, GcArtifactKindV1::RootLifecycleManifest)?;
+    let lifecycle_whole = decode_whole_entity(&lifecycle_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let lifecycle = decode_root_lifecycle_manifest_v1(lifecycle_whole.stored_value, self.header.hash_algorithm)?;
+    if lifecycle.database_id != self.header.database_id || lifecycle.key != lifecycle_manifest_hash {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_manifest_identity",
+        "selected root-lifecycle manifest identity differs from its database or control target",
+      ));
+    }
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+
+    let candidate = match lifecycle.candidate_directory_hash {
+      Some(directory_hash) => self
+        .find_root_record(directory_hash, GcDirectoryRoleV1::RootCandidates, root_hash, |directory| {
+          validate_root_lifecycle_candidate_directory(&lifecycle, directory)
+        })?
+        .map(|row| {
+          let record = decode_root_candidate_record_v1(&row, self.header.hash_algorithm)?;
+          Ok::<_, RootLifecyclePointReadErrorV1>((record.pending_since_ms, record.grace_at_pending_ms))
+        })
+        .transpose()?,
+      None => None,
+    };
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+
+    let expiry = match lifecycle.root_expiry_manifest_hash {
+      Some(expiry_manifest_hash) => {
+        let expiry_entity = self.load_entity(expiry_manifest_hash, GcArtifactKindV1::RootExpiryCatalogManifest)?;
+        let expiry_whole = decode_whole_entity(&expiry_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+        let expiry_manifest = decode_root_expiry_manifest_v1(expiry_whole.stored_value, self.header.hash_algorithm)?;
+        if expiry_manifest.database_id != self.header.database_id || expiry_manifest.key != expiry_manifest_hash {
+          return Err(RootLifecyclePointReadErrorV1::invalid(
+            "root_lifecycle_read_expiry_manifest_identity",
+            "selected root-expiry manifest identity differs from its database or lifecycle target",
+          ));
+        }
+        validate_root_lifecycle_expiry_manifest(&lifecycle, &expiry_manifest)?;
+        match expiry_manifest.directory_root_hash {
+          Some(directory_hash) => self
+            .find_root_record(directory_hash, GcDirectoryRoleV1::RootExpiry, root_hash, |directory| {
+              validate_root_expiry_manifest_directory(&expiry_manifest, directory)
+            })?
+            .map(|row| decode_root_expiry_record_v1(&row, self.header.hash_algorithm).map(|record| record.state))
+            .transpose()?,
+          None => None,
+        }
+      }
+      None => None,
+    };
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+
+    match (candidate, expiry) {
+      (Some(_), Some(_)) => Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_conflict",
+        "one namespace root appears in both candidate and expiry lifecycle state",
+      )),
+      (Some((pending_since_ms, grace_at_pending_ms)), None) => {
+        Ok(RootLifecycleObservationV1::PendingDelete { pending_since_ms, grace_at_pending_ms, current_configured_grace_ms })
+      }
+      (None, Some(RootExpiryStateV1::LogicallyRetired)) => Ok(RootLifecycleObservationV1::LogicallyRetired),
+      (None, Some(RootExpiryStateV1::PhysicallyReclaimed)) => Ok(RootLifecycleObservationV1::PhysicallyReclaimed),
+      (None, None) => Ok(RootLifecycleObservationV1::Retained),
+    }
+  }
+
+  fn find_root_record(
+    &self,
+    directory_hash: &[u8],
+    role: GcDirectoryRoleV1,
+    root_hash: &[u8],
+    validate_root: impl FnOnce(&GcStateDirectoryV1<'_>) -> Result<(), FormatError>,
+  ) -> Result<Option<Vec<u8>>, RootLifecyclePointReadErrorV1> {
+    let mut directory_entity = self.load_entity(directory_hash, GcArtifactKindV1::GcArtifactDirectoryNode)?;
+    let mut validate_root = Some(validate_root);
+    for depth in 0..=16 {
+      ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+      let whole = decode_whole_entity(&directory_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+      let GcStateArtifactV1::Directory(directory) = decode_gc_state_artifact(whole.stored_value, self.header.hash_algorithm)? else {
+        return Err(RootLifecyclePointReadErrorV1::invalid(
+          "root_lifecycle_read_directory_kind",
+          "root-lifecycle directory key resolves to another GC artifact kind",
+        ));
+      };
+      if directory.role != role || directory.database_id != self.header.database_id {
+        return Err(RootLifecyclePointReadErrorV1::invalid(
+          "root_lifecycle_read_directory_identity",
+          "root-lifecycle directory role or database differs from its selected path",
+        ));
+      }
+      if depth == 0 {
+        if directory.key != directory_hash {
+          return Err(RootLifecyclePointReadErrorV1::invalid(
+            "root_lifecycle_read_directory_identity",
+            "root-lifecycle root directory differs from its selected manifest target",
+          ));
+        }
+        validate_root.take().ok_or_else(|| {
+          RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_internal", "root directory validator was already consumed")
+        })?(&directory)?;
+      }
+      ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+      let Some(descriptor) = root_lifecycle_descriptor_for(&directory, root_hash) else {
+        return Ok(None);
+      };
+      if directory.level == 0 {
+        return self.find_root_record_in_page(&directory, descriptor, root_hash);
+      }
+      let child_entity = self.load_entity(descriptor.child_hash, GcArtifactKindV1::GcArtifactDirectoryNode)?;
+      let child_whole = decode_whole_entity(&child_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+      let GcStateArtifactV1::Directory(child) = decode_gc_state_artifact(child_whole.stored_value, self.header.hash_algorithm)? else {
+        return Err(RootLifecyclePointReadErrorV1::invalid(
+          "root_lifecycle_read_directory_kind",
+          "root-lifecycle child directory key resolves to another GC artifact kind",
+        ));
+      };
+      validate_gc_directory_child(&directory, &child)?;
+      directory_entity = child_entity;
+    }
+    Err(RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_depth", "root-lifecycle directory path exceeds the frozen depth bound"))
+  }
+
+  fn find_root_record_in_page(
+    &self,
+    directory: &GcStateDirectoryV1<'_>,
+    descriptor: &GcStateDirectoryEntryV1<'_>,
+    root_hash: &[u8],
+  ) -> Result<Option<Vec<u8>>, RootLifecyclePointReadErrorV1> {
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+    let kind = match directory.role {
+      GcDirectoryRoleV1::RootCandidates => GcArtifactKindV1::RootCandidatePage,
+      GcDirectoryRoleV1::RootExpiry => GcArtifactKindV1::RootExpiryPage,
+      _ => {
+        return Err(RootLifecyclePointReadErrorV1::invalid(
+          "root_lifecycle_read_page_role",
+          "root-lifecycle point lookup reached a non-lifecycle page role",
+        ));
+      }
+    };
+    let page_entity = self.load_entity(descriptor.child_hash, kind)?;
+    let whole = decode_whole_entity(&page_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    let GcStateArtifactV1::Page(page) = decode_gc_state_artifact(whole.stored_value, self.header.hash_algorithm)? else {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_page_kind",
+        "root-lifecycle page key resolves to another GC artifact kind",
+      ));
+    };
+    validate_gc_directory_page(directory, &page)?;
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+
+    let count = usize::try_from(page.record_count).map_err(|error| {
+      RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_page_count", format!("page record count exceeds usize: {error}"))
+    })?;
+    let row_length = page
+      .records
+      .len()
+      .checked_div(count)
+      .ok_or_else(|| RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_page_count", "root-lifecycle page has zero records"))?;
+    let hash_width = self.header.hash_algorithm.hash_length();
+    let mut low = 0usize;
+    let mut high = count;
+    while low < high {
+      ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+      let middle = low + (high - low) / 2;
+      let start = middle
+        .checked_mul(row_length)
+        .ok_or_else(|| RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_page_index", "root-lifecycle page index overflowed"))?;
+      let row = &page.records[start..start + row_length];
+      match row[..hash_width].cmp(root_hash) {
+        std::cmp::Ordering::Less => low = middle + 1,
+        std::cmp::Ordering::Greater => high = middle,
+        std::cmp::Ordering::Equal => return Ok(Some(row.to_vec())),
+      }
+    }
+    Ok(None)
+  }
+
+  fn load_entity(
+    &self,
+    key: &[u8],
+    expected_kind: GcArtifactKindV1,
+  ) -> Result<ChargedRootLifecycleQueryEntityV1, RootLifecyclePointReadErrorV1> {
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+    let Some(locator) = self.kv.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_missing",
+        format!("root-lifecycle artifact {} is absent", hex::encode(key)),
+      ));
+    };
+    if locator.type_flags != kv_tag::GC_ARTIFACT {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_collision",
+        "root-lifecycle artifact key resolves to another KV role",
+      ));
+    }
+    let maximum_value_length = expected_kind.immutable_maximum_encoded_length().ok_or_else(|| {
+      RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_kind", "requested root-lifecycle role has no immutable bound")
+    })?;
+    let maximum_entity_length = checked_whole_entity_encoded_length(self.header.hash_algorithm, key.len(), maximum_value_length)?;
+    let locator_length = usize::try_from(locator.total_length).map_err(|error| {
+      RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_length", format!("root-lifecycle locator length exceeds usize: {error}"))
+    })?;
+    if locator_length > maximum_entity_length {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_length",
+        format!("root-lifecycle entity length {locator_length} exceeds its {maximum_entity_length}-byte role cap"),
+      ));
+    }
+    let multiplier = if expected_kind == GcArtifactKindV1::GcArtifactDirectoryNode { 2 } else { 1 };
+    let locator_length_u64 = u64::try_from(locator_length).map_err(|error| {
+      RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_length",
+        format!("root-lifecycle locator length cannot be accounted: {error}"),
+      )
+    })?;
+    let accounted = locator_length_u64
+      .checked_mul(multiplier)
+      .and_then(|length| length.checked_add(ROOT_LIFECYCLE_QUERY_ENTITY_OVERHEAD_BYTES))
+      .ok_or_else(|| RootLifecyclePointReadErrorV1::invalid("root_lifecycle_read_length", "query memory accounting overflowed"))?;
+    let reservation = self.memory.reserve(MemoryOwner::Query, accounted, AdmissionClass::Workload)?;
+    let bytes =
+      read_entity_bounded(self.file, self.kv, key, maximum_entity_length, self.header.write_sequence_high_water)?.ok_or_else(|| {
+        RootLifecyclePointReadErrorV1::invalid(
+          "root_lifecycle_read_missing",
+          format!("root-lifecycle artifact {} disappeared", hex::encode(key)),
+        )
+      })?;
+    ensure_root_lifecycle_read_not_cancelled(self.cancellation)?;
+    let entity = decode_whole_entity(&bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
+    if entity.entry_type != EntryTypeV4::GcArtifact
+      || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != key
+    {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_representation",
+        "root-lifecycle artifact is not one canonical system GC WholeEntity",
+      ));
+    }
+    let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+    if envelope.kind != expected_kind {
+      return Err(RootLifecyclePointReadErrorV1::invalid(
+        "root_lifecycle_read_kind",
+        "root-lifecycle artifact kind differs from its selected directory role",
+      ));
+    }
+    Ok(ChargedRootLifecycleQueryEntityV1 { bytes, _memory: reservation })
+  }
+}
+
+fn root_lifecycle_descriptor_for<'a>(directory: &'a GcStateDirectoryV1<'a>, root_hash: &[u8]) -> Option<&'a GcStateDirectoryEntryV1<'a>> {
+  let candidate = directory.entries.partition_point(|entry| entry.upper_fence < root_hash);
+  directory.entries.get(candidate).filter(|entry| entry.lower_fence <= root_hash)
+}
+
+fn ensure_root_lifecycle_read_not_cancelled(cancellation: &CancellationToken) -> Result<(), RootLifecyclePointReadErrorV1> {
+  if cancellation.is_cancelled() {
+    Err(RootLifecyclePointReadErrorV1::Canceled)
+  } else {
+    Ok(())
+  }
+}
+
 fn root_retirement_support_error(source: super::gc_lifecycle::RootLifecycleSupportClosureErrorV1) -> RootRetirementPublicationErrorV1 {
   RootRetirementPublicationErrorV1::Invalid { code: source.code(), message: source.to_string() }
 }
@@ -12107,11 +12504,24 @@ fn select_root_lifecycle_control(
   kv: &DiskKVStore,
   header: &DatabaseHeaderV4,
 ) -> Result<SelectedRootLifecycleControlV1, RootRetirementPublicationErrorV1> {
+  select_root_lifecycle_control_optional(file, kv, header)?.ok_or_else(|| {
+    RootRetirementPublicationErrorV1::invalid("root_retirement_lifecycle_unavailable", "no root-lifecycle A/B control has been published")
+  })
+}
+
+fn select_root_lifecycle_control_optional(
+  file: &File,
+  kv: &DiskKVStore,
+  header: &DatabaseHeaderV4,
+) -> Result<Option<SelectedRootLifecycleControlV1>, RootRetirementPublicationErrorV1> {
   let keys = gc_control_keys(header.hash_algorithm, GcArtifactKindV1::RootLifecycleActiveControl, &header.database_id)?;
   let controls = [
     load_gc_control_entity(file, kv, GcArtifactKindV1::RootLifecycleActiveControl, &keys[0], header)?,
     load_gc_control_entity(file, kv, GcArtifactKindV1::RootLifecycleActiveControl, &keys[1], header)?,
   ];
+  if controls.iter().all(Option::is_none) {
+    return Ok(None);
+  }
   let closure_valid = [
     match &controls[0] {
       Some(control) => root_lifecycle_manifest_is_present(file, kv, header, &control.target_manifest_hash)?,
@@ -12141,10 +12551,10 @@ fn select_root_lifecycle_control(
   let stored = controls[usize::from(selected_slot)].as_ref().ok_or_else(|| {
     RootRetirementPublicationErrorV1::invalid("root_retirement_lifecycle_internal", "selected lifecycle control slot is absent")
   })?;
-  Ok(SelectedRootLifecycleControlV1 {
+  Ok(Some(SelectedRootLifecycleControlV1 {
     stored_value: stored.stored_value.clone(),
     target_manifest_hash: stored.target_manifest_hash.clone(),
-  })
+  }))
 }
 
 fn root_lifecycle_manifest_is_present(
