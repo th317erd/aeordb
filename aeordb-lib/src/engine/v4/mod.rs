@@ -121,6 +121,7 @@ pub mod position;
 pub mod position_order;
 pub mod position_resolver;
 pub(crate) mod private_workspace;
+pub mod query_planner;
 pub mod read_view;
 pub mod read_view_authorization;
 pub mod read_view_native;

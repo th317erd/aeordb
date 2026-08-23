@@ -727,6 +727,10 @@ name = "v4_position_resolution_spec"
 path = "spec/engine/v4_position_resolution_spec.rs"
 
 [[test]]
+name = "v4_query_planner_spec"
+path = "spec/engine/v4_query_planner_spec.rs"
+
+[[test]]
 name = "v4_active_pointer_spec"
 path = "spec/engine/v4_active_pointer_spec.rs"
 

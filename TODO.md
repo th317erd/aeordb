@@ -1224,6 +1224,15 @@
           - [x] Fail closed with stable invalid-position, root/order mismatch, historical-unavailable, resource, corruption, and cancellation classes without route, storage, or legacy-query activation.
           - [x] Prove both hash widths, every route shape, aggregate synthetic identities, preliminary no-I/O failures, absent/stale/forged positions, dishonest sources, pressure, and cancellation against an independent source model.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
+        - [x] P7-3a: freeze the bounded typed query AST, selected-definition literal compiler, conservative coordinate spans, measured-cost planner, and storage-neutral EXPLAIN model.
+          - [x] Add a compile-red independent planner target covering exact typed coercion, aliases, AST/literal bounds, operation closure, range widening, coverage truth, and measured driver choice.
+          - [x] Compile every literal through the selected root's exact ValueStore/FieldIndex definitions; retain `json_query_value_to_bytes` only in v0 compatibility territory.
+          - [x] Represent complete, partial-candidate, degraded, no-compatible, and historical-unavailable coverage without allowing a candidate or hint to claim result authority.
+          - [x] Select drivers from bounded page/posting/cardinality/coverage/fallback estimates, with stable authorization-safe logical diagnostics and no physical details.
+        - [ ] P7-3b: implement one shared bounded native selected-root namespace reader for FileKey/revision/path rows, authoritative source values, and position universes.
+        - [ ] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.
+        - [ ] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
+        - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
