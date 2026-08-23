@@ -12,7 +12,8 @@ use super::index_maintenance_scan::{
 use super::index_producer_collector::{CollectedIndexProducerReportV1, IndexParserExecutorV1};
 use super::index_producer_coordinator::{
   IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorV1, IndexProducerLeaseV1,
-  IndexProducerMaintenanceDocumentRequestV1, IndexProducerMaintenanceProgressV1, IndexProducerReportV1, IndexProducerSpillStoreV1,
+  IndexProducerMaintenanceDocumentRequestV1, IndexProducerMaintenanceProgressV1, IndexProducerReconcileProgressV1,
+  IndexProducerReconcileRecordRequestV1, IndexProducerReportV1, IndexProducerSpillStoreV1,
 };
 use super::index_producer_executor::{IndexProducerExecutionErrorV1, IndexProducerExecutionInputV1, IndexProducerExecutorV1};
 use super::index_producer_journal_source::IndexProducerJournalReadErrorClassV1;
@@ -54,6 +55,15 @@ pub(crate) struct IndexProducerMaintenancePageRequestV1<'request> {
   pub is_cancelled: &'request dyn Fn() -> bool,
 }
 
+pub(crate) struct IndexProducerReconcilePageRequestV1<'request> {
+  pub lease: &'request IndexProducerLeaseV1,
+  pub processed_records: u32,
+  pub complete: bool,
+  pub record_count: u32,
+  pub now_ms: u64,
+  pub is_cancelled: &'request dyn Fn() -> bool,
+}
+
 pub(crate) struct IndexProducerCompactionRetryRequestV1<'request> {
   pub lease: &'request IndexProducerLeaseV1,
   pub source: IndexRuntimeCompactionErrorV1,
@@ -68,6 +78,8 @@ pub enum IndexProducerWorkerOutcomeV1 {
   ContentOnly { semantic_state_root: Vec<u8>, completion: IndexProducerCompletionV1 },
   SourceRetry { source: IndexProducerSourceErrorV1, completion: IndexProducerCompletionV1 },
   MaintenanceDocument(IndexProducerMaintenanceProgressV1),
+  ReconcileRecord(IndexProducerReconcileProgressV1),
+  ReconcilePage { processed_records: u32, complete: bool, completion: Option<IndexProducerCompletionV1> },
   MaintenancePage { processed_documents: u32, complete: bool, completion: Option<IndexProducerCompletionV1> },
   ArtifactCompaction { published_owners: u32, publication_bytes: u64, complete: bool, completion: Option<IndexProducerCompletionV1> },
   ArtifactCompactionRetry { source: IndexRuntimeCompactionErrorV1, completion: IndexProducerCompletionV1 },
@@ -75,6 +87,9 @@ pub enum IndexProducerWorkerOutcomeV1 {
 
 pub(crate) struct IndexProducerMutationCollectionV1 {
   lease: IndexProducerLeaseV1,
+  record_ordinal: Option<u32>,
+  record_operation_id: [u8; 16],
+  publication_sequence: u64,
   result: Result<IndexProducerMutationCollectionOutcomeV1, IndexProducerMutationCollectionErrorV1>,
 }
 
@@ -166,8 +181,23 @@ impl IndexProducerMutationWorkerV1 {
     request: IndexProducerMutationWorkRequestV1<'_, '_>,
   ) -> IndexProducerMutationCollectionV1 {
     let lease = request.lease.clone();
-    let result = self.collect_resolved_mutation_inner(&record, request);
-    IndexProducerMutationCollectionV1 { lease, result }
+    let record_operation_id = request.lease.operation_id();
+    let publication_sequence = request.lease.publication_sequence();
+    let result = self.collect_resolved_mutation_inner(&record, record_operation_id, publication_sequence, request);
+    IndexProducerMutationCollectionV1 { lease, record_ordinal: None, record_operation_id, publication_sequence, result }
+  }
+
+  pub(crate) fn collect_resolved_reconcile_mutation(
+    &self,
+    record: MutationRecordV1<'_>,
+    record_ordinal: u32,
+    record_operation_id: [u8; 16],
+    request: IndexProducerMutationWorkRequestV1<'_, '_>,
+  ) -> IndexProducerMutationCollectionV1 {
+    let lease = request.lease.clone();
+    let publication_sequence = record.sequence;
+    let result = self.collect_resolved_mutation_inner(&record, record_operation_id, publication_sequence, request);
+    IndexProducerMutationCollectionV1 { lease, record_ordinal: Some(record_ordinal), record_operation_id, publication_sequence, result }
   }
 
   pub(crate) fn collect_maintenance_document(
@@ -252,6 +282,8 @@ impl IndexProducerMutationWorkerV1 {
   fn collect_resolved_mutation_inner(
     &self,
     record: &MutationRecordV1<'_>,
+    operation_id: [u8; 16],
+    publication_sequence: u64,
     request: IndexProducerMutationWorkRequestV1<'_, '_>,
   ) -> Result<IndexProducerMutationCollectionOutcomeV1, IndexProducerMutationCollectionErrorV1> {
     let transition_read =
@@ -260,8 +292,8 @@ impl IndexProducerMutationWorkerV1 {
         Err(error) => return Err(IndexProducerMutationCollectionErrorV1::Source(error)),
       };
     self.collect_resolved_transition_inner(
-      request.lease.operation_id(),
-      request.lease.publication_sequence(),
+      operation_id,
+      publication_sequence,
       request.journal.semantic_state_root,
       transition_read.transition(),
       request.semantic_source,
@@ -349,6 +381,35 @@ impl IndexProducerMutationWorkerV1 {
     spill_store: &mut dyn IndexProducerSpillStoreV1,
   ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
     let lease = collection.lease;
+    if let Some(record_ordinal) = collection.record_ordinal {
+      let report = match collection.result {
+        Ok(IndexProducerMutationCollectionOutcomeV1::Collected(collected)) => collected.into_parts().0,
+        Ok(IndexProducerMutationCollectionOutcomeV1::ContentOnly { .. }) => IndexProducerReportV1 { outcomes: Vec::new() },
+        Err(IndexProducerMutationCollectionErrorV1::Source(source)) => {
+          return self.handle_source_failure(producer, &lease, source, now_ms, is_cancelled, spill_store);
+        }
+        Err(IndexProducerMutationCollectionErrorV1::Execution(error)) => {
+          return self.release_after_execution(producer, &lease, error);
+        }
+      };
+      return match producer.advance_reconcile_record(
+        &lease,
+        IndexProducerReconcileRecordRequestV1 {
+          record_ordinal,
+          record_operation_id: collection.record_operation_id,
+          publication_sequence: collection.publication_sequence,
+          report,
+        },
+        mutations,
+        now_ms,
+        is_cancelled(),
+        spill_store,
+      ) {
+        Ok(progress) => Ok(IndexProducerWorkerOutcomeV1::ReconcileRecord(progress)),
+        Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
+        Err(error) => self.coordinator_failure(producer, &lease, error),
+      };
+    }
     match collection.result {
       Ok(IndexProducerMutationCollectionOutcomeV1::Collected(collected)) => {
         match self.executor.complete_collected(producer, mutations, &lease, collected, now_ms, is_cancelled, spill_store) {
@@ -370,6 +431,35 @@ impl IndexProducerMutationWorkerV1 {
         self.handle_source_failure(producer, &lease, source, now_ms, is_cancelled, spill_store)
       }
       Err(IndexProducerMutationCollectionErrorV1::Execution(error)) => self.release_after_execution(producer, &lease, error),
+    }
+  }
+
+  pub(crate) fn finish_reconcile_page(
+    &self,
+    producer: &mut IndexProducerCoordinatorV1,
+    request: IndexProducerReconcilePageRequestV1<'_>,
+  ) -> Result<IndexProducerWorkerOutcomeV1, IndexProducerWorkerErrorV1> {
+    if (request.is_cancelled)() {
+      return match producer.cancel(request.lease) {
+        Ok(()) => Err(IndexProducerWorkerErrorV1::Cancelled),
+        Err(source) => Err(IndexProducerWorkerErrorV1::Coordinator(source)),
+      };
+    }
+    if !request.complete && request.processed_records == 0 {
+      return self.release_after_source(
+        producer,
+        request.lease,
+        IndexProducerSourceErrorV1::TaskMismatch("an incomplete reconcile page made no record progress".to_string()),
+      );
+    }
+    match producer.finish_reconcile_page(request.lease, request.complete, request.record_count, request.now_ms, (request.is_cancelled)()) {
+      Ok(completion) => Ok(IndexProducerWorkerOutcomeV1::ReconcilePage {
+        processed_records: request.processed_records,
+        complete: request.complete,
+        completion,
+      }),
+      Err(IndexProducerCoordinatorErrorV1::Cancelled) => Err(IndexProducerWorkerErrorV1::Cancelled),
+      Err(error) => self.coordinator_failure(producer, request.lease, error),
     }
   }
 

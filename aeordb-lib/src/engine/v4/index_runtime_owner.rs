@@ -32,7 +32,7 @@ use super::index_maintenance_scan::{
 };
 use super::index_producer_admission::{
   IndexProducerJournalAdmissionErrorV1, IndexProducerJournalAdmissionSummaryV1, admit_durable_mutation_journal_tasks,
-  admit_mutation_journal_tasks,
+  admit_mutation_journal_tasks, derive_journal_reconcile_operation_id, derive_mutation_operation_id,
 };
 use super::index_producer_collector::{
   IndexParserExecutorV1, IndexProducerCollectorErrorV1, IndexProducerCollectorOptionsV1, IndexProducerCollectorV1,
@@ -40,23 +40,26 @@ use super::index_producer_collector::{
 use super::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorSnapshotV1, IndexProducerCoordinatorV1,
   IndexProducerCompactionPlanV1, IndexProducerDurableTaskStoreV1, IndexProducerJournalWorkPlanV1, IndexProducerLeaseV1,
-  IndexProducerMaintenanceProgressV1, IndexProducerMaintenanceScanPlanV1, IndexProducerSpillStoreV1, IndexProducerTaskRequestV1,
+  IndexProducerMaintenanceProgressV1, IndexProducerMaintenanceScanPlanV1, IndexProducerReconcileProgressV1, IndexProducerSpillStoreV1,
+  IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
 };
 use super::index_producer_executor::IndexProducerExecutorV1;
 use super::index_producer_journal_source::{IndexProducerJournalReadRequestV1, IndexProducerJournalSourceV1};
 use super::index_producer_source::{
   IndexFileRevisionSourceV1, IndexProducerSourceErrorV1, IndexSemanticScopeLimitsV1, IndexSemanticScopeSourceV1,
-  resolve_planned_mutation_record,
+  resolve_planned_mutation_record, validate_planned_reconcile_journal,
 };
 use super::index_producer_worker::{
   IndexProducerCompactionRetryRequestV1, IndexProducerMaintenancePageRequestV1, IndexProducerMaintenanceWorkRequestV1,
-  IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1, IndexProducerWorkerOutcomeV1,
+  IndexProducerMutationWorkRequestV1, IndexProducerMutationWorkerV1, IndexProducerReconcilePageRequestV1, IndexProducerWorkerErrorV1,
+  IndexProducerWorkerOutcomeV1,
 };
 use super::index_source::PluginMapperExecutorV1;
 use super::index_task::MutationJournalV1;
 
 const MAX_DEGRADED_CONTEXT_BYTES: usize = 16 * 1024;
 const MAX_STABLE_CODE_BYTES: usize = 128;
+const INDEX_RECONCILE_RECORDS_PER_PAGE_MAX: u32 = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IndexRuntimeOwnerOptionsV1 {
@@ -794,6 +797,12 @@ impl IndexRuntimeOwnerV1 {
       }
       Err(_) => return self.latch_unlocked_worker_panic(lease),
     };
+    let journal_reconcile = plan.kind() == IndexProducerTaskKindV1::Reconcile
+      && derive_journal_reconcile_operation_id(self.hash_algorithm, &journal.key)
+        .is_ok_and(|operation_id| operation_id == plan.operation_id());
+    if journal_reconcile {
+      return self.execute_reconcile_journal(lease, plan, journal, request, spill_store);
+    }
     let record = match catch_unwind(AssertUnwindSafe(|| {
       resolve_planned_mutation_record(self.hash_algorithm, &plan, &journal, request.is_cancelled)
     })) {
@@ -827,6 +836,113 @@ impl IndexRuntimeOwnerV1 {
       }
       Err(_) => self.latch_worker_panic(&mut state, lease),
     }
+  }
+
+  fn execute_reconcile_journal(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    plan: IndexProducerJournalWorkPlanV1,
+    journal: MutationJournalV1<'_>,
+    request: &IndexRuntimeProducerWorkRequestV1<'_>,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let (start, record_count) = match catch_unwind(AssertUnwindSafe(|| {
+      validate_planned_reconcile_journal(self.hash_algorithm, &plan, &journal, request.is_cancelled)
+    })) {
+      Ok(Ok(start)) => start,
+      Ok(Err(source)) => return self.finish_unlocked_source_failure(lease, source, request, spill_store),
+      Err(panic) => return self.latch_unlocked_worker_panic_with_payload(lease, "reconcile journal validation", panic),
+    };
+    let mut processed_records = 0u32;
+    for (record_ordinal, decoded) in
+      (start..record_count).zip(journal.records.iter().skip(start as usize)).take(INDEX_RECONCILE_RECORDS_PER_PAGE_MAX as usize)
+    {
+      if (request.is_cancelled)() {
+        let mut state = self.reacquire_producer_state(lease)?;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+          self.worker.finish_reconcile_page(
+            &mut state.producer,
+            IndexProducerReconcilePageRequestV1 {
+              lease,
+              processed_records,
+              complete: false,
+              record_count,
+              now_ms: request.now_ms,
+              is_cancelled: request.is_cancelled,
+            },
+          )
+        }));
+        return self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms);
+      }
+      let record = match decoded {
+        Ok(record) => record,
+        Err(error) => {
+          return self.finish_unlocked_source_failure(lease, IndexProducerSourceErrorV1::Format(error), request, spill_store);
+        }
+      };
+      let record_operation_id = match derive_mutation_operation_id(self.hash_algorithm, record.mutation_id, record.batch_ordinal) {
+        Ok(operation_id) => operation_id,
+        Err(error) => {
+          return self.finish_unlocked_source_failure(lease, IndexProducerSourceErrorV1::OperationIdentity(error), request, spill_store);
+        }
+      };
+      let collection = catch_unwind(AssertUnwindSafe(|| {
+        self.worker.collect_resolved_reconcile_mutation(
+          record,
+          record_ordinal,
+          record_operation_id,
+          IndexProducerMutationWorkRequestV1 {
+            lease,
+            journal: &journal,
+            revision_source: request.revision_source,
+            semantic_source: request.semantic_source,
+            parser: request.parser,
+            mapper: request.mapper,
+            now_ms: request.now_ms,
+            is_cancelled: request.is_cancelled,
+          },
+        )
+      }));
+      let mut state = self.reacquire_producer_state(lease)?;
+      let collection = match collection {
+        Ok(collection) => collection,
+        Err(panic) => {
+          return self.latch_worker_panic_with_payload(&mut state, lease, "reconcile record collection", panic);
+        }
+      };
+      let IndexRuntimeStateV1 { producer, mutations, .. } = &mut *state;
+      let execution = catch_unwind(AssertUnwindSafe(|| {
+        self.worker.finish_mutation_collection(producer, mutations, collection, request.now_ms, request.is_cancelled, spill_store)
+      }));
+      match execution {
+        Ok(Ok(IndexProducerWorkerOutcomeV1::ReconcileRecord(IndexProducerReconcileProgressV1::Advanced { .. }))) => {
+          processed_records = processed_records
+            .checked_add(1)
+            .ok_or_else(|| IndexRuntimeErrorV1::Work("reconcile page record count overflowed".to_string()))?;
+          state.service_retry_not_before_ms = 0;
+          self.project_state_observation(&state);
+        }
+        execution => return self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms),
+      }
+    }
+    let next_record =
+      start.checked_add(processed_records).ok_or_else(|| IndexRuntimeErrorV1::Work("reconcile continuation overflowed".to_string()))?;
+    let complete = next_record == record_count;
+    let mut state = self.reacquire_producer_state(lease)?;
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+      self.worker.finish_reconcile_page(
+        &mut state.producer,
+        IndexProducerReconcilePageRequestV1 {
+          lease,
+          processed_records,
+          complete,
+          record_count,
+          now_ms: request.now_ms,
+          is_cancelled: request.is_cancelled,
+        },
+      )
+    }));
+    self.apply_caught_worker_result(&mut state, lease, execution, request.now_ms)
   }
 
   fn execute_maintenance_plan(
@@ -933,6 +1049,16 @@ impl IndexRuntimeOwnerV1 {
     self.latch_worker_panic(&mut state, lease)
   }
 
+  fn latch_unlocked_worker_panic_with_payload(
+    &self,
+    lease: &IndexProducerLeaseV1,
+    stage: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let mut state = self.reacquire_producer_state(lease)?;
+    self.latch_worker_panic_with_payload(&mut state, lease, stage, panic)
+  }
+
   fn reacquire_producer_state(
     &self,
     lease: &IndexProducerLeaseV1,
@@ -985,6 +1111,26 @@ impl IndexRuntimeOwnerV1 {
     let context = match state.producer.cancel(lease) {
       Ok(()) => "index producer worker panicked".to_string(),
       Err(error) => format!("index producer worker panicked and its exact lease could not be released: {error}"),
+    };
+    latch_degraded(state, "worker_panic", context.clone());
+    Err(IndexRuntimeErrorV1::Work(context))
+  }
+
+  fn latch_worker_panic_with_payload(
+    &self,
+    state: &mut IndexRuntimeStateV1,
+    lease: &super::index_producer_coordinator::IndexProducerLeaseV1,
+    stage: &'static str,
+    panic: Box<dyn std::any::Any + Send>,
+  ) -> Result<IndexRuntimeWorkOutcomeV1, IndexRuntimeErrorV1> {
+    let payload_class = panic_payload_class(panic.as_ref());
+    let context = match state.producer.cancel(lease) {
+      Ok(()) => format!("index producer worker panicked during {stage} with a {payload_class} payload"),
+      Err(error) => {
+        format!(
+          "index producer worker panicked during {stage} with a {payload_class} payload and its exact lease could not be released: {error}"
+        )
+      }
     };
     latch_degraded(state, "worker_panic", context.clone());
     Err(IndexRuntimeErrorV1::Work(context))
@@ -1233,6 +1379,16 @@ fn runtime_snapshot(state: &IndexRuntimeStateV1, soft_hub: SoftMutationHubSnapsh
     soft_hub,
     producer: state.producer.snapshot(),
     mutations: state.mutations.snapshot(),
+  }
+}
+
+fn panic_payload_class(panic: &(dyn std::any::Any + Send)) -> &'static str {
+  if panic.is::<&'static str>() {
+    "static-string"
+  } else if panic.is::<String>() {
+    "owned-string"
+  } else {
+    "non-string"
   }
 }
 

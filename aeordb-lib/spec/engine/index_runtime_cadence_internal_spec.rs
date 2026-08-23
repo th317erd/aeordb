@@ -1,6 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use crate::engine::v4::coverage_runtime::SoftMutationHubOptionsV1;
 use crate::engine::v4::index_artifact::EncodedImmutableIndexArtifactV1;
@@ -13,6 +15,7 @@ use crate::engine::v4::index_producer_collector::IndexProducerCollectorOptionsV1
 use crate::engine::v4::index_producer_collector::{
   IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1,
 };
+use crate::engine::v4::index_producer_admission::derive_mutation_operation_id;
 use crate::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCoordinatorOptionsV1, IndexProducerDurableTaskStoreV1, IndexProducerSpillErrorV1,
   IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1,
@@ -28,7 +31,8 @@ use crate::engine::v4::index_producer_journal_source::{
 };
 use crate::engine::v4::index_producer_source::{
   IndexFileRevisionReadErrorV1, IndexFileRevisionReadV1, IndexFileRevisionSourceV1, IndexSemanticScopeReadErrorV1,
-  IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeSourceV1,
+  IndexSemanticScopeReadRequestV1, IndexSemanticScopeReadV1, IndexSemanticScopeResolutionV1, IndexSemanticScopeSourceV1,
+  LoadedIndexFileRevisionV1,
 };
 use crate::engine::v4::index_runtime_batch_publisher::IndexRuntimeMutationJournalStoreV1;
 use crate::engine::v4::index_runtime_owner::{
@@ -36,6 +40,7 @@ use crate::engine::v4::index_runtime_owner::{
   IndexRuntimePublicationErrorClassV1, IndexRuntimePublicationErrorV1, IndexRuntimePublicationReceiptV1, IndexRuntimeRecoveryDecisionV1,
   IndexRuntimeWorkOutcomeV1,
 };
+use crate::engine::v4::index_producer_worker::IndexProducerWorkerOutcomeV1;
 use crate::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
   encode_mutation_journal,
@@ -51,6 +56,72 @@ struct UnusedSources;
 struct EmptyMaintenanceSource {
   memory: MemoryCoordinator,
   delay: std::time::Duration,
+}
+
+struct ReconcileJournalSource {
+  encoded: Vec<u8>,
+  memory: MemoryCoordinator,
+  loads: AtomicUsize,
+}
+
+impl IndexProducerJournalSourceV1 for ReconcileJournalSource {
+  fn load_journal(
+    &self,
+    request: IndexProducerJournalReadRequestV1<'_>,
+  ) -> Result<IndexProducerJournalReadV1, IndexProducerJournalReadErrorV1> {
+    self.loads.fetch_add(1, Ordering::SeqCst);
+    let encoded = self.encoded.clone();
+    let reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, 1024 * 1024, AdmissionClass::Workload)
+      .map_err(|error| IndexProducerJournalReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexProducerJournalReadV1::new(&request, encoded, reservation)
+  }
+}
+
+struct ReconcileRevisionSource {
+  records: BTreeMap<(Vec<u8>, String), LoadedIndexFileRevisionV1>,
+  memory: MemoryCoordinator,
+}
+
+impl IndexFileRevisionSourceV1 for ReconcileRevisionSource {
+  fn load_file_revision(&self, namespace_root: &[u8], path: &str) -> Result<Option<IndexFileRevisionReadV1>, IndexFileRevisionReadErrorV1> {
+    self
+      .records
+      .get(&(namespace_root.to_vec(), path.to_string()))
+      .cloned()
+      .map(|revision| {
+        let reservation = self
+          .memory
+          .reserve(MemoryOwner::Task, 4096, AdmissionClass::Workload)
+          .map_err(|error| IndexFileRevisionReadErrorV1::retryable("test_memory", error.to_string()))?;
+        IndexFileRevisionReadV1::new(revision, reservation)
+      })
+      .transpose()
+  }
+}
+
+struct ContentOnlySemanticSource {
+  semantic_state_root: Vec<u8>,
+  observed: Mutex<Vec<([u8; 16], u64)>>,
+  memory: MemoryCoordinator,
+}
+
+impl IndexSemanticScopeSourceV1 for ContentOnlySemanticSource {
+  fn resolve_scopes(
+    &self,
+    request: IndexSemanticScopeReadRequestV1<'_>,
+  ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    self.observed.lock().unwrap().push((request.operation_id, request.source_publication_sequence));
+    let reservation = self
+      .memory
+      .reserve(MemoryOwner::Task, 4096, AdmissionClass::Workload)
+      .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
+    IndexSemanticScopeReadV1::new(
+      IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: self.semantic_state_root.clone() },
+      reservation,
+    )
+  }
 }
 
 impl IndexMaintenanceScanSourceV1 for EmptyMaintenanceSource {
@@ -223,7 +294,32 @@ fn maintenance_task<'a>(
 }
 
 fn encoded_journal(path: &str) -> EncodedImmutableIndexArtifactV1 {
+  encoded_journal_paths(&[path])
+}
+
+fn encoded_journal_paths(paths: &[&str]) -> EncodedImmutableIndexArtifactV1 {
+  assert!(!paths.is_empty());
   let hash = |label: &[u8]| crate::engine::v4::hash::digest_parts(HashAlgorithm::Blake3_256, &[b"cadence-journal:", label]);
+  let semantic_state_root = hash(b"semantic");
+  let roots: Vec<Vec<u8>> = (0..=paths.len()).map(|ordinal| hash(format!("root-{ordinal}").as_bytes())).collect();
+  let mutation_ids: Vec<Vec<u8>> = (0..paths.len()).map(|ordinal| hash(format!("mutation-{ordinal}").as_bytes())).collect();
+  let revisions: Vec<Vec<u8>> = (0..paths.len()).map(|ordinal| hash(format!("revision-{ordinal}").as_bytes())).collect();
+  let records: Vec<MutationRecordWriteV1<'_>> = paths
+    .iter()
+    .enumerate()
+    .map(|(ordinal, path)| MutationRecordWriteV1 {
+      kind: MutationKindV1::Create,
+      sequence: 7 + u64::try_from(ordinal).unwrap(),
+      mutation_id: &mutation_ids[ordinal],
+      batch_ordinal: 0,
+      batch_count: 1,
+      root_before: &roots[ordinal],
+      root_after: &roots[ordinal + 1],
+      before: None,
+      after: Some(MutationSideWriteV1 { path, revision: &revisions[ordinal] }),
+      committed_at_ms: 100,
+    })
+    .collect();
   encode_mutation_journal(&MutationJournalWriteV1 {
     hash_algorithm: HashAlgorithm::Blake3_256,
     owner_id: [0x61; 16],
@@ -232,22 +328,40 @@ fn encoded_journal(path: &str) -> EncodedImmutableIndexArtifactV1 {
     segment_ordinal: 0,
     chain_reset: true,
     previous_segment: &[0; 32],
-    semantic_state_root: &hash(b"semantic"),
+    semantic_state_root: &semantic_state_root,
     runtime_boot_id: [0x62; 16],
-    records: &[MutationRecordWriteV1 {
-      kind: MutationKindV1::Create,
-      sequence: 7,
-      mutation_id: &hash(b"mutation"),
-      batch_ordinal: 0,
-      batch_count: 1,
-      root_before: &hash(b"before-root"),
-      root_after: &hash(b"after-root"),
-      before: None,
-      after: Some(MutationSideWriteV1 { path, revision: &hash(b"revision") }),
-      committed_at_ms: 100,
-    }],
+    records: &records,
   })
   .unwrap()
+}
+
+fn reconcile_revision_source(encoded: &[u8]) -> ReconcileRevisionSource {
+  let journal = decode_mutation_journal(encoded, HashAlgorithm::Blake3_256).unwrap();
+  let mut records = BTreeMap::new();
+  for (ordinal, decoded) in journal.records.iter().enumerate() {
+    let record = decoded.unwrap();
+    let path = record.after_path.unwrap();
+    records.insert(
+      (record.root_after.to_vec(), path.to_string()),
+      LoadedIndexFileRevisionV1 {
+        revision_hash: record.after_revision.unwrap().to_vec(),
+        file_record: FileRecord {
+          path: path.to_string(),
+          content_type: Some("application/json".to_string()),
+          total_size: 32,
+          created_at: 1_700_000_000_000,
+          updated_at: 1_700_000_000_001,
+          metadata: Vec::new(),
+          content_hash: vec![u8::try_from(ordinal + 1).unwrap(); 32],
+          chunk_hashes: vec![vec![u8::try_from(ordinal + 2).unwrap(); 32]],
+        },
+      },
+    );
+  }
+  ReconcileRevisionSource {
+    records,
+    memory: MemoryCoordinator::new(MemoryPolicy::new(8 * 1_024 * 1_024, 16 * 1_024 * 1_024, 1, 2 * 1_024 * 1_024).unwrap()),
+  }
 }
 
 fn owner() -> Arc<IndexRuntimeOwnerV1> {
@@ -604,6 +718,116 @@ fn mutation_journal_is_persisted_before_durable_task_admission_and_queueing() {
   assert_eq!(duplicate.spilled, 0);
   assert_eq!(*events.lock().unwrap(), vec!["journal", "task", "journal", "task"]);
   assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
+}
+
+#[test]
+fn durable_journal_handoff_publishes_one_task_independent_of_record_count() {
+  let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    JournalPublisher {
+      events: Arc::clone(&events),
+      refuse_journal: Arc::new(AtomicBool::new(false)),
+      refuse_task: Arc::new(AtomicBool::new(false)),
+      cancel_after_journal: None,
+    },
+    CancellationToken::new(),
+    Arc::new(MockClock::new(90, 100)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let owned_paths: Vec<String> = (0..10_000).map(|ordinal| format!("/docs/{ordinal:05}.json")).collect();
+  let paths: Vec<&str> = owned_paths.iter().map(String::as_str).collect();
+  let encoded = encoded_journal_paths(&paths);
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
+
+  let admitted = cadence.persist_and_admit_mutation_journal(&encoded, &journal).unwrap();
+
+  assert_eq!(admitted.queued, 1);
+  assert_eq!(admitted.duplicates, 0);
+  assert_eq!(admitted.spilled, 0);
+  assert_eq!(*events.lock().unwrap(), vec!["journal", "task"]);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
+}
+
+#[test]
+fn durable_reconcile_services_exact_records_from_one_bounded_journal_read() {
+  let owner = owner();
+  let events = Arc::new(Mutex::new(Vec::new()));
+  let cadence = IndexRuntimeCadenceV1::new(
+    Arc::clone(&owner),
+    JournalPublisher {
+      events,
+      refuse_journal: Arc::new(AtomicBool::new(false)),
+      refuse_task: Arc::new(AtomicBool::new(false)),
+      cancel_after_journal: None,
+    },
+    CancellationToken::new(),
+    Arc::new(MockClock::new(91, 100)) as Arc<dyn VirtualClock>,
+  )
+  .unwrap();
+  let owned_paths: Vec<String> = (0..40).map(|ordinal| format!("/docs/{ordinal:02}.json")).collect();
+  let paths: Vec<&str> = owned_paths.iter().map(String::as_str).collect();
+  let encoded = encoded_journal_paths(&paths);
+  let journal = decode_mutation_journal(&encoded.value, HashAlgorithm::Blake3_256).unwrap();
+  let expected_operations: Vec<([u8; 16], u64)> = journal
+    .records
+    .iter()
+    .map(|decoded| {
+      let record = decoded.unwrap();
+      (derive_mutation_operation_id(HashAlgorithm::Blake3_256, record.mutation_id, record.batch_ordinal).unwrap(), record.sequence)
+    })
+    .collect();
+  let journal_source = ReconcileJournalSource {
+    encoded: encoded.value.clone(),
+    memory: MemoryCoordinator::new(MemoryPolicy::new(8 * 1_024 * 1_024, 16 * 1_024 * 1_024, 1, 2 * 1_024 * 1_024).unwrap()),
+    loads: AtomicUsize::new(0),
+  };
+  let revisions = reconcile_revision_source(&encoded.value);
+  let semantics = ContentOnlySemanticSource {
+    semantic_state_root: journal.semantic_state_root.to_vec(),
+    observed: Mutex::new(Vec::new()),
+    memory: MemoryCoordinator::new(MemoryPolicy::new(8 * 1_024 * 1_024, 16 * 1_024 * 1_024, 1, 2 * 1_024 * 1_024).unwrap()),
+  };
+  let unused = UnusedSources;
+
+  assert_eq!(cadence.persist_and_admit_mutation_journal(&encoded, &journal).unwrap().queued, 1);
+  let service_sources = || IndexRuntimeProducerServiceSourcesV1 {
+    journal_source: &journal_source,
+    maintenance_source: &unused,
+    compaction_executor: &unused,
+    maintenance_limits: IndexMaintenanceScanLimitsV1::new(1, 64 * 1_024, 4 * 1_024).unwrap(),
+    revision_source: &revisions,
+    semantic_source: &semantics,
+    parser: &unused,
+    mapper: None,
+  };
+  let first = cadence.service_next_producer(service_sources()).unwrap();
+
+  assert!(matches!(
+    first,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ReconcilePage {
+      processed_records: 32,
+      complete: false,
+      completion: None,
+    })
+  ));
+  assert_eq!(journal_source.loads.load(Ordering::SeqCst), 1);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 1);
+
+  let second = cadence.service_next_producer(service_sources()).unwrap();
+  assert!(matches!(
+    second,
+    IndexRuntimeWorkOutcomeV1::Completed(IndexProducerWorkerOutcomeV1::ReconcilePage {
+      processed_records: 8,
+      complete: true,
+      completion: Some(_),
+    })
+  ));
+  assert_eq!(journal_source.loads.load(Ordering::SeqCst), 2);
+  assert_eq!(*semantics.observed.lock().unwrap(), expected_operations);
+  assert_eq!(owner.cached_snapshot().producer.pending_tasks, 0);
+  assert_eq!(owner.cached_snapshot().producer.completed_tasks, 1);
 }
 
 #[test]

@@ -338,8 +338,8 @@ where
   Publisher:
     IndexRuntimeBatchPublisherV1 + IndexRuntimeMutationJournalStoreV1 + IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1 + Send,
 {
-  /// Persist and admit every exact mutation record from one validated journal through the
-  /// same serialized spill boundary used by maintenance tasks and publication.
+  /// Persist one exact journal and its durable reconcile task through the same serialized
+  /// spill boundary used by maintenance tasks and publication.
   pub(crate) fn persist_and_admit_mutation_journal(
     &self,
     artifact: &EncodedImmutableIndexArtifactV1,

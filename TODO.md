@@ -1156,8 +1156,9 @@
           - [x] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, restart reconstructs it, shutdown retains pinned snapshots safely, and no second writer, timer, selector, cache, or query authority survives.
         - [x] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
-        - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.
-        - [ ] Measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.
+        - [x] P6-4a: prove the 10,000-record bound uses one durable AITK-v1 `Reconcile` journal pin, then service exact record identities through a bounded in-memory continuation without per-record selectors, fsyncs, or quadratic commit-time coordinator work.
+        - [ ] P6-4b: measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.
+        - [ ] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

@@ -8,7 +8,9 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{MemoryOwner, MemoryReservation};
 
 use super::hash::digest_parts;
-use super::index_producer_admission::{IndexProducerJournalAdmissionErrorV1, derive_mutation_operation_id};
+use super::index_producer_admission::{
+  IndexProducerJournalAdmissionErrorV1, derive_journal_reconcile_operation_id, derive_mutation_operation_id,
+};
 use super::field_definition::decode_field_index_definition;
 use super::index_producer_collector::{
   IndexCollectorDocumentRevisionTransitionV1, IndexCollectorDocumentV1, IndexCollectorFieldDefinitionV1, IndexCollectorScopeDefinitionV1,
@@ -700,6 +702,40 @@ pub(crate) fn resolve_planned_mutation_record<'a>(
     journal,
     is_cancelled,
   )
+}
+
+pub(crate) fn validate_planned_reconcile_journal(
+  hash_algorithm: HashAlgorithm,
+  plan: &IndexProducerJournalWorkPlanV1,
+  journal: &MutationJournalV1<'_>,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<(u32, u32), IndexProducerSourceErrorV1> {
+  if is_cancelled() {
+    return Err(IndexProducerSourceErrorV1::Cancelled);
+  }
+  if plan.kind() != IndexProducerTaskKindV1::Reconcile {
+    return Err(IndexProducerSourceErrorV1::TaskMismatch("planned task is not journal reconciliation work".to_string()));
+  }
+  if plan.operation_id() != derive_journal_reconcile_operation_id(hash_algorithm, &journal.key)? {
+    return Err(IndexProducerSourceErrorV1::TaskMismatch("reconcile operation identity does not match the journal head".to_string()));
+  }
+  if plan.journal_head() != journal.key.as_slice()
+    || plan.semantic_state_root() != journal.semantic_state_root
+    || plan.namespace_root_before() != journal.source_root_before
+    || plan.namespace_root_after() != journal.source_root_after
+    || plan.publication_sequence() != journal.last_sequence
+  {
+    return Err(IndexProducerSourceErrorV1::TaskMismatch("reconcile task boundaries do not match the exact journal closure".to_string()));
+  }
+  let record_count = u32::try_from(journal.records.len())
+    .map_err(|error| IndexProducerSourceErrorV1::TaskMismatch(format!("journal record count exceeds u32: {error}")))?;
+  if plan.next_record_ordinal() > record_count {
+    return Err(IndexProducerSourceErrorV1::TaskMismatch(format!(
+      "reconcile continuation {} exceeds journal record count {record_count}",
+      plan.next_record_ordinal()
+    )));
+  }
+  Ok((plan.next_record_ordinal(), record_count))
 }
 
 #[derive(Clone, Copy)]

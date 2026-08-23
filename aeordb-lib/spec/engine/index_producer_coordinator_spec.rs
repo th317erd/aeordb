@@ -12,8 +12,9 @@ use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerAdmissionV1, IndexProducerCompletionV1, IndexProducerCoordinatorErrorV1, IndexProducerCoordinatorOptionsV1,
   IndexProducerCoordinatorV1, IndexProducerDurableTaskStoreV1, IndexProducerFallbackModeV1, IndexProducerMaintenanceDocumentRequestV1,
   IndexProducerMaintenanceProgressV1, IndexProducerMembershipTransitionV1, IndexProducerMutationV1, IndexProducerOwnerDispositionV1,
-  IndexProducerOwnerOutcomeV1, IndexProducerReportV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
-  IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
+  IndexProducerOwnerOutcomeV1, IndexProducerReconcileProgressV1, IndexProducerReconcileRecordRequestV1, IndexProducerReportV1,
+  IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1,
+  IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_record::{
   CanonicalValueRecordV1, ScopeReverseRecordV1, encode_canonical_value_record, encode_scope_reverse_record,
@@ -243,8 +244,9 @@ fn durable_admission_persists_before_queueing_duplicate_or_pressure_outcomes() {
   let pressure = coordinator.admit_durable_or_spill(second, 12, &mut store).unwrap();
   assert!(matches!(pressure, IndexProducerAdmissionV1::Spilled { .. }));
   assert_eq!(store.persisted, vec![[0x21; 16], [0x21; 16], [0x22; 16]]);
-  assert_eq!(store.calls, vec![([0x22; 16], IndexProducerSpillReasonV1::AdmissionPressure)]);
+  assert!(store.calls.is_empty(), "the original durable receipt must satisfy admission pressure without a second spill write");
   assert_eq!(coordinator.snapshot().pending_tasks, 1);
+  assert_eq!(coordinator.snapshot().spilled_tasks, 1);
 
   store.fail = true;
   let third = task([0x23; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
@@ -1267,4 +1269,154 @@ fn every_producer_kind_uses_the_same_leased_path() {
     now += 1;
   }
   assert_eq!(producer.snapshot().pending_tasks, 0);
+}
+
+#[test]
+fn reconcile_continuation_advances_exact_records_and_only_completes_at_page_end() {
+  let before = hash(b"reconcile-before");
+  let after = hash(b"reconcile-after");
+  let semantic = hash(b"reconcile-semantic");
+  let journal = hash(b"reconcile-journal");
+  let operation_id = [0x71; 16];
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(4, 200_000, 3)).unwrap();
+  producer
+    .admit(task(operation_id, IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, Some(&journal), None), 100)
+    .unwrap();
+  let mut mutations = mutation_coordinator(memory(500_000));
+  let mut spill = SpillStore::default();
+
+  let first = producer.lease_next(100, false).unwrap().unwrap();
+  assert_eq!(producer.leased_reconcile_next_record(&first).unwrap(), 0);
+  assert!(matches!(
+    producer
+      .advance_reconcile_record(
+        &first,
+        IndexProducerReconcileRecordRequestV1 {
+          record_ordinal: 0,
+          record_operation_id: [0x72; 16],
+          publication_sequence: 11,
+          report: IndexProducerReportV1 { outcomes: Vec::new() },
+        },
+        &mut mutations,
+        101,
+        false,
+        &mut spill,
+      )
+      .unwrap(),
+    IndexProducerReconcileProgressV1::Advanced { record_ordinal: 0, record_operation_id, .. }
+      if record_operation_id == [0x72; 16]
+  ));
+  assert_eq!(producer.leased_reconcile_next_record(&first).unwrap(), 1);
+  assert!(matches!(producer.finish_reconcile_page(&first, true, 2, 101, false), Err(IndexProducerCoordinatorErrorV1::InvalidTask(_))));
+  assert_eq!(producer.finish_reconcile_page(&first, false, 2, 101, false).unwrap(), None);
+
+  let second = producer.lease_next(101, false).unwrap().unwrap();
+  assert_eq!(producer.leased_reconcile_next_record(&second).unwrap(), 1);
+  assert!(matches!(
+    producer
+      .advance_reconcile_record(
+        &second,
+        IndexProducerReconcileRecordRequestV1 {
+          record_ordinal: 1,
+          record_operation_id: [0x73; 16],
+          publication_sequence: 12,
+          report: IndexProducerReportV1 { outcomes: Vec::new() },
+        },
+        &mut mutations,
+        102,
+        false,
+        &mut spill,
+      )
+      .unwrap(),
+    IndexProducerReconcileProgressV1::Advanced { record_ordinal: 1, record_operation_id, .. }
+      if record_operation_id == [0x73; 16]
+  ));
+  assert!(matches!(
+    producer.finish_reconcile_page(&second, true, 2, 102, false).unwrap(),
+    Some(IndexProducerCompletionV1::Completed { .. })
+  ));
+  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(producer.snapshot().completed_tasks, 1);
+}
+
+#[test]
+fn reconcile_cancellation_releases_the_lease_without_losing_the_exact_continuation() {
+  let before = hash(b"cancel-reconcile-before");
+  let after = hash(b"cancel-reconcile-after");
+  let semantic = hash(b"cancel-reconcile-semantic");
+  let journal = hash(b"cancel-reconcile-journal");
+  let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(4, 200_000, 3)).unwrap();
+  producer.admit(task([0x74; 16], IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, Some(&journal), None), 100).unwrap();
+  let lease = producer.lease_next(100, false).unwrap().unwrap();
+  producer
+    .advance_reconcile_record(
+      &lease,
+      IndexProducerReconcileRecordRequestV1 {
+        record_ordinal: 0,
+        record_operation_id: [0x75; 16],
+        publication_sequence: 11,
+        report: IndexProducerReportV1 { outcomes: Vec::new() },
+      },
+      &mut mutation_coordinator(memory(500_000)),
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+
+  assert_eq!(producer.finish_reconcile_page(&lease, false, 2, 101, true).unwrap_err(), IndexProducerCoordinatorErrorV1::Cancelled);
+  assert_eq!(producer.snapshot().pending_tasks, 1);
+  assert_eq!(producer.snapshot().leased_tasks, 0);
+  let resumed = producer.lease_next(101, false).unwrap().unwrap();
+  assert_eq!(producer.leased_reconcile_next_record(&resumed).unwrap(), 1);
+}
+
+#[test]
+fn reconcile_restart_replays_from_zero_without_duplicating_exact_record_mutations() {
+  let before = hash(b"restart-reconcile-before");
+  let after = hash(b"restart-reconcile-after");
+  let semantic = hash(b"restart-reconcile-semantic");
+  let journal = hash(b"restart-reconcile-journal");
+  let owner = hash(b"restart-reconcile-owner");
+  let task_operation_id = [0x76; 16];
+  let record_operation_id = [0x77; 16];
+  let report = || IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, 1)])] };
+  let mut mutations = mutation_coordinator(memory(500_000));
+
+  let mut first = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  first
+    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, Some(&journal), None), 100)
+    .unwrap();
+  let lease = first.lease_next(100, false).unwrap().unwrap();
+  first
+    .advance_reconcile_record(
+      &lease,
+      IndexProducerReconcileRecordRequestV1 { record_ordinal: 0, record_operation_id, publication_sequence: 11, report: report() },
+      &mut mutations,
+      101,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert_eq!(mutations.snapshot().active_records, 1);
+  drop(first);
+
+  let mut recovered = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
+  recovered
+    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, Some(&journal), None), 200)
+    .unwrap();
+  let lease = recovered.lease_next(200, false).unwrap().unwrap();
+  assert_eq!(recovered.leased_reconcile_next_record(&lease).unwrap(), 0);
+  recovered
+    .advance_reconcile_record(
+      &lease,
+      IndexProducerReconcileRecordRequestV1 { record_ordinal: 0, record_operation_id, publication_sequence: 11, report: report() },
+      &mut mutations,
+      201,
+      false,
+      &mut SpillStore::default(),
+    )
+    .unwrap();
+  assert_eq!(mutations.snapshot().active_records, 1);
+  assert_eq!(mutations.snapshot().active_mutations, 1);
 }

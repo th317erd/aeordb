@@ -12,6 +12,7 @@ use super::index_task::{MutationJournalV1, MutationRecordV1};
 use super::reader::FormatError;
 
 const MUTATION_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:mutation-operation:v1\0";
+const JOURNAL_RECONCILE_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:journal-reconcile-operation:v1\0";
 const MAINTENANCE_OPERATION_DOMAIN_V1: &[u8] = b"aeordb:index-producer:maintenance-operation:v1\0";
 const IMPLICIT_MAINTENANCE_SOURCE_DOMAIN_V1: &[u8] = b"aeordb:index-producer:implicit-maintenance-source:v1\0";
 
@@ -118,6 +119,32 @@ pub fn derive_mutation_operation_id(
   }
   let ordinal = batch_ordinal.to_le_bytes();
   let digest = digest_parts(hash_algorithm, &[MUTATION_OPERATION_DOMAIN_V1, mutation_id, &ordinal]);
+  let operation_prefix = digest.get(..16).ok_or(IndexProducerJournalAdmissionErrorV1::InvalidMutationIdentity {
+    algorithm: hash_algorithm,
+    expected: 16,
+    actual: digest.len(),
+  })?;
+  let mut operation_id = [0u8; 16];
+  operation_id.copy_from_slice(operation_prefix);
+  if operation_id == [0; 16] {
+    return Err(IndexProducerJournalAdmissionErrorV1::ZeroOperationIdentity);
+  }
+  Ok(operation_id)
+}
+
+pub fn derive_journal_reconcile_operation_id(
+  hash_algorithm: HashAlgorithm,
+  journal_head: &[u8],
+) -> Result<[u8; 16], IndexProducerJournalAdmissionErrorV1> {
+  let expected = hash_algorithm.hash_length();
+  if journal_head.len() != expected {
+    return Err(IndexProducerJournalAdmissionErrorV1::InvalidMutationIdentity {
+      algorithm: hash_algorithm,
+      expected,
+      actual: journal_head.len(),
+    });
+  }
+  let digest = digest_parts(hash_algorithm, &[JOURNAL_RECONCILE_OPERATION_DOMAIN_V1, journal_head]);
   let operation_prefix = digest.get(..16).ok_or(IndexProducerJournalAdmissionErrorV1::InvalidMutationIdentity {
     algorithm: hash_algorithm,
     expected: 16,
@@ -241,7 +268,32 @@ pub fn admit_durable_mutation_journal_tasks<Store>(
 where
   Store: IndexProducerDurableTaskStoreV1 + IndexProducerSpillStoreV1,
 {
-  visit_mutation_journal_tasks(hash_algorithm, journal, is_cancelled, |request| producer.admit_durable_or_spill(request, now_ms, store))
+  if is_cancelled() {
+    return Err(IndexProducerJournalAdmissionErrorV1::Cancelled);
+  }
+  validate_journal(hash_algorithm, journal, is_cancelled)?;
+  let operation_id = derive_journal_reconcile_operation_id(hash_algorithm, &journal.key)?;
+  let admission = producer.admit_durable_or_spill(
+    IndexProducerTaskRequestV1 {
+      operation_id,
+      kind: IndexProducerTaskKindV1::Reconcile,
+      publication_sequence: journal.last_sequence,
+      namespace_root_before: journal.source_root_before,
+      namespace_root_after: journal.source_root_after,
+      semantic_state_root: journal.semantic_state_root,
+      journal_head: Some(&journal.key),
+      scope: None,
+    },
+    now_ms,
+    store,
+  )?;
+  let mut summary = IndexProducerJournalAdmissionSummaryV1::default();
+  match admission {
+    IndexProducerAdmissionV1::Queued => increment(&mut summary.queued)?,
+    IndexProducerAdmissionV1::Duplicate => increment(&mut summary.duplicates)?,
+    IndexProducerAdmissionV1::Spilled { .. } => increment(&mut summary.spilled)?,
+  }
+  Ok(summary)
 }
 
 fn visit_mutation_journal_tasks(

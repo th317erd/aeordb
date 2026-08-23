@@ -2,12 +2,12 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::index_producer_admission::{
   IndexProducerJournalAdmissionErrorV1, IndexProducerMaintenanceAdmissionErrorV1, IndexProducerMaintenanceIntentV1,
-  IndexProducerMaintenanceClassV1, admit_mutation_journal_tasks, build_maintenance_task, derive_implicit_maintenance_source_operation_id,
-  derive_mutation_operation_id,
+  IndexProducerMaintenanceClassV1, admit_durable_mutation_journal_tasks, admit_mutation_journal_tasks, build_maintenance_task,
+  derive_implicit_maintenance_source_operation_id, derive_journal_reconcile_operation_id, derive_mutation_operation_id,
 };
 use aeordb::engine::v4::index_producer_coordinator::{
-  IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1,
-  IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskViewV1,
+  IndexProducerCoordinatorOptionsV1, IndexProducerCoordinatorV1, IndexProducerDurableTaskStoreV1, IndexProducerSpillErrorV1,
+  IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1, IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskViewV1,
 };
 use aeordb::engine::v4::index_task::{
   JournalOwnerKindV1, MutationJournalWriteV1, MutationKindV1, MutationRecordWriteV1, MutationSideWriteV1, decode_mutation_journal,
@@ -117,6 +117,14 @@ fn encoded_journal(discontinuous: bool) -> Vec<u8> {
 #[derive(Default)]
 struct SpillStore {
   tasks: Vec<([u8; 16], IndexProducerSpillReasonV1)>,
+  persisted: Vec<([u8; 16], IndexProducerTaskKindV1)>,
+}
+
+impl IndexProducerDurableTaskStoreV1 for SpillStore {
+  fn persist_task(&mut self, task: IndexProducerTaskViewV1<'_>) -> Result<IndexProducerSpillReceiptV1, IndexProducerSpillErrorV1> {
+    self.persisted.push((task.operation_id(), task.kind()));
+    IndexProducerSpillReceiptV1::new(task.operation_id(), hash(b"durable-task"))
+  }
 }
 
 impl IndexProducerSpillStoreV1 for SpillStore {
@@ -175,6 +183,30 @@ fn retrying_the_same_journal_is_idempotent() {
 }
 
 #[test]
+fn durable_journal_admission_persists_one_exact_reconcile_task() {
+  let encoded = encoded_journal(false);
+  let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
+  let expected_operation_id = derive_journal_reconcile_operation_id(ALGORITHM, &journal.key).unwrap();
+  let mut producer = producer(8);
+  let mut store = SpillStore::default();
+
+  let summary = admit_durable_mutation_journal_tasks(ALGORITHM, &mut producer, &journal, 200, &|| false, &mut store).unwrap();
+
+  assert_eq!((summary.queued, summary.duplicates, summary.spilled), (1, 0, 0));
+  assert_eq!(store.persisted, vec![(expected_operation_id, IndexProducerTaskKindV1::Reconcile)]);
+  assert!(store.tasks.is_empty());
+  let lease = producer.lease_next(200, false).unwrap().unwrap();
+  let task = producer.leased_task(&lease).unwrap();
+  assert_eq!(task.operation_id(), expected_operation_id);
+  assert_eq!(task.kind(), IndexProducerTaskKindV1::Reconcile);
+  assert_eq!(task.publication_sequence(), journal.last_sequence);
+  assert_eq!(task.namespace_root_before(), journal.source_root_before);
+  assert_eq!(task.namespace_root_after(), journal.source_root_after);
+  assert_eq!(task.semantic_state_root(), journal.semantic_state_root);
+  assert_eq!(task.journal_head(), Some(journal.key.as_slice()));
+}
+
+#[test]
 fn pressure_spills_each_unretained_task_through_the_same_boundary() {
   let encoded = encoded_journal(false);
   let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
@@ -193,14 +225,23 @@ fn pressure_spills_each_unretained_task_through_the_same_boundary() {
 fn discontinuous_journal_fails_before_any_task_is_admitted() {
   let encoded = encoded_journal(true);
   let journal = decode_mutation_journal(&encoded, ALGORITHM).unwrap();
-  let mut producer = producer(8);
+  let mut legacy_producer = producer(8);
   let mut spill = SpillStore::default();
 
-  let error = admit_mutation_journal_tasks(ALGORITHM, &mut producer, &journal, 200, &|| false, &mut spill).unwrap_err();
+  let error = admit_mutation_journal_tasks(ALGORITHM, &mut legacy_producer, &journal, 200, &|| false, &mut spill).unwrap_err();
 
   assert!(matches!(error, IndexProducerJournalAdmissionErrorV1::DiscontinuousRoots { .. }));
-  assert_eq!(producer.snapshot().pending_tasks, 0);
+  assert_eq!(legacy_producer.snapshot().pending_tasks, 0);
   assert!(spill.tasks.is_empty());
+
+  let mut durable_producer = producer(8);
+  let mut durable_store = SpillStore::default();
+  let durable_error =
+    admit_durable_mutation_journal_tasks(ALGORITHM, &mut durable_producer, &journal, 200, &|| false, &mut durable_store).unwrap_err();
+  assert!(matches!(durable_error, IndexProducerJournalAdmissionErrorV1::DiscontinuousRoots { .. }));
+  assert_eq!(durable_producer.snapshot().pending_tasks, 0);
+  assert!(durable_store.persisted.is_empty());
+  assert!(durable_store.tasks.is_empty());
 }
 
 #[test]
@@ -242,8 +283,11 @@ fn operation_identity_rejects_wrong_width_and_supports_every_hash_profile() {
     let identity = vec![0x11; algorithm.hash_length()];
     let first = derive_mutation_operation_id(algorithm, &identity, 0).unwrap();
     let second = derive_mutation_operation_id(algorithm, &identity, 1).unwrap();
+    let reconcile = derive_journal_reconcile_operation_id(algorithm, &identity).unwrap();
     assert_ne!(first, [0; 16]);
     assert_ne!(first, second);
+    assert_ne!(reconcile, [0; 16]);
+    assert_ne!(reconcile, first);
   }
 }
 

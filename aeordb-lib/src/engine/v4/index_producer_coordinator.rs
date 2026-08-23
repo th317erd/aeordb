@@ -289,6 +289,14 @@ pub struct IndexProducerMaintenanceDocumentRequestV1<'a> {
   pub report: IndexProducerReportV1,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexProducerReconcileRecordRequestV1 {
+  pub record_ordinal: u32,
+  pub record_operation_id: [u8; 16],
+  pub publication_sequence: u64,
+  pub report: IndexProducerReportV1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexProducerSpillReasonV1 {
   AdmissionPressure,
@@ -378,6 +386,28 @@ pub enum IndexProducerMaintenanceProgressV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexProducerReconcileProgressV1 {
+  Advanced {
+    record_ordinal: u32,
+    record_operation_id: [u8; 16],
+    outcomes: Vec<IndexProducerOwnerOutcomeV1>,
+  },
+  RetryScheduled {
+    record_ordinal: u32,
+    record_operation_id: [u8; 16],
+    attempt: u16,
+    next_retry_at_ms: u64,
+    outcomes: Vec<IndexProducerOwnerOutcomeV1>,
+  },
+  Spilled {
+    record_ordinal: u32,
+    record_operation_id: [u8; 16],
+    receipt: IndexProducerSpillReceiptV1,
+    outcomes: Vec<IndexProducerOwnerOutcomeV1>,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexProducerCoordinatorSnapshotV1 {
   pub pending_tasks: u32,
   pub pending_bytes: u64,
@@ -437,6 +467,7 @@ pub(crate) struct IndexProducerJournalWorkPlanV1 {
   namespace_root_after: Vec<u8>,
   semantic_state_root: Vec<u8>,
   journal_head: Vec<u8>,
+  next_record_ordinal: u32,
   _reservation: MemoryReservation,
 }
 
@@ -467,6 +498,10 @@ impl IndexProducerJournalWorkPlanV1 {
 
   pub(crate) fn journal_head(&self) -> &[u8] {
     &self.journal_head
+  }
+
+  pub(crate) const fn next_record_ordinal(&self) -> u32 {
+    self.next_record_ordinal
   }
 }
 
@@ -541,6 +576,7 @@ struct RetainedIndexProducerTaskV1 {
   scope: Option<String>,
   attempts: u16,
   next_attempt_at_ms: u64,
+  reconcile_next_record: u32,
   maintenance_continuation: Option<RetainedMaintenanceContinuationV1>,
   retained_bytes: u64,
   _reservation: MemoryReservation,
@@ -744,7 +780,14 @@ impl IndexProducerCoordinatorV1 {
     }
     let receipt = store.persist_task(task_view_from_request(&request)).map_err(spill_error)?;
     self.validate_spill_receipt(&receipt, request.operation_id)?;
-    self.admit_or_spill(request, now_ms, store)
+    match self.admit(request, now_ms) {
+      Ok(admission) => Ok(admission),
+      Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. }) => {
+        self.spilled_tasks = self.spilled_tasks.saturating_add(1);
+        Ok(IndexProducerAdmissionV1::Spilled { receipt })
+      }
+      Err(error) => Err(error),
+    }
   }
 
   pub fn lease_next(&mut self, now_ms: u64, cancelled: bool) -> Result<Option<IndexProducerLeaseV1>, IndexProducerCoordinatorErrorV1> {
@@ -822,6 +865,7 @@ impl IndexProducerCoordinatorV1 {
       namespace_root_after,
       semantic_state_root,
       journal_head,
+      next_record_ordinal: task.reconcile_next_record,
       _reservation: reservation,
     })
   }
@@ -831,6 +875,15 @@ impl IndexProducerCoordinatorV1 {
     let task = &self.tasks[self.task_index(lease.operation_id)?];
     require_maintenance_scan_task(task.kind)?;
     Ok(task.maintenance_continuation.as_ref().map(|continuation| continuation.resume_after.as_str()))
+  }
+
+  pub fn leased_reconcile_next_record(&self, lease: &IndexProducerLeaseV1) -> Result<u32, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    let task = &self.tasks[self.task_index(lease.operation_id)?];
+    if task.kind != IndexProducerTaskKindV1::Reconcile {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("leased task is not journal reconciliation work".to_string()));
+    }
+    Ok(task.reconcile_next_record)
   }
 
   pub(crate) fn leased_maintenance_scan_plan(
@@ -981,6 +1034,118 @@ impl IndexProducerCoordinatorV1 {
     self.tasks[task_index].attempts = 0;
     self.tasks[task_index].next_attempt_at_ms = now_ms;
     Ok(IndexProducerMaintenanceProgressV1::Advanced { document_operation_id, outcomes: request.report.outcomes })
+  }
+
+  pub fn advance_reconcile_record(
+    &mut self,
+    lease: &IndexProducerLeaseV1,
+    mut request: IndexProducerReconcileRecordRequestV1,
+    mutation_coordinator: &mut IndexCoordinatorV1,
+    now_ms: u64,
+    cancelled: bool,
+    spill_store: &mut dyn IndexProducerSpillStoreV1,
+  ) -> Result<IndexProducerReconcileProgressV1, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    if cancelled {
+      self.active_lease = None;
+      return Err(IndexProducerCoordinatorErrorV1::Cancelled);
+    }
+    self.observe_time(now_ms)?;
+    let task_index = self.task_index(lease.operation_id)?;
+    let task = &self.tasks[task_index];
+    if task.kind != IndexProducerTaskKindV1::Reconcile {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("leased task is not journal reconciliation work".to_string()));
+    }
+    if request.record_ordinal != task.reconcile_next_record {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask(format!(
+        "reconcile record ordinal {} does not match retained continuation {}",
+        request.record_ordinal, task.reconcile_next_record
+      )));
+    }
+    if request.record_operation_id == [0; 16] {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("reconcile record operation identity is all zeroes".to_string()));
+    }
+    if request.publication_sequence == 0 || request.publication_sequence > task.publication_sequence {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask(
+        "reconcile record publication sequence is zero or exceeds the journal boundary".to_string(),
+      ));
+    }
+    let next_record_ordinal =
+      request.record_ordinal.checked_add(1).ok_or(IndexProducerCoordinatorErrorV1::AccountingOverflow("reconcile record continuation"))?;
+    let requested_retry_ms = self.prepare_report(&mut request.report)?;
+    self.admit_report_mutations(
+      &request.report,
+      request.publication_sequence,
+      request.record_operation_id,
+      mutation_coordinator,
+      now_ms,
+    )?;
+    if let Some(requested_retry_ms) = requested_retry_ms {
+      return match self.schedule_retry(lease, requested_retry_ms, request.report.outcomes, now_ms, spill_store)? {
+        IndexProducerCompletionV1::RetryScheduled { attempt, next_retry_at_ms, outcomes } => {
+          Ok(IndexProducerReconcileProgressV1::RetryScheduled {
+            record_ordinal: request.record_ordinal,
+            record_operation_id: request.record_operation_id,
+            attempt,
+            next_retry_at_ms,
+            outcomes,
+          })
+        }
+        IndexProducerCompletionV1::Spilled { receipt, outcomes } => Ok(IndexProducerReconcileProgressV1::Spilled {
+          record_ordinal: request.record_ordinal,
+          record_operation_id: request.record_operation_id,
+          receipt,
+          outcomes,
+        }),
+        IndexProducerCompletionV1::Completed { .. } => {
+          Err(IndexProducerCoordinatorErrorV1::Invariant("retry scheduling unexpectedly completed a reconcile task".to_string()))
+        }
+      };
+    }
+    self.tasks[task_index].reconcile_next_record = next_record_ordinal;
+    self.tasks[task_index].attempts = 0;
+    self.tasks[task_index].next_attempt_at_ms = now_ms;
+    Ok(IndexProducerReconcileProgressV1::Advanced {
+      record_ordinal: request.record_ordinal,
+      record_operation_id: request.record_operation_id,
+      outcomes: request.report.outcomes,
+    })
+  }
+
+  pub fn finish_reconcile_page(
+    &mut self,
+    lease: &IndexProducerLeaseV1,
+    complete: bool,
+    record_count: u32,
+    now_ms: u64,
+    cancelled: bool,
+  ) -> Result<Option<IndexProducerCompletionV1>, IndexProducerCoordinatorErrorV1> {
+    self.validate_lease(lease)?;
+    if cancelled {
+      self.active_lease = None;
+      return Err(IndexProducerCoordinatorErrorV1::Cancelled);
+    }
+    self.observe_time(now_ms)?;
+    let task_index = self.task_index(lease.operation_id)?;
+    if self.tasks[task_index].kind != IndexProducerTaskKindV1::Reconcile {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask("leased task is not journal reconciliation work".to_string()));
+    }
+    let next_record = self.tasks[task_index].reconcile_next_record;
+    if (complete && next_record != record_count) || (!complete && next_record >= record_count) {
+      return Err(IndexProducerCoordinatorErrorV1::InvalidTask(format!(
+        "reconcile page completion {complete} disagrees with continuation {next_record} and record count {record_count}"
+      )));
+    }
+    if complete {
+      self.remove_task(task_index)?;
+      self.active_lease = None;
+      self.completed_tasks = self.completed_tasks.saturating_add(1);
+      return Ok(Some(IndexProducerCompletionV1::Completed { outcomes: Vec::new() }));
+    }
+    self.tasks[task_index].attempts = 0;
+    self.tasks[task_index].next_attempt_at_ms = now_ms;
+    self.active_lease = None;
+    Ok(None)
   }
 
   pub fn complete(
@@ -1639,6 +1804,7 @@ fn clone_task(
     scope: request.scope.map(|value| clone_string(value, "task scope")).transpose()?,
     attempts: 0,
     next_attempt_at_ms: now_ms,
+    reconcile_next_record: 0,
     maintenance_continuation: None,
     retained_bytes,
     _reservation: reservation,

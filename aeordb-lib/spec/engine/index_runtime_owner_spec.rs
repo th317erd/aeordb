@@ -22,7 +22,7 @@ use aeordb::engine::v4::index_maintenance_scan::{
 use aeordb::engine::v4::index_producer_collector::{
   IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1, IndexParserOutcomeV1, IndexProducerCollectorOptionsV1,
 };
-use aeordb::engine::v4::index_producer_admission::derive_mutation_operation_id;
+use aeordb::engine::v4::index_producer_admission::{derive_journal_reconcile_operation_id, derive_mutation_operation_id};
 use aeordb::engine::v4::index_producer_coordinator::{
   IndexProducerCoordinatorOptionsV1, IndexProducerSpillErrorV1, IndexProducerSpillReasonV1, IndexProducerSpillReceiptV1,
   IndexProducerSpillStoreV1, IndexProducerTaskKindV1, IndexProducerTaskRequestV1, IndexProducerTaskViewV1,
@@ -2088,7 +2088,7 @@ fn concurrent_degradation_discards_unlocked_collection_and_releases_only_its_lea
 fn runtime_source_has_one_unlocked_collection_and_one_owner_locked_finalization_path() {
   let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
   let start = source.find("  fn execute_journal_plan(").unwrap();
-  let end = source[start..].find("  fn execute_maintenance_plan(").map(|offset| start + offset).unwrap();
+  let end = source[start..].find("  fn execute_reconcile_journal(").map(|offset| start + offset).unwrap();
   let implementation = &source[start..end];
   let source_read = implementation.find("request.journal_source.load_journal(").unwrap();
   let collection = implementation.find("self.worker.collect_resolved_mutation(").unwrap();
@@ -2102,6 +2102,24 @@ fn runtime_source_has_one_unlocked_collection_and_one_owner_locked_finalization_
   assert!(!implementation.contains("self.state.lock()"));
   assert!(!implementation.contains("self.worker.execute("));
   assert!(source_read < collection);
+  assert!(collection < reacquire);
+  assert!(reacquire < finalization);
+}
+
+#[test]
+fn runtime_reconcile_uses_one_bounded_exact_collection_and_locked_finalization_loop() {
+  let source = std::fs::read_to_string(format!("{}/src/engine/v4/index_runtime_owner.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let start = source.find("  fn execute_reconcile_journal(").unwrap();
+  let end = source[start..].find("  fn execute_maintenance_plan(").map(|offset| start + offset).unwrap();
+  let implementation = &source[start..end];
+  let collection = implementation.find("self.worker.collect_resolved_reconcile_mutation(").unwrap();
+  let reacquire = implementation[collection..].find("self.reacquire_producer_state(lease)").map(|offset| collection + offset).unwrap();
+  let finalization = implementation.find("self.worker.finish_mutation_collection(").unwrap();
+
+  assert_eq!(implementation.matches("self.worker.collect_resolved_reconcile_mutation(").count(), 1);
+  assert_eq!(implementation.matches("self.worker.finish_mutation_collection(").count(), 1);
+  assert!(implementation.contains(".take(INDEX_RECONCILE_RECORDS_PER_PAGE_MAX as usize)"));
+  assert!(!implementation.contains("self.state.lock()"));
   assert!(collection < reacquire);
   assert!(reacquire < finalization);
 }
@@ -2256,6 +2274,36 @@ fn cancellation_during_journal_validation_is_typed_and_worker_panics_retain_the_
     Err(IndexRuntimeErrorV1::Work(_))
   ));
   let snapshot = owner.snapshot().unwrap();
+  assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
+  assert_eq!(snapshot.degraded.unwrap().code, "worker_panic");
+  assert_eq!(snapshot.producer.pending_tasks, 1);
+  assert_eq!(snapshot.producer.leased_tasks, 0);
+
+  let reconcile_owner = IndexRuntimeOwnerV1::new([0x44; 16], ALGORITHM, memory(), options(), 1).unwrap();
+  reconcile_owner.complete_recovery(IndexRuntimeRecoveryDecisionV1::Ready { recovered_scopes: 1, highest_checkpoint_sequence: 1 }).unwrap();
+  let reconcile_operation_id = derive_journal_reconcile_operation_id(ALGORITHM, &journal.key).unwrap();
+  reconcile_owner
+    .admit_task(
+      IndexProducerTaskRequestV1 {
+        operation_id: reconcile_operation_id,
+        kind: IndexProducerTaskKindV1::Reconcile,
+        publication_sequence: journal.last_sequence,
+        namespace_root_before: journal.source_root_before,
+        namespace_root_after: journal.source_root_after,
+        semantic_state_root: journal.semantic_state_root,
+        journal_head: Some(&journal.key),
+        scope: None,
+      },
+      103,
+      &mut Spill,
+    )
+    .unwrap();
+  let error =
+    execute_journal_work(&reconcile_owner, &encoded, &revisions, &PanickingSemanticSource, 104, &|| false, &mut Spill).unwrap_err();
+  assert!(
+    matches!(&error, IndexRuntimeErrorV1::Work(context) if context.contains("reconcile record collection") && context.contains("string"))
+  );
+  let snapshot = reconcile_owner.snapshot().unwrap();
   assert_eq!(snapshot.lifecycle, IndexRuntimeLifecycleV1::Degraded);
   assert_eq!(snapshot.degraded.unwrap().code, "worker_panic");
   assert_eq!(snapshot.producer.pending_tasks, 1);
