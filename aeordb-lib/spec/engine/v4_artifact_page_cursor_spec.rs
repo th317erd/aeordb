@@ -585,3 +585,21 @@ fn batch_and_compaction_use_the_shared_cursor_without_a_second_directory_walker(
   assert!(compaction.contains("load_ordered_page_ordinal_path_v1"));
   assert_eq!(cursor.matches("fn locate_neighbor(").count(), 1);
 }
+
+#[test]
+fn nvt_and_posting_materialized_paths_use_the_shared_directory_walker() {
+  let nvt = include_str!("../../src/engine/v4/index_nvt.rs");
+  let cursor = include_str!("../../src/engine/v4/index_artifact_cursor.rs");
+  for removed in [
+    "fn validate_directory_path",
+    "fn predecessor_directory_entry",
+    "fn matching_page_id_entry",
+    "fn validate_directory_root",
+    "fn validate_directory_descriptor",
+  ] {
+    assert!(!nvt.contains(removed), "NVT lookup retained duplicate directory traversal owner {removed}");
+  }
+  assert!(nvt.contains("load_artifact_leaf_cursor_v1("));
+  assert_eq!(cursor.matches("fn descend(").count(), 1);
+  assert_eq!(cursor.matches("fn locate_neighbor(").count(), 1);
+}

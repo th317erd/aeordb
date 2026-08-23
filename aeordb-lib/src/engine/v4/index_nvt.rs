@@ -5,10 +5,14 @@ use super::index_artifact::{
   checked_immutable_index_artifact_encoded_length, decode_immutable_index_artifact, decode_index_manifest, encode_immutable_index_artifact,
   u16_at, u32_at, u64_at,
 };
+use super::index_artifact_cursor::{
+  ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, ArtifactLeafIdentityV1, ArtifactLeafValidatorV1, ArtifactPageCursorErrorV1,
+  ArtifactPageCursorLimitsV1, ArtifactPageCursorRequestV1, ArtifactPageCursorRootV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1,
+  LoadedArtifactLeafCursorV1, OrderedPageLeafValidatorV1, RetainedArtifactBytesV1, load_artifact_leaf_cursor_v1,
+};
 use super::index_manifest::IndexManifestBodyV1;
 use super::index_page::{
-  ArtifactDirectoryEntryV1, ArtifactDirectoryNodeV1, OrderedIndexRoleV1, OrderedPageV1, compare_order_keys, decode_artifact_directory,
-  decode_ordered_page,
+  ArtifactDirectoryEntryV1, ArtifactDirectoryNodeV1, OrderedIndexRoleV1, OrderedPageV1, compare_order_keys, decode_ordered_page,
 };
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
@@ -601,12 +605,13 @@ pub fn select_nvt_predecessor_hint_v1(
   let mut lookup_cell = target_tile_start;
   for candidate in candidates {
     let lookup_key = lookup_cell.to_le_bytes();
-    let tile = match validate_nvt_tile_path(basis, &lookup_key, candidate, limits) {
-      Ok(tile) => tile,
+    let cursor = match load_materialized_nvt_tile_cursor(basis, &lookup_key, candidate, limits) {
+      Ok(cursor) => cursor,
       Err(error) => {
         return Ok(failed_nvt_hint(nvt_error_reason(&error), error));
       }
     };
+    let tile = decode_nvt_tile(cursor.leaf(), basis.hash_algorithm)?;
     if tile.tile_start_cell > lookup_cell {
       return Ok(missing_nvt_hint());
     }
@@ -647,13 +652,11 @@ pub fn validate_nvt_page_hint_v1(
   let Some(path) = path else {
     return Ok(None);
   };
-  validate_path_input_bytes(path, limits)?;
-  let root = posting_root_expectation(field)?;
-  let Some(descriptor) = validate_directory_path(root, PathSelectionV1::PageId(page_id), path, limits)? else {
+  let Some(cursor) = load_materialized_posting_cursor(field, ArtifactPageSeekV1::PageId(page_id), path, limits)? else {
     return Ok(None);
   };
-  let page = decode_ordered_page(path.leaf, field.hash_algorithm)?;
-  validate_posting_page_closure(field, &descriptor, &page)?;
+  let page = decode_ordered_page(cursor.leaf(), field.hash_algorithm)?;
+  validate_posting_manifest_endpoints(field, &page)?;
   if page.page_id != page_id
     || compare_order_keys(field.hash_algorithm, OrderedIndexRoleV1::Posting, page.lower_fence, target_posting_position)?
       == std::cmp::Ordering::Greater
@@ -678,12 +681,10 @@ pub fn exact_posting_predecessor_v1(
     return Ok(None);
   };
   let path = path.ok_or_else(|| lookup_closure_error("populated FieldIndex is missing its exact Posting path"))?;
-  validate_path_input_bytes(path, limits)?;
-  let root = posting_root_expectation(field)?;
-  let descriptor = validate_directory_path(root, PathSelectionV1::OrderKey(target_posting_position), path, limits)?
+  let cursor = load_materialized_posting_cursor(field, ArtifactPageSeekV1::OrderPredecessor(target_posting_position), path, limits)?
     .ok_or_else(|| lookup_closure_error("exact Posting predecessor path selected no descriptor"))?;
-  let page = decode_ordered_page(path.leaf, field.hash_algorithm)?;
-  validate_posting_page_closure(field, &descriptor, &page)?;
+  let page = decode_ordered_page(cursor.leaf(), field.hash_algorithm)?;
+  validate_posting_manifest_endpoints(field, &page)?;
   Ok(Some(PostingPageAnchorV1 { page_id: page.page_id, generation: page.generation, page_artifact_hash: page.key }))
 }
 
@@ -820,198 +821,7 @@ fn try_copy_healing_bytes(value: &[u8]) -> FormatResult<Vec<u8>> {
   Ok(copy)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DirectoryRootExpectationV1<'a> {
-  hash_algorithm: HashAlgorithm,
-  root_key: &'a [u8],
-  owner_id: &'a [u8],
-  maximum_generation: u64,
-  role: OrderedIndexRoleV1,
-  live_count: u64,
-  tombstone_count: u64,
-  page_count: u64,
-  logical_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PathSelectionV1<'a> {
-  OrderKey(&'a [u8]),
-  PageId(u64),
-}
-
-fn posting_root_expectation<'a>(field: &PinnedFieldIndexV1<'a>) -> FormatResult<DirectoryRootExpectationV1<'a>> {
-  let root_key = field.posting_directory_root.ok_or_else(|| lookup_closure_error("FieldIndex has no Posting directory root"))?;
-  Ok(DirectoryRootExpectationV1 {
-    hash_algorithm: field.hash_algorithm,
-    root_key,
-    owner_id: field.owner_id,
-    maximum_generation: field.generation,
-    role: OrderedIndexRoleV1::Posting,
-    live_count: field.live_posting_count,
-    tombstone_count: field.posting_tombstone_count,
-    page_count: field.posting_page_count,
-    logical_bytes: Some(field.live_canonical_posting_bytes),
-  })
-}
-
-fn nvt_root_expectation<'a>(basis: &PinnedFieldNvtV1<'a>) -> FormatResult<DirectoryRootExpectationV1<'a>> {
-  let root_key = basis.tile_directory_root.ok_or_else(|| lookup_closure_error("FieldNvt has no tile directory root"))?;
-  Ok(DirectoryRootExpectationV1 {
-    hash_algorithm: basis.hash_algorithm,
-    root_key,
-    owner_id: basis.owner_id,
-    maximum_generation: basis.generation,
-    role: OrderedIndexRoleV1::NvtTile,
-    live_count: basis.populated_cell_count,
-    tombstone_count: 0,
-    page_count: basis.tile_count,
-    logical_bytes: None,
-  })
-}
-
-fn validate_directory_path<'a>(
-  root: DirectoryRootExpectationV1<'_>,
-  selection: PathSelectionV1<'_>,
-  path: &ImmutableIndexPathV1<'a>,
-  limits: SparseNvtLookupLimitsV1,
-) -> FormatResult<Option<ArtifactDirectoryEntryV1<'a>>> {
-  if path.directories.is_empty() || path.directories.len() > limits.maximum_directory_depth || path.directories.len() > 16 {
-    return Err(lookup_amplification_error("immutable index path depth is outside the admitted range"));
-  }
-  let mut parent_descriptor: Option<ArtifactDirectoryEntryV1<'a>> = None;
-  for (index, bytes) in path.directories.iter().enumerate() {
-    let directory = decode_artifact_directory(bytes, root.hash_algorithm)?;
-    validate_directory_identity(&directory, root.owner_id, root.role, root.maximum_generation)?;
-    let expected_level = u16::try_from(path.directories.len() - index - 1)
-      .map_err(|error| lookup_length_error(format!("directory path level does not fit u16: {error}")))?;
-    if directory.level != expected_level {
-      return Err(lookup_closure_error("directory path levels are not a complete root-to-leaf chain"));
-    }
-    if index == 0 {
-      validate_directory_root(&directory, root)?;
-    } else {
-      let parent = parent_descriptor.as_ref().ok_or_else(|| lookup_closure_error("directory path is missing its parent descriptor"))?;
-      validate_directory_descriptor(parent, &directory)?;
-    }
-    let next_value = if index + 1 < path.directories.len() { path.directories[index + 1] } else { path.leaf };
-    let next_key = decode_immutable_index_artifact(next_value, root.hash_algorithm, MAX_INDEX_PATH_ARTIFACT_LENGTH)?.key;
-    let selected = match selection {
-      PathSelectionV1::OrderKey(key) => {
-        let entry = predecessor_directory_entry(&directory, root.hash_algorithm, key)?;
-        if entry.child_hash != next_key {
-          return Err(lookup_closure_error("directory predecessor path does not name the supplied child"));
-        }
-        Some(entry.clone())
-      }
-      PathSelectionV1::PageId(page_id) => matching_page_id_entry(&directory, page_id, &next_key)?,
-    };
-    let Some(selected) = selected else {
-      return Ok(None);
-    };
-    parent_descriptor = Some(selected);
-  }
-  Ok(parent_descriptor)
-}
-
-fn predecessor_directory_entry<'node, 'data>(
-  directory: &'node ArtifactDirectoryNodeV1<'data>,
-  hash_algorithm: HashAlgorithm,
-  key: &[u8],
-) -> FormatResult<&'node ArtifactDirectoryEntryV1<'data>> {
-  compare_order_keys(hash_algorithm, directory.role, key, key)?;
-  let mut low = 0usize;
-  let mut high = directory.entries.len();
-  while low < high {
-    let middle = low + (high - low) / 2;
-    if compare_order_keys(hash_algorithm, directory.role, directory.entries[middle].lower_fence, key)? != std::cmp::Ordering::Greater {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-  let index = if low == 0 { 0 } else { low - 1 };
-  directory.entries.get(index).ok_or_else(|| lookup_closure_error("validated directory has no predecessor descriptor"))
-}
-
-fn matching_page_id_entry<'data>(
-  directory: &ArtifactDirectoryNodeV1<'data>,
-  page_id: u64,
-  next_key: &[u8],
-) -> FormatResult<Option<ArtifactDirectoryEntryV1<'data>>> {
-  let mut matching = None;
-  for entry in &directory.entries {
-    if page_id >= entry.minimum_page_id && page_id <= entry.maximum_page_id && entry.child_hash == next_key {
-      if matching.is_some() {
-        return Err(lookup_order_error("directory repeats one PageId path child"));
-      }
-      matching = Some(entry.clone());
-    }
-  }
-  Ok(matching)
-}
-
-fn validate_directory_root(directory: &ArtifactDirectoryNodeV1<'_>, root: DirectoryRootExpectationV1<'_>) -> FormatResult<()> {
-  if directory.key != root.root_key
-    || directory.live_count != root.live_count
-    || directory.tombstone_count != root.tombstone_count
-    || directory.page_count != root.page_count
-    || root.logical_bytes.is_some_and(|logical_bytes| directory.logical_bytes != logical_bytes)
-  {
-    return Err(lookup_closure_error("directory root disagrees with its pinned manifest"));
-  }
-  Ok(())
-}
-
-fn validate_directory_identity(
-  directory: &ArtifactDirectoryNodeV1<'_>,
-  owner_id: &[u8],
-  role: OrderedIndexRoleV1,
-  maximum_generation: u64,
-) -> FormatResult<()> {
-  if directory.owner_id != owner_id || directory.role != role || directory.generation > maximum_generation {
-    return Err(lookup_closure_error("directory owner, role, or birth generation disagrees with its pinned manifest"));
-  }
-  Ok(())
-}
-
-fn validate_directory_descriptor(entry: &ArtifactDirectoryEntryV1<'_>, child: &ArtifactDirectoryNodeV1<'_>) -> FormatResult<()> {
-  if entry.child_hash != child.key
-    || entry.child_generation != child.generation
-    || entry.lower_fence != child.lower_fence
-    || entry.upper_fence != child.upper_fence
-    || entry.live_count != child.live_count
-    || entry.tombstone_count != child.tombstone_count
-    || entry.page_count != child.page_count
-    || entry.logical_bytes != child.logical_bytes
-    || entry.minimum_page_id != child.minimum_page_id
-    || entry.maximum_page_id != child.maximum_page_id
-  {
-    return Err(lookup_closure_error("directory descriptor disagrees with its child directory"));
-  }
-  Ok(())
-}
-
-fn validate_posting_page_closure(
-  field: &PinnedFieldIndexV1<'_>,
-  descriptor: &ArtifactDirectoryEntryV1<'_>,
-  page: &OrderedPageV1<'_>,
-) -> FormatResult<()> {
-  if page.owner_id != field.owner_id
-    || page.role != OrderedIndexRoleV1::Posting
-    || page.generation > field.generation
-    || descriptor.child_hash != page.key
-    || descriptor.child_generation != page.generation
-    || descriptor.lower_fence != page.lower_fence
-    || descriptor.upper_fence != page.upper_fence
-    || descriptor.live_count != u64::from(page.live_count)
-    || descriptor.tombstone_count != u64::from(page.tombstone_count)
-    || descriptor.page_count != 1
-    || descriptor.logical_bytes != page.logical_live_bytes
-    || descriptor.minimum_page_id != page.page_id
-    || descriptor.maximum_page_id != page.page_id
-  {
-    return Err(lookup_closure_error("Posting descriptor or page disagrees with the pinned FieldIndex"));
-  }
+fn validate_posting_manifest_endpoints(field: &PinnedFieldIndexV1<'_>, page: &OrderedPageV1<'_>) -> FormatResult<()> {
   if (page.previous_page_id == 0) != (page.page_id == field.first_page_id)
     || (page.next_page_id == 0) != (page.page_id == field.last_page_id)
   {
@@ -1020,36 +830,227 @@ fn validate_posting_page_closure(
   Ok(())
 }
 
-fn validate_nvt_tile_path<'a>(
+fn load_materialized_posting_cursor<'a>(
+  field: &PinnedFieldIndexV1<'_>,
+  seek: ArtifactPageSeekV1<'a>,
+  path: &ImmutableIndexPathV1<'_>,
+  limits: SparseNvtLookupLimitsV1,
+) -> FormatResult<Option<LoadedArtifactLeafCursorV1>> {
+  let root_key = field.posting_directory_root.ok_or_else(|| lookup_closure_error("FieldIndex has no Posting directory root"))?;
+  let mut source = MaterializedArtifactPathSourceV1::new(field.hash_algorithm, path, limits)?;
+  let cursor_limits = materialized_cursor_limits(limits)?;
+  let validator = MaterializedPostingLeafValidatorV1 { field };
+  let loaded = load_artifact_leaf_cursor_v1(
+    &ArtifactPageCursorRequestV1 {
+      root: ArtifactPageCursorRootV1 {
+        hash_algorithm: field.hash_algorithm,
+        root_key,
+        owner_id: field.owner_id,
+        role: OrderedIndexRoleV1::Posting,
+        maximum_generation: field.generation,
+        expected_summary: None,
+      },
+      seek,
+      neighbors: ArtifactPageNeighborModeV1::None,
+      limits: cursor_limits,
+    },
+    &mut source,
+    &validator,
+    &|| false,
+  )
+  .map_err(map_materialized_cursor_error)?;
+  source.ensure_fully_consumed()?;
+  Ok(loaded)
+}
+
+struct MaterializedPostingLeafValidatorV1<'a> {
+  field: &'a PinnedFieldIndexV1<'a>,
+}
+
+impl ArtifactLeafValidatorV1 for MaterializedPostingLeafValidatorV1<'_> {
+  fn validate_root(
+    &self,
+    directory: &ArtifactDirectoryNodeV1<'_>,
+    _root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<(), ArtifactPageCursorErrorV1> {
+    if directory.live_count != self.field.live_posting_count
+      || directory.tombstone_count != self.field.posting_tombstone_count
+      || directory.page_count != self.field.posting_page_count
+      || directory.logical_bytes != self.field.live_canonical_posting_bytes
+    {
+      return Err(ArtifactPageCursorErrorV1::Malformed(lookup_closure_error(
+        "Posting directory root disagrees with its pinned FieldIndex",
+      )));
+    }
+    Ok(())
+  }
+
+  fn validate_leaf(
+    &self,
+    leaf: &[u8],
+    descriptor: &ArtifactDirectoryEntryV1<'_>,
+    root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<ArtifactLeafIdentityV1, ArtifactPageCursorErrorV1> {
+    OrderedPageLeafValidatorV1.validate_leaf(leaf, descriptor, root)
+  }
+}
+
+fn load_materialized_nvt_tile_cursor(
   basis: &PinnedFieldNvtV1<'_>,
   lookup_key: &[u8],
-  path: &ImmutableIndexPathV1<'a>,
+  path: &ImmutableIndexPathV1<'_>,
   limits: SparseNvtLookupLimitsV1,
-) -> FormatResult<NvtTileV1<'a>> {
-  let root = nvt_root_expectation(basis)?;
-  let descriptor = validate_directory_path(root, PathSelectionV1::OrderKey(lookup_key), path, limits)?
-    .ok_or_else(|| lookup_closure_error("NVT directory predecessor path selected no descriptor"))?;
-  let tile = decode_nvt_tile(path.leaf, basis.hash_algorithm)?;
-  let tile_fence = tile.tile_start_cell.to_le_bytes();
-  if tile.owner_id != basis.owner_id
-    || tile.generation > basis.generation
-    || tile.resolution != basis.resolution
-    || tile.tile_cell_count != basis.tile_cells
-    || tile.basis_posting_generation != basis.basis_posting_generation
-    || descriptor.child_hash != tile.key
-    || descriptor.child_generation != tile.generation
-    || descriptor.lower_fence != tile_fence
-    || descriptor.upper_fence != tile_fence
-    || descriptor.live_count != checked_u64(tile.entries.len(), "NVT tile entry count")?
-    || descriptor.tombstone_count != 0
-    || descriptor.page_count != 1
-    || descriptor.logical_bytes != checked_u64(path.leaf.len(), "NVT tile encoded length")?
-    || descriptor.minimum_page_id != 0
-    || descriptor.maximum_page_id != 0
-  {
-    return Err(lookup_closure_error("NVT tile descriptor or basis closure disagrees"));
+) -> FormatResult<LoadedArtifactLeafCursorV1> {
+  let root_key = basis.tile_directory_root.ok_or_else(|| lookup_closure_error("FieldNvt has no tile directory root"))?;
+  let mut source = MaterializedArtifactPathSourceV1::new(basis.hash_algorithm, path, limits)?;
+  let validator = NvtTileLeafValidatorV1 { basis };
+  let loaded = load_artifact_leaf_cursor_v1(
+    &ArtifactPageCursorRequestV1 {
+      root: ArtifactPageCursorRootV1 {
+        hash_algorithm: basis.hash_algorithm,
+        root_key,
+        owner_id: basis.owner_id,
+        role: OrderedIndexRoleV1::NvtTile,
+        maximum_generation: basis.generation,
+        expected_summary: None,
+      },
+      seek: ArtifactPageSeekV1::OrderPredecessor(lookup_key),
+      neighbors: ArtifactPageNeighborModeV1::None,
+      limits: materialized_cursor_limits(limits)?,
+    },
+    &mut source,
+    &validator,
+    &|| false,
+  )
+  .map_err(map_materialized_cursor_error)?;
+  source.ensure_fully_consumed()?;
+  loaded.ok_or_else(|| lookup_closure_error("NVT directory predecessor path selected no descriptor"))
+}
+
+struct NvtTileLeafValidatorV1<'a> {
+  basis: &'a PinnedFieldNvtV1<'a>,
+}
+
+impl ArtifactLeafValidatorV1 for NvtTileLeafValidatorV1<'_> {
+  fn validate_root(
+    &self,
+    directory: &ArtifactDirectoryNodeV1<'_>,
+    _root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<(), ArtifactPageCursorErrorV1> {
+    if directory.live_count != self.basis.populated_cell_count
+      || directory.tombstone_count != 0
+      || directory.page_count != self.basis.tile_count
+      || directory.minimum_page_id != 0
+      || directory.maximum_page_id != 0
+    {
+      return Err(ArtifactPageCursorErrorV1::Malformed(lookup_closure_error("NVT tile directory root disagrees with its pinned FieldNvt")));
+    }
+    Ok(())
   }
-  Ok(tile)
+
+  fn validate_leaf(
+    &self,
+    leaf: &[u8],
+    descriptor: &ArtifactDirectoryEntryV1<'_>,
+    _root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<ArtifactLeafIdentityV1, ArtifactPageCursorErrorV1> {
+    let tile = decode_nvt_tile(leaf, self.basis.hash_algorithm)?;
+    let tile_fence = tile.tile_start_cell.to_le_bytes();
+    if tile.owner_id != self.basis.owner_id
+      || tile.generation > self.basis.generation
+      || tile.resolution != self.basis.resolution
+      || tile.tile_cell_count != self.basis.tile_cells
+      || tile.basis_posting_generation != self.basis.basis_posting_generation
+      || descriptor.child_hash != tile.key
+      || descriptor.child_generation != tile.generation
+      || descriptor.lower_fence != tile_fence
+      || descriptor.upper_fence != tile_fence
+      || descriptor.live_count != checked_u64(tile.entries.len(), "NVT tile entry count")?
+      || descriptor.tombstone_count != 0
+      || descriptor.page_count != 1
+      || descriptor.logical_bytes != checked_u64(leaf.len(), "NVT tile encoded length")?
+      || descriptor.minimum_page_id != 0
+      || descriptor.maximum_page_id != 0
+    {
+      return Err(ArtifactPageCursorErrorV1::Malformed(lookup_closure_error("NVT tile descriptor or basis closure disagrees")));
+    }
+    Ok(ArtifactLeafIdentityV1::without_page_id())
+  }
+}
+
+struct MaterializedArtifactPathSourceV1<'a> {
+  artifacts: Vec<MaterializedArtifactPathEntryV1<'a>>,
+}
+
+struct MaterializedArtifactPathEntryV1<'a> {
+  key: Vec<u8>,
+  value: &'a [u8],
+  consumed: bool,
+}
+
+impl<'a> MaterializedArtifactPathSourceV1<'a> {
+  fn new(hash_algorithm: HashAlgorithm, path: &ImmutableIndexPathV1<'a>, limits: SparseNvtLookupLimitsV1) -> FormatResult<Self> {
+    validate_path_input_bytes(path, limits)?;
+    if path.directories.is_empty() {
+      return Err(lookup_amplification_error("immutable index path has no directory root"));
+    }
+    let artifact_count =
+      path.directories.len().checked_add(1).ok_or_else(|| lookup_length_error("materialized path artifact count overflowed"))?;
+    let mut artifacts = Vec::new();
+    artifacts
+      .try_reserve_exact(artifact_count)
+      .map_err(|error| lookup_amplification_error(format!("materialized path source allocation failed: {error}")))?;
+    for value in path.directories.iter().copied().chain(std::iter::once(path.leaf)) {
+      let artifact = decode_immutable_index_artifact(value, hash_algorithm, MAX_INDEX_PATH_ARTIFACT_LENGTH)?;
+      artifacts.push(MaterializedArtifactPathEntryV1 { key: artifact.key, value, consumed: false });
+    }
+    Ok(Self { artifacts })
+  }
+
+  fn ensure_fully_consumed(&self) -> FormatResult<()> {
+    if self.artifacts.iter().any(|artifact| !artifact.consumed) {
+      return Err(lookup_closure_error("materialized artifact path contains an unselected artifact"));
+    }
+    Ok(())
+  }
+}
+
+impl ArtifactCursorSourceV1 for MaterializedArtifactPathSourceV1<'_> {
+  fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+    let artifact =
+      self.artifacts.iter_mut().find(|artifact| !artifact.consumed && artifact.key == key).ok_or(ArtifactCursorReadErrorV1::Missing)?;
+    artifact.consumed = true;
+    let value = artifact.value;
+    if value.len() > maximum_bytes {
+      return Err(ArtifactCursorReadErrorV1::ResourcePressure("materialized path artifact exceeds the supplied read ceiling".to_owned()));
+    }
+    let mut copy = Vec::new();
+    copy
+      .try_reserve_exact(value.len())
+      .map_err(|error| ArtifactCursorReadErrorV1::ResourcePressure(format!("materialized path copy allocation failed: {error}")))?;
+    copy.extend_from_slice(value);
+    Ok(RetainedArtifactBytesV1::from_bytes(copy))
+  }
+}
+
+fn materialized_cursor_limits(limits: SparseNvtLookupLimitsV1) -> FormatResult<ArtifactPageCursorLimitsV1> {
+  ArtifactPageCursorLimitsV1::new(limits.maximum_directory_depth, limits.maximum_input_bytes).map_err(map_materialized_cursor_error)
+}
+
+fn map_materialized_cursor_error(error: ArtifactPageCursorErrorV1) -> FormatError {
+  match error {
+    ArtifactPageCursorErrorV1::Malformed(error) => error,
+    ArtifactPageCursorErrorV1::InvalidLimits(context)
+    | ArtifactPageCursorErrorV1::SourcePressure(context)
+    | ArtifactPageCursorErrorV1::Allocation(context) => lookup_amplification_error(context),
+    ArtifactPageCursorErrorV1::Cancelled => lookup_closure_error("materialized artifact cursor unexpectedly cancelled"),
+    ArtifactPageCursorErrorV1::MissingArtifact { key } => {
+      lookup_closure_error(format!("materialized artifact path is missing selected child {key}"))
+    }
+    ArtifactPageCursorErrorV1::SourceCorrupt(context) | ArtifactPageCursorErrorV1::SourceOperational(context) => {
+      lookup_closure_error(context)
+    }
+  }
 }
 
 fn validate_posting_position(hash_algorithm: HashAlgorithm, key: &[u8]) -> FormatResult<()> {
@@ -1127,10 +1128,6 @@ fn lookup_length_error(context: impl Into<String>) -> FormatError {
 
 fn lookup_amplification_error(context: impl Into<String>) -> FormatError {
   error(MalformedInputClass::AllocationAmplification, "nvt_lookup_bound", context)
-}
-
-fn lookup_order_error(context: impl Into<String>) -> FormatError {
-  error(MalformedInputClass::NoncanonicalOrderOrDuplicate, "nvt_lookup_order", context)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

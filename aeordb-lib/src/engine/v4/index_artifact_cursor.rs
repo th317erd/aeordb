@@ -191,6 +191,38 @@ pub struct ArtifactPageCursorRequestV1<'a> {
   pub limits: ArtifactPageCursorLimitsV1,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArtifactLeafIdentityV1 {
+  page_id: Option<u64>,
+}
+
+impl ArtifactLeafIdentityV1 {
+  pub(crate) const fn without_page_id() -> Self {
+    Self { page_id: None }
+  }
+
+  pub(crate) const fn with_page_id(page_id: u64) -> Self {
+    Self { page_id: Some(page_id) }
+  }
+}
+
+pub(crate) trait ArtifactLeafValidatorV1 {
+  fn validate_root(
+    &self,
+    _directory: &ArtifactDirectoryNodeV1<'_>,
+    _root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<(), ArtifactPageCursorErrorV1> {
+    Ok(())
+  }
+
+  fn validate_leaf(
+    &self,
+    leaf: &[u8],
+    descriptor: &ArtifactDirectoryEntryV1<'_>,
+    root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<ArtifactLeafIdentityV1, ArtifactPageCursorErrorV1>;
+}
+
 #[derive(Debug)]
 struct TraversedPathV1 {
   directories: Vec<RetainedArtifactBytesV1>,
@@ -199,13 +231,32 @@ struct TraversedPathV1 {
   page_ordinal: u64,
   live_rank_before_page: u64,
   live_rank_within_page: Option<u64>,
-  record_index_within_page: Option<usize>,
 }
 
 #[derive(Debug)]
 struct LoadedNeighborV1 {
   directories: Vec<RetainedArtifactBytesV1>,
   page: RetainedArtifactBytesV1,
+}
+
+#[derive(Debug)]
+pub(crate) struct LoadedArtifactLeafCursorV1 {
+  directories: Vec<RetainedArtifactBytesV1>,
+  leaf: RetainedArtifactBytesV1,
+  previous: Option<LoadedNeighborV1>,
+  next: Option<LoadedNeighborV1>,
+  page_ordinal: u64,
+  live_rank_before_page: u64,
+  live_rank_within_page: Option<u64>,
+  root_page_count: u64,
+  root_live_count: u64,
+  retained_input_bytes: usize,
+}
+
+impl LoadedArtifactLeafCursorV1 {
+  pub(crate) fn leaf(&self) -> &[u8] {
+    self.leaf.bytes()
+  }
 }
 
 #[derive(Debug)]
@@ -385,44 +436,72 @@ pub fn load_artifact_page_cursor_v1(
   source: &mut dyn ArtifactCursorSourceV1,
   is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<LoadedArtifactPageCursorV1>, ArtifactPageCursorErrorV1> {
-  validate_request(request)?;
-  check_cancelled(is_cancelled)?;
-  let mut budget = InputBudgetV1::new(request.limits.maximum_input_bytes());
-  let Some(path) = descend(request, source, is_cancelled, &mut budget)? else {
+  if request.root.role == OrderedIndexRoleV1::NvtTile {
+    return Err(identity_error("ordered-page cursor cannot traverse NVT tile leaves"));
+  }
+  let validator = OrderedPageLeafValidatorV1;
+  let Some(loaded) = load_artifact_leaf_cursor_v1(request, source, &validator, is_cancelled)? else {
     return Ok(None);
   };
-  let current_page = decode_ordered_page(path.page.bytes(), request.root.hash_algorithm)?;
-  let previous = if request.neighbors == ArtifactPageNeighborModeV1::Both {
-    locate_neighbor(request, &path, NeighborDirectionV1::Previous, source, is_cancelled, &mut budget)?
-  } else {
-    None
-  };
-  let next = if request.neighbors != ArtifactPageNeighborModeV1::None {
-    locate_neighbor(request, &path, NeighborDirectionV1::Next, source, is_cancelled, &mut budget)?
-  } else {
-    None
-  };
+  let current_page = decode_ordered_page(loaded.leaf.bytes(), request.root.hash_algorithm)?;
+  let record_index_within_page = loaded.live_rank_within_page.map(|rank| live_record_index_within_page(&current_page, rank)).transpose()?;
   validate_neighbor_continuity(
     request.root.hash_algorithm,
     request.root.role,
     request.neighbors,
     &current_page,
-    previous.as_ref(),
-    next.as_ref(),
+    loaded.previous.as_ref(),
+    loaded.next.as_ref(),
   )?;
+  Ok(Some(LoadedArtifactPageCursorV1 {
+    directories: loaded.directories,
+    page: loaded.leaf,
+    previous: loaded.previous,
+    next: loaded.next,
+    page_ordinal: loaded.page_ordinal,
+    live_rank_before_page: loaded.live_rank_before_page,
+    live_rank_within_page: loaded.live_rank_within_page,
+    record_index_within_page,
+    root_page_count: loaded.root_page_count,
+    root_live_count: loaded.root_live_count,
+    retained_input_bytes: loaded.retained_input_bytes,
+  }))
+}
+
+pub(crate) fn load_artifact_leaf_cursor_v1(
+  request: &ArtifactPageCursorRequestV1<'_>,
+  source: &mut dyn ArtifactCursorSourceV1,
+  validator: &dyn ArtifactLeafValidatorV1,
+  is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<LoadedArtifactLeafCursorV1>, ArtifactPageCursorErrorV1> {
+  validate_request(request)?;
+  check_cancelled(is_cancelled)?;
+  let mut budget = InputBudgetV1::new(request.limits.maximum_input_bytes());
+  let Some(path) = descend(request, source, validator, is_cancelled, &mut budget)? else {
+    return Ok(None);
+  };
+  let previous = if request.neighbors == ArtifactPageNeighborModeV1::Both {
+    locate_neighbor(request, &path, NeighborDirectionV1::Previous, source, validator, is_cancelled, &mut budget)?
+  } else {
+    None
+  };
+  let next = if request.neighbors != ArtifactPageNeighborModeV1::None {
+    locate_neighbor(request, &path, NeighborDirectionV1::Next, source, validator, is_cancelled, &mut budget)?
+  } else {
+    None
+  };
   let (root_page_count, root_live_count) = {
     let root = decode_artifact_directory(path.directories[0].bytes(), request.root.hash_algorithm)?;
     (root.page_count, root.live_count)
   };
-  Ok(Some(LoadedArtifactPageCursorV1 {
+  Ok(Some(LoadedArtifactLeafCursorV1 {
     directories: path.directories,
-    page: path.page,
+    leaf: path.page,
     previous,
     next,
     page_ordinal: path.page_ordinal,
     live_rank_before_page: path.live_rank_before_page,
     live_rank_within_page: path.live_rank_within_page,
-    record_index_within_page: path.record_index_within_page,
     root_page_count,
     root_live_count,
     retained_input_bytes: budget.retained_bytes,
@@ -432,11 +511,12 @@ pub fn load_artifact_page_cursor_v1(
 fn descend(
   request: &ArtifactPageCursorRequestV1<'_>,
   source: &mut dyn ArtifactCursorSourceV1,
+  validator: &dyn ArtifactLeafValidatorV1,
   is_cancelled: &dyn Fn() -> bool,
   budget: &mut InputBudgetV1,
 ) -> Result<Option<TraversedPathV1>, ArtifactPageCursorErrorV1> {
   if let ArtifactPageSeekV1::PageId(page_id) = request.seek {
-    return descend_to_page_id(request, page_id, source, is_cancelled, budget);
+    return descend_to_page_id(request, page_id, source, validator, is_cancelled, budget);
   }
   let mut directories = Vec::new();
   let mut selected_entries = Vec::new();
@@ -459,6 +539,7 @@ fn descend(
         return Err(closure_error("artifact directory root key disagrees with the selected root"));
       }
       validate_root_summary(&directory, request.root.expected_summary)?;
+      validator.validate_root(&directory, request.root)?;
       validate_seek_against_root(&directory, request.root.hash_algorithm, request.seek)?;
       if usize::from(directory.level).checked_add(1).is_none_or(|depth| depth > request.limits.maximum_directory_depth()) {
         return Err(amplification_error("artifact cursor root level exceeds its directory-depth limit"));
@@ -478,16 +559,13 @@ fn descend(
     selected_entries.push(selected);
     if directory.level == 0 {
       let page = load_artifact(entry.child_hash, source, is_cancelled, budget)?;
-      let decoded_page = decode_ordered_page(page.bytes(), request.root.hash_algorithm)?;
-      validate_leaf_page(&decoded_page, entry, request.root)?;
-      let (live_rank_within_page, record_index_within_page) = match request.seek {
-        ArtifactPageSeekV1::LiveRecordRank(_) => {
-          (Some(selection.remaining), Some(live_record_index_within_page(&decoded_page, selection.remaining)?))
-        }
+      validator.validate_leaf(page.bytes(), entry, request.root)?;
+      let live_rank_within_page = match request.seek {
+        ArtifactPageSeekV1::LiveRecordRank(_) => Some(selection.remaining),
         ArtifactPageSeekV1::PageOrdinal(_)
         | ArtifactPageSeekV1::OrderLowerBound(_)
         | ArtifactPageSeekV1::OrderPredecessor(_)
-        | ArtifactPageSeekV1::PageId(_) => (None, None),
+        | ArtifactPageSeekV1::PageId(_) => None,
       };
       return Ok(Some(TraversedPathV1 {
         directories,
@@ -496,7 +574,6 @@ fn descend(
         page_ordinal: selection.page_ordinal,
         live_rank_before_page: selection.live_rank_before_page,
         live_rank_within_page,
-        record_index_within_page,
       }));
     }
     current_key = copy_bytes(entry.child_hash, "directory child key")?;
@@ -509,11 +586,12 @@ fn descend_to_page_id(
   request: &ArtifactPageCursorRequestV1<'_>,
   page_id: u64,
   source: &mut dyn ArtifactCursorSourceV1,
+  validator: &dyn ArtifactLeafValidatorV1,
   is_cancelled: &dyn Fn() -> bool,
   budget: &mut InputBudgetV1,
 ) -> Result<Option<TraversedPathV1>, ArtifactPageCursorErrorV1> {
   let root = load_artifact(request.root.root_key, source, is_cancelled, budget)?;
-  let mut search = PageIdSearchV1 { request, page_id, source, is_cancelled, budget, found: None };
+  let mut search = PageIdSearchV1 { request, page_id, source, validator, is_cancelled, budget, found: None };
   search.search(PageIdSearchNodeV1 {
     retained: root,
     expected_level: None,
@@ -540,6 +618,7 @@ struct PageIdSearchV1<'request, 'source> {
   request: &'request ArtifactPageCursorRequestV1<'request>,
   page_id: u64,
   source: &'source mut dyn ArtifactCursorSourceV1,
+  validator: &'source dyn ArtifactLeafValidatorV1,
   is_cancelled: &'source dyn Fn() -> bool,
   budget: &'source mut InputBudgetV1,
   found: Option<TraversedPathV1>,
@@ -560,6 +639,7 @@ impl PageIdSearchV1<'_, '_> {
         return Err(closure_error("PageId search root key disagrees with the selected root"));
       }
       validate_root_summary(&directory, self.request.root.expected_summary)?;
+      self.validator.validate_root(&directory, self.request.root)?;
       validate_seek_against_root(&directory, self.request.root.hash_algorithm, self.request.seek)?;
       if usize::from(directory.level).checked_add(1).is_none_or(|depth| depth > self.request.limits.maximum_directory_depth()) {
         return Err(amplification_error("PageId search root level exceeds its directory-depth limit"));
@@ -585,9 +665,8 @@ impl PageIdSearchV1<'_, '_> {
         child_selected.push(index);
         if directory.level == 0 {
           let page = load_artifact(entry.child_hash, self.source, self.is_cancelled, self.budget)?;
-          let decoded = decode_ordered_page(page.bytes(), self.request.root.hash_algorithm)?;
-          validate_leaf_page(&decoded, entry, self.request.root)?;
-          if decoded.page_id != self.page_id {
+          let identity = self.validator.validate_leaf(page.bytes(), entry, self.request.root)?;
+          if identity.page_id != Some(self.page_id) {
             return Err(closure_error("PageId leaf descriptor range does not resolve to its requested page"));
           }
           if self.found.is_some() {
@@ -600,7 +679,6 @@ impl PageIdSearchV1<'_, '_> {
             page_ordinal: child_page_ordinal,
             live_rank_before_page: child_live_rank,
             live_rank_within_page: None,
-            record_index_within_page: None,
           });
         } else {
           let child = load_artifact(entry.child_hash, self.source, self.is_cancelled, self.budget)?;
@@ -750,6 +828,7 @@ fn locate_neighbor(
   path: &TraversedPathV1,
   direction: NeighborDirectionV1,
   source: &mut dyn ArtifactCursorSourceV1,
+  validator: &dyn ArtifactLeafValidatorV1,
   is_cancelled: &dyn Fn() -> bool,
   budget: &mut InputBudgetV1,
 ) -> Result<Option<LoadedNeighborV1>, ArtifactPageCursorErrorV1> {
@@ -767,8 +846,7 @@ fn locate_neighbor(
     let entry = &directory.entries[sibling];
     if directory.level == 0 {
       let page = load_artifact(entry.child_hash, source, is_cancelled, budget)?;
-      let decoded = decode_ordered_page(page.bytes(), request.root.hash_algorithm)?;
-      validate_leaf_page(&decoded, entry, request.root)?;
+      validator.validate_leaf(page.bytes(), entry, request.root)?;
       return Ok(Some(LoadedNeighborV1 { directories, page }));
     }
     let mut key = copy_bytes(entry.child_hash, "neighbor directory key")?;
@@ -794,8 +872,7 @@ fn locate_neighbor(
       .ok_or_else(|| closure_error("artifact cursor neighbor directory is empty"))?;
       if child.level == 0 {
         let page = load_artifact(child_entry.child_hash, source, is_cancelled, budget)?;
-        let decoded = decode_ordered_page(page.bytes(), request.root.hash_algorithm)?;
-        validate_leaf_page(&decoded, child_entry, request.root)?;
+        validator.validate_leaf(page.bytes(), child_entry, request.root)?;
         return Ok(Some(LoadedNeighborV1 { directories, page }));
       }
       key = copy_bytes(child_entry.child_hash, "neighbor child key")?;
@@ -848,7 +925,6 @@ fn validate_request(request: &ArtifactPageCursorRequestV1<'_>) -> Result<(), Art
     || request.root.owner_id.len() != hash_width
     || request.root.owner_id.iter().all(|byte| *byte == 0)
     || request.root.maximum_generation == 0
-    || request.root.role == OrderedIndexRoleV1::NvtTile
   {
     return Err(identity_error("artifact cursor root key, owner, generation, or role is invalid"));
   }
@@ -941,6 +1017,21 @@ fn validate_leaf_page(
     return Err(closure_error("ordered page disagrees with its exact artifact-directory descriptor"));
   }
   Ok(())
+}
+
+pub(crate) struct OrderedPageLeafValidatorV1;
+
+impl ArtifactLeafValidatorV1 for OrderedPageLeafValidatorV1 {
+  fn validate_leaf(
+    &self,
+    leaf: &[u8],
+    descriptor: &ArtifactDirectoryEntryV1<'_>,
+    root: ArtifactPageCursorRootV1<'_>,
+  ) -> Result<ArtifactLeafIdentityV1, ArtifactPageCursorErrorV1> {
+    let page = decode_ordered_page(leaf, root.hash_algorithm)?;
+    validate_leaf_page(&page, descriptor, root)?;
+    Ok(ArtifactLeafIdentityV1::with_page_id(page.page_id))
+  }
 }
 
 fn load_artifact(

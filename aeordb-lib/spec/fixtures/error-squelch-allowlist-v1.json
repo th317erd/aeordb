@@ -10046,7 +10046,7 @@
     {
       "id": "esq-v1-68c37ffd4471888c86f5-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 298,
+      "line": 302,
       "column": 8,
       "enclosing_item": "impl NvtEntryIteratorV1 < '_ >::next",
       "kind": "result_status_probe",
@@ -10056,7 +10056,7 @@
     {
       "id": "esq-v1-bf03be8045fb9c55d0b9-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 334,
+      "line": 338,
       "column": 19,
       "enclosing_item": "impl NvtTileV1 < '_ >::predecessor_entry",
       "kind": "result_to_option",
@@ -10066,7 +10066,7 @@
     {
       "id": "esq-v1-be21d1fc9a1154d20660-00",
       "file": "aeordb-lib/src/engine/v4/index_nvt.rs",
-      "line": 344,
+      "line": 348,
       "column": 7,
       "enclosing_item": "impl NvtTileV1 < '_ >::predecessor_entry",
       "kind": "result_to_option",

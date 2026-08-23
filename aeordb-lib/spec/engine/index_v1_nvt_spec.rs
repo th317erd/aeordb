@@ -1131,6 +1131,13 @@ fn multi_level_posting_paths_close_every_parent_descriptor() {
   assert_eq!(exact_posting_predecessor_v1(&field, &graph.target_key, Some(&path), lookup_limits()).unwrap().unwrap().page_id, 11);
   assert_eq!(validate_nvt_page_hint_v1(&field, &graph.target_key, 11, Some(&path), lookup_limits()).unwrap().unwrap().page_id, 11);
 
+  let appended_directories = [root_directory.as_slice(), graph.posting_directory.as_slice(), graph.posting_directory.as_slice()];
+  let appended = ImmutableIndexPathV1 { directories: &appended_directories, leaf: &graph.posting_pages[0] };
+  assert_eq!(
+    exact_posting_predecessor_v1(&field, &graph.target_key, Some(&appended), lookup_limits()).unwrap_err().class(),
+    MalformedInputClass::CrossRecordClosureMismatch
+  );
+
   let detached_directories = [root_directory.as_slice()];
   let detached = ImmutableIndexPathV1 { directories: &detached_directories, leaf: &graph.posting_pages[0] };
   assert_eq!(
