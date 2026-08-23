@@ -1,9 +1,9 @@
 # Child 06 Progress: Query
 
-- **Status:** active; P6-1/P6-2, P6-3a through P6-3f, P6-4a/P6-4c, P7-1a, P7-1b1, and P7-1b2 are complete; P6-4b Linux/macOS qualification is green and Windows qualification remains externally blocked
-- **Current landing unit:** P7-1b3 shared permission evaluation and restrictive selected-root authorization, while periodically retrying the externally blocked Windows native-parser gate
+- **Status:** active; P6-1/P6-2, P6-3a through P6-3f, P6-4a/P6-4c, P7-1a, and P7-1b1 through P7-1b3 are complete; P6-4b Linux/macOS qualification is green and Windows qualification remains externally blocked
+- **Current landing unit:** P7-1b4 combined native read-view resolver proof, while periodically retrying the externally blocked Windows native-parser gate
 - **Entry commit:** `20e1aa9` (`Persist soft mutation journals safely`)
-- **Last green commit:** `84e520c` (`Read selected root lifecycle state`)
+- **Last green commit:** `c851326` (`Authorize selected roots restrictively`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
 - **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
@@ -761,3 +761,4 @@
 - **Focused and regression proof:** the final exact-source authorization target passes 14/14 tests. Affected permission/auth/share/SSE/read-view suites pass 298 tests: `permissions_spec` 55, `auth_middleware_spec` 27, `permission_scenarios_spec` 25, `api_key_rules_spec` 35, `sharing_spec` 68, `sse_spec` 55, `v4_read_view_spec` 19, and the focused target 14. The final library harness passes 592/592 tests. All 29 suppression architecture tests pass against the exact 1,531-site inventory.
 - **Broad and static proof:** serial workspace all-target checking, workspace formatting, diff hygiene, mdBook, and the independent 454-fixture/95-route/38-document contract gate pass. Strict library Clippy remains at the exact inherited 120-diagnostic baseline with no diagnostic in the changed permission/read-view files. The separately owned `tools/v4-reference` formatter still reports one pre-existing unchanged layout mismatch at `src/index_runtime_workspace.rs:464`; its independent contract executable is green. Windows native-parser qualification remains externally blocked because the configured ProxyJump endpoint refuses the forwarded connection.
 - **Review boundary and next:** the adversarial review found no selected-root expansion path, current-authority bypass, current-denial storage read, credential-policy ambiguity, cancellation authority leak, second permission evaluator, storage/service dependency, route activation, persistent-format change, writer, migration, deployment, or production operation. P7-1b4 next supplies the real immutable-tree permission source and proves the combined resolver against native files, authority movement, request-pin lifetime, concealment, memory pressure, corruption, and cancellation before P7-1c may integrate handlers.
+- **Landing:** committed as `c851326` (`Authorize selected roots restrictively`); the implementation landing and this handoff are pushed together before P7-1b4 source edits.
