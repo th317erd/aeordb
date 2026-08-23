@@ -1305,6 +1305,10 @@ path = "spec/http/root_api_reference_spec.rs"
 name = "root_route_runtime_spec"
 path = "spec/http/root_route_runtime_spec.rs"
 
+[[test]]
+name = "root_request_adapter_spec"
+path = "spec/http/root_request_adapter_spec.rs"
+
 
 [lints]
 workspace = true

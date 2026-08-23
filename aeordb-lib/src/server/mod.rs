@@ -776,11 +776,12 @@ fn try_create_app_with_all_and_task_queue_inner(
     .route("/sync/diff", post(sync_routes::sync_diff))
     .route("/sync/chunks", post(sync_routes::sync_chunks));
 
+  let root_service_activation = root_api::RootServiceActivationV1::inactive_v4();
   let router = public_routes
     .merge(protected_routes)
     .with_state(app_state)
     .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)) // 1 MB default for non-upload routes
-    .layer(from_fn(root_api::root_contract_middleware))
+    .layer(from_fn_with_state(root_service_activation, root_api::root_contract_middleware))
     .layer(HttpMetricsLayer)
     .layer(from_fn(request_id_middleware))
     .layer(TraceLayer::new_for_http());

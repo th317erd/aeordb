@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use axum::extract::{MatchedPath, Request};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::engine::HashAlgorithm;
@@ -103,6 +103,53 @@ pub struct RouteRootRegistrationContractV1 {
 pub struct RouteRootContractWitnessV1 {
   pub path: &'static str,
   pub operation: RouteRootOperationContractV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RootRequestAdapterV1 {
+  ResolveSingleRoot,
+  ResolveMultipleRoots,
+  TransportContent,
+  RetrieveHashFromSelectedRoot,
+  ExecuteOperational,
+  PublishCurrentMutation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootServiceModeV1 {
+  LegacyV3Compatibility,
+}
+
+/// The sole HTTP root-operation service activation boundary.
+///
+/// P7 installs only the inactive-v4 compatibility mode. The private field
+/// prevents callers from manufacturing another mode before P8 adds a
+/// migration-qualified constructor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootServiceActivationV1 {
+  mode: RootServiceModeV1,
+}
+
+impl RootServiceActivationV1 {
+  pub const fn inactive_v4() -> Self {
+    Self { mode: RootServiceModeV1::LegacyV3Compatibility }
+  }
+
+  pub const fn mode(self) -> RootServiceModeV1 {
+    self.mode
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteRootRequestPlanV1 {
+  pub witness: RouteRootContractWitnessV1,
+  pub adapter: RootRequestAdapterV1,
+  pub service_mode: RootServiceModeV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootRequestPlanErrorV1 {
+  ClassProofMismatch { class: RootRouteClassV1, proof: ReadViewProofV1 },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -486,17 +533,49 @@ pub fn route_root_operation_contract_v1(path: &str, method: &Method) -> Option<R
   route_root_contract_witness_v1(path, method).map(|witness| witness.operation)
 }
 
+pub fn route_root_request_plan_v1(
+  witness: RouteRootContractWitnessV1,
+  activation: RootServiceActivationV1,
+) -> Result<RouteRootRequestPlanV1, RootRequestPlanErrorV1> {
+  let operation = witness.operation;
+  let adapter = match (operation.class, operation.proof) {
+    (RootRouteClassV1::SingleRootNamespace, ReadViewProofV1::ResolvedReadView) => RootRequestAdapterV1::ResolveSingleRoot,
+    (RootRouteClassV1::MultiRoot, ReadViewProofV1::MultiRootResolver) => RootRequestAdapterV1::ResolveMultipleRoots,
+    (RootRouteClassV1::ContentStaging, ReadViewProofV1::ContentTransport) => RootRequestAdapterV1::TransportContent,
+    (RootRouteClassV1::HashRetrieval, ReadViewProofV1::ResolvedReadView) => RootRequestAdapterV1::RetrieveHashFromSelectedRoot,
+    (RootRouteClassV1::OperationalSystem, ReadViewProofV1::NoNamespace | ReadViewProofV1::PluginHost) => {
+      RootRequestAdapterV1::ExecuteOperational
+    }
+    (RootRouteClassV1::Mutation, ReadViewProofV1::MutationRejectsGenericRoot) => RootRequestAdapterV1::PublishCurrentMutation,
+    (class, proof) => return Err(RootRequestPlanErrorV1::ClassProofMismatch { class, proof }),
+  };
+  Ok(RouteRootRequestPlanV1 { witness, adapter, service_mode: activation.mode() })
+}
+
 /// Attach the exact route contract to every matched request without parsing
 /// selectors, buffering bodies, or activating a storage reader.
-pub async fn root_contract_middleware(mut request: Request, next: Next) -> Response {
+pub async fn root_contract_middleware(State(activation): State<RootServiceActivationV1>, mut request: Request, next: Next) -> Response {
   let witness =
     request.extensions().get::<MatchedPath>().and_then(|matched| route_root_contract_witness_v1(matched.as_str(), request.method()));
+  let mut plan = None;
   if let Some(witness) = witness {
+    let request_plan = match route_root_request_plan_v1(witness, activation) {
+      Ok(request_plan) => request_plan,
+      Err(error) => {
+        tracing::error!(?error, path = witness.path, "Route root contract could not be adapted");
+        return ErrorResponse::new("Internal route root contract is inconsistent").with_code(error_codes::INTERNAL_ERROR).into_response();
+      }
+    };
     request.extensions_mut().insert(witness);
+    request.extensions_mut().insert(request_plan);
+    plan = Some(request_plan);
   }
   let mut response = next.run(request).await;
   if let Some(witness) = witness {
     response.extensions_mut().insert(witness);
+  }
+  if let Some(plan) = plan {
+    response.extensions_mut().insert(plan);
   }
   response
 }

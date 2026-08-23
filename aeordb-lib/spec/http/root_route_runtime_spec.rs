@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use aeordb::auth::jwt::JwtManager;
 use aeordb::server::root_api::{
-  HttpMethodV1, RootResponseShapeV1, RootRouteClassV1, RouteRootContractWitnessV1, root_contract_middleware,
+  HttpMethodV1, RootResponseShapeV1, RootRouteClassV1, RootServiceActivationV1, RouteRootContractWitnessV1, root_contract_middleware,
   route_root_operation_contract_v1,
 };
 use aeordb::server::{create_app_with_jwt_and_engine, create_temp_engine_for_tests};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Extension, Request};
 use axum::http::{Method, StatusCode};
-use axum::middleware::from_fn;
+use axum::middleware::from_fn_with_state;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
@@ -51,7 +51,9 @@ fn runtime_lookup_covers_explicit_methods_and_axum_implicit_head() {
 
 #[tokio::test]
 async fn middleware_exposes_the_exact_witness_to_handler_and_response() {
-  let router = Router::new().route("/files", get(witnessed)).layer(from_fn(root_contract_middleware));
+  let router = Router::new()
+    .route("/files", get(witnessed))
+    .layer(from_fn_with_state(RootServiceActivationV1::inactive_v4(), root_contract_middleware));
 
   let response = router.oneshot(Request::builder().method(Method::GET).uri("/files").body(Body::empty()).unwrap()).await.unwrap();
 
@@ -64,7 +66,9 @@ async fn middleware_exposes_the_exact_witness_to_handler_and_response() {
 
 #[tokio::test]
 async fn middleware_classifies_implicit_head_without_changing_axum_method_behavior() {
-  let router = Router::new().route("/system/health", get(witnessed)).layer(from_fn(root_contract_middleware));
+  let router = Router::new()
+    .route("/system/health", get(witnessed))
+    .layer(from_fn_with_state(RootServiceActivationV1::inactive_v4(), root_contract_middleware));
 
   let response = router.oneshot(Request::builder().method(Method::HEAD).uri("/system/health").body(Body::empty()).unwrap()).await.unwrap();
 
@@ -77,7 +81,9 @@ async fn middleware_classifies_implicit_head_without_changing_axum_method_behavi
 
 #[tokio::test]
 async fn middleware_leaves_undeclared_methods_and_unknown_paths_to_axum() {
-  let router = Router::new().route("/files/query", post(witnessed)).layer(from_fn(root_contract_middleware));
+  let router = Router::new()
+    .route("/files/query", post(witnessed))
+    .layer(from_fn_with_state(RootServiceActivationV1::inactive_v4(), root_contract_middleware));
 
   let method_response =
     router.clone().oneshot(Request::builder().method(Method::GET).uri("/files/query").body(Body::empty()).unwrap()).await.unwrap();
@@ -91,7 +97,9 @@ async fn middleware_leaves_undeclared_methods_and_unknown_paths_to_axum() {
 
 #[tokio::test]
 async fn middleware_does_not_buffer_replace_or_truncate_request_bodies() {
-  let router = Router::new().route("/files/query", post(witnessed_body)).layer(from_fn(root_contract_middleware));
+  let router = Router::new()
+    .route("/files/query", post(witnessed_body))
+    .layer(from_fn_with_state(RootServiceActivationV1::inactive_v4(), root_contract_middleware));
   let expected = b"streamed request bytes remain exact";
 
   let response = router
@@ -128,7 +136,7 @@ async fn assembled_app_witness_wraps_public_and_protected_routes() {
 #[test]
 fn assembled_server_installs_exactly_one_whole_router_contract_middleware() {
   let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/mod.rs")).unwrap();
-  assert_eq!(source.matches("from_fn(root_api::root_contract_middleware)").count(), 1);
+  assert_eq!(source.matches("from_fn_with_state(root_service_activation, root_api::root_contract_middleware)").count(), 1);
 
   let root_source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/root_api.rs")).unwrap();
   for forbidden in ["DirectoryOps", "StorageEngine", "ReadViewResolverV1::new", "NativeReadViewSourceV1::new"] {
