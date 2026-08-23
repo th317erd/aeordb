@@ -3,7 +3,7 @@
 - **Status:** active; P6-1/P6-2, P6-3a through P6-3f, and P6-4a complete; P6-4b native-parser allocator qualification is next
 - **Current landing unit:** P6-4b native-parser allocator and RSS proof
 - **Entry commit:** `20e1aa9` (`Persist soft mutation journals safely`)
-- **Last green commit:** `e29ad5f` (`Integrate migration-qualified index coverage`)
+- **Last green commit:** `3a9578a` (`Bound durable journal handoff`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest
 - **Start gate:** satisfied: Children 03 and 05 are complete; Child 04 root-state APIs are complete for the later P7 gate
 - **Plan:** [Child 06](../children/06-async-coverage-query-pagination-and-locators.md)
