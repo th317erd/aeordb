@@ -47,6 +47,7 @@ pub mod gc_void_settlement;
 pub mod hash;
 pub mod header_publication;
 pub mod index_artifact;
+pub mod index_artifact_cursor;
 pub mod index_batch_application;
 pub mod index_compaction_runtime;
 pub mod index_converter;

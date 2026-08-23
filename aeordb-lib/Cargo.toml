@@ -755,6 +755,10 @@ name = "v4_index_batch_application_spec"
 path = "spec/engine/v4_index_batch_application_spec.rs"
 
 [[test]]
+name = "v4_artifact_page_cursor_spec"
+path = "spec/engine/v4_artifact_page_cursor_spec.rs"
+
+[[test]]
 name = "v4_root_migration_spec"
 path = "spec/engine/v4_root_migration_spec.rs"
 
