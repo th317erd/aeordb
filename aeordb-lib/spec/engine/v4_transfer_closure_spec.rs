@@ -120,7 +120,7 @@ impl ReadViewAuthoritySourceV1 for Source {
   fn observe_lifecycle(
     &self,
     _header: &SelectedDatabaseHeaderV4,
-    _authority: &LoadedReadAuthorityV1,
+    _root_hash: &[u8],
     _cancellation: &CancellationToken,
   ) -> Result<RootLifecycleObservationV1, ReadViewLifecycleErrorV1> {
     Ok(RootLifecycleObservationV1::Live)

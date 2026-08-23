@@ -1182,6 +1182,15 @@
             - [x] Prove current denial reads no selected-root source, share/root current-only policy remains explicit, and ordinary API/user requests evaluate selected documents with current group identity.
             - [x] Run affected permission/auth/share/SSE/plugin regressions, broad/static gates, update evidence, commit, and push the green landing unit.
           - [ ] P7-1b4: prove the combined native resolver against real v4 files, concurrent authority movement, pin lifetime, concealment, pressure, and architecture uniqueness.
+            - [ ] Add compile-red native-file proof for both hash widths, direct and ancestor-navigation permission decisions, current-denial isolation, authority movement, cancellation, corruption, and pressure.
+            - [ ] Implement the single production `ReadViewAuthoritySourceV1` adapter over `V4FirstAuthorityPublisher`, captured-header authority, current lifecycle, and the shared process memory coordinator.
+            - [x] Move lifecycle admission and request-pin acquisition ahead of every selected-root entity or permission read, retaining the pin through the complete resolved-view lifetime.
+            - [ ] Account immutable authority allocations before reading them and retain the query reservation through the complete resolved-view lifetime; release it on every refusal and drop path.
+            - [ ] Add one captured-header native namespace point reader for canonical flat/B-tree directories and bounded FileRecord/chunk assembly without recapturing mutable HEAD.
+            - [ ] Implement the selected-root permission source over real `.aeordb-permissions` files, including current-compatible bounded descendant-grant child discovery and restrictive intersection.
+            - [ ] Prove root/share current-only policy performs no selected namespace reads and current denial preserves concealment before header, lifecycle, pin, or selected storage access.
+            - [ ] Prove concurrent HEAD advancement is allowed while physical-instance/regression drift fails closed, active pins exclude retirement, and all reservations/pins release after success or failure.
+            - [ ] Prove architecture uniqueness, run affected/broad/static/native real-file gates, update evidence, commit, and push the green landing unit.
         - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.

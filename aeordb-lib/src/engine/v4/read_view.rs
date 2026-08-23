@@ -662,7 +662,7 @@ pub trait ReadViewAuthoritySourceV1: Send + Sync {
   fn observe_lifecycle(
     &self,
     header: &SelectedDatabaseHeaderV4,
-    authority: &LoadedReadAuthorityV1,
+    root_hash: &[u8],
     cancellation: &CancellationToken,
   ) -> Result<RootLifecycleObservationV1, ReadViewLifecycleErrorV1>;
 }
@@ -903,6 +903,17 @@ where
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }
 
+    let admission = self
+      .pin_coordinator
+      .admit_read(root_hash, cancellation, || {
+        self.authority_source.observe_lifecycle(&header, root_hash, cancellation).map_err(|error| match error {
+          ReadViewLifecycleErrorV1::Corrupt(_) => RootPinCoordinatorErrorV1::LifecycleCorrupt,
+          ReadViewLifecycleErrorV1::Unavailable(_) => RootPinCoordinatorErrorV1::LifecycleUnavailable,
+          ReadViewLifecycleErrorV1::Canceled => RootPinCoordinatorErrorV1::Canceled,
+        })
+      })
+      .map_err(|error| authorized_error(error.into()))?;
+
     let loaded = match self.authority_source.load_verified_authority(&header, root_hash, cancellation) {
       Ok(loaded) => loaded,
       Err(ReadViewSourceErrorV1::RootNotAdmitted) => {
@@ -930,16 +941,6 @@ where
     validate_loaded_authority(&header, root_hash, &loaded).map_err(authorized_error)?;
     validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(authorized_error)?;
 
-    let admission = self
-      .pin_coordinator
-      .admit_read(root_hash, cancellation, || {
-        self.authority_source.observe_lifecycle(&header, &loaded, cancellation).map_err(|error| match error {
-          ReadViewLifecycleErrorV1::Corrupt(_) => RootPinCoordinatorErrorV1::LifecycleCorrupt,
-          ReadViewLifecycleErrorV1::Unavailable(_) => RootPinCoordinatorErrorV1::LifecycleUnavailable,
-          ReadViewLifecycleErrorV1::Canceled => RootPinCoordinatorErrorV1::Canceled,
-        })
-      })
-      .map_err(|error| authorized_error(error.into()))?;
     let root_metadata =
       ReadViewRootMetadataV1 { hash: root_hash.to_vec(), state: admission.state, expires_at_ms: admission.state.expires_at_ms() };
     Ok(ResolvedReadViewV1 {

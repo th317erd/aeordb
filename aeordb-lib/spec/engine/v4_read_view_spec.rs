@@ -178,7 +178,7 @@ impl ReadViewAuthoritySourceV1 for FakeAuthoritySource {
   fn observe_lifecycle(
     &self,
     _header: &SelectedDatabaseHeaderV4,
-    _authority: &LoadedReadAuthorityV1,
+    _root_hash: &[u8],
     _cancellation: &CancellationToken,
   ) -> Result<RootLifecycleObservationV1, ReadViewLifecycleErrorV1> {
     self.lifecycle_calls.fetch_add(1, Ordering::SeqCst);
@@ -323,7 +323,7 @@ fn current_head_resolution_captures_header_once_orders_authority_and_owns_pin() 
   assert_eq!(source.header_calls.load(Ordering::SeqCst), 1);
   assert_eq!(source.authority_calls.load(Ordering::SeqCst), 1);
   assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 1);
-  assert_eq!(*source.order.lock().unwrap(), ["current_auth", "header", "authority", "selected_auth", "lifecycle"]);
+  assert_eq!(*source.order.lock().unwrap(), ["current_auth", "header", "lifecycle", "authority", "selected_auth"]);
   assert_eq!(view.database_id(), header.header.database_id);
   assert_eq!(view.physical_instance_id(), header.header.physical_instance_id);
   assert_eq!(view.selected_header_slot(), header.selected_slot);
@@ -357,7 +357,7 @@ fn explicit_unknown_root_never_falls_back_to_head() {
   assert_eq!(error.code(), "invalid_namespace_root");
   assert_eq!(*source.requested_roots.lock().unwrap(), [explicit]);
   assert!(!source.requested_roots.lock().unwrap().contains(&head));
-  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 1);
   assert_eq!(coordinator.active_pin_count().unwrap(), 0);
 }
 
@@ -389,7 +389,7 @@ fn share_credentials_can_resolve_only_the_captured_current_head() {
 }
 
 #[test]
-fn selected_root_denial_precedes_lifecycle_and_preserves_current_concealment() {
+fn selected_root_denial_happens_under_lifecycle_pin_and_preserves_current_concealment() {
   let algorithm = HashAlgorithm::Blake3_256;
   let head = hash(algorithm, 0x17);
   let source = Arc::new(FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head, false));
@@ -402,13 +402,13 @@ fn selected_root_denial_precedes_lifecycle_and_preserves_current_concealment() {
 
   assert_eq!(error.code(), "read_authorization_denied");
   assert_eq!(error.concealment(), Some(ReadViewConcealmentV1::Conceal));
-  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 0);
-  assert_eq!(*source.order.lock().unwrap(), ["current_auth", "header", "authority", "selected_auth"]);
+  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 1);
+  assert_eq!(*source.order.lock().unwrap(), ["current_auth", "header", "lifecycle", "authority", "selected_auth"]);
   assert_eq!(coordinator.active_pin_count().unwrap(), 0);
 }
 
 #[test]
-fn selected_root_operational_and_corruption_failures_never_reach_lifecycle() {
+fn selected_root_operational_and_corruption_failures_release_lifecycle_pin() {
   let algorithm = HashAlgorithm::Blake3_256;
   let head = hash(algorithm, 0x0b);
   for (authorization_error, expected_code) in [
@@ -425,7 +425,7 @@ fn selected_root_operational_and_corruption_failures_never_reach_lifecycle() {
 
     assert_eq!(error.code(), expected_code);
     assert_eq!(error.concealment(), Some(ReadViewConcealmentV1::Conceal));
-    assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 1);
     assert_eq!(coordinator.active_pin_count().unwrap(), 0);
   }
 }
@@ -480,7 +480,7 @@ fn current_head_without_complete_admission_is_corruption_not_an_explicit_root_mi
   assert_eq!(error.code(), "root_authority_corrupt");
   assert_eq!(source.header_calls.load(Ordering::SeqCst), 1);
   assert_eq!(source.authority_calls.load(Ordering::SeqCst), 1);
-  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -522,7 +522,7 @@ fn cancellation_is_observed_at_every_resolver_boundary_before_more_authority_wor
   let resolver = ReadViewResolverV1::new(Arc::clone(&after_selected), coordinator.clone(), all_capabilities_profile());
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "read_view_canceled");
-  assert_eq!(after_selected.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(after_selected.lifecycle_calls.load(Ordering::SeqCst), 1);
   assert_eq!(coordinator.active_pin_count().unwrap(), 0);
 }
 
@@ -576,7 +576,7 @@ fn source_failures_remain_distinct_and_carry_current_concealment() {
     assert_eq!(error.code(), expected_code);
     assert_eq!(error.concealment(), Some(ReadViewConcealmentV1::Conceal));
     assert_eq!(source.authority_calls.load(Ordering::SeqCst), expected_authority_calls);
-    assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(source.lifecycle_calls.load(Ordering::SeqCst), usize::from(expected_authority_calls != 0));
   }
 }
 
@@ -592,12 +592,12 @@ fn selected_authorization_precedes_defensive_closure_and_capability_errors() {
   let resolver = ReadViewResolverV1::new(Arc::clone(&malformed), pin_coordinator(algorithm), all_capabilities_profile());
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &denied, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "read_authorization_denied");
-  assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 1);
 
   let allowed = FakeAuthorizer::standard(Arc::clone(&malformed.order));
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &allowed, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
-  assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 2);
 
   let mut unsupported = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head, false);
   unsupported.authority.root.required_capabilities = CapabilitySetV1::from_bits([23]).unwrap().into_bytes();
@@ -609,7 +609,7 @@ fn selected_authorization_precedes_defensive_closure_and_capability_errors() {
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "unsupported_root_capabilities");
   assert!(unsupported.order.lock().unwrap().contains(&"selected_auth"));
-  assert_eq!(unsupported.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(unsupported.lifecycle_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn authority_high_water_and_legacy_mapping_corruption_fail_after_selected_author
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
   assert!(future.order.lock().unwrap().contains(&"selected_auth"));
-  assert_eq!(future.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(future.lifecycle_calls.load(Ordering::SeqCst), 1);
 
   let mut legacy = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head, false);
   legacy.legacy_root_hash = Some(vec![0; algorithm.hash_length()]);
@@ -652,7 +652,7 @@ fn authority_high_water_and_legacy_mapping_corruption_fail_after_selected_author
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
   assert!(legacy.order.lock().unwrap().contains(&"selected_auth"));
-  assert_eq!(legacy.lifecycle_calls.load(Ordering::SeqCst), 0);
+  assert_eq!(legacy.lifecycle_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -676,6 +676,7 @@ fn lifecycle_state_and_source_error_matrix_never_leaks_a_pin() {
     let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
 
     assert_eq!(error.code(), expected_code);
+    assert_eq!(source.authority_calls.load(Ordering::SeqCst), 0);
     assert_eq!(coordinator.active_pin_count().unwrap(), 0);
     assert_eq!(coordinator.tracked_root_count().unwrap(), 0);
   }
@@ -695,6 +696,7 @@ fn lifecycle_state_and_source_error_matrix_never_leaks_a_pin() {
     let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
 
     assert_eq!(error.code(), expected_code);
+    assert_eq!(source.authority_calls.load(Ordering::SeqCst), 0);
     assert_eq!(coordinator.active_pin_count().unwrap(), 0);
     assert_eq!(coordinator.tracked_root_count().unwrap(), 0);
   }
