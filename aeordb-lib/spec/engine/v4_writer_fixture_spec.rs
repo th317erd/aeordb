@@ -505,6 +505,7 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   assert!(!reference_sources.contains("encode_immutable_index_artifact"));
   assert!(!reference_sources.contains("encode_index_manifest"));
   assert!(!reference_sources.contains("encode_immutable_gc_artifact"));
+  assert!(!reference_sources.contains("encode_logical_position"));
 
   let admission = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/admission.rs")).unwrap();
   assert!(admission.contains(".with_known_bit(capability_bit::WHOLE_ENTITY_V1)"));
@@ -517,8 +518,13 @@ fn production_writer_surface_advertises_only_complete_codecs_and_remains_disconn
   assert!(!storage_engine.contains("encode_immutable_index_artifact"));
   assert!(!storage_engine.contains("encode_index_manifest"));
   assert!(!storage_engine.contains("encode_immutable_gc_artifact"));
+  assert!(!storage_engine.contains("encode_logical_position"));
 
   let production_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+  let position = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/position.rs")).unwrap();
+  assert_eq!(position.matches("pub fn encode_logical_position(").count(), 1);
+  let server_sources = rust_sources(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server"));
+  assert!(!server_sources.contains("encode_logical_position"));
   let index_artifact = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_artifact.rs")).unwrap();
   assert_eq!(index_artifact.matches("encode_immutable_index_artifact(").count(), 2);
   let index_page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/index_page.rs")).unwrap();

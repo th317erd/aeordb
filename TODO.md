@@ -1210,6 +1210,9 @@
             - [x] Start a separate self-contained-auth instance and prove public health remains reachable while a protected route fails with 401 before handler execution.
             - [x] Re-run exact source/runtime route coverage, auth/CORS/route regressions, workspace/static gates, record evidence, commit, and push.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
+        - [x] P7-2a: add the bounded production APOS writer and canonical route-order compiler, matching the independent both-width fixtures without activating a route schema.
+        - [ ] P7-2b: implement one logical total-order and bounded pagination-window model for directory, query, global-search, and aggregate rows.
+        - [ ] P7-2c: resolve APOS positions against authorized selected-root result universes, recompute complete ties, and fail closed on root/order/row drift.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
