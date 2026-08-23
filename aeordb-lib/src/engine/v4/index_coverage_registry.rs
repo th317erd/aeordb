@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 
-use super::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
+use super::admission::CapabilitySetV1;
 use super::first_authority::{
   FirstAuthorityPublicationErrorV1, LoadedIndexActivePointerPairV1, LoadedIndexActivePointerV1, V4FirstAuthorityPublisher,
 };
@@ -102,6 +102,19 @@ impl IndexCoverageRegistryOwnerRequestV1 {
 
   pub fn owner_id(&self) -> &[u8] {
     &self.owner_id
+  }
+
+  pub const fn health(&self) -> IndexCoverageGenerationHealthV1 {
+    self.health
+  }
+
+  pub(crate) fn try_clone_retained(&self) -> Result<Self, IndexCoverageRegistryErrorV1> {
+    let mut owner_id = Vec::new();
+    owner_id
+      .try_reserve_exact(self.owner_id.len())
+      .map_err(|error| IndexCoverageRegistryErrorV1::Allocation(format!("owner identity allocation failed: {error}")))?;
+    owner_id.extend_from_slice(&self.owner_id);
+    Ok(Self { kind: self.kind, owner_id, health: self.health })
   }
 }
 
@@ -318,6 +331,7 @@ impl IndexCoverageRegistrySnapshotV1 {
 pub struct IndexCoverageRegistryV1 {
   hash_algorithm: HashAlgorithm,
   database_id: [u8; 16],
+  supported_reader_capabilities: CapabilitySetV1,
   options: IndexCoverageRegistryOptionsV1,
   memory: Arc<MemoryCoordinator>,
   refresh: Mutex<()>,
@@ -328,6 +342,7 @@ impl IndexCoverageRegistryV1 {
   pub fn new(
     hash_algorithm: HashAlgorithm,
     database_id: [u8; 16],
+    supported_reader_capabilities: CapabilitySetV1,
     options: IndexCoverageRegistryOptionsV1,
     memory: Arc<MemoryCoordinator>,
   ) -> Result<Self, IndexCoverageRegistryErrorV1> {
@@ -344,7 +359,15 @@ impl IndexCoverageRegistryV1 {
       retained_bytes,
       _reservation: reservation,
     });
-    Ok(Self { hash_algorithm, database_id, options, memory, refresh: Mutex::new(()), snapshot: RwLock::new(snapshot) })
+    Ok(Self {
+      hash_algorithm,
+      database_id,
+      supported_reader_capabilities,
+      options,
+      memory,
+      refresh: Mutex::new(()),
+      snapshot: RwLock::new(snapshot),
+    })
   }
 
   pub fn snapshot(&self) -> Result<Arc<IndexCoverageRegistrySnapshotV1>, IndexCoverageRegistryErrorV1> {
@@ -353,6 +376,13 @@ impl IndexCoverageRegistryV1 {
       .read()
       .map(|snapshot| Arc::clone(&snapshot))
       .map_err(|error| IndexCoverageRegistryErrorV1::Poisoned { message: error.to_string() })
+  }
+
+  pub(crate) fn validate_owner_requests(
+    &self,
+    requests: &[IndexCoverageRegistryOwnerRequestV1],
+  ) -> Result<(), IndexCoverageRegistryErrorV1> {
+    validate_requests(self.hash_algorithm, self.options, requests)
   }
 
   pub fn refresh(
@@ -380,9 +410,9 @@ impl IndexCoverageRegistryV1 {
     require_snapshot_bound(self.options, retained_bytes)?;
     let reservation = self.memory.reserve(MemoryOwner::IndexCleanCache, retained_bytes, AdmissionClass::Cache)?;
     let mut entries = Vec::new();
-    entries.try_reserve_exact(requests.len()).map_err(|error| {
-      IndexCoverageRegistryErrorV1::invalid("index_coverage_registry_allocation", format!("registry entry allocation failed: {error}"))
-    })?;
+    entries
+      .try_reserve_exact(requests.len())
+      .map_err(|error| IndexCoverageRegistryErrorV1::Allocation(format!("registry entry allocation failed: {error}")))?;
     for request in requests {
       require_not_cancelled(cancellation)?;
       entries.push(self.load_entry(source, request, cancellation)?);
@@ -442,7 +472,7 @@ impl IndexCoverageRegistryV1 {
           ));
         };
         require_manifest_pointer(pointer, &manifest.key, manifest.owner_id, manifest.generation)?;
-        require_readable_capabilities(body.required_reader_capabilities)?;
+        require_readable_capabilities(body.required_reader_capabilities, self.supported_reader_capabilities)?;
         let generation = selected_generation(
           self.hash_algorithm,
           pointer,
@@ -493,7 +523,7 @@ impl IndexCoverageRegistryV1 {
         for capabilities in
           [field_body.required_reader_capabilities, value_body.required_reader_capabilities, scope_body.required_reader_capabilities]
         {
-          require_readable_capabilities(capabilities)?;
+          require_readable_capabilities(capabilities, self.supported_reader_capabilities)?;
         }
         let dependency_fingerprint = field_dependency_fingerprint(self.hash_algorithm, scope.owner_id, value.owner_id);
         let generation = selected_generation(
@@ -534,7 +564,7 @@ impl IndexCoverageRegistryV1 {
       Err(IndexCoverageRegistryErrorV1::Source(IndexCoverageRegistrySourceErrorV1::Corrupt { .. })) => {
         return Ok(IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::CorruptSelection));
       }
-      Err(IndexCoverageRegistryErrorV1::Memory(_)) => {
+      Err(IndexCoverageRegistryErrorV1::Memory(_)) | Err(IndexCoverageRegistryErrorV1::Allocation(_)) => {
         return Ok(IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::ResourceLimit));
       }
       Err(error) => return Err(error),
@@ -566,7 +596,7 @@ impl IndexCoverageRegistryV1 {
       Err(IndexCoverageRegistryErrorV1::Corrupt { .. }) => {
         return Ok(IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::CorruptManifest));
       }
-      Err(IndexCoverageRegistryErrorV1::Memory(_)) => {
+      Err(IndexCoverageRegistryErrorV1::Memory(_)) | Err(IndexCoverageRegistryErrorV1::Allocation(_)) => {
         return Ok(IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::ResourceLimit));
       }
       Err(error) => return Err(error),
@@ -601,7 +631,7 @@ impl IndexCoverageRegistryV1 {
     let rechecked = match load_pair_bounded(&self.memory, source, ActivePointerKindV1::FieldNvt, &field_pointer.owner_id, cancellation) {
       Ok(pair) => pair,
       Err(IndexCoverageRegistryErrorV1::Cancelled) => return Err(IndexCoverageRegistryErrorV1::Cancelled),
-      Err(IndexCoverageRegistryErrorV1::Memory(_)) => {
+      Err(IndexCoverageRegistryErrorV1::Memory(_)) | Err(IndexCoverageRegistryErrorV1::Allocation(_)) => {
         return Ok(IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::ResourceLimit));
       }
       Err(IndexCoverageRegistryErrorV1::Source(IndexCoverageRegistrySourceErrorV1::Unavailable { .. })) => {
@@ -718,6 +748,8 @@ pub enum IndexCoverageRegistryErrorV1 {
   RefreshBusy,
   #[error("index coverage registry memory admission failed: {0}")]
   Memory(#[from] MemoryCoordinatorError),
+  #[error("index coverage registry allocation failed: {0}")]
+  Allocation(String),
   #[error("index coverage registry lock is poisoned: {message}")]
   Poisoned { message: String },
 }
@@ -933,10 +965,13 @@ fn combined_health(requested: IndexCoverageGenerationHealthV1, repair_required: 
   }
 }
 
-fn require_readable_capabilities(required: [u8; 32]) -> Result<(), IndexCoverageRegistryErrorV1> {
+fn require_readable_capabilities(
+  required: [u8; 32],
+  supported_reader_capabilities: CapabilitySetV1,
+) -> Result<(), IndexCoverageRegistryErrorV1> {
   let required = CapabilitySetV1::from_bytes(required)
     .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_manifest_capabilities", error.to_string()))?;
-  if !required.difference(BinaryCapabilityProfileV1::current().supported_reader_capabilities).is_empty() {
+  if !required.difference(supported_reader_capabilities).is_empty() {
     return Err(IndexCoverageRegistryErrorV1::corrupt(
       "index_coverage_manifest_capabilities",
       "selected manifest requires unsupported reader capabilities",

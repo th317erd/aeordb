@@ -173,6 +173,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let first_authority_path = source_root.join("engine/v4/first_authority.rs");
   let index_coverage_registry_path = source_root.join("engine/v4/index_coverage_registry.rs");
+  let index_coverage_runtime_path = source_root.join("engine/v4/index_coverage_runtime.rs");
   let index_generation_authority_path = source_root.join("engine/v4/index_generation_authority.rs");
   let index_native_compaction_path = source_root.join("engine/v4/index_native_compaction.rs");
   let index_native_journal_source_path = source_root.join("engine/v4/index_native_journal_source.rs");
@@ -201,6 +202,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     publisher_callers,
     vec![
       &index_coverage_registry_path,
+      &index_coverage_runtime_path,
       &index_generation_authority_path,
       &index_native_compaction_path,
       &index_native_journal_source_path,
@@ -219,6 +221,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   );
   for owner_path in [
     &index_coverage_registry_path,
+    &index_coverage_runtime_path,
     &index_generation_authority_path,
     &index_native_compaction_path,
     &index_native_journal_source_path,

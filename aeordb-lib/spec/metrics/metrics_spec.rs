@@ -221,6 +221,21 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     "aeordb_index_runtime_mutation_bytes",
     "aeordb_index_runtime_reconciliation_required",
     "aeordb_index_runtime_publication_in_flight",
+    "aeordb_index_runtime_coverage_entries",
+    "aeordb_index_runtime_coverage_retained_bytes",
+    "aeordb_index_runtime_coverage_refresh_attempts",
+    "aeordb_index_runtime_coverage_refresh_successes",
+    "aeordb_index_runtime_coverage_refresh_failures",
+    "aeordb_index_runtime_coverage_refresh_pending",
+    "aeordb_index_runtime_coverage_selected_generations",
+    "aeordb_index_runtime_coverage_unavailable_generations",
+    "aeordb_index_runtime_coverage_usable_nvt_generations",
+    "aeordb_index_runtime_scope_cache_entries",
+    "aeordb_index_runtime_scope_cache_resident_bytes",
+    "aeordb_index_runtime_scope_cache_pinned_entries",
+    "aeordb_index_runtime_scope_cache_hits",
+    "aeordb_index_runtime_scope_cache_misses",
+    "aeordb_index_runtime_scope_cache_evictions",
     "aeordb_gc_run_active",
     "aeordb_gc_run_progress_ratio",
     "aeordb_gc_run_state",
@@ -230,6 +245,8 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
   }
   assert!(output.contains("aeordb_gc_run_state{state=\"complete\"} 1"));
   assert!(output.contains("aeordb_index_runtime_state{state=\"inactive\"} 1"));
+  assert!(output.contains("aeordb_index_runtime_coverage_refresh_pending 0"));
+  assert!(output.contains("aeordb_index_runtime_scope_cache_entries 0"));
   assert!(!output.contains(&run_id), "Prometheus output must not use run IDs as high-cardinality labels");
 }
 

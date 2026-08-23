@@ -6906,7 +6906,7 @@
     {
       "id": "esq-v1-faab55788cbdff03290f-00",
       "file": "aeordb-lib/src/engine/runtime_observability.rs",
-      "line": 307,
+      "line": 390,
       "column": 5,
       "enclosing_item": "durability_observability",
       "kind": "default_on_error",
@@ -6916,7 +6916,7 @@
     {
       "id": "esq-v1-8374ae346d5e0cfdc2d0-00",
       "file": "aeordb-lib/src/engine/runtime_observability.rs",
-      "line": 400,
+      "line": 483,
       "column": 19,
       "enclosing_item": "visible_spill_report",
       "kind": "default_on_error",
@@ -7256,7 +7256,7 @@
     {
       "id": "esq-v1-aa67d12e80ede27cb207-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 984,
+      "line": 1045,
       "column": 7,
       "enclosing_item": "impl StorageEngine::initialize_configuration_authority",
       "kind": "default_on_error",
@@ -7266,7 +7266,7 @@
     {
       "id": "esq-v1-31472ee848e41da612da-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 985,
+      "line": 1046,
       "column": 5,
       "enclosing_item": "impl StorageEngine::initialize_configuration_authority",
       "kind": "error_conversion",
@@ -7276,7 +7276,7 @@
     {
       "id": "esq-v1-fd6b6d0d243bf75a8c5e-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1041,
+      "line": 1102,
       "column": 19,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "default_on_error",
@@ -7286,7 +7286,7 @@
     {
       "id": "esq-v1-b67fdb0da4c693c47052-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1049,
+      "line": 1110,
       "column": 27,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "default_on_error",
@@ -7296,7 +7296,7 @@
     {
       "id": "esq-v1-bc9d91fa5cb966a0792c-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1050,
+      "line": 1111,
       "column": 24,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "default_on_error",
@@ -7306,7 +7306,7 @@
     {
       "id": "esq-v1-7b28af1d0cb2027d8e47-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1058,
+      "line": 1119,
       "column": 23,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "default_on_error",
@@ -7316,7 +7316,7 @@
     {
       "id": "esq-v1-0a3c283d3892aa9721be-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1066,
+      "line": 1127,
       "column": 28,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "default_on_error",
@@ -7326,7 +7326,7 @@
     {
       "id": "esq-v1-61f3eb77ca886135390d-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1070,
+      "line": 1131,
       "column": 9,
       "enclosing_item": "impl StorageEngine::converge_configuration_owners",
       "kind": "panic_method",
@@ -7336,7 +7336,7 @@
     {
       "id": "esq-v1-0f9d794105fbf4334164-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1144,
+      "line": 1205,
       "column": 30,
       "enclosing_item": "impl StorageEngine::converge_index_configuration",
       "kind": "error_conversion",
@@ -7346,7 +7346,7 @@
     {
       "id": "esq-v1-207e7cd6d0e2207980e0-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1182,
+      "line": 1243,
       "column": 16,
       "enclosing_item": "impl StorageEngine::configuration_authority",
       "kind": "panic_method",
@@ -7356,7 +7356,7 @@
     {
       "id": "esq-v1-6a96ec7654f32a93d5f8-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1197,
+      "line": 1258,
       "column": 9,
       "enclosing_item": "impl StorageEngine::initialize_bootstrap_memory_coordinator",
       "kind": "logged_error_continues",
@@ -7366,7 +7366,7 @@
     {
       "id": "esq-v1-157ca1dcf6ae64ba7b77-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1203,
+      "line": 1264,
       "column": 5,
       "enclosing_item": "impl StorageEngine::initialize_bootstrap_memory_coordinator",
       "kind": "error_conversion",
@@ -7376,7 +7376,7 @@
     {
       "id": "esq-v1-2747d0384f5081c59c20-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1242,
+      "line": 1303,
       "column": 7,
       "enclosing_item": "impl StorageEngine::initialize_query_runtime",
       "kind": "logged_error_continues",
@@ -7386,7 +7386,7 @@
     {
       "id": "esq-v1-a9aa51b3f2a113a93679-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1248,
+      "line": 1309,
       "column": 5,
       "enclosing_item": "impl StorageEngine::initialize_query_runtime",
       "kind": "error_conversion",
@@ -7396,7 +7396,7 @@
     {
       "id": "esq-v1-811a55e887540446a087-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1271,
+      "line": 1332,
       "column": 7,
       "enclosing_item": "impl StorageEngine::initialize_durability_runtime",
       "kind": "logged_error_continues",
@@ -7406,7 +7406,7 @@
     {
       "id": "esq-v1-28cb6e1961e0038adde7-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1420,
+      "line": 1499,
       "column": 9,
       "enclosing_item": "impl StorageEngine::offer_soft_namespace_mutation",
       "kind": "logged_error_continues",
@@ -7416,7 +7416,7 @@
     {
       "id": "esq-v1-cb1b632ac12c14aff43a-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1556,
+      "line": 1635,
       "column": 31,
       "enclosing_item": "impl StorageEngine::activate_bounded_clean_caches",
       "kind": "default_on_error",
@@ -7426,7 +7426,7 @@
     {
       "id": "esq-v1-d4fe51c6fe66026c6d86-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1561,
+      "line": 1640,
       "column": 34,
       "enclosing_item": "impl StorageEngine::activate_bounded_clean_caches",
       "kind": "default_on_error",
@@ -7436,7 +7436,7 @@
     {
       "id": "esq-v1-1e5208b68935fe12594d-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1598,
+      "line": 1677,
       "column": 30,
       "enclosing_item": "impl StorageEngine::activate_bounded_index_cache",
       "kind": "error_conversion",
@@ -7446,7 +7446,7 @@
     {
       "id": "esq-v1-010fdd310d5bafda68f7-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 1611,
+      "line": 1690,
       "column": 5,
       "enclosing_item": "impl StorageEngine::memory_coordinator",
       "kind": "panic_method",
@@ -7456,7 +7456,7 @@
     {
       "id": "esq-v1-f3caeecec6ecf01cb296-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2016,
+      "line": 2095,
       "column": 7,
       "enclosing_item": "impl StorageEngine::durability_failure",
       "kind": "broad_err_pattern",
@@ -7466,7 +7466,7 @@
     {
       "id": "esq-v1-f3caeecec6ecf01cb296-01",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2026,
+      "line": 2105,
       "column": 7,
       "enclosing_item": "impl StorageEngine::durability_failure",
       "kind": "broad_err_pattern",
@@ -7476,7 +7476,7 @@
     {
       "id": "esq-v1-61f41f5dca29c9d9c8da-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2066,
+      "line": 2145,
       "column": 26,
       "enclosing_item": "impl StorageEngine::refresh_persistent_durability_recovery",
       "kind": "error_conversion",
@@ -7486,7 +7486,7 @@
     {
       "id": "esq-v1-bd779442ea2aa3eac65d-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2086,
+      "line": 2165,
       "column": 18,
       "enclosing_item": "impl StorageEngine::current_thread_has_durability_repair_authority",
       "kind": "error_conversion",
@@ -7496,7 +7496,7 @@
     {
       "id": "esq-v1-3c8f70564f2b3271d642-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2112,
+      "line": 2191,
       "column": 31,
       "enclosing_item": "impl StorageEngine::ensure_writable",
       "kind": "error_conversion",
@@ -7506,7 +7506,7 @@
     {
       "id": "esq-v1-2fb8b01faecabd5adff7-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2121,
+      "line": 2200,
       "column": 27,
       "enclosing_item": "impl StorageEngine::ensure_writable",
       "kind": "error_conversion",
@@ -7516,7 +7516,7 @@
     {
       "id": "esq-v1-b0d155ff92e662f47416-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2168,
+      "line": 2247,
       "column": 29,
       "enclosing_item": "impl StorageEngine::record_durability_failure",
       "kind": "default_on_error",
@@ -7526,7 +7526,7 @@
     {
       "id": "esq-v1-51e319dc07cc5559148c-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2169,
+      "line": 2248,
       "column": 28,
       "enclosing_item": "impl StorageEngine::record_durability_failure",
       "kind": "default_on_error",
@@ -7536,7 +7536,7 @@
     {
       "id": "esq-v1-6f0e86c9570ecb2d5860-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2171,
+      "line": 2250,
       "column": 7,
       "enclosing_item": "impl StorageEngine::record_durability_failure",
       "kind": "default_on_error",
@@ -7546,7 +7546,7 @@
     {
       "id": "esq-v1-893d60aa68a477103e56-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2173,
+      "line": 2252,
       "column": 41,
       "enclosing_item": "impl StorageEngine::record_durability_failure",
       "kind": "default_on_error",
@@ -7556,7 +7556,7 @@
     {
       "id": "esq-v1-364b75a16d357733123e-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2174,
+      "line": 2253,
       "column": 28,
       "enclosing_item": "impl StorageEngine::record_durability_failure",
       "kind": "default_on_error",
@@ -7566,7 +7566,7 @@
     {
       "id": "esq-v1-568a1a4e1c10d6f58e82-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2480,
+      "line": 2559,
       "column": 20,
       "enclosing_item": "impl StorageEngine::attempt_emergency_spill",
       "kind": "default_on_error",
@@ -7576,7 +7576,7 @@
     {
       "id": "esq-v1-3a7d1732754876602fbb-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2844,
+      "line": 2923,
       "column": 5,
       "enclosing_item": "impl StorageEngine::emergency_wal_spill_max_bytes",
       "kind": "default_on_error",
@@ -7586,7 +7586,7 @@
     {
       "id": "esq-v1-75b41b9ba0f3b0a0661d-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 2883,
+      "line": 2962,
       "column": 36,
       "enclosing_item": "impl StorageEngine::shutdown_operation_wait_timeout",
       "kind": "default_on_error",
@@ -7596,7 +7596,7 @@
     {
       "id": "esq-v1-c27c24413c42cdb6aef3-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 3122,
+      "line": 3201,
       "column": 5,
       "enclosing_item": "impl StorageEngine::shifted_expansion_offset",
       "kind": "error_conversion",
@@ -7606,7 +7606,7 @@
     {
       "id": "esq-v1-a92cf169e8028faf8bbe-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 3480,
+      "line": 3559,
       "column": 9,
       "enclosing_item": "impl StorageEngine::open_internal",
       "kind": "logged_error_continues",
@@ -7616,7 +7616,7 @@
     {
       "id": "esq-v1-d70ff13b85c57cce4b14-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 4377,
+      "line": 4485,
       "column": 8,
       "enclosing_item": "impl StorageEngine::get_entry",
       "kind": "result_status_probe",
@@ -7626,7 +7626,7 @@
     {
       "id": "esq-v1-6fcabd7eba8a460859cb-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 4776,
+      "line": 4884,
       "column": 9,
       "enclosing_item": "impl StorageEngine::read_chunk_span_verified",
       "kind": "error_conversion",
@@ -7636,7 +7636,7 @@
     {
       "id": "esq-v1-bfe67fe8a148940596d1-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 4788,
+      "line": 4896,
       "column": 9,
       "enclosing_item": "impl StorageEngine::read_chunk_span_verified",
       "kind": "error_conversion",
@@ -7646,7 +7646,7 @@
     {
       "id": "esq-v1-400605ed10d812174111-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 4844,
+      "line": 4952,
       "column": 7,
       "enclosing_item": "impl StorageEngine::read_chunk_verified_bounded_internal",
       "kind": "default_on_error",
@@ -7656,7 +7656,7 @@
     {
       "id": "esq-v1-cff01a902a18fbad15f2-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 5190,
+      "line": 5298,
       "column": 39,
       "enclosing_item": "impl StorageEngine::invalidate_caches_for_paths",
       "kind": "default_on_error",
@@ -7666,7 +7666,7 @@
     {
       "id": "esq-v1-2f79ace73d5778afb058-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 5434,
+      "line": 5542,
       "column": 24,
       "enclosing_item": "impl StorageEngine::expand_kv_block_online",
       "kind": "error_conversion",
@@ -7676,7 +7676,7 @@
     {
       "id": "esq-v1-3f19eed582d420132975-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 5986,
+      "line": 6094,
       "column": 11,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "logged_error_continues",
@@ -7686,7 +7686,7 @@
     {
       "id": "esq-v1-07f15be9c45dd606364e-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6108,
+      "line": 6216,
       "column": 34,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "error_conversion",
@@ -7696,7 +7696,7 @@
     {
       "id": "esq-v1-dcc1cf6dbecfd924b40f-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6811,
+      "line": 6919,
       "column": 5,
       "enclosing_item": "impl StorageEngine::drop",
       "kind": "logged_error_continues",
@@ -7706,7 +7706,7 @@
     {
       "id": "esq-v1-a5d82e88e5f0f57c2ff1-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 7952,
+      "line": 8060,
       "column": 7,
       "enclosing_item": "impl DurabilityRepairAuthorityGuard < '_ >::drop",
       "kind": "broad_err_pattern",
@@ -7716,7 +7716,7 @@
     {
       "id": "esq-v1-2de4ce252f7b55e676bf-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 8111,
+      "line": 8219,
       "column": 5,
       "enclosing_item": "impl TransactionGuard < 'a >::drop",
       "kind": "logged_error_continues",
@@ -10246,7 +10246,7 @@
     {
       "id": "esq-v1-2a24507e0ddf8fb3ac58-00",
       "file": "aeordb-lib/src/engine/v4/index_runtime_cadence.rs",
-      "line": 235,
+      "line": 239,
       "column": 5,
       "enclosing_item": "impl IndexRuntimeCadenceV1 < Publisher >::lock_publisher",
       "kind": "error_conversion",
@@ -12416,7 +12416,7 @@
     {
       "id": "esq-v1-1cef6c5c4e15fa382a2b-00",
       "file": "aeordb-lib/src/metrics/mod.rs",
-      "line": 235,
+      "line": 250,
       "column": 95,
       "enclosing_item": "record_configuration_family",
       "kind": "default_on_error",
@@ -12426,7 +12426,7 @@
     {
       "id": "esq-v1-d2b98e9298fa7d54a56f-00",
       "file": "aeordb-lib/src/metrics/mod.rs",
-      "line": 237,
+      "line": 252,
       "column": 21,
       "enclosing_item": "record_configuration_family",
       "kind": "default_on_error",

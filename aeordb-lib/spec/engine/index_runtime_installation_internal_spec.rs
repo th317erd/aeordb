@@ -1,6 +1,8 @@
 use crate::engine::memory_coordinator::MemoryOwner;
 use crate::engine::native_durability::PlatformFileIdentityDescriptorV1;
+use crate::engine::v4::admission::CapabilitySetV1;
 use crate::engine::v4::index_coordinator_recovery::IndexRecoveryOptionsV1;
+use crate::engine::v4::index_coverage_registry::IndexCoverageRegistryOptionsV1;
 use crate::engine::v4::index_operation_control::IndexOperationKindV1;
 use crate::engine::v4::index_recovery_store::{IndexScopeOrdinalStoreRegistryOptionsV1, NativeIndexOperationDescriptorV1};
 use crate::engine::{HashAlgorithm, StorageEngine};
@@ -30,6 +32,7 @@ fn descriptor_catalog_retains_its_memory_reservation_for_the_runtime_lifetime() 
       birth_identity: [0; 16],
     },
     hash_algorithm: algorithm,
+    supported_reader_capabilities: CapabilitySetV1::v4_baseline(),
     system_family_registry_fingerprint: vec![0x17; algorithm.hash_length()],
   };
   let descriptor = NativeIndexOperationDescriptorV1::new(
@@ -47,6 +50,7 @@ fn descriptor_catalog_retains_its_memory_reservation_for_the_runtime_lifetime() 
     8,
     1_024 * 1_024,
     IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 1_024 * 1_024).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(8, 64 * 1_024).unwrap(),
     IndexRecoveryOptionsV1::new(8, 1_024 * 1_024, 8, 1_024 * 1_024).unwrap(),
   )
   .unwrap();

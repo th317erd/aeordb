@@ -963,6 +963,67 @@ fn resolve_index_runtime_service_and_flush(
   }
 }
 
+fn resolve_index_runtime_outcome_and_coverage<Outcome>(
+  runtime: Result<Outcome, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+  coverage: Result<(), crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+) -> Result<Outcome, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1> {
+  use crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1;
+
+  match (runtime, coverage) {
+    (Ok(outcome), Ok(())) => Ok(outcome),
+    (Err(runtime), Ok(())) => Err(runtime),
+    (Ok(_), Err(coverage)) => Err(coverage),
+    (Err(runtime), Err(coverage)) => {
+      Err(IndexRuntimeCadenceErrorV1::RuntimeAndCoverage { runtime: Box::new(runtime), coverage: Box::new(coverage) })
+    }
+  }
+}
+
+fn resolve_index_runtime_cadence_and_refresh<Outcome, Refresh>(
+  runtime: Result<Outcome, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+  coverage_pending: Result<(), crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+  refresh: Refresh,
+) -> Result<Outcome, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>
+where
+  Refresh: FnOnce() -> Result<(), crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+{
+  let coverage = match coverage_pending {
+    Ok(()) => refresh(),
+    Err(error) => Err(error),
+  };
+  resolve_index_runtime_outcome_and_coverage(runtime, coverage)
+}
+
+fn classify_index_runtime_producer_service(
+  service: Result<u16, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>,
+) -> (Result<u16, crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1>, bool) {
+  match service {
+    Ok(attempts) => (Ok(attempts), attempts > 0),
+    Err(error) => (Err(error), true),
+  }
+}
+
+fn classify_index_runtime_flush(
+  flush: Result<
+    crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1,
+    crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+  >,
+) -> (
+  Result<
+    crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1,
+    crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1,
+  >,
+  bool,
+) {
+  match flush {
+    Ok(outcome) => {
+      let changed = matches!(outcome, crate::engine::v4::index_runtime_owner::IndexRuntimeFlushOutcomeV1::Published { .. });
+      (Ok(outcome), changed)
+    }
+    Err(error) => (Err(error), true),
+  }
+}
+
 impl StorageEngine {
   fn initialize_configuration_authority(
     &self,
@@ -1296,6 +1357,24 @@ impl StorageEngine {
 
   pub fn index_runtime_snapshot_v1(&self) -> Option<Arc<crate::engine::v4::index_runtime_owner::IndexRuntimeSnapshotV1>> {
     self.index_runtime_v1.get().map(|runtime| runtime.owner().cached_snapshot())
+  }
+
+  pub fn index_coverage_registry_snapshot_v1(
+    &self,
+  ) -> Result<
+    Option<Arc<crate::engine::v4::index_coverage_registry::IndexCoverageRegistrySnapshotV1>>,
+    crate::engine::v4::index_coverage_runtime::IndexCoverageRuntimeErrorV1,
+  > {
+    self.index_runtime_v1.get().map(|runtime| runtime.coverage().registry_snapshot()).transpose()
+  }
+
+  pub fn index_runtime_coverage_snapshot_v1(
+    &self,
+  ) -> Result<
+    Option<crate::engine::v4::index_coverage_runtime::IndexCoverageRuntimeSnapshotV1>,
+    crate::engine::v4::index_coverage_runtime::IndexCoverageRuntimeErrorV1,
+  > {
+    self.index_runtime_v1.get().map(|runtime| runtime.coverage().snapshot()).transpose()
   }
 
   pub fn admit_index_maintenance_task_v1(
@@ -3820,9 +3899,25 @@ impl StorageEngine {
     if let Some(prepared) = prepared {
       prepared.persist()?;
     }
-    let service = runtime.service_bounded_producers(self);
-    let flush = runtime.cadence().flush_if_due();
-    resolve_index_runtime_service_and_flush(service, flush).map(Some)
+    let (service, service_may_have_changed_selection) = classify_index_runtime_producer_service(runtime.service_bounded_producers(self));
+    let (flush, flush_changed_selection) = classify_index_runtime_flush(runtime.cadence().flush_if_due());
+    let selected_generation_may_have_changed = service_may_have_changed_selection || flush_changed_selection;
+    let coverage_pending = if selected_generation_may_have_changed {
+      runtime
+        .coverage()
+        .mark_refresh_pending()
+        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::Coverage(error.to_string()))
+    } else {
+      Ok(())
+    };
+    resolve_index_runtime_cadence_and_refresh(resolve_index_runtime_service_and_flush(service, flush), coverage_pending, || {
+      runtime
+        .coverage()
+        .refresh_if_pending()
+        .map(|_| ())
+        .map_err(|error| crate::engine::v4::index_runtime_cadence::IndexRuntimeCadenceErrorV1::Coverage(error.to_string()))
+    })
+    .map(Some)
   }
 
   fn index_runtime_emergency_state_v1(
@@ -3910,7 +4005,20 @@ impl StorageEngine {
   }
 
   pub fn evict_clean_index_cache(&self) -> EngineResult<usize> {
-    IndexManager::new(self).evict_clean_indexes()
+    let legacy = IndexManager::new(self).evict_clean_indexes()?;
+    let runtime = self
+      .index_runtime_v1
+      .get()
+      .map(|runtime| runtime.coverage().evict_all_unpinned())
+      .transpose()
+      .map_err(|error| EngineError::ResourceExhausted(format!("v4 index adapter cache eviction failed: {error}")))?;
+    let mut runtime_evictions = 0;
+    if let Some(evictions) = runtime {
+      runtime_evictions = evictions;
+    }
+    let runtime = usize::try_from(runtime_evictions)
+      .map_err(|error| EngineError::ResourceExhausted(format!("v4 index adapter eviction count exceeds this platform: {error}")))?;
+    legacy.checked_add(runtime).ok_or_else(|| EngineError::ResourceExhausted("combined index cache eviction count overflowed".to_string()))
   }
 
   /// Mirror VoidManager state into the DiskKVStore's pending_voids so the

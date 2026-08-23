@@ -15,11 +15,34 @@ Stats, Prometheus, administrative SSE, CLI status, and the Dashboard use the sam
 
 ## Index Runtime
 
-`index_runtime` is a lock-free cached view of the migration-qualified v4 index
+`index_runtime` is a bounded cached view of the migration-qualified v4 index
 runtime. It reports lifecycle state, recovered scope/checkpoint progress,
 publication activity, soft mutation queue and reconciliation evidence,
-producer task/retry/spill counts, and active/frozen mutation batches. Ordinary
-v3 operation reports `state: "inactive"`; this is not a failure.
+producer task/retry/spill counts, active/frozen mutation batches, selected
+immutable index coverage, and the shared scope-ordinal cache. Ordinary v3
+operation reports `state: "inactive"`; this is not a failure and does not
+activate v4 readers or writers.
+
+`coverage` reports one memory-accounted immutable registry snapshot. Its
+retained-byte fields include both the selected generation metadata and the
+bounded owner request catalog needed to refresh it. `selected_generations`
+counts closure-valid immutable selections, `unavailable_generations` counts
+owners that remain on exact fallback, and `usable_nvt_generations` counts
+selected NVT hints that passed dependency and capability checks. A failed
+refresh leaves the previous snapshot authoritative, keeps `refresh_pending`
+true, and records one bounded failure. Non-root stats redact that failure
+context.
+
+`scope_ordinal_cache` reports the one shared, memory-coordinator-owned adapter
+cache supplied to migration-qualified exact and NVT-assisted v4 readers. Clean
+unpinned entries are evictable through the existing index-cache pressure path.
+Selected coverage metadata and pinned entries remain resident because they are
+required to interpret active generations. Ordinary v3 query readers remain
+outside this runtime until the coordinated query cutover. Refreshes run on the
+existing index runtime cadence after a producer or publication may have changed
+first-authority selection; no second timer, selector, publisher, or query
+authority is created. Collection clones the existing lifecycle snapshot and
+briefly locks only this bounded metadata; it performs no artifact or page I/O.
 
 The Prometheus projection uses fixed series and bounded lifecycle labels:
 `aeordb_index_runtime_installed`, `aeordb_index_runtime_state`,
@@ -28,10 +51,13 @@ The Prometheus projection uses fixed series and bounded lifecycle labels:
 `aeordb_index_runtime_queued_mutations`,
 `aeordb_index_runtime_mutation_bytes`,
 `aeordb_index_runtime_reconciliation_required`, and
-`aeordb_index_runtime_publication_in_flight`. It never uses operation IDs,
-paths, errors, or degradation text as labels. Root stats and metrics SSE retain
-bounded degradation context; non-root stats replace that context with
-`"<redacted>"`. Public health exposes only the resulting aggregate status.
+`aeordb_index_runtime_publication_in_flight`. Coverage and cache state use the
+fixed `aeordb_index_runtime_coverage_*` and
+`aeordb_index_runtime_scope_cache_*` gauges. The projection never uses
+operation IDs, paths, errors, or degradation text as labels. Root stats and
+metrics SSE retain bounded degradation context; non-root stats replace that
+context with `"<redacted>"`. Public health exposes only the resulting aggregate
+status.
 
 ## Garbage Collection
 

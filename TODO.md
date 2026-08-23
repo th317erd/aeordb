@@ -1149,9 +1149,12 @@
           - [x] P6-3e4: prove restart, selected-pointer change, corruption, cancellation, pressure, both hash widths, in-flight generation retention, and registry/planner architecture uniqueness.
           - [x] Use partial generations only with an exact covered-set plus authoritative-complement scan, dedupe, and recheck proof; otherwise ignore the accelerator or return the typed historical-view error.
           - [x] Keep NVT hints disposable and preserve exact Posting-directory fallback for absent, stale, corrupt, or pressure-refused hints.
-        - [ ] P6-3f: integrate migration-qualified activation, lifecycle/metrics/cache eviction, restart, shutdown, and legacy query compatibility removal at the coordinated cutover.
-          - [ ] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, and no second writer, timer, selector, cache, or query authority survives.
-        - [ ] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
+        - [x] P6-3f: integrate migration-qualified activation, lifecycle/metrics/cache eviction, restart, shutdown, and the explicit legacy-query cutover boundary.
+          - [x] Install one bounded selected-generation coverage registry inside the existing migration-qualified runtime owner and refresh it through the existing shared cadence only.
+          - [x] Expose coverage generation, refresh failure, retained-memory, and adapter-cache eviction state through runtime observability without double-counting coordinator reservations.
+          - [x] Preserve the v3 query-compatible writer and assign its removal to the P7 coordinated reader cutover rather than deleting it before a replacement reader exists.
+          - [x] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, restart reconstructs it, shutdown retains pinned snapshots safely, and no second writer, timer, selector, cache, or query authority survives.
+        - [x] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
       - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
         - [ ] Measure the selector/fsync cost of durable per-record mutation-task admission at the 10,000-record journal bound and replace it with a format-compatible batched publication if it misses the latency/I/O envelope.
         - [ ] Measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.

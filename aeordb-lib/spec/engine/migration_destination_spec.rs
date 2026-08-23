@@ -28,10 +28,21 @@ use aeordb::engine::v4::migration_preflight::{
 };
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::first_authority::{
-  ImmutableSemanticObjectBatchPublicationRequestV1, PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1,
+  ImmutableSemanticObjectBatchPublicationRequestV1, IndexActivePointerPublicationRequestV1, IndexArtifactBatchPublicationRequestV1,
+  PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1,
 };
 use aeordb::engine::v4::index_coordinator_recovery::{
   IndexCheckpointRootV1, IndexRecoveryOptionsV1, IndexRecoveryOwnerV1, IndexRecoveryStoreV1,
+};
+use aeordb::engine::v4::index_artifact::{
+  ActivePointerKindV1, ActivePointerWriteV1, CoverageVersionV1, EncodedImmutableIndexArtifactV1, FieldIndexManifestBodyV1,
+  FieldNvtManifestBodyV1, IndexManifestBodyV1, IndexManifestWriteV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1,
+  decode_index_manifest, encode_active_pointer, encode_index_manifest,
+};
+use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
+use aeordb::engine::v4::index_coverage_registry::{
+  IndexCoverageNvtStatusV1, IndexCoverageRegistryOptionsV1, IndexCoverageRegistryOwnerKindV1, IndexCoverageRegistryOwnerRequestV1,
+  IndexCoverageRegistrySelectionV1,
 };
 use aeordb::engine::v4::index_coordinator::{
   FrozenIndexBatchV1, IndexCoordinatorOptionsV1, IndexCoordinatorV1, IndexFlushReasonV1, IndexMutationRequestV1,
@@ -83,6 +94,169 @@ fn id(first: u8) -> [u8; 16] {
 
 fn digest(first: u8) -> [u8; 32] {
   std::array::from_fn(|offset| first.wrapping_add(offset as u8))
+}
+
+struct RuntimeCoverageManifestChain {
+  scope: EncodedImmutableIndexArtifactV1,
+  value: EncodedImmutableIndexArtifactV1,
+  field: EncodedImmutableIndexArtifactV1,
+  nvt: EncodedImmutableIndexArtifactV1,
+  scope_owner: Vec<u8>,
+  field_owner: Vec<u8>,
+}
+
+impl RuntimeCoverageManifestChain {
+  fn new(algorithm: HashAlgorithm) -> Self {
+    let fixture = |suffix: &str| {
+      let profile = match algorithm {
+        HashAlgorithm::Blake3_256 => "blake3-256",
+        HashAlgorithm::Sha512 => "sha512",
+        _ => panic!("runtime coverage fixtures require one frozen v4 hash width"),
+      };
+      fs::read(format!("{}/spec/fixtures/v4/index-artifact-v1/aidx-{profile}-{suffix}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    };
+    let scope_fixture_bytes = fixture("scope-catalog-manifest-empty.bin");
+    let scope_fixture = decode_index_manifest(&scope_fixture_bytes, algorithm).unwrap();
+    let IndexManifestBodyV1::ScopeCatalog(scope_body) = scope_fixture.details else {
+      panic!("scope fixture kind");
+    };
+    let coverage_root = scope_body.coverage.source_namespace_root.to_vec();
+    let coverage_epoch = scope_body.coverage.coverage_epoch_id.to_vec();
+    let coverage = CoverageVersionV1 {
+      source_namespace_root: &coverage_root,
+      coverage_epoch_id: &coverage_epoch,
+      coverage_publication_sequence: scope_body.coverage.coverage_publication_sequence.max(1),
+    };
+    let scope = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: scope_fixture.generation,
+      owner_id: scope_fixture.owner_id,
+      body: IndexManifestBodyV1::ScopeCatalog(ScopeCatalogManifestBodyV1 { coverage: coverage.clone(), ..scope_body }),
+    })
+    .unwrap();
+    let scope_owner = scope_fixture.owner_id.to_vec();
+
+    let value_fixture_bytes = fixture("value-store-manifest-empty.bin");
+    let value_fixture = decode_index_manifest(&value_fixture_bytes, algorithm).unwrap();
+    let IndexManifestBodyV1::ValueStore(value_body) = value_fixture.details else {
+      panic!("value fixture kind");
+    };
+    let value = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: value_fixture.generation,
+      owner_id: value_fixture.owner_id,
+      body: IndexManifestBodyV1::ValueStore(ValueStoreManifestBodyV1 {
+        coverage: coverage.clone(),
+        scope_catalog_manifest: &scope.key,
+        ..value_body
+      }),
+    })
+    .unwrap();
+
+    let field_fixture_bytes = fixture("field-index-manifest-empty.bin");
+    let field_fixture = decode_index_manifest(&field_fixture_bytes, algorithm).unwrap();
+    let IndexManifestBodyV1::FieldIndex(field_body) = field_fixture.details else {
+      panic!("field fixture kind");
+    };
+    let field_owner = field_fixture.owner_id.to_vec();
+    let field_generation = field_fixture.generation;
+    let field = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: field_generation,
+      owner_id: field_fixture.owner_id,
+      body: IndexManifestBodyV1::FieldIndex(FieldIndexManifestBodyV1 { coverage, value_store_manifest: &value.key, ..field_body }),
+    })
+    .unwrap();
+
+    let nvt_fixture_bytes = fixture("field-nvt-manifest-empty.bin");
+    let nvt_fixture = decode_index_manifest(&nvt_fixture_bytes, algorithm).unwrap();
+    let IndexManifestBodyV1::FieldNvt(nvt_body) = nvt_fixture.details else {
+      panic!("NVT fixture kind");
+    };
+    let nvt = encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: nvt_fixture.generation,
+      owner_id: field_fixture.owner_id,
+      body: IndexManifestBodyV1::FieldNvt(FieldNvtManifestBodyV1 {
+        basis_posting_generation: field_generation,
+        basis_source_head_hash: &coverage_root,
+        ..nvt_body
+      }),
+    })
+    .unwrap();
+    Self { scope, value, field, nvt, scope_owner, field_owner }
+  }
+
+  fn scope_successor(&self, algorithm: HashAlgorithm) -> EncodedImmutableIndexArtifactV1 {
+    let manifest = decode_index_manifest(&self.scope.value, algorithm).unwrap();
+    let IndexManifestBodyV1::ScopeCatalog(body) = manifest.details else {
+      panic!("scope manifest kind");
+    };
+    let source_root = vec![0xa7; algorithm.hash_length()];
+    let coverage_epoch = body.coverage.coverage_epoch_id.to_vec();
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: manifest.generation.checked_add(1).unwrap(),
+      owner_id: manifest.owner_id,
+      body: IndexManifestBodyV1::ScopeCatalog(ScopeCatalogManifestBodyV1 {
+        coverage: CoverageVersionV1 {
+          source_namespace_root: &source_root,
+          coverage_epoch_id: &coverage_epoch,
+          coverage_publication_sequence: body.coverage.coverage_publication_sequence.checked_add(1).unwrap(),
+        },
+        ..body
+      }),
+    })
+    .unwrap()
+  }
+}
+
+fn publish_runtime_coverage_artifacts(fixture: &RuntimeFixture, artifacts: &[&EncodedImmutableIndexArtifactV1], timestamp_ms: u64) {
+  fixture
+    .destination
+    .publisher()
+    .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
+      database_id: &fixture.permit.database_id(),
+      artifacts,
+      publication_timestamp_ms: timestamp_ms,
+    })
+    .unwrap();
+}
+
+fn publish_runtime_coverage_pointer(
+  fixture: &RuntimeFixture,
+  retirement: &SharedRetirementJournalOwnerV1,
+  kind: ActivePointerKindV1,
+  manifest: &EncodedImmutableIndexArtifactV1,
+  slot: u8,
+  sequence: u64,
+  timestamp_ms: u64,
+) {
+  let decoded = decode_index_manifest(&manifest.value, fixture.permit.hash_algorithm()).unwrap();
+  let pointer = encode_active_pointer(&ActivePointerWriteV1 {
+    kind,
+    hash_algorithm: fixture.permit.hash_algorithm(),
+    generation: decoded.generation,
+    owner_id: decoded.owner_id,
+    slot,
+    sequence,
+    target_manifest_hash: &manifest.key,
+  })
+  .unwrap();
+  let mut retirement = retirement.lock().unwrap();
+  fixture
+    .destination
+    .publisher()
+    .publish_index_active_pointer(
+      IndexActivePointerPublicationRequestV1 {
+        database_id: &fixture.permit.database_id(),
+        pointer: &pointer,
+        publication_timestamp_ms: timestamp_ms,
+        monotonic_now_ms: timestamp_ms,
+      },
+      &mut retirement,
+    )
+    .unwrap();
 }
 
 fn identity(first: u8, volume: u8) -> PlatformFileIdentityDescriptorV1 {
@@ -226,7 +400,7 @@ fn permit_with_authority(
       source_commit: [0x21; 20],
       executable_sha256: digest(0x31),
       contract_registry_sha256: hex::decode(CONTRACT_REGISTRY_SHA256).unwrap().try_into().unwrap(),
-      capability_profile: BinaryCapabilityProfileV1::new(baseline, baseline),
+      capability_profile: BinaryCapabilityProfileV1::new(BinaryCapabilityProfileV1::current().supported_reader_capabilities, baseline),
       required_reader_capabilities: baseline,
       required_writer_capabilities: baseline,
       system_family_registry_fingerprint: registry.operational_fingerprint.clone(),
@@ -252,6 +426,7 @@ fn native_recovery_options() -> IndexRuntimeNativeRecoveryOptionsV1 {
     128,
     4 * 1_024 * 1_024,
     IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(64, 256 * 1_024).unwrap(),
     IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
   )
   .unwrap()
@@ -408,6 +583,7 @@ impl RuntimeFixture {
         publisher: self.destination.shared_publisher(),
         retirement_owner: self.retirement(),
         operation_descriptors: &[],
+        coverage_owner_requests: &[],
         runtime_options: runtime_options(),
         recovery_options: native_recovery_options(),
         runtime_publisher: runtime_publisher_options(self, workspace_id),
@@ -732,6 +908,7 @@ fn install_runtime_fixture(
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: std::slice::from_ref(selected_descriptor),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(fixture, id(coordinator_byte)),
@@ -834,6 +1011,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
     None,
     "an engine without an installed runtime must preserve the legacy-only path"
   );
+  assert!(source.index_coverage_registry_snapshot_v1().unwrap().is_none(), "ordinary v3 create/open must not install a v4 coverage cache");
 
   let canceled = CancellationToken::new();
   canceled.cancel();
@@ -845,6 +1023,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       publisher: initialized.shared_publisher(),
       retirement_owner: Arc::clone(&retirement),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x51)),
@@ -857,6 +1036,39 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Canceled));
   assert!(source.index_runtime_snapshot_v1().is_none(), "cancellation must not consume the one-time runtime slot");
 
+  let invalid_coverage_request = IndexCoverageRegistryOwnerRequestV1::new(
+    IndexCoverageRegistryOwnerKindV1::ScopeCatalog,
+    vec![0x91],
+    IndexCoverageGenerationHealthV1::Healthy,
+  )
+  .unwrap();
+  let coverage_memory_before = source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes;
+  let error = install_native_index_runtime_v1(
+    &source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: [0x5f; 16],
+      shadow_identity: &identity,
+      publisher: initialized.shared_publisher(),
+      retirement_owner: Arc::clone(&retirement),
+      operation_descriptors: &[],
+      coverage_owner_requests: std::slice::from_ref(&invalid_coverage_request),
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x5f)),
+      cancellation: &cancellation,
+      clock: Arc::clone(&clock),
+      now_ms: 1_700_000_000_200,
+    },
+  )
+  .unwrap_err();
+  assert!(matches!(error, NativeIndexRuntimeInstallationErrorV1::Coverage(ref error) if error.code() == "index_coverage_refresh_invalid"));
+  assert!(source.index_runtime_snapshot_v1().is_none(), "invalid coverage ownership must not consume the runtime slot");
+  assert_eq!(
+    source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes,
+    coverage_memory_before,
+    "invalid coverage ownership must release its provisional registry and request reservations"
+  );
+
   let receipt = install_native_index_runtime_v1(
     &source,
     NativeIndexRuntimeInstallationRequestV1 {
@@ -865,6 +1077,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       publisher: initialized.shared_publisher(),
       retirement_owner: retirement,
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x52)),
@@ -878,6 +1091,15 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
   assert_eq!(receipt.recovered_scopes, 0);
   assert_eq!(receipt.highest_checkpoint_sequence, 0);
   assert_eq!(source.index_runtime_snapshot_v1().unwrap().lifecycle, IndexRuntimeLifecycleV1::Running);
+  let coverage = source.index_coverage_registry_snapshot_v1().unwrap().expect("migration-qualified runtime coverage registry");
+  assert!(coverage.is_empty(), "content-only authority must install an explicit empty registry");
+  let coverage_runtime = source.index_runtime_coverage_snapshot_v1().unwrap().expect("installed coverage lifecycle");
+  assert_eq!(coverage_runtime.refresh_attempts, 1);
+  assert_eq!(coverage_runtime.successful_refreshes, 1);
+  assert_eq!(coverage_runtime.failed_refreshes, 0);
+  assert!(!coverage_runtime.refresh_pending);
+  assert_eq!(coverage_runtime.registry_entries, 0);
+  assert_eq!(coverage_runtime.scope_ordinal_cache.entries, 0);
   DirectoryOps::new(&source).store_file_buffered(&RequestContext::system(), "/runtime-routed.txt", b"runtime", Some("text/plain")).unwrap();
   assert_eq!(source.index_runtime_snapshot_v1().unwrap().soft_hub.queued_notices, 1);
   assert_eq!(
@@ -932,6 +1154,7 @@ fn content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellati
       publisher: initialized.shared_publisher(),
       retirement_owner: retirement_owner(&source, permit.database_id(), &cancellation),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x53)),
@@ -976,6 +1199,7 @@ fn native_runtime_activation_preserves_legacy_query_results_and_cached_observabi
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0x55)),
@@ -998,6 +1222,188 @@ fn native_runtime_activation_preserves_legacy_query_results_and_cached_observabi
   assert!(observed.index_runtime.installed);
   assert_eq!(observed.index_runtime.producer.pending_tasks, cached.producer.pending_tasks);
   assert_eq!(observed.index_runtime.mutations.active_bytes, cached.mutations.active_bytes);
+  assert_eq!(observed.index_runtime.coverage.registry_entries, 0);
+  assert_eq!(observed.index_runtime.coverage.successful_refreshes, 1);
+  assert!(observed.index_runtime.coverage.last_failure.is_none());
+  assert_eq!(observed.index_runtime.scope_ordinal_cache.entries, 0);
+}
+
+#[test]
+fn migration_runtime_tracks_real_selected_coverage_without_a_second_selector_and_pinned_snapshots_survive_shutdown() {
+  let fixture = RuntimeFixture::new("runtime-selected-coverage-lifecycle");
+  DirectoryOps::new(&fixture.source)
+    .store_file_buffered(&RequestContext::system(), "/coverage-bootstrap.txt", b"coverage bootstrap", Some("text/plain"))
+    .unwrap();
+  fixture.source.shutdown().unwrap();
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  drop(source);
+  let source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  let fixture = RuntimeFixture { _directory, source_path, source, permit, destination, cancellation };
+  let algorithm = fixture.permit.hash_algorithm();
+  let chain = RuntimeCoverageManifestChain::new(algorithm);
+  let retirement = fixture.retirement();
+  publish_runtime_coverage_artifacts(&fixture, &[&chain.scope, &chain.value, &chain.field, &chain.nvt], 1_700_000_000_210);
+  publish_runtime_coverage_pointer(&fixture, &retirement, ActivePointerKindV1::ScopeCatalog, &chain.scope, 0, 1, 1_700_000_000_211);
+  publish_runtime_coverage_pointer(&fixture, &retirement, ActivePointerKindV1::FieldIndex, &chain.field, 0, 1, 1_700_000_000_212);
+  publish_runtime_coverage_pointer(&fixture, &retirement, ActivePointerKindV1::FieldNvt, &chain.nvt, 0, 1, 1_700_000_000_213);
+  let requests = [
+    IndexCoverageRegistryOwnerRequestV1::new(
+      IndexCoverageRegistryOwnerKindV1::ScopeCatalog,
+      chain.scope_owner.clone(),
+      IndexCoverageGenerationHealthV1::Healthy,
+    )
+    .unwrap(),
+    IndexCoverageRegistryOwnerRequestV1::new(
+      IndexCoverageRegistryOwnerKindV1::FieldIndex,
+      chain.field_owner.clone(),
+      IndexCoverageGenerationHealthV1::Healthy,
+    )
+    .unwrap(),
+  ];
+  let identity = fixture.identity();
+  let runtime_clock = Arc::new(MockClock::new(4, 1_700_000_000_214));
+  install_native_index_runtime_v1(
+    &fixture.source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: id(0x56),
+      shadow_identity: &identity,
+      publisher: fixture.destination.shared_publisher(),
+      retirement_owner: Arc::clone(&retirement),
+      operation_descriptors: &[],
+      coverage_owner_requests: &requests,
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options(&fixture, id(0x57)),
+      cancellation: &fixture.cancellation,
+      clock: runtime_clock.clone(),
+      now_ms: 1_700_000_000_214,
+    },
+  )
+  .unwrap();
+
+  let first = fixture.source.index_coverage_registry_snapshot_v1().unwrap().unwrap();
+  assert_eq!(first.len(), 2);
+  assert!(matches!(
+    first.entry(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, &chain.scope_owner).unwrap().selection(),
+    IndexCoverageRegistrySelectionV1::Selected(_)
+  ));
+  assert!(matches!(
+    first.entry(IndexCoverageRegistryOwnerKindV1::FieldIndex, &chain.field_owner).unwrap().nvt_status(),
+    IndexCoverageNvtStatusV1::Usable(_)
+  ));
+  let first_scope_generation = match first.entry(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, &chain.scope_owner).unwrap().selection() {
+    IndexCoverageRegistrySelectionV1::Selected(generation) => generation.generation(),
+    IndexCoverageRegistrySelectionV1::Unavailable(reason) => panic!("initial scope coverage unavailable: {reason:?}"),
+  };
+
+  let successor = chain.scope_successor(algorithm);
+  publish_runtime_coverage_artifacts(&fixture, &[&successor], 1_700_000_000_220);
+  publish_runtime_coverage_pointer(&fixture, &retirement, ActivePointerKindV1::ScopeCatalog, &successor, 1, 2, 1_700_000_000_221);
+  DirectoryOps::new(&fixture.source)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/coverage-refresh-trigger.txt",
+      b"refresh selected coverage through the installed cadence",
+      Some("text/plain"),
+    )
+    .unwrap();
+  fixture.source.flush_index_runtime_if_due_v1().unwrap().expect("installed cadence must refresh changed selection");
+  let second = fixture.source.index_coverage_registry_snapshot_v1().unwrap().unwrap();
+  let second_scope_generation = match second.entry(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, &chain.scope_owner).unwrap().selection()
+  {
+    IndexCoverageRegistrySelectionV1::Selected(generation) => generation.generation(),
+    IndexCoverageRegistrySelectionV1::Unavailable(reason) => panic!("replacement scope coverage unavailable: {reason:?}"),
+  };
+  assert_eq!(second_scope_generation, first_scope_generation + 1);
+  assert_eq!(
+    match first.entry(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, &chain.scope_owner).unwrap().selection() {
+      IndexCoverageRegistrySelectionV1::Selected(generation) => generation.generation(),
+      IndexCoverageRegistrySelectionV1::Unavailable(reason) => panic!("pinned scope coverage unavailable: {reason:?}"),
+    },
+    first_scope_generation,
+    "atomic replacement must not mutate an in-flight generation"
+  );
+  let lifecycle = fixture.source.index_runtime_coverage_snapshot_v1().unwrap().unwrap();
+  assert_eq!(lifecycle.refresh_attempts, 2);
+  assert_eq!(lifecycle.successful_refreshes, 2);
+  assert_eq!(lifecycle.failed_refreshes, 0);
+  assert_eq!(lifecycle.registry_entries, 2);
+  assert!(lifecycle.owner_requests_retained_bytes > 0);
+  assert_eq!(
+    lifecycle.total_retained_bytes,
+    lifecycle.registry_retained_bytes.checked_add(lifecycle.owner_requests_retained_bytes).unwrap()
+  );
+
+  let normal_memory_policy = fixture.source.memory_coordinator().snapshot().unwrap().policy.unwrap();
+  assert_eq!(
+    fixture.source.admit_index_maintenance_task_v1([0x62; 16], IndexProducerMaintenanceClassV1::Reindex, "/").unwrap(),
+    Some(IndexProducerAdmissionV1::Queued)
+  );
+  fixture.source.memory_coordinator().reconfigure_policy(MemoryPolicy::new(1, 2, 1, 1).unwrap()).unwrap();
+  let pressure = fixture.source.flush_index_runtime_if_due_v1().unwrap_err();
+  assert!(pressure.to_string().contains("index coverage registry memory admission failed"));
+  let retained_after_pressure = fixture.source.index_coverage_registry_snapshot_v1().unwrap().unwrap();
+  assert_eq!(retained_after_pressure.entries(), second.entries(), "refresh pressure must retain prior selected coverage");
+  let failed_lifecycle = fixture.source.index_runtime_coverage_snapshot_v1().unwrap().unwrap();
+  assert_eq!(failed_lifecycle.refresh_attempts, 3);
+  assert_eq!(failed_lifecycle.successful_refreshes, 2);
+  assert_eq!(failed_lifecycle.failed_refreshes, 1);
+  assert!(failed_lifecycle.refresh_pending);
+  assert_eq!(failed_lifecycle.last_failure.as_ref().unwrap().code, "index_coverage_refresh_memory");
+  let root_observability = fixture.source.runtime_observability_snapshot(ConfigurationVisibility::Root).unwrap();
+  assert_ne!(root_observability.index_runtime.coverage.last_failure.as_ref().unwrap().context, "<redacted>");
+  let public_observability = fixture.source.runtime_observability_snapshot(ConfigurationVisibility::Redacted).unwrap();
+  assert_eq!(public_observability.index_runtime.coverage.last_failure.as_ref().unwrap().code, "index_coverage_refresh_memory");
+  assert_eq!(public_observability.index_runtime.coverage.last_failure.as_ref().unwrap().context, "<redacted>");
+  fixture.source.memory_coordinator().reconfigure_policy(normal_memory_policy).unwrap();
+  runtime_clock.advance(100);
+  fixture.source.flush_index_runtime_if_due_v1().unwrap().expect("pending cadence refresh must recover after pressure clears");
+  let recovered_lifecycle = fixture.source.index_runtime_coverage_snapshot_v1().unwrap().unwrap();
+  assert_eq!(recovered_lifecycle.refresh_attempts, 4);
+  assert_eq!(recovered_lifecycle.successful_refreshes, 3);
+  assert_eq!(recovered_lifecycle.failed_refreshes, 1);
+  assert!(!recovered_lifecycle.refresh_pending);
+  assert!(recovered_lifecycle.last_failure.is_none());
+
+  fixture.source.shutdown().unwrap();
+  assert_eq!(first.len(), 2, "shutdown must not invalidate an in-flight immutable coverage snapshot");
+  assert_eq!(second.len(), 2);
+
+  let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
+  let shadow_path = destination.path().to_path_buf();
+  let database_id = permit.database_id();
+  drop(source);
+  drop(destination);
+  drop(cancellation);
+
+  let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  let reopened_publisher = Arc::new(reopen(&shadow_path));
+  let reopened_cancellation = CancellationToken::new();
+  let reopened_retirement = retirement_owner(&reopened_source, database_id, &reopened_cancellation);
+  install_native_index_runtime_v1(
+    &reopened_source,
+    NativeIndexRuntimeInstallationRequestV1 {
+      coordinator_id: id(0x56),
+      shadow_identity: &identity,
+      publisher: reopened_publisher,
+      retirement_owner: reopened_retirement,
+      operation_descriptors: &[],
+      coverage_owner_requests: &requests,
+      runtime_options: runtime_options(),
+      recovery_options: native_recovery_options(),
+      runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), database_id, id(0x57)),
+      cancellation: &reopened_cancellation,
+      clock: Arc::new(MockClock::new(5, 1_700_000_000_230)),
+      now_ms: 1_700_000_000_230,
+    },
+  )
+  .unwrap();
+  let reconstructed = reopened_source.index_coverage_registry_snapshot_v1().unwrap().unwrap();
+  assert_eq!(reconstructed.entries(), second.entries());
+  let reconstructed_lifecycle = reopened_source.index_runtime_coverage_snapshot_v1().unwrap().unwrap();
+  assert_eq!(reconstructed_lifecycle.refresh_attempts, 1);
+  assert_eq!(reconstructed_lifecycle.successful_refreshes, 1);
+  assert_eq!(reconstructed_lifecycle.failed_refreshes, 0);
 }
 
 #[test]
@@ -1200,6 +1606,7 @@ fn post_commit_pressure_and_spill_refusal_cannot_reverse_legacy_write_or_delete(
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: owner_options,
       recovery_options: native_recovery_options(),
       runtime_publisher: publisher_options,
@@ -1433,6 +1840,7 @@ fn native_runtime_atomic_installation_rejects_invalid_publisher_authority_withou
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(fixture._directory.path(), fixture.permit.hash_algorithm(), id(0x11), id(0xe0)),
@@ -1456,6 +1864,7 @@ fn native_runtime_atomic_installation_rejects_invalid_publisher_authority_withou
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xe1)),
@@ -1476,6 +1885,7 @@ fn native_runtime_atomic_installation_rejects_invalid_publisher_authority_withou
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xe2)),
@@ -1503,6 +1913,10 @@ fn selected_runtime_dirty_overlay_resumes_after_source_and_destination_restart_w
   drop(cancellation);
 
   let reopened_source = StorageEngine::open(source_path.to_str().unwrap()).unwrap();
+  assert!(
+    reopened_source.index_coverage_registry_snapshot_v1().unwrap().is_none(),
+    "plain reopen must remain v3-only until migration recovery explicitly reinstalls the runtime"
+  );
   let reopened_publisher = Arc::new(reopen(&shadow_path));
   let reopened_cancellation = CancellationToken::new();
   let receipt = install_native_index_runtime_v1(
@@ -1513,6 +1927,7 @@ fn selected_runtime_dirty_overlay_resumes_after_source_and_destination_restart_w
       publisher: Arc::clone(&reopened_publisher),
       retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
@@ -1582,6 +1997,7 @@ fn selected_runtime_restart_streams_each_durable_producer_task_into_the_recoveri
       publisher: Arc::clone(&reopened_publisher),
       retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
@@ -1612,6 +2028,7 @@ fn fresh_runtime_reuses_its_exact_empty_workspace_after_restart() {
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
@@ -1638,6 +2055,7 @@ fn fresh_runtime_reuses_its_exact_empty_workspace_after_restart() {
       publisher: reopened_publisher,
       retirement_owner: retirement_owner(&reopened_source, permit.database_id(), &reopened_cancellation),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), workspace_id),
@@ -1669,6 +2087,7 @@ fn malformed_selected_runtime_dirty_overlay_refuses_installation_without_consumi
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
@@ -1699,6 +2118,7 @@ fn resumed_runtime_refuses_an_unexpected_generation_without_consuming_the_runtim
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for_generation(
@@ -1725,6 +2145,7 @@ fn resumed_runtime_refuses_an_unexpected_generation_without_consuming_the_runtim
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
@@ -1753,6 +2174,7 @@ fn publisher_recovery_cancellation_and_pressure_leave_no_partial_runtime_or_memo
       publisher: canceled.destination.shared_publisher(),
       retirement_owner: canceled.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&canceled, canceled_workspace_id),
@@ -1782,6 +2204,7 @@ fn publisher_recovery_cancellation_and_pressure_leave_no_partial_runtime_or_memo
       publisher: pressured.destination.shared_publisher(),
       retirement_owner: pressured.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&pressured, pressured_workspace_id),
@@ -1804,6 +2227,7 @@ fn publisher_recovery_cancellation_and_pressure_leave_no_partial_runtime_or_memo
       publisher: pressured.destination.shared_publisher(),
       retirement_owner: pressured.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&pressured, pressured_workspace_id),
@@ -1837,6 +2261,7 @@ fn runtime_selection_change_during_installation_is_rejected_at_the_final_authori
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
@@ -1863,6 +2288,7 @@ fn storage_shutdown_drains_the_installed_runtime_before_completing() {
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xea)),
@@ -1892,6 +2318,7 @@ fn storage_shutdown_cannot_observe_a_runtime_whose_publisher_construction_failed
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xea)),
@@ -1922,6 +2349,7 @@ fn storage_shutdown_preserves_the_existing_workspace_when_soft_work_blocks_drain
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, workspace_id),
@@ -1978,6 +2406,7 @@ fn runtime_identity_refusal_and_content_only_descriptor_refusal_do_not_consume_i
       publisher: destination.shared_publisher(),
       retirement_owner: retirement_owner(&source, wrong_permit.database_id(), &cancellation),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(
@@ -2007,6 +2436,7 @@ fn runtime_identity_refusal_and_content_only_descriptor_refusal_do_not_consume_i
       publisher: destination.shared_publisher(),
       retirement_owner: retirement_owner(&source, correct_permit.database_id(), &cancellation),
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(
@@ -2038,6 +2468,7 @@ fn complete_semantic_authority_without_a_selected_checkpoint_starts_a_clean_buil
       publisher: empty.destination.shared_publisher(),
       retirement_owner: empty.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&empty, id(0x81)),
@@ -2061,6 +2492,7 @@ fn complete_semantic_authority_without_a_selected_checkpoint_starts_a_clean_buil
       publisher: unbuilt.destination.shared_publisher(),
       retirement_owner: unbuilt.retirement(),
       operation_descriptors: &[],
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&unbuilt, id(0x82)),
@@ -2185,6 +2617,7 @@ fn cancellation_during_native_checkpoint_recovery_releases_the_unconsumed_instal
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xb1)),
@@ -2216,6 +2649,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &descriptors,
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0xc1)),
@@ -2233,6 +2667,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
     1,
     4 * 1_024 * 1_024,
     IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(64, 256 * 1_024).unwrap(),
     IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
   )
   .unwrap();
@@ -2244,6 +2679,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: &descriptors,
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: count_options,
       runtime_publisher: runtime_publisher_options(&fixture, id(0xc2)),
@@ -2260,6 +2696,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
     128,
     1,
     IndexScopeOrdinalStoreRegistryOptionsV1::new(8, 8 * 1_024 * 1_024).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(64, 256 * 1_024).unwrap(),
     IndexRecoveryOptionsV1::new(128, 16 * 1_024 * 1_024, 128, 16 * 1_024 * 1_024).unwrap(),
   )
   .unwrap();
@@ -2271,6 +2708,7 @@ fn descriptor_duplicates_and_resource_bounds_refuse_before_consuming_the_runtime
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: fixture.retirement(),
       operation_descriptors: std::slice::from_ref(&first),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: byte_options,
       runtime_publisher: runtime_publisher_options(&fixture, id(0xc3)),
@@ -2315,6 +2753,7 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
       publisher: fixture.destination.shared_publisher(),
       retirement_owner: retirement,
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options(&fixture, id(0x91)),
@@ -2328,6 +2767,13 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
   assert_eq!(first.recovered_scopes, 1);
   assert_eq!(first.highest_checkpoint_sequence, 1);
   assert_eq!(first.semantic_state_root, semantic_state_root);
+  let cache_before_eviction = fixture.source.index_runtime_coverage_snapshot_v1().unwrap().unwrap().scope_ordinal_cache;
+  assert_eq!(cache_before_eviction.entries, 1);
+  assert_eq!(cache_before_eviction.pinned_entries, 0);
+  assert_eq!(fixture.source.evict_clean_index_cache().unwrap(), 1);
+  let cache_after_eviction = fixture.source.index_runtime_coverage_snapshot_v1().unwrap().unwrap().scope_ordinal_cache;
+  assert_eq!(cache_after_eviction.entries, 0);
+  assert_eq!(cache_after_eviction.evictions, cache_before_eviction.evictions + 1);
 
   let RuntimeFixture { _directory, source_path, source, permit, destination, cancellation } = fixture;
   let shadow_path = destination.path().to_path_buf();
@@ -2349,6 +2795,7 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
       publisher: reopened_publisher,
       retirement_owner: reopened_retirement,
       operation_descriptors: std::slice::from_ref(&selected_descriptor),
+      coverage_owner_requests: &[],
       runtime_options: runtime_options(),
       recovery_options: native_recovery_options(),
       runtime_publisher: runtime_publisher_options_for(_directory.path(), permit.hash_algorithm(), permit.database_id(), id(0x92)),
@@ -2361,6 +2808,12 @@ fn selected_native_checkpoint_recovers_again_after_source_and_shadow_reopen() {
   assert_eq!(reopened.lifecycle, IndexRuntimeLifecycleV1::Running);
   assert_eq!(reopened.recovered_scopes, 1);
   assert_eq!(reopened.highest_checkpoint_sequence, 1);
+  let coverage = reopened_source.index_coverage_registry_snapshot_v1().unwrap().expect("reconstructed coverage registry");
+  assert!(coverage.is_empty());
+  let coverage_runtime = reopened_source.index_runtime_coverage_snapshot_v1().unwrap().expect("reconstructed coverage lifecycle");
+  assert_eq!(coverage_runtime.refresh_attempts, 1);
+  assert_eq!(coverage_runtime.successful_refreshes, 1);
+  assert_eq!(coverage_runtime.failed_refreshes, 0);
 }
 
 #[test]
@@ -2464,8 +2917,10 @@ fn destination_initializer_is_a_disconnected_composition_of_existing_physical_ow
 fn native_runtime_has_one_atomic_publisher_and_cadence_installation_boundary() {
   let package = Path::new(env!("CARGO_MANIFEST_DIR"));
   let installation = fs::read_to_string(package.join("src/engine/v4/index_runtime_installation.rs")).unwrap();
+  let coverage_runtime = fs::read_to_string(package.join("src/engine/v4/index_coverage_runtime.rs")).unwrap();
   let storage_engine = fs::read_to_string(package.join("src/engine/storage_engine.rs")).unwrap();
   let query_engine = fs::read_to_string(package.join("src/engine/query_engine.rs")).unwrap();
+  let server = fs::read_to_string(package.join("src/server/mod.rs")).unwrap();
 
   assert_eq!(installation.matches("NativeIndexRuntimeCadenceV1::new").count(), 1);
   assert_eq!(installation.matches("NativeIndexCompactionExecutorV1::new").count(), 1);
@@ -2473,6 +2928,19 @@ fn native_runtime_has_one_atomic_publisher_and_cadence_installation_boundary() {
   assert!(installation.contains("Arc::clone(&self.retirement_owner)"));
   assert!(installation.contains("compaction_executor: &compaction_executor"));
   assert!(installation.contains("build_runtime_publisher("));
+  assert_eq!(installation.matches("coverage: Arc<NativeIndexCoverageRuntimeV1>").count(), 1);
+  assert_eq!(installation.matches("NativeIndexCoverageRuntimeV1::new(").count(), 1);
+  assert!(coverage_runtime.contains("FirstAuthorityIndexCoverageRegistrySourceV1::new"));
+  assert!(!coverage_runtime.contains("publish_index_active_pointer"));
+  assert!(!coverage_runtime.contains("tokio::spawn"));
+  assert!(!coverage_runtime.contains("std::thread::spawn"));
+  assert!(!coverage_runtime.contains("DiskKVStore"));
+  assert_eq!(storage_engine.matches("index_runtime_v1: OnceLock<Arc<").count(), 1);
+  assert!(
+    !storage_engine.contains("pub fn refresh_index_coverage_registry_v1"),
+    "coverage refresh must remain owned by the installed shared cadence"
+  );
+  assert_eq!(server.matches("engine.flush_index_runtime_if_due_v1()").count(), 1);
   let source_frontier = installation
     .find("let source_authority_guard = engine.direct_hard_authority_guard()?;")
     .expect("runtime installation must acquire source hard authority at its final frontier");

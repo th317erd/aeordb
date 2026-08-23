@@ -14,6 +14,7 @@ use crate::engine::memory_coordinator::{MemoryCoordinatorError, MemoryReservatio
 use crate::engine::native_durability::{NativeDurabilityError, PlatformFileIdentityDescriptorV1, platform_file_identity};
 use crate::engine::{EngineError, HashAlgorithm, StorageEngine, VirtualClock};
 
+use super::admission::CapabilitySetV1;
 use super::first_authority::{FirstAuthorityPublicationErrorV1, SelectedSemanticAuthorityV1, V4FirstAuthorityPublisher};
 use super::coverage_journal::{
   CoverageJournalEncodeOptionsV1, CoverageJournalErrorV1, CoverageJournalWindowOptionsV1, CoverageJournalWindowOutcomeV1,
@@ -24,6 +25,8 @@ use super::index_coordinator_recovery::{
   IndexRecoveryErrorV1, IndexRecoveryOptionsV1, IndexRecoveryOutcomeV1, IndexRecoveryOwnerV1, IndexRecoveryReasonV1,
   IndexRecoveryStoreErrorV1, IndexRecoveryStoreV1,
 };
+use super::index_coverage_registry::{IndexCoverageRegistryOptionsV1, IndexCoverageRegistryOwnerRequestV1};
+use super::index_coverage_runtime::{IndexCoverageRuntimeErrorV1, NativeIndexCoverageRuntimeV1};
 use super::index_maintenance_scan::IndexMaintenanceScanLimitsV1;
 use super::index_native_compaction::{NativeIndexCompactionExecutorV1, NativeIndexCompactionOptionsV1};
 use super::index_native_journal_source::FirstAuthorityIndexProducerJournalSourceV1;
@@ -105,6 +108,7 @@ pub struct IndexRuntimeShadowIdentityV1 {
   destination_physical_instance_id: [u8; 16],
   source_file_identity: PlatformFileIdentityDescriptorV1,
   hash_algorithm: HashAlgorithm,
+  supported_reader_capabilities: CapabilitySetV1,
   system_family_registry_fingerprint: Vec<u8>,
 }
 
@@ -117,6 +121,7 @@ impl IndexRuntimeShadowIdentityV1 {
       destination_physical_instance_id: permit.destination_physical_instance_id(),
       source_file_identity: permit.source_file_identity(),
       hash_algorithm: permit.hash_algorithm(),
+      supported_reader_capabilities: permit.capability_profile().supported_reader_capabilities,
       system_family_registry_fingerprint: permit.system_family_registry_fingerprint().to_vec(),
     }
   }
@@ -129,6 +134,7 @@ impl IndexRuntimeShadowIdentityV1 {
       destination_physical_instance_id: owner.destination_physical_instance_id(),
       source_file_identity: owner.source_file_identity(),
       hash_algorithm: owner.hash_algorithm(),
+      supported_reader_capabilities: owner.capability_profile().supported_reader_capabilities,
       system_family_registry_fingerprint: owner.system_family_registry_fingerprint().to_vec(),
     }
   }
@@ -155,6 +161,7 @@ pub struct IndexRuntimeNativeRecoveryOptionsV1 {
   maximum_operation_descriptors: usize,
   maximum_descriptor_bytes: u64,
   registry: IndexScopeOrdinalStoreRegistryOptionsV1,
+  coverage_registry: IndexCoverageRegistryOptionsV1,
   checkpoint: IndexRecoveryOptionsV1,
 }
 
@@ -163,12 +170,13 @@ impl IndexRuntimeNativeRecoveryOptionsV1 {
     maximum_operation_descriptors: usize,
     maximum_descriptor_bytes: u64,
     registry: IndexScopeOrdinalStoreRegistryOptionsV1,
+    coverage_registry: IndexCoverageRegistryOptionsV1,
     checkpoint: IndexRecoveryOptionsV1,
   ) -> Result<Self, NativeIndexRuntimeInstallationErrorV1> {
     if maximum_operation_descriptors == 0 || maximum_descriptor_bytes == 0 {
       return Err(invalid("native_index_recovery_limits", "descriptor count and byte limits must be nonzero"));
     }
-    Ok(Self { maximum_operation_descriptors, maximum_descriptor_bytes, registry, checkpoint })
+    Ok(Self { maximum_operation_descriptors, maximum_descriptor_bytes, registry, coverage_registry, checkpoint })
   }
 }
 
@@ -203,6 +211,7 @@ pub struct NativeIndexRuntimeInstallationRequestV1<'request> {
   pub publisher: Arc<V4FirstAuthorityPublisher>,
   pub retirement_owner: SharedRetirementJournalOwnerV1,
   pub operation_descriptors: &'request [NativeIndexOperationDescriptorV1],
+  pub coverage_owner_requests: &'request [IndexCoverageRegistryOwnerRequestV1],
   pub runtime_options: IndexRuntimeOwnerOptionsV1,
   pub recovery_options: IndexRuntimeNativeRecoveryOptionsV1,
   pub runtime_publisher: NativeIndexRuntimePublisherOptionsV1,
@@ -216,6 +225,7 @@ pub struct NativeIndexRuntimeV1 {
   publisher: Arc<V4FirstAuthorityPublisher>,
   retirement_owner: SharedRetirementJournalOwnerV1,
   registry: Arc<IndexScopeOrdinalStoreRegistryV1>,
+  coverage: Arc<NativeIndexCoverageRuntimeV1>,
   descriptor_catalog: Arc<NativeIndexOperationDescriptorCatalogV1>,
   shadow_identity: IndexRuntimeShadowIdentityV1,
   semantic_authority: SelectedSemanticAuthorityV1,
@@ -348,6 +358,10 @@ impl NativeIndexRuntimeV1 {
 
   pub fn registry(&self) -> &Arc<IndexScopeOrdinalStoreRegistryV1> {
     &self.registry
+  }
+
+  pub fn coverage(&self) -> &Arc<NativeIndexCoverageRuntimeV1> {
+    &self.coverage
   }
 
   pub fn descriptor_catalog(&self) -> &Arc<NativeIndexOperationDescriptorCatalogV1> {
@@ -553,6 +567,8 @@ pub enum NativeIndexRuntimeInstallationErrorV1 {
   Memory(#[from] MemoryCoordinatorError),
   #[error("native index runtime registry construction failed: {0}")]
   Registry(#[from] IndexScopeOrdinalStoreRegistryErrorV1),
+  #[error("native index runtime coverage lifecycle failed: {0}")]
+  Coverage(#[from] IndexCoverageRuntimeErrorV1),
   #[error("native index runtime publisher recovery owner is invalid: {0}")]
   PublisherRecovery(#[from] IndexRecoveryErrorV1),
   #[error("native index runtime publisher recovery store failed: {0}")]
@@ -630,6 +646,23 @@ pub fn install_native_index_runtime_v1(
     request.cancellation.clone(),
     Arc::clone(&request.clock),
   )?);
+  let coverage = Arc::new(NativeIndexCoverageRuntimeV1::new(
+    request.shadow_identity.hash_algorithm,
+    request.shadow_identity.database_id,
+    request.shadow_identity.supported_reader_capabilities,
+    request.recovery_options.coverage_registry,
+    request.coverage_owner_requests,
+    Arc::clone(&request.publisher),
+    Arc::clone(&registry),
+    Arc::clone(&memory),
+    request.cancellation.clone(),
+  )?);
+  if let Err(error) = coverage.refresh() {
+    if error.is_installation_contract_failure() {
+      return Err(error.into());
+    }
+    tracing::warn!(code = error.code(), error = %error, "Initial v4 index coverage refresh failed; exact fallback remains authoritative");
+  }
 
   let content_only = matches!(semantic_authority.semantic_state.availability, SemanticAvailabilityV1::ContentOnly { .. });
   let mut recovery = recover_selected_operations(&registry, descriptor_catalog.descriptors(), &semantic_authority, request.cancellation)?;
@@ -686,6 +719,7 @@ pub fn install_native_index_runtime_v1(
     publisher: Arc::clone(&request.publisher),
     retirement_owner: Arc::clone(&request.retirement_owner),
     registry,
+    coverage,
     descriptor_catalog,
     shadow_identity: request.shadow_identity.clone(),
     semantic_authority: semantic_authority.clone(),

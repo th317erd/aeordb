@@ -527,7 +527,7 @@ fn every_index_pointer_and_manifest_fixture_matches_the_independent_oracle() {
       row.format_id == "index-artifact-v1" && (row.expected.starts_with("index:pointer:") || row.expected.starts_with("index:manifest:"))
     })
     .collect();
-  assert_eq!(rows.len(), 28);
+  assert_eq!(rows.len(), 32);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();

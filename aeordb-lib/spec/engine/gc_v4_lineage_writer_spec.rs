@@ -457,6 +457,8 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
     callers,
     [
       PathBuf::from("engine/v4/first_authority.rs"),
+      PathBuf::from("engine/v4/index_generation_authority.rs"),
+      PathBuf::from("engine/v4/index_native_compaction.rs"),
       PathBuf::from("engine/v4/index_recovery_store.rs"),
       PathBuf::from("engine/v4/index_runtime_installation.rs"),
       PathBuf::from("engine/v4/migration_capture_replay.rs"),

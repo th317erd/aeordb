@@ -987,6 +987,28 @@ Authentication is required. Share-link tokens are rejected. Root callers receive
       "frozen_bytes": 0,
       "successful_flushes": 14,
       "restored_flushes": 0
+    },
+    "coverage": {
+      "refresh_attempts": 19,
+      "successful_refreshes": 18,
+      "failed_refreshes": 1,
+      "refresh_pending": false,
+      "registry_entries": 24,
+      "registry_retained_bytes": 98304,
+      "owner_requests_retained_bytes": 4096,
+      "total_retained_bytes": 102400,
+      "selected_generations": 22,
+      "unavailable_generations": 2,
+      "usable_nvt_generations": 17,
+      "last_failure": null
+    },
+    "scope_ordinal_cache": {
+      "entries": 12,
+      "resident_bytes": 131072,
+      "pinned_entries": 2,
+      "hits": 1432,
+      "misses": 37,
+      "evictions": 9
     }
   }
 }
@@ -1010,7 +1032,7 @@ without double-counting `--auth self`.
 | `memory` | Process probes, memory policy/pressure, per-owner observations and reservations, and bounded cache diagnostics |
 | `durability` | Hard frontier, waiter depth, last completed barrier, grouping policy, read-only latch, spill evidence, and repair state |
 | `configuration` | Complete runtime/lifecycle envelopes: active and desired values, exact sources, validity, degradation, and pending activation |
-| `index_runtime` | Lock-free cached v4 lifecycle, soft-journal pressure/loss, producer queue/retry/spill, mutation batch, and publication state |
+| `index_runtime` | Bounded cached v4 lifecycle, soft-journal pressure/loss, producer queue/retry/spill, mutation batch, publication state, selected coverage, and shared scope-cache evidence |
 
 The response is bounded by fixed owner/property registries and bounded diagnostic arrays. Collection does not evict caches or otherwise mutate storage policy. Poll at a monitoring cadence rather than treating it as a hot data-plane endpoint.
 
@@ -1018,8 +1040,21 @@ The response is bounded by fixed owner/property registries and bounded diagnosti
 installed. The other lifecycle states are `recovering`, `running`, `degraded`,
 `draining`, and `stopped`. A degraded record includes a stable `code` and a
 bounded `context`; non-root stats retain the code but replace the context with
-`"<redacted>"`. Collection reads the runtime's lock-free cached snapshot and
-never waits for parser, index publication, or worker ownership.
+`"<redacted>"`. Collection clones the runtime's lock-free lifecycle snapshot,
+briefly locks only bounded coverage/cache metadata, and never waits for parser,
+index publication, or worker ownership.
+
+`index_runtime.coverage` exists only as active state when that
+migration-qualified runtime is installed; inactive v3 snapshots report zeroes.
+The registry and owner-request catalog are reserved through the memory
+coordinator. A failed refresh preserves the previous immutable snapshot,
+retains exact-query fallback for unavailable owners, leaves `refresh_pending`
+set for the next existing runtime cadence, and exposes one bounded
+`last_failure`. Non-root callers receive its stable code with a redacted
+context. `scope_ordinal_cache` is the shared bounded cache supplied to
+migration-qualified exact and NVT-assisted v4 readers; its clean unpinned
+entries participate in normal index-cache eviction. Ordinary v3 query readers
+remain outside this runtime until the coordinated query cutover.
 
 `health.gc` is omitted before the first run, for all non-root callers, and
 after process restart until another run begins. The root projection retains
@@ -1145,6 +1180,21 @@ Memory gauges are updated when `/system/metrics` is rendered and by the periodic
 | `aeordb_index_cache_values` | Raw indexed value count currently cached |
 | `aeordb_directory_cache_estimated_bytes` | Estimated directory content cache memory |
 | `aeordb_directory_cache_entries` | Directory content cache entry count |
+| `aeordb_index_runtime_coverage_entries` | Owner entries in the active immutable coverage snapshot |
+| `aeordb_index_runtime_coverage_retained_bytes` | Memory-accounted coverage registry plus retained owner-request catalog bytes |
+| `aeordb_index_runtime_coverage_refresh_attempts` | Coverage refresh attempts since runtime installation |
+| `aeordb_index_runtime_coverage_refresh_successes` | Coverage refreshes that published a complete replacement snapshot |
+| `aeordb_index_runtime_coverage_refresh_failures` | Coverage refreshes that preserved the prior snapshot and exact fallback |
+| `aeordb_index_runtime_coverage_refresh_pending` | `1` when selection may have changed or the last refresh failed |
+| `aeordb_index_runtime_coverage_selected_generations` | Owners with a selected immutable generation |
+| `aeordb_index_runtime_coverage_unavailable_generations` | Owners currently using exact fallback because no generation is selected |
+| `aeordb_index_runtime_coverage_usable_nvt_generations` | Selected generations with dependency-valid NVT hints |
+| `aeordb_index_runtime_scope_cache_entries` | Entries in the shared scope-ordinal reader cache |
+| `aeordb_index_runtime_scope_cache_resident_bytes` | Memory-accounted bytes retained by the shared scope-ordinal cache |
+| `aeordb_index_runtime_scope_cache_pinned_entries` | Cache entries protected from clean eviction by active readers |
+| `aeordb_index_runtime_scope_cache_hits` | Scope-ordinal cache hits since runtime installation |
+| `aeordb_index_runtime_scope_cache_misses` | Scope-ordinal cache misses since runtime installation |
+| `aeordb_index_runtime_scope_cache_evictions` | Clean unpinned scope-ordinal cache entries evicted since installation |
 | `aeordb_durability_*` | Frontier, waiters, last barrier, group policy, latch, spill, and repair gauges |
 | `aeordb_configuration_family_*{family}` | Runtime/lifecycle validity, degradation, and pending-state gauges |
 | `aeordb_configuration_property_active{family,path,source}` | Fixed-registry one-hot active source for each configuration property |

@@ -515,6 +515,7 @@ pub struct MigrationPreflightPermitV1 {
   source_authority_digest: [u8; 32],
   source_authority_counts: AuthorityInventoryCountsV1,
   system_family_registry_fingerprint: Vec<u8>,
+  capability_profile: BinaryCapabilityProfileV1,
   required_reader_capabilities: CapabilitySetV1,
   required_writer_capabilities: CapabilitySetV1,
   evidence_fingerprint: [u8; 32],
@@ -579,6 +580,10 @@ impl MigrationPreflightPermitV1 {
 
   pub fn system_family_registry_fingerprint(&self) -> &[u8] {
     &self.system_family_registry_fingerprint
+  }
+
+  pub const fn capability_profile(&self) -> BinaryCapabilityProfileV1 {
+    self.capability_profile
   }
 
   pub const fn required_reader_capabilities(&self) -> CapabilitySetV1 {
@@ -673,6 +678,7 @@ pub fn admit_migration_preflight_v1(
     source_authority_digest: request.inventory.authority_digest,
     source_authority_counts: request.inventory.counts,
     system_family_registry_fingerprint: request.inventory.system_family_registry_fingerprint.clone(),
+    capability_profile: request.binary.capability_profile,
     required_reader_capabilities: request.binary.required_reader_capabilities,
     required_writer_capabilities: request.binary.required_writer_capabilities,
     evidence_fingerprint: report.evidence_fingerprint,

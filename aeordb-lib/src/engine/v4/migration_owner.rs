@@ -1334,6 +1334,10 @@ impl MigrationStateOwnerV1 {
     self.permit.system_family_registry_fingerprint()
   }
 
+  pub const fn capability_profile(&self) -> super::admission::BinaryCapabilityProfileV1 {
+    self.permit.capability_profile()
+  }
+
   pub const fn source_authority_digest(&self) -> [u8; 32] {
     self.permit.source_authority_digest()
   }

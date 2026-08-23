@@ -157,6 +157,21 @@ fn record_index_runtime_metrics(runtime: &crate::engine::runtime_observability::
     .set(runtime.mutations.active_bytes.saturating_add(runtime.mutations.frozen_bytes) as f64);
   metrics::gauge!(definitions::INDEX_RUNTIME_RECONCILIATION_REQUIRED).set(bool_gauge(runtime.soft_mutations.reconciliation_required));
   metrics::gauge!(definitions::INDEX_RUNTIME_PUBLICATION_IN_FLIGHT).set(bool_gauge(runtime.publication_in_flight));
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_ENTRIES).set(runtime.coverage.registry_entries as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_RETAINED_BYTES).set(runtime.coverage.total_retained_bytes as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_REFRESH_ATTEMPTS).set(runtime.coverage.refresh_attempts as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_REFRESH_SUCCESSES).set(runtime.coverage.successful_refreshes as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_REFRESH_PENDING).set(bool_gauge(runtime.coverage.refresh_pending));
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_REFRESH_FAILURES).set(runtime.coverage.failed_refreshes as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_SELECTED_GENERATIONS).set(runtime.coverage.selected_generations as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_UNAVAILABLE_GENERATIONS).set(runtime.coverage.unavailable_generations as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_COVERAGE_USABLE_NVT_GENERATIONS).set(runtime.coverage.usable_nvt_generations as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_ENTRIES).set(runtime.scope_ordinal_cache.entries as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_RESIDENT_BYTES).set(runtime.scope_ordinal_cache.resident_bytes as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_PINNED_ENTRIES).set(runtime.scope_ordinal_cache.pinned_entries as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_HITS).set(runtime.scope_ordinal_cache.hits as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_MISSES).set(runtime.scope_ordinal_cache.misses as f64);
+  metrics::gauge!(definitions::INDEX_RUNTIME_SCOPE_CACHE_EVICTIONS).set(runtime.scope_ordinal_cache.evictions as f64);
 }
 
 fn record_gc_metrics(gc: Option<&crate::engine::GcRunStatusSnapshotV1>) {

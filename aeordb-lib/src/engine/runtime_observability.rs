@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::engine::config_resolver::ConfigurationFamily;
 use crate::engine::configuration_observability::{configuration_envelope, ConfigurationVisibility};
 use crate::engine::durability_coordinator::{DurabilityBarrierObservation, DurabilityCoordinatorSnapshot, DurabilityGroupPolicySnapshot};
-use crate::engine::errors::EngineResult;
+use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::storage_engine::{DurabilityFailureState, EmergencySpillReport, EngineMemoryStats, StorageEngine};
 use crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState;
 
@@ -30,6 +30,8 @@ pub struct IndexRuntimeObservabilitySnapshot {
   pub soft_mutations: IndexRuntimeSoftMutationObservability,
   pub producer: IndexRuntimeProducerObservability,
   pub mutations: IndexRuntimeMutationObservability,
+  pub coverage: IndexRuntimeCoverageObservability,
+  pub scope_ordinal_cache: IndexRuntimeScopeOrdinalCacheObservability,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +79,33 @@ pub struct IndexRuntimeMutationObservability {
   pub frozen_bytes: u64,
   pub successful_flushes: u64,
   pub restored_flushes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeCoverageObservability {
+  pub refresh_attempts: u64,
+  pub successful_refreshes: u64,
+  pub failed_refreshes: u64,
+  pub refresh_pending: bool,
+  pub registry_entries: usize,
+  pub registry_retained_bytes: u64,
+  pub owner_requests_retained_bytes: u64,
+  pub total_retained_bytes: u64,
+  pub selected_generations: usize,
+  pub unavailable_generations: usize,
+  pub usable_nvt_generations: usize,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub last_failure: Option<IndexRuntimeDegradedObservability>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexRuntimeScopeOrdinalCacheObservability {
+  pub entries: usize,
+  pub resident_bytes: u64,
+  pub pinned_entries: usize,
+  pub hits: u64,
+  pub misses: u64,
+  pub evictions: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,14 +188,17 @@ pub fn collect_runtime_observability(
       runtime: configuration_envelope(&configuration, ConfigurationFamily::Runtime, visibility),
       lifecycle: configuration_envelope(&configuration, ConfigurationFamily::Lifecycle, visibility),
     },
-    index_runtime: index_runtime_observability(engine, visibility),
+    index_runtime: index_runtime_observability(engine, visibility)?,
     gc: (visibility == ConfigurationVisibility::Root).then(|| engine.gc_run_status()).flatten(),
   })
 }
 
-fn index_runtime_observability(engine: &StorageEngine, visibility: ConfigurationVisibility) -> IndexRuntimeObservabilitySnapshot {
+fn index_runtime_observability(
+  engine: &StorageEngine,
+  visibility: ConfigurationVisibility,
+) -> EngineResult<IndexRuntimeObservabilitySnapshot> {
   let Some(snapshot) = engine.index_runtime_snapshot_v1() else {
-    return IndexRuntimeObservabilitySnapshot {
+    return Ok(IndexRuntimeObservabilitySnapshot {
       installed: false,
       state: "inactive",
       recovered_scopes: 0,
@@ -208,13 +240,39 @@ fn index_runtime_observability(engine: &StorageEngine, visibility: Configuration
         successful_flushes: 0,
         restored_flushes: 0,
       },
-    };
+      coverage: IndexRuntimeCoverageObservability {
+        refresh_attempts: 0,
+        successful_refreshes: 0,
+        failed_refreshes: 0,
+        refresh_pending: false,
+        registry_entries: 0,
+        registry_retained_bytes: 0,
+        owner_requests_retained_bytes: 0,
+        total_retained_bytes: 0,
+        selected_generations: 0,
+        unavailable_generations: 0,
+        usable_nvt_generations: 0,
+        last_failure: None,
+      },
+      scope_ordinal_cache: IndexRuntimeScopeOrdinalCacheObservability {
+        entries: 0,
+        resident_bytes: 0,
+        pinned_entries: 0,
+        hits: 0,
+        misses: 0,
+        evictions: 0,
+      },
+    });
   };
 
+  let coverage = engine
+    .index_runtime_coverage_snapshot_v1()
+    .map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?
+    .ok_or_else(|| EngineError::InvalidInput("installed index runtime has no coverage lifecycle".to_string()))?;
   let soft = &snapshot.soft_hub;
   let producer = &snapshot.producer;
   let mutations = &snapshot.mutations;
-  IndexRuntimeObservabilitySnapshot {
+  Ok(IndexRuntimeObservabilitySnapshot {
     installed: true,
     state: snapshot.lifecycle.stable_name(),
     recovered_scopes: snapshot.recovered_scopes,
@@ -259,7 +317,32 @@ fn index_runtime_observability(engine: &StorageEngine, visibility: Configuration
       successful_flushes: mutations.successful_flushes,
       restored_flushes: mutations.restored_flushes,
     },
-  }
+    coverage: IndexRuntimeCoverageObservability {
+      refresh_attempts: coverage.refresh_attempts,
+      successful_refreshes: coverage.successful_refreshes,
+      failed_refreshes: coverage.failed_refreshes,
+      refresh_pending: coverage.refresh_pending,
+      registry_entries: coverage.registry_entries,
+      registry_retained_bytes: coverage.registry_retained_bytes,
+      owner_requests_retained_bytes: coverage.owner_requests_retained_bytes,
+      total_retained_bytes: coverage.total_retained_bytes,
+      selected_generations: coverage.selected_generations,
+      unavailable_generations: coverage.unavailable_generations,
+      usable_nvt_generations: coverage.usable_nvt_generations,
+      last_failure: coverage.last_failure.map(|failure| IndexRuntimeDegradedObservability {
+        code: failure.code,
+        context: if visibility == ConfigurationVisibility::Root { failure.context } else { "<redacted>".to_string() },
+      }),
+    },
+    scope_ordinal_cache: IndexRuntimeScopeOrdinalCacheObservability {
+      entries: coverage.scope_ordinal_cache.entries,
+      resident_bytes: coverage.scope_ordinal_cache.resident_bytes,
+      pinned_entries: coverage.scope_ordinal_cache.pinned_entries,
+      hits: coverage.scope_ordinal_cache.hits,
+      misses: coverage.scope_ordinal_cache.misses,
+      evictions: coverage.scope_ordinal_cache.evictions,
+    },
+  })
 }
 
 fn soft_mutation_loss_reason_name(reason: crate::engine::v4::coverage_runtime::SoftMutationLossReasonV1) -> &'static str {

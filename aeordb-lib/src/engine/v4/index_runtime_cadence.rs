@@ -55,8 +55,12 @@ pub enum IndexRuntimeCadenceErrorV1 {
   SoftJournal(String),
   #[error("index runtime native producer source construction failed: {0}")]
   NativeSource(String),
+  #[error("index runtime coverage refresh failed: {0}")]
+  Coverage(String),
   #[error("index runtime producer service failed ({service}) and due publication also failed ({flush})")]
   ServiceAndFlush { service: Box<IndexRuntimeCadenceErrorV1>, flush: Box<IndexRuntimeCadenceErrorV1> },
+  #[error("index runtime cadence failed ({runtime}) and coverage lifecycle also failed ({coverage})")]
+  RuntimeAndCoverage { runtime: Box<IndexRuntimeCadenceErrorV1>, coverage: Box<IndexRuntimeCadenceErrorV1> },
   #[error(transparent)]
   Runtime(#[from] IndexRuntimeErrorV1),
   #[error(transparent)]

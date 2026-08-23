@@ -113,6 +113,10 @@ async fn test_metrics_pulse_payload_structure() {
 
   assert_eq!(payload["index_runtime"]["state"], "inactive");
   assert_eq!(payload["index_runtime"]["installed"], false);
+  assert_eq!(payload["index_runtime"]["coverage"]["registry_entries"], 0);
+  assert_eq!(payload["index_runtime"]["coverage"]["refresh_pending"], false);
+  assert_eq!(payload["index_runtime"]["scope_ordinal_cache"]["entries"], 0);
+  assert_eq!(payload["index_runtime"]["scope_ordinal_cache"]["resident_bytes"], 0);
 
   for family in &["runtime", "lifecycle"] {
     assert!(payload["configuration"][family]["config"].is_object());

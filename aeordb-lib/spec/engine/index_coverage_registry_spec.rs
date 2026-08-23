@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
+use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::first_authority::{LoadedIndexActivePointerPairV1, LoadedIndexActivePointerV1};
 use aeordb::engine::v4::index_artifact::{
   ActivePointerKindV1, ActivePointerWriteV1, EncodedImmutableIndexArtifactV1, FieldIndexManifestBodyV1, FieldNvtManifestBodyV1,
@@ -25,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 fn memory(limit: u64) -> Arc<MemoryCoordinator> {
   Arc::new(MemoryCoordinator::new(MemoryPolicy::new(limit, limit + 4 * 1_024 * 1_024, 1, 2 * 1_024 * 1_024).unwrap()))
+}
+
+fn supported_reader_capabilities() -> CapabilitySetV1 {
+  BinaryCapabilityProfileV1::current().supported_reader_capabilities
 }
 
 fn fixture_root() -> PathBuf {
@@ -308,7 +313,14 @@ fn request(
 }
 
 fn registry(algorithm: HashAlgorithm, database_id: [u8; 16], memory: Arc<MemoryCoordinator>) -> IndexCoverageRegistryV1 {
-  IndexCoverageRegistryV1::new(algorithm, database_id, IndexCoverageRegistryOptionsV1::new(8, 64 * 1_024).unwrap(), memory).unwrap()
+  IndexCoverageRegistryV1::new(
+    algorithm,
+    database_id,
+    supported_reader_capabilities(),
+    IndexCoverageRegistryOptionsV1::new(8, 64 * 1_024).unwrap(),
+    memory,
+  )
+  .unwrap()
 }
 
 #[test]
@@ -317,6 +329,7 @@ fn an_empty_registry_is_bounded_and_carries_one_database_authority() {
   let registry = IndexCoverageRegistryV1::new(
     HashAlgorithm::Blake3_256,
     database_id,
+    supported_reader_capabilities(),
     IndexCoverageRegistryOptionsV1::new(16, 64 * 1_024).unwrap(),
     memory(16 * 1_024 * 1_024),
   )
@@ -426,6 +439,35 @@ fn pointer_change_or_corrupt_transitive_closure_never_replaces_the_prior_snapsho
   assert!(matches!(error, IndexCoverageRegistryErrorV1::Corrupt { .. }));
   assert!(Arc::ptr_eq(&prior, &coverage_registry.snapshot().unwrap()));
   assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::IndexCleanCache).unwrap().reserved_bytes, baseline_bytes);
+}
+
+#[test]
+fn admitted_reader_capabilities_bound_selected_manifest_loading() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let database_id = [0x11; 16];
+  let chain = ManifestChain::new(algorithm);
+  let coverage_registry = IndexCoverageRegistryV1::new(
+    algorithm,
+    database_id,
+    CapabilitySetV1::empty(),
+    IndexCoverageRegistryOptionsV1::new(8, 64 * 1_024).unwrap(),
+    memory(16 * 1_024 * 1_024),
+  )
+  .unwrap();
+  let prior = coverage_registry.snapshot().unwrap();
+  let mut source = FakeSource::new(algorithm, database_id);
+  source.insert_artifact(&chain.scope);
+  source.set_stable_pair(ActivePointerKindV1::ScopeCatalog, &chain.scope, false);
+
+  let error = coverage_registry
+    .refresh(
+      &mut source,
+      &[request(IndexCoverageRegistryOwnerKindV1::ScopeCatalog, chain.scope_owner, IndexCoverageGenerationHealthV1::Healthy)],
+      &CancellationToken::new(),
+    )
+    .unwrap_err();
+  assert!(matches!(error, IndexCoverageRegistryErrorV1::Corrupt { .. }));
+  assert!(Arc::ptr_eq(&prior, &coverage_registry.snapshot().unwrap()));
 }
 
 #[test]
@@ -553,6 +595,7 @@ fn malformed_request_sets_fail_before_source_io() {
   let registry = IndexCoverageRegistryV1::new(
     algorithm,
     database_id,
+    supported_reader_capabilities(),
     IndexCoverageRegistryOptionsV1::new(1, 64 * 1_024).unwrap(),
     memory(16 * 1_024 * 1_024),
   )
@@ -752,6 +795,7 @@ fn selected_scope_field_and_compatible_nvt_metadata_load_at_both_hash_widths_wit
     let registry = IndexCoverageRegistryV1::new(
       algorithm,
       database_id,
+      supported_reader_capabilities(),
       IndexCoverageRegistryOptionsV1::new(8, 64 * 1_024).unwrap(),
       Arc::clone(&memory),
     )
