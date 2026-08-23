@@ -187,6 +187,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
   let migration_root_map_owner_path = source_root.join("engine/v4/migration_root_map_owner.rs");
+  let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -216,6 +217,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &migration_final_reconciliation_path,
       &migration_owner_path,
       &migration_root_map_owner_path,
+      &read_view_native_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
@@ -235,6 +237,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &migration_final_reconciliation_path,
     &migration_owner_path,
     &migration_root_map_owner_path,
+    &read_view_native_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
     for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {

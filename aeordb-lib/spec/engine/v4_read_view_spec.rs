@@ -172,7 +172,7 @@ impl ReadViewAuthoritySourceV1 for FakeAuthoritySource {
     if self.cancel_after_authority {
       cancellation.cancel();
     }
-    Ok(LoadedReadAuthorityV1 { authority: self.authority.clone(), legacy_root_hash: self.legacy_root_hash.clone() })
+    Ok(LoadedReadAuthorityV1::new(self.authority.clone(), self.legacy_root_hash.clone()))
   }
 
   fn observe_lifecycle(
@@ -243,6 +243,7 @@ impl ReadViewAuthorizerV1 for FakeAuthorizer {
   fn restrict_to_selected_root(
     &self,
     current: &Self::CurrentAuthorization,
+    _header: &SelectedDatabaseHeaderV4,
     _authority: &LoadedReadAuthorityV1,
     cancellation: &CancellationToken,
   ) -> Result<Self::ResolvedAuthorization, ReadViewAuthorizationFailureV1> {
@@ -581,7 +582,7 @@ fn source_failures_remain_distinct_and_carry_current_concealment() {
 }
 
 #[test]
-fn selected_authorization_precedes_defensive_closure_and_capability_errors() {
+fn defensive_closure_and_capability_errors_precede_selected_authorization() {
   let algorithm = HashAlgorithm::Blake3_256;
   let head = hash(algorithm, 0x1f);
   let mut malformed = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head.clone(), false);
@@ -591,12 +592,14 @@ fn selected_authorization_precedes_defensive_closure_and_capability_errors() {
   denied.deny_selected = true;
   let resolver = ReadViewResolverV1::new(Arc::clone(&malformed), pin_coordinator(algorithm), all_capabilities_profile());
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &denied, &CancellationToken::new()).unwrap_err();
-  assert_eq!(error.code(), "read_authorization_denied");
+  assert_eq!(error.code(), "root_authority_corrupt");
+  assert!(!malformed.order.lock().unwrap().contains(&"selected_auth"));
   assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 1);
 
   let allowed = FakeAuthorizer::standard(Arc::clone(&malformed.order));
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &allowed, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
+  assert!(!malformed.order.lock().unwrap().contains(&"selected_auth"));
   assert_eq!(malformed.lifecycle_calls.load(Ordering::SeqCst), 2);
 
   let mut unsupported = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head, false);
@@ -608,7 +611,7 @@ fn selected_authorization_precedes_defensive_closure_and_capability_errors() {
   let resolver = ReadViewResolverV1::new(Arc::clone(&unsupported), pin_coordinator(algorithm), profile);
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "unsupported_root_capabilities");
-  assert!(unsupported.order.lock().unwrap().contains(&"selected_auth"));
+  assert!(!unsupported.order.lock().unwrap().contains(&"selected_auth"));
   assert_eq!(unsupported.lifecycle_calls.load(Ordering::SeqCst), 1);
 }
 
@@ -631,7 +634,7 @@ fn captured_header_admission_fails_before_root_lookup_and_preserves_concealment(
 }
 
 #[test]
-fn authority_high_water_and_legacy_mapping_corruption_fail_after_selected_authorization() {
+fn authority_high_water_and_legacy_mapping_corruption_fail_before_selected_authorization() {
   let algorithm = HashAlgorithm::Blake3_256;
   let head = hash(algorithm, 0x27);
   let mut future = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head.clone(), false);
@@ -641,7 +644,7 @@ fn authority_high_water_and_legacy_mapping_corruption_fail_after_selected_author
   let resolver = ReadViewResolverV1::new(Arc::clone(&future), pin_coordinator(algorithm), all_capabilities_profile());
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
-  assert!(future.order.lock().unwrap().contains(&"selected_auth"));
+  assert!(!future.order.lock().unwrap().contains(&"selected_auth"));
   assert_eq!(future.lifecycle_calls.load(Ordering::SeqCst), 1);
 
   let mut legacy = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head, false);
@@ -651,7 +654,7 @@ fn authority_high_water_and_legacy_mapping_corruption_fail_after_selected_author
   let resolver = ReadViewResolverV1::new(Arc::clone(&legacy), pin_coordinator(algorithm), all_capabilities_profile());
   let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
   assert_eq!(error.code(), "root_authority_corrupt");
-  assert!(legacy.order.lock().unwrap().contains(&"selected_auth"));
+  assert!(!legacy.order.lock().unwrap().contains(&"selected_auth"));
   assert_eq!(legacy.lifecycle_calls.load(Ordering::SeqCst), 1);
 }
 

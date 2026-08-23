@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use aeordb::engine::permission_resolver::{CrudlifyOp, evaluate_ordered_path_permissions};
 use aeordb::engine::permissions::{PathPermissions, PermissionLink};
+use aeordb::engine::v4::database_header::{SelectedDatabaseHeaderV4, decode_header_region};
 use aeordb::engine::v4::namespace::{NamespaceRootV1, NamespaceTreeLayoutV0, NamespaceTreeRootV0, SemanticAvailabilityV1, SemanticStateV1};
 use aeordb::engine::v4::read_view::{
   CurrentReadAuthorizationV1, LoadedReadAuthorityV1, ReadViewAuthorizationErrorV1, ReadViewAuthorizationFailureV1, ReadViewAuthorizerV1,
@@ -15,6 +18,11 @@ use aeordb::engine::v4::read_view_authorization::{
 };
 use aeordb::engine::v4::root_authority::{ImmutableNamespaceAuthorityV1, RootAdmissionCommitV1, RootAuthorityKindV1};
 use tokio_util::sync::CancellationToken;
+
+fn selected_header() -> SelectedDatabaseHeaderV4 {
+  let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/fixtures/v4/database-header-v4/header-blake3-256-valid-ab.bin");
+  decode_header_region(&fs::read(path).unwrap()).unwrap()
+}
 
 fn link(
   group: &str,
@@ -132,6 +140,7 @@ struct CancelingSelectedSource {
 impl SelectedRootPermissionSourceV1 for CancelingSelectedSource {
   fn authorize_selected_root(
     &self,
+    _header: &SelectedDatabaseHeaderV4,
     _authority: &LoadedReadAuthorityV1,
     _request: SelectedRootPermissionRequestV1<'_>,
     cancellation: &CancellationToken,
@@ -145,6 +154,7 @@ impl SelectedRootPermissionSourceV1 for CancelingSelectedSource {
 impl SelectedRootPermissionSourceV1 for FakeSelectedSource {
   fn authorize_selected_root(
     &self,
+    _header: &SelectedDatabaseHeaderV4,
     _authority: &LoadedReadAuthorityV1,
     request: SelectedRootPermissionRequestV1<'_>,
     _cancellation: &CancellationToken,
@@ -198,8 +208,8 @@ fn loaded_authority() -> LoadedReadAuthorityV1 {
   let root_hash = vec![0x11; 32];
   let namespace_tree_root = vec![0x22; 32];
   let semantic_state_root = vec![0x33; 32];
-  LoadedReadAuthorityV1 {
-    authority: ImmutableNamespaceAuthorityV1 {
+  LoadedReadAuthorityV1::new(
+    ImmutableNamespaceAuthorityV1 {
       root: NamespaceRootV1 {
         root_hash: root_hash.clone(),
         required_capabilities: [0; 32],
@@ -239,8 +249,8 @@ fn loaded_authority() -> LoadedReadAuthorityV1 {
         prepare_payload_hash: vec![0x48; 32],
       },
     },
-    legacy_root_hash: None,
-  }
+    None,
+  )
 }
 
 #[test]
@@ -252,7 +262,8 @@ fn authorizer_reuses_current_identity_and_selected_decision_only_restricts() {
   let cancellation = CancellationToken::new();
 
   let current = authorizer.authorize_current(&cancellation).unwrap();
-  let resolved = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap();
+  let resolved =
+    authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap();
 
   assert_eq!(resolved, selected_decision);
   assert_eq!(current_calls.load(Ordering::SeqCst), 1);
@@ -270,7 +281,8 @@ fn selected_root_cannot_expand_current_filtered_navigation() {
   let cancellation = CancellationToken::new();
   let current = authorizer.authorize_current(&cancellation).unwrap();
 
-  let resolved = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap();
+  let resolved =
+    authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap();
 
   assert_eq!(resolved.allowed_children(), Some(&names(&["shared"])));
 }
@@ -283,7 +295,8 @@ fn empty_selected_intersection_and_explicit_selected_denial_fail_closed() {
     let cancellation = CancellationToken::new();
     let current = authorizer.authorize_current(&cancellation).unwrap();
 
-    let error = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap_err();
+    let error =
+      authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap_err();
 
     assert_eq!(error, ReadViewAuthorizationFailureV1::Denied);
   }
@@ -299,7 +312,8 @@ fn current_only_authority_skips_selected_root_permission_source() {
     let cancellation = CancellationToken::new();
     let current = authorizer.authorize_current(&cancellation).unwrap();
 
-    let resolved = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap();
+    let resolved =
+      authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap();
 
     assert!(resolved.is_direct());
     assert_eq!(selected_calls.load(Ordering::SeqCst), 0);
@@ -377,7 +391,10 @@ fn selected_root_failures_and_cancellation_remain_typed() {
     let cancellation = CancellationToken::new();
     let current = authorizer.authorize_current(&cancellation).unwrap();
 
-    assert_eq!(authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap_err(), failure);
+    assert_eq!(
+      authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap_err(),
+      failure,
+    );
   }
 }
 
@@ -392,13 +409,14 @@ fn cancellation_before_or_during_selected_evaluation_never_returns_authority() {
   let cancellation = CancellationToken::new();
   let current = authorizer.authorize_current(&cancellation).unwrap();
 
-  let error = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &cancellation).unwrap_err();
+  let error =
+    authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap_err();
   assert_eq!(error, ReadViewAuthorizationFailureV1::Canceled);
   assert_eq!(selected_calls.load(Ordering::SeqCst), 1);
 
   let before = CancellationToken::new();
   before.cancel();
-  let error = authorizer.restrict_to_selected_root(current.authorization(), &loaded_authority(), &before).unwrap_err();
+  let error = authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &before).unwrap_err();
   assert_eq!(error, ReadViewAuthorizationFailureV1::Canceled);
   assert_eq!(selected_calls.load(Ordering::SeqCst), 1);
 }

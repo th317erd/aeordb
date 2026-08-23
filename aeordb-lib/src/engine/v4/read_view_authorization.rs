@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::permission_resolver::{CrudlifyOp, normalize_permission_path};
 
+use super::database_header::SelectedDatabaseHeaderV4;
 use super::read_view::{
   CurrentReadAuthorizationV1, LoadedReadAuthorityV1, ReadViewAuthorizationErrorV1, ReadViewAuthorizationFailureV1, ReadViewAuthorizerV1,
 };
@@ -187,6 +188,7 @@ impl<'a> SelectedRootPermissionRequestV1<'a> {
 pub trait SelectedRootPermissionSourceV1: Send + Sync {
   fn authorize_selected_root(
     &self,
+    header: &SelectedDatabaseHeaderV4,
     authority: &LoadedReadAuthorityV1,
     request: SelectedRootPermissionRequestV1<'_>,
     cancellation: &CancellationToken,
@@ -243,6 +245,7 @@ where
   fn restrict_to_selected_root(
     &self,
     current: &Self::CurrentAuthorization,
+    header: &SelectedDatabaseHeaderV4,
     authority: &LoadedReadAuthorityV1,
     cancellation: &CancellationToken,
   ) -> Result<Self::ResolvedAuthorization, ReadViewAuthorizationFailureV1> {
@@ -258,7 +261,7 @@ where
 
     let request =
       SelectedRootPermissionRequestV1 { path: current.path(), operation: current.operation(), current_groups: current.current_groups() };
-    let selected = self.selected.authorize_selected_root(authority, request, cancellation)?;
+    let selected = self.selected.authorize_selected_root(header, authority, request, cancellation)?;
     if cancellation.is_cancelled() {
       return Err(ReadViewAuthorizationFailureV1::Canceled);
     }

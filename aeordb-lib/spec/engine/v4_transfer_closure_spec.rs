@@ -114,7 +114,7 @@ impl ReadViewAuthoritySourceV1 for Source {
     if root_hash != self.authority.root.root_hash {
       return Err(ReadViewSourceErrorV1::RootNotAdmitted);
     }
-    Ok(LoadedReadAuthorityV1 { authority: self.authority.clone(), legacy_root_hash: None })
+    Ok(LoadedReadAuthorityV1::new(self.authority.clone(), None))
   }
 
   fn observe_lifecycle(
@@ -143,6 +143,7 @@ impl ReadViewAuthorizerV1 for Authorizer {
   fn restrict_to_selected_root(
     &self,
     _current: &Self::CurrentAuthorization,
+    _header: &SelectedDatabaseHeaderV4,
     _authority: &LoadedReadAuthorityV1,
     _cancellation: &CancellationToken,
   ) -> Result<Self::ResolvedAuthorization, ReadViewAuthorizationFailureV1> {

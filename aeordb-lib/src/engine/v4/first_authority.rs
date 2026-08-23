@@ -3043,6 +3043,51 @@ impl V4FirstAuthorityPublisher {
     }))
   }
 
+  /// Load one immutable entity against exactly one captured v4 header.
+  /// Mutable HEAD may advance, but the selected physical database identity
+  /// must not change or regress and entities newer than the captured write
+  /// high-water are rejected.
+  pub fn load_immutable_entity_at_captured_header(
+    &self,
+    captured: &SelectedDatabaseHeaderV4,
+    key: &[u8],
+    maximum_total_length: usize,
+    cancellation: &CancellationToken,
+  ) -> Result<Option<LoadedImmutableEntityV1>, FirstAuthorityPublicationErrorV1> {
+    if maximum_total_length == 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_immutable_entity_read_bound",
+        "captured immutable entity read bound must be nonzero",
+      ));
+    }
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let current = self.observe()?;
+    validate_captured_authority_header(captured, &current.selected, key)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, &current.selected.header)?;
+    let Some(bytes) = read_entity_bounded(&self.file, &kv, key, maximum_total_length, captured.header.write_sequence_high_water)? else {
+      return Ok(None);
+    };
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let entity = decode_whole_entity(&bytes, captured.header.hash_algorithm, captured.header.write_sequence_high_water)?;
+    Ok(Some(LoadedImmutableEntityV1 {
+      entity_version: entity.entity_version,
+      entry_type: entity.entry_type,
+      flags: entity.flags,
+      compression_algorithm: entity.compression_algorithm,
+      timestamp_ms: entity.timestamp_ms,
+      write_sequence: entity.write_sequence,
+      key: entity.key.to_vec(),
+      stored_value: entity.stored_value.to_vec(),
+    }))
+  }
+
   /// Load one complete immutable namespace authority against exactly one
   /// previously captured v4 header. Mutable HEAD may advance while this read
   /// is in flight, but no dependency published beyond the captured write

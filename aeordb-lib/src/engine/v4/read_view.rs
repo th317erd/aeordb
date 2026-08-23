@@ -62,6 +62,8 @@ pub enum RootPinCoordinatorErrorV1 {
   LifecycleCorrupt,
   #[error("root lifecycle authority is unavailable")]
   LifecycleUnavailable,
+  #[error("root lifecycle query memory admission failed: {0}")]
+  LifecycleMemory(String),
   #[error("root-pin coordinator lock is poisoned")]
   LockPoisoned,
   #[error("root-pin coordinator accounting is corrupt: {0}")]
@@ -88,6 +90,7 @@ impl RootPinCoordinatorErrorV1 {
       Self::InvalidNamespaceRoot => "invalid_namespace_root",
       Self::LifecycleCorrupt => "root_lifecycle_corrupt",
       Self::LifecycleUnavailable => "root_lifecycle_unavailable",
+      Self::LifecycleMemory(_) => "read_view_memory_admission",
       Self::LockPoisoned | Self::AccountingCorrupt(_) => "read_pin_corrupt",
       Self::Memory(_) => "read_pin_memory_admission",
       Self::RootLimit => "read_pin_root_limit",
@@ -598,6 +601,7 @@ pub trait ReadViewAuthorizerV1 {
   fn restrict_to_selected_root(
     &self,
     current: &Self::CurrentAuthorization,
+    header: &SelectedDatabaseHeaderV4,
     authority: &LoadedReadAuthorityV1,
     cancellation: &CancellationToken,
   ) -> Result<Self::ResolvedAuthorization, ReadViewAuthorizationFailureV1>;
@@ -605,6 +609,10 @@ pub trait ReadViewAuthorizerV1 {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ReadViewSourceErrorV1 {
+  #[error("selected-root source work was canceled")]
+  Canceled,
+  #[error("selected-root query memory admission failed: {0}")]
+  Memory(String),
   #[error("selected database header is unavailable: {0}")]
   HeaderUnavailable(String),
   #[error("selected database header is corrupt: {0}")]
@@ -620,6 +628,8 @@ pub enum ReadViewSourceErrorV1 {
 impl ReadViewSourceErrorV1 {
   pub const fn code(&self) -> &'static str {
     match self {
+      Self::Canceled => "read_view_canceled",
+      Self::Memory(_) => "read_view_memory_admission",
       Self::HeaderUnavailable(_) => "database_header_unavailable",
       Self::HeaderCorrupt(_) => "database_header_corrupt",
       Self::RootNotAdmitted => "invalid_namespace_root",
@@ -629,10 +639,28 @@ impl ReadViewSourceErrorV1 {
   }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedReadAuthorityV1 {
   pub authority: ImmutableNamespaceAuthorityV1,
   pub legacy_root_hash: Option<Vec<u8>>,
+  memory_reservation: Option<MemoryReservation>,
+}
+
+impl LoadedReadAuthorityV1 {
+  pub const fn new(authority: ImmutableNamespaceAuthorityV1, legacy_root_hash: Option<Vec<u8>>) -> Self {
+    Self { authority, legacy_root_hash, memory_reservation: None }
+  }
+
+  pub const fn new_accounted(
+    authority: ImmutableNamespaceAuthorityV1,
+    legacy_root_hash: Option<Vec<u8>>,
+    memory_reservation: MemoryReservation,
+  ) -> Self {
+    Self { authority, legacy_root_hash, memory_reservation: Some(memory_reservation) }
+  }
+
+  pub fn retained_memory_bytes(&self) -> u64 {
+    self.memory_reservation.as_ref().map_or(0, MemoryReservation::bytes)
+  }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -643,6 +671,8 @@ pub enum ReadViewLifecycleErrorV1 {
   Unavailable(String),
   #[error("root lifecycle observation was canceled")]
   Canceled,
+  #[error("root lifecycle query memory admission failed: {0}")]
+  Memory(String),
 }
 
 /// Storage adapter for one selected physical v4 database.
@@ -769,6 +799,7 @@ pub struct ResolvedReadViewV1<A> {
   system_family_registry: &'static SystemFamilyRegistryV1<'static>,
   cancellation: CancellationToken,
   _pin: RootReadPinV1,
+  _authority_memory: Option<MemoryReservation>,
 }
 
 impl<A> std::fmt::Debug for ResolvedReadViewV1<A> {
@@ -910,6 +941,7 @@ where
           ReadViewLifecycleErrorV1::Corrupt(_) => RootPinCoordinatorErrorV1::LifecycleCorrupt,
           ReadViewLifecycleErrorV1::Unavailable(_) => RootPinCoordinatorErrorV1::LifecycleUnavailable,
           ReadViewLifecycleErrorV1::Canceled => RootPinCoordinatorErrorV1::Canceled,
+          ReadViewLifecycleErrorV1::Memory(message) => RootPinCoordinatorErrorV1::LifecycleMemory(message),
         })
       })
       .map_err(|error| authorized_error(error.into()))?;
@@ -929,17 +961,18 @@ where
     if cancellation.is_cancelled() {
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }
+    validate_loaded_authority(&header, root_hash, &loaded).map_err(authorized_error)?;
+    validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(authorized_error)?;
 
-    let authorization =
-      authorizer.restrict_to_selected_root(current_authorization.authorization(), &loaded, cancellation).map_err(|error| match error {
+    let authorization = authorizer
+      .restrict_to_selected_root(current_authorization.authorization(), &header, &loaded, cancellation)
+      .map_err(|error| match error {
         ReadViewAuthorizationFailureV1::Canceled => authorized_error(ReadViewAuthorizedFailureV1::Canceled),
         other => authorized_error(other.into()),
       })?;
     if cancellation.is_cancelled() {
       return Err(authorized_error(ReadViewAuthorizedFailureV1::Canceled));
     }
-    validate_loaded_authority(&header, root_hash, &loaded).map_err(authorized_error)?;
-    validate_root_capabilities(&loaded.authority, self.capability_profile).map_err(authorized_error)?;
 
     let root_metadata =
       ReadViewRootMetadataV1 { hash: root_hash.to_vec(), state: admission.state, expires_at_ms: admission.state.expires_at_ms() };
@@ -959,6 +992,7 @@ where
       system_family_registry: header_admission.registry,
       cancellation: cancellation.clone(),
       _pin: admission.pin,
+      _authority_memory: loaded.memory_reservation,
     })
   }
 }
