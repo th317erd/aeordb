@@ -9,6 +9,10 @@ const FRAME_LENGTH: usize = 5;
 const MAX_CONTAINER_MEMBERS: usize = 65_535;
 const MAX_CONTAINER_DEPTH: usize = 32;
 
+/// Conservative retained-memory admission for one canonical node, including
+/// the expensive one-entry `BTreeMap` shape and allocator overhead headroom.
+pub const CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1: u64 = 768;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalValueBounds {
   pub maximum_value_length: usize,

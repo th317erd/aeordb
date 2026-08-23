@@ -1,14 +1,22 @@
 //! Production parser executor for the native v4 index runtime.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::mem::size_of;
 
 use crate::engine::errors::EngineError;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
-use crate::engine::native_parsers::{native_parser_claims_corrected, native_parser_claims_legacy, parse_native, parse_native_corrected};
+use crate::engine::native_parsers::{
+  CorrectedNativeParserErrorV1, CorrectedNativeParserLimitsV1, native_parser_claims_corrected, native_parser_claims_legacy,
+  native_parser_expands_archive_corrected, parse_native, parse_native_corrected,
+};
 use crate::engine::path_utils::{file_name, normalize_path};
 use crate::engine::storage_engine::StorageEngine;
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
-use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
+use super::config_value::{
+  CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1, CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value,
+};
 use super::dependency::{DependencyRecordV1, DependencyTableV1, InvocationPolicyV1};
 use super::index_producer_collector::{
   IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
@@ -22,6 +30,8 @@ const NATIVE_SUITE_ID: &str = "/org/aeordev/aeordb/native/native-suite-v1";
 const NATIVE_VERSION: &str = "1.0.0";
 const BODY_FIXED_BYTES: u64 = 4 * 1_024;
 const PARSER_WORKSPACE_MULTIPLIER: u64 = 4;
+const CORRECTED_ARCHIVE_EXPANSION_MULTIPLIER: u64 = 4;
+const CORRECTED_ARCHIVE_WORKSPACE_MULTIPLIER: u64 = 4;
 
 pub struct NativeIndexParserExecutorV1<'engine> {
   engine: &'engine StorageEngine,
@@ -81,7 +91,10 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
       let content_type = content_type_or_empty(stored_content_type);
       native_parser_claims_legacy(content_type, filename, request.path())
     };
-    let body = self.read_body(request)?;
+    let expands_archive = corrected && native_parser_expands_archive_corrected(mime_essence.as_deref(), extension.as_deref());
+    let workspace_bytes =
+      parser_workspace_bytes(request.file_record().total_size, corrected, expands_archive, &raw.policy, &native.policy)?;
+    let body = self.read_body(request, workspace_bytes)?;
     match parse_raw_json(&body, raw, corrected, is_json_media_type(mime_essence.as_deref(), stored_content_type, corrected))? {
       RawJsonAttemptV1::Parsed(value) => return Ok(IndexParserOutcomeV1::Parsed(value)),
       RawJsonAttemptV1::Deterministic(outcome) => return Ok(outcome),
@@ -106,14 +119,33 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
     let filename = required_filename(request)?;
     let stored_content_type = content_type_or_empty(request.file_record().content_type.as_deref());
     let parsed = if corrected {
-      parse_native_corrected(body, mime_essence, extension, filename, stored_content_type, request.file_record().total_size)
+      parse_native_corrected(
+        body,
+        mime_essence,
+        extension,
+        filename,
+        stored_content_type,
+        request.file_record().total_size,
+        CorrectedNativeParserLimitsV1::new(
+          corrected_archive_expansion_bytes(&candidate.policy)?,
+          candidate.policy.max_response_bytes,
+          candidate.policy.max_structure_nodes,
+          candidate.policy.max_scalar_bytes,
+          candidate.policy.max_container_members,
+        ),
+      )
     } else {
       parse_native(body, stored_content_type, filename, request.path(), request.file_record().total_size)
+        .map(|result| result.map_err(CorrectedNativeParserErrorV1::Malformed))
     };
     check_cancelled(request, "native_parser_cancelled_after_native")?;
     match parsed {
-      Some(Ok(value)) => finish_native_value(value, &candidate.policy),
-      Some(Err(error)) if corrected => {
+      Some(Ok(value)) => finish_native_value(value, &candidate.policy, corrected),
+      Some(Err(CorrectedNativeParserErrorV1::PolicyLimit { observed })) if corrected => {
+        deterministic_policy("native_parser_expansion_limit", observed)
+      }
+      Some(Err(CorrectedNativeParserErrorV1::Host(context))) if corrected => Err(host_failure("native_parser_corrected_host", context)),
+      Some(Err(CorrectedNativeParserErrorV1::Malformed(error))) if corrected => {
         drop(error);
         deterministic_malformed("native_parser_rejected", body.len() as u64)
       }
@@ -126,7 +158,11 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
     }
   }
 
-  fn read_body(&self, request: &IndexParserExecutionRequestV1<'_>) -> Result<ParserBodyV1, IndexParserExecutionErrorV1> {
+  fn read_body(
+    &self,
+    request: &IndexParserExecutionRequestV1<'_>,
+    workspace_bytes: u64,
+  ) -> Result<ParserBodyV1, IndexParserExecutionErrorV1> {
     check_cancelled(request, "native_parser_cancelled_before_body")?;
     let record = request.file_record();
     if request.maximum_document_input_bytes() == 0 {
@@ -144,11 +180,6 @@ impl<'engine> NativeIndexParserExecutorV1<'engine> {
       .memory_coordinator()
       .reserve(MemoryOwner::StreamingRead, retained_bytes.max(1), AdmissionClass::Maintenance)
       .map_err(map_body_memory_error)?;
-    let workspace_bytes = record
-      .total_size
-      .checked_mul(PARSER_WORKSPACE_MULTIPLIER)
-      .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
-      .ok_or_else(|| host_failure("native_parser_workspace_accounting", "parser workspace reservation overflowed"))?;
     let workspace = self
       .engine
       .memory_coordinator()
@@ -218,6 +249,44 @@ impl IndexParserExecutorV1 for NativeIndexParserExecutorV1<'_> {
   }
 }
 
+fn corrected_archive_expansion_bytes(policy: &InvocationPolicyV1) -> Result<u64, IndexParserExecutionErrorV1> {
+  policy
+    .max_response_bytes
+    .checked_mul(CORRECTED_ARCHIVE_EXPANSION_MULTIPLIER)
+    .ok_or_else(|| host_failure("native_parser_expansion_accounting", "corrected archive expansion limit overflowed"))
+}
+
+fn parser_workspace_bytes(
+  body_bytes: u64,
+  corrected: bool,
+  expands_archive: bool,
+  raw_policy: &InvocationPolicyV1,
+  native_policy: &InvocationPolicyV1,
+) -> Result<u64, IndexParserExecutionErrorV1> {
+  let body_workspace = body_bytes
+    .checked_mul(PARSER_WORKSPACE_MULTIPLIER)
+    .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
+    .ok_or_else(|| host_failure("native_parser_workspace_accounting", "body-relative parser workspace overflowed"))?;
+  if !corrected {
+    return Ok(body_workspace);
+  }
+  let archive_workspace = if expands_archive {
+    corrected_archive_expansion_bytes(native_policy)?
+      .checked_mul(CORRECTED_ARCHIVE_WORKSPACE_MULTIPLIER)
+      .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
+      .ok_or_else(|| host_failure("native_parser_workspace_accounting", "corrected archive workspace overflowed"))?
+  } else {
+    0
+  };
+  let json_workspace = raw_policy
+    .max_structure_nodes
+    .checked_mul(CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1)
+    .and_then(|bytes| bytes.checked_add(raw_policy.max_response_bytes))
+    .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
+    .ok_or_else(|| host_failure("native_parser_workspace_accounting", "corrected JSON workspace overflowed"))?;
+  Ok(body_workspace.max(archive_workspace).max(json_workspace))
+}
+
 struct ParserBodyV1 {
   bytes: Vec<u8>,
   _body_reservation: MemoryReservation,
@@ -245,7 +314,7 @@ fn parse_raw_json(
   json_media_type: bool,
 ) -> Result<RawJsonAttemptV1, IndexParserExecutionErrorV1> {
   if corrected {
-    match serde_json::from_slice::<CanonicalConfigValueV1>(body) {
+    match parse_corrected_json(body, &candidate.policy) {
       Ok(value) => match enforce_policy(&value, &candidate.policy) {
         Ok(()) => Ok(RawJsonAttemptV1::Parsed(value)),
         Err(PolicyCheckErrorV1::Limit(observed)) => {
@@ -253,7 +322,11 @@ fn parse_raw_json(
         }
         Err(PolicyCheckErrorV1::Host(context)) => Err(host_failure("raw_json_policy_host", context)),
       },
-      Err(error) => {
+      Err(CorrectedJsonParseErrorV1::PolicyLimit(observed)) => {
+        Ok(RawJsonAttemptV1::Deterministic(deterministic_policy("raw_json_policy_limit", observed)?))
+      }
+      Err(CorrectedJsonParseErrorV1::Host(context)) => Err(host_failure("raw_json_parse_host", context)),
+      Err(CorrectedJsonParseErrorV1::Malformed(error)) => {
         if json_media_type || (json_root_recognized(body) && matches!(error.classify(), serde_json::error::Category::Data)) {
           Ok(RawJsonAttemptV1::Deterministic(deterministic_malformed_outcome("raw_json_malformed", body.len() as u64)?))
         } else {
@@ -282,8 +355,257 @@ fn parse_raw_json(
   }
 }
 
-fn finish_native_value(value: serde_json::Value, policy: &InvocationPolicyV1) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
-  let value = canonical_from_serde(value)?;
+enum CorrectedJsonParseErrorV1 {
+  PolicyLimit(u64),
+  Host(String),
+  Malformed(serde_json::Error),
+}
+
+struct CorrectedJsonStateV1<'policy> {
+  policy: &'policy InvocationPolicyV1,
+  nodes: u64,
+  policy_limit: Option<u64>,
+  host_failure: Option<String>,
+}
+
+impl CorrectedJsonStateV1<'_> {
+  fn maximum_depth(&self) -> u64 {
+    u64::from(self.policy.max_structure_depth.min(self.policy.max_value_stack_height).min(self.policy.max_recursion_depth))
+  }
+
+  fn enter<E: de::Error>(&mut self, depth: u64) -> Result<(), E> {
+    self.nodes = match self.nodes.checked_add(1) {
+      Some(nodes) => nodes,
+      None => return self.reject_policy(u64::MAX, "corrected JSON node count overflowed"),
+    };
+    if self.nodes > self.policy.max_structure_nodes || depth > self.maximum_depth() {
+      return self.reject_policy(self.nodes.max(depth), "corrected JSON exceeds the structural policy");
+    }
+    Ok(())
+  }
+
+  fn check_scalar<E: de::Error>(&mut self, length: usize) -> Result<(), E> {
+    if length as u64 > self.policy.max_scalar_bytes {
+      return self.reject_policy(length as u64, "corrected JSON scalar exceeds the policy");
+    }
+    Ok(())
+  }
+
+  fn reject_policy<T, E: de::Error>(&mut self, observed: u64, message: &'static str) -> Result<T, E> {
+    self.policy_limit = Some(match self.policy_limit {
+      Some(previous) => previous.max(observed),
+      None => observed,
+    });
+    Err(E::custom(message))
+  }
+
+  fn reject_host<T, E: de::Error>(&mut self, context: String) -> Result<T, E> {
+    self.host_failure = Some(context);
+    Err(E::custom("corrected JSON allocation failed"))
+  }
+}
+
+fn parse_corrected_json(body: &[u8], policy: &InvocationPolicyV1) -> Result<CanonicalConfigValueV1, CorrectedJsonParseErrorV1> {
+  let mut state = CorrectedJsonStateV1 { policy, nodes: 0, policy_limit: None, host_failure: None };
+  let mut deserializer = serde_json::Deserializer::from_slice(body);
+  let result = CorrectedJsonSeedV1 { state: &mut state, depth: 1 }.deserialize(&mut deserializer).and_then(|value| {
+    deserializer.end()?;
+    Ok(value)
+  });
+  match result {
+    Ok(value) => Ok(value),
+    Err(error) => match (state.policy_limit, state.host_failure) {
+      (Some(observed), _) => Err(CorrectedJsonParseErrorV1::PolicyLimit(observed)),
+      (None, Some(context)) => Err(CorrectedJsonParseErrorV1::Host(context)),
+      (None, None) => Err(CorrectedJsonParseErrorV1::Malformed(error)),
+    },
+  }
+}
+
+struct CorrectedJsonSeedV1<'state, 'policy> {
+  state: &'state mut CorrectedJsonStateV1<'policy>,
+  depth: u64,
+}
+
+impl<'de> DeserializeSeed<'de> for CorrectedJsonSeedV1<'_, '_> {
+  type Value = CanonicalConfigValueV1;
+
+  fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+  where
+    D: de::Deserializer<'de>,
+  {
+    self.state.enter(self.depth)?;
+    deserializer.deserialize_any(CorrectedJsonVisitorV1 { state: self.state, depth: self.depth })
+  }
+}
+
+struct CorrectedJsonVisitorV1<'state, 'policy> {
+  state: &'state mut CorrectedJsonStateV1<'policy>,
+  depth: u64,
+}
+
+impl<'de> Visitor<'de> for CorrectedJsonVisitorV1<'_, '_> {
+  type Value = CanonicalConfigValueV1;
+
+  fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("a corrected canonical JSON value")
+  }
+
+  fn visit_unit<E>(self) -> Result<Self::Value, E> {
+    Ok(CanonicalConfigValueV1::Null)
+  }
+
+  fn visit_none<E>(self) -> Result<Self::Value, E> {
+    Ok(CanonicalConfigValueV1::Null)
+  }
+
+  fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+    Ok(CanonicalConfigValueV1::Boolean(value))
+  }
+
+  fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+    Ok(CanonicalConfigValueV1::Signed(value))
+  }
+
+  fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+    if value <= i64::MAX as u64 {
+      Ok(CanonicalConfigValueV1::Signed(value as i64))
+    } else {
+      Ok(CanonicalConfigValueV1::Unsigned(value))
+    }
+  }
+
+  fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+  where
+    E: de::Error,
+  {
+    if !value.is_finite() || value.to_bits() == (-0.0f64).to_bits() {
+      return Err(E::custom("canonical JSON number must be finite and encode zero positively"));
+    }
+    Ok(CanonicalConfigValueV1::FloatBits(value.to_bits()))
+  }
+
+  fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+  where
+    E: de::Error,
+  {
+    self.state.check_scalar(value.len())?;
+    let mut owned = String::new();
+    if let Err(error) = owned.try_reserve_exact(value.len()) {
+      return self.state.reject_host(format!("cannot reserve corrected JSON scalar: {error}"));
+    }
+    owned.push_str(value);
+    Ok(CanonicalConfigValueV1::String(owned))
+  }
+
+  fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+  where
+    E: de::Error,
+  {
+    self.state.check_scalar(value.len())?;
+    Ok(CanonicalConfigValueV1::String(value))
+  }
+
+  fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+  where
+    A: SeqAccess<'de>,
+  {
+    let mut values = Vec::new();
+    while let Some(value) =
+      sequence.next_element_seed(CorrectedJsonSeedV1 { state: &mut *self.state, depth: self.depth.saturating_add(1) })?
+    {
+      if values.len() == self.state.policy.max_container_members as usize {
+        return self.state.reject_policy(values.len() as u64 + 1, "corrected JSON array exceeds the member policy");
+      }
+      if let Err(error) = values.try_reserve(1) {
+        return self.state.reject_host(format!("cannot grow corrected JSON array: {error}"));
+      }
+      values.push(value);
+    }
+    Ok(CanonicalConfigValueV1::Array(values))
+  }
+
+  fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+  where
+    A: MapAccess<'de>,
+  {
+    let mut values = BTreeMap::new();
+    while let Some(key) = map.next_key_seed(CorrectedJsonStringSeedV1 { state: &mut *self.state })? {
+      if values.len() == self.state.policy.max_container_members as usize {
+        return self.state.reject_policy(values.len() as u64 + 1, "corrected JSON map exceeds the member policy");
+      }
+      if values.contains_key(&key) {
+        return Err(de::Error::custom(format!("duplicate canonical JSON key {key}")));
+      }
+      let value = map.next_value_seed(CorrectedJsonSeedV1 { state: &mut *self.state, depth: self.depth.saturating_add(1) })?;
+      values.insert(key, value);
+    }
+    Ok(CanonicalConfigValueV1::Map(values))
+  }
+}
+
+struct CorrectedJsonStringSeedV1<'state, 'policy> {
+  state: &'state mut CorrectedJsonStateV1<'policy>,
+}
+
+impl<'de> DeserializeSeed<'de> for CorrectedJsonStringSeedV1<'_, '_> {
+  type Value = String;
+
+  fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+  where
+    D: de::Deserializer<'de>,
+  {
+    deserializer.deserialize_string(CorrectedJsonStringVisitorV1 { state: self.state })
+  }
+}
+
+struct CorrectedJsonStringVisitorV1<'state, 'policy> {
+  state: &'state mut CorrectedJsonStateV1<'policy>,
+}
+
+impl<'de> Visitor<'de> for CorrectedJsonStringVisitorV1<'_, '_> {
+  type Value = String;
+
+  fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("a corrected JSON object key")
+  }
+
+  fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+  where
+    E: de::Error,
+  {
+    self.state.check_scalar(value.len())?;
+    let mut owned = String::new();
+    if let Err(error) = owned.try_reserve_exact(value.len()) {
+      return self.state.reject_host(format!("cannot reserve corrected JSON key: {error}"));
+    }
+    owned.push_str(value);
+    Ok(owned)
+  }
+
+  fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+  where
+    E: de::Error,
+  {
+    self.state.check_scalar(value.len())?;
+    Ok(value)
+  }
+}
+
+fn finish_native_value(
+  value: serde_json::Value,
+  policy: &InvocationPolicyV1,
+  corrected: bool,
+) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+  let value = if corrected {
+    match canonical_from_serde_corrected(value, policy) {
+      Ok(value) => value,
+      Err(PolicyCheckErrorV1::Limit(observed)) => return deterministic_policy("native_parser_policy_limit", observed),
+      Err(PolicyCheckErrorV1::Host(context)) => return Err(host_failure("native_parser_output_convert", context)),
+    }
+  } else {
+    canonical_from_serde(value)?
+  };
   match enforce_policy(&value, policy) {
     Ok(()) => Ok(IndexParserOutcomeV1::Parsed(value)),
     Err(PolicyCheckErrorV1::Limit(observed)) => deterministic_policy("native_parser_policy_limit", observed),
@@ -296,6 +618,77 @@ fn canonical_from_serde(value: serde_json::Value) -> Result<CanonicalConfigValue
     .map_err(|error| host_failure("native_parser_output_encode", format!("cannot encode native parser output: {error}")))?;
   serde_json::from_slice::<CanonicalConfigValueV1>(&bytes)
     .map_err(|error| host_failure("native_parser_output_decode", format!("cannot canonicalize native parser output: {error}")))
+}
+
+fn canonical_from_serde_corrected(
+  value: serde_json::Value,
+  policy: &InvocationPolicyV1,
+) -> Result<CanonicalConfigValueV1, PolicyCheckErrorV1> {
+  let mut nodes = 0u64;
+  canonical_from_serde_corrected_at(value, policy, 1, &mut nodes)
+}
+
+fn canonical_from_serde_corrected_at(
+  value: serde_json::Value,
+  policy: &InvocationPolicyV1,
+  depth: u64,
+  nodes: &mut u64,
+) -> Result<CanonicalConfigValueV1, PolicyCheckErrorV1> {
+  *nodes = nodes.checked_add(1).ok_or(PolicyCheckErrorV1::Limit(u64::MAX))?;
+  let maximum_depth = u64::from(policy.max_structure_depth.min(policy.max_value_stack_height).min(policy.max_recursion_depth));
+  if *nodes > policy.max_structure_nodes || depth > maximum_depth {
+    return Err(PolicyCheckErrorV1::Limit((*nodes).max(depth)));
+  }
+  match value {
+    serde_json::Value::Null => Ok(CanonicalConfigValueV1::Null),
+    serde_json::Value::Bool(value) => Ok(CanonicalConfigValueV1::Boolean(value)),
+    serde_json::Value::Number(value) => {
+      if let Some(value) = value.as_i64() {
+        return Ok(CanonicalConfigValueV1::Signed(value));
+      }
+      if let Some(value) = value.as_u64() {
+        return Ok(CanonicalConfigValueV1::Unsigned(value));
+      }
+      let value =
+        value.as_f64().ok_or_else(|| PolicyCheckErrorV1::Host("native parser produced an unrepresentable JSON number".to_string()))?;
+      if !value.is_finite() || value.to_bits() == (-0.0f64).to_bits() {
+        return Err(PolicyCheckErrorV1::Host("native parser produced a noncanonical JSON number".to_string()));
+      }
+      Ok(CanonicalConfigValueV1::FloatBits(value.to_bits()))
+    }
+    serde_json::Value::String(value) => {
+      if value.len() as u64 > policy.max_scalar_bytes {
+        return Err(PolicyCheckErrorV1::Limit(value.len() as u64));
+      }
+      Ok(CanonicalConfigValueV1::String(value))
+    }
+    serde_json::Value::Array(values) => {
+      if values.len() > policy.max_container_members as usize {
+        return Err(PolicyCheckErrorV1::Limit(values.len() as u64));
+      }
+      let mut canonical = Vec::new();
+      canonical
+        .try_reserve_exact(values.len())
+        .map_err(|error| PolicyCheckErrorV1::Host(format!("cannot reserve corrected native array: {error}")))?;
+      for value in values {
+        canonical.push(canonical_from_serde_corrected_at(value, policy, depth.saturating_add(1), nodes)?);
+      }
+      Ok(CanonicalConfigValueV1::Array(canonical))
+    }
+    serde_json::Value::Object(values) => {
+      if values.len() > policy.max_container_members as usize {
+        return Err(PolicyCheckErrorV1::Limit(values.len() as u64));
+      }
+      let mut canonical = BTreeMap::new();
+      for (key, value) in values {
+        if key.len() as u64 > policy.max_scalar_bytes {
+          return Err(PolicyCheckErrorV1::Limit(key.len() as u64));
+        }
+        canonical.insert(key, canonical_from_serde_corrected_at(value, policy, depth.saturating_add(1), nodes)?);
+      }
+      Ok(CanonicalConfigValueV1::Map(canonical))
+    }
+  }
 }
 
 enum PolicyCheckErrorV1 {

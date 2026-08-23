@@ -24,6 +24,7 @@ use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 
 const HASH_ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
+const PARSER_TEST_HARD_LIMIT: u64 = 128 * 1_024 * 1_024;
 
 fn memory(hard_limit_bytes: u64) -> MemoryCoordinator {
   let emergency = (hard_limit_bytes / 4).max(1);
@@ -174,7 +175,7 @@ fn metadata_create_emits_exact_scope_value_and_posting_records_without_parser_wo
   let revision = hash(b"revision");
   let record = file("/doc.json", 0x44, 32);
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
 
   let report = collector
@@ -232,7 +233,7 @@ fn in_scope_path_move_emits_explicit_old_reverse_removal_and_new_reverse_upsert(
   let before_record = file("/old.json", 0x20, 64);
   let after_record = file("/new.json", 0x21, 65);
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
 
   let report = collector
     .collect(
@@ -267,7 +268,7 @@ fn in_scope_departure_removes_the_exact_reverse_key_and_marks_membership_absent(
   let revision = hash(b"before-revision");
   let before_record = file("/departed.json", 0x20, 64);
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
 
   let report = collector
     .collect(
@@ -301,7 +302,7 @@ fn exact_before_after_parsing_replaces_values_and_tombstones_only_removed_postin
     first: json_document("first"),
     second: json_document("second"),
   });
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
 
   let report = collector
     .collect(
@@ -345,7 +346,7 @@ fn parser_no_claim_is_an_ordinary_missing_value_without_document_state() {
   let revision = hash(b"revision");
   let record = file("/messages.unknown", 0x20, 64);
   let parser = Parser::new(ParserBehavior::NotApplicable);
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
   let report = collector
     .collect(
       scope_bundle(&definitions),
@@ -377,7 +378,7 @@ fn deterministic_parser_failure_is_value_state_while_operational_failure_is_retr
   .unwrap();
   let deterministic =
     Parser::new(ParserBehavior::Deterministic(IndexParserDeterministicFailureV1::malformed_document(evidence.clone(), 64)));
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
   let transition =
     IndexCollectorDocumentTransitionV1 { document_ordinal: 4, before: None, after: Some(document(&root, &revision, &record)) };
   let report = collector.collect(scope_bundle(&definitions), transition, &deterministic, None, &|| false).unwrap();
@@ -417,7 +418,7 @@ fn frozen_evidence_and_records_use_the_database_sha512_profile() {
   )
   .unwrap();
   let parser = Parser::new(ParserBehavior::Deterministic(IndexParserDeterministicFailureV1::malformed_document(evidence.clone(), 1)));
-  let collector = IndexProducerCollectorV1::new(algorithm, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(algorithm, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
   let report = collector
     .collect(
       scope_bundle(&definitions),
@@ -447,7 +448,7 @@ fn field_limit_failure_is_independent_and_malformed_field_degrades_only_that_own
   let root = hash(b"root");
   let revision = hash(b"revision");
   let record = file("/doc.json", 0x44, 32);
-  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(32 * 1_024 * 1_024), options()).unwrap();
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory(PARSER_TEST_HARD_LIMIT), options()).unwrap();
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
   let transition =
     IndexCollectorDocumentTransitionV1 { document_ordinal: 6, before: None, after: Some(document(&root, &revision, &record)) };
@@ -480,7 +481,7 @@ fn source_byte_limit_freezes_the_value_store_with_the_frozen_reason() {
   let revision = hash(b"revision");
   let record = file("/doc.json", 0x44, 32);
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
   let report = collector
     .collect(
@@ -508,7 +509,7 @@ fn parser_cancellation_and_host_failure_are_typed_and_release_memory() {
   let record = file("/messages.json", 0x20, 64);
   let transition =
     IndexCollectorDocumentTransitionV1 { document_ordinal: 13, before: None, after: Some(document(&root, &revision, &record)) };
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
 
   let cancelled = Parser::new(ParserBehavior::Cancelled);
@@ -537,7 +538,7 @@ fn malformed_parser_evidence_fails_closed_without_retaining_memory() {
   let revision = hash(b"revision");
   let record = file("/messages.json", 0x20, 64);
   let parser = Parser::new(ParserBehavior::Deterministic(IndexParserDeterministicFailureV1::malformed_document(Vec::new(), 0)));
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
 
   assert!(matches!(
@@ -561,7 +562,7 @@ fn invalid_transition_identity_and_duplicate_owners_fail_before_parser_work() {
   let revision = hash(b"revision");
   let record = file("/doc.json", 0x44, 32);
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
 
   for transition in [
@@ -646,7 +647,7 @@ fn out_of_scope_document_is_an_empty_report_without_parser_work() {
   let revision = hash(b"revision");
   let record = file("/nested/messages.json", 0x20, 64);
   let parser = Parser::new(ParserBehavior::HostFailure);
-  let memory = memory(32 * 1_024 * 1_024);
+  let memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, memory.clone(), options()).unwrap();
   let report = collector
     .collect(
@@ -673,7 +674,7 @@ fn cancellation_and_report_memory_pressure_fail_without_retained_state() {
     IndexCollectorDocumentTransitionV1 { document_ordinal: 1, before: None, after: Some(document(&root, &revision, &record)) };
   let parser = Parser::new(ParserBehavior::DependencyUnavailable);
 
-  let roomy_memory = memory(32 * 1_024 * 1_024);
+  let roomy_memory = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, roomy_memory.clone(), options()).unwrap();
   assert!(matches!(
     collector.collect(scope_bundle(&definitions), transition, &parser, None, &|| true),

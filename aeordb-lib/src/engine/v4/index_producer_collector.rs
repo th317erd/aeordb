@@ -8,7 +8,10 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 use crate::engine::path_utils::normalize_path;
 
-use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value, encode_canonical_value};
+use super::config_value::{
+  CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1, CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value,
+  encode_canonical_value,
+};
 use super::contract_generated::stable_reason_v1;
 use super::dependency::DependencyTableV1;
 use super::field_definition::decode_field_index_definition;
@@ -1485,7 +1488,7 @@ fn parser_transient_bytes(plan: &ParserResolutionPlanV1<'_>) -> Result<u64, Inde
     let structure_bytes = candidate
       .policy
       .max_structure_nodes
-      .checked_mul(size_of::<CanonicalConfigValueV1>() as u64)
+      .checked_mul(CANONICAL_CONFIG_VALUE_MAX_RETAINED_BYTES_PER_NODE_V1)
       .ok_or(IndexProducerCollectorErrorV1::AccountingOverflow("parser structure bytes"))?;
     let bytes = candidate
       .policy

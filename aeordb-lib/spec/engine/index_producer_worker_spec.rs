@@ -34,6 +34,7 @@ use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
+const PARSER_TEST_HARD_LIMIT: u64 = 128 * 1_024 * 1_024;
 
 fn hash(label: &[u8]) -> Vec<u8> {
   aeordb::engine::v4::hash::digest_parts(ALGORITHM, &[b"producer-worker:", label])
@@ -291,7 +292,7 @@ fn mutations(max_bytes: u64) -> IndexCoordinatorV1 {
 }
 
 fn worker_with_retry(source_retry_after_ms: u64) -> Result<IndexProducerMutationWorkerV1, IndexProducerWorkerErrorV1> {
-  let coordinator = memory(32 * 1_024 * 1_024);
+  let coordinator = memory(PARSER_TEST_HARD_LIMIT);
   let collector = IndexProducerCollectorV1::new(
     ALGORITHM,
     coordinator.clone(),
