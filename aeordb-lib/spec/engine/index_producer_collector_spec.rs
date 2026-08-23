@@ -24,7 +24,9 @@ use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 
 const HASH_ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
-const PARSER_TEST_HARD_LIMIT: u64 = 128 * 1_024 * 1_024;
+// JSON regex extraction reserves worst-case escaped serialization workspace in
+// addition to the collector report and parser output retained by this harness.
+const PARSER_TEST_HARD_LIMIT: u64 = 192 * 1_024 * 1_024;
 
 fn memory(hard_limit_bytes: u64) -> MemoryCoordinator {
   let emergency = (hard_limit_bytes / 4).max(1);

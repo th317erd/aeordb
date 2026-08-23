@@ -39,7 +39,7 @@ use super::read_view_authorization::{
   PathAuthorizationDecisionV1, ResolvedPathAuthorizationV1, SelectedRootPermissionRequestV1, SelectedRootPermissionSourceV1,
 };
 use super::root_authority::ImmutableNamespaceAuthorityV1;
-use super::scope::{decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path};
+use super::scope::{ScopeDefinitionV1, decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path};
 use super::semantic_catalog::{
   SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1,
   SemanticCatalogTraversalBoundsV1, SemanticCatalogWalkStatsV1, validate_semantic_definition_identity_v1,
@@ -86,6 +86,7 @@ const SELECTED_SEMANTIC_MAXIMUM_RETAINED_BYTES: u64 = 128 * 1024 * 1024;
 const SELECTED_SEMANTIC_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
 const SELECTED_SOURCE_MAXIMUM_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const SELECTED_SOURCE_RECEIPT_FIXED_BYTES: u64 = 4 * 1024;
+const SELECTED_SOURCE_PREPARED_FIXED_BYTES: u64 = 4 * 1024;
 
 /// One production source for captured v4 authority, lifecycle, and selected
 /// permission reads. Callers must use the same process memory coordinator for
@@ -334,6 +335,17 @@ impl NativeSelectedSourceEvaluationV1 {
   pub const fn outcome(&self) -> &NativeSelectedSourceOutcomeV1 {
     &self.outcome
   }
+}
+
+pub struct NativeSelectedSourceEvaluatorV1<'reader, 'view, 'definition> {
+  reader: &'reader NativeSelectedNamespaceReaderV1<'view>,
+  scope: ScopeDefinitionV1<'definition>,
+  scope_id: Vec<u8>,
+  value_store_id: Vec<u8>,
+  evaluator: AuthoritativeSourceEvaluatorV1<'definition>,
+  receipt_maximum: u64,
+  limits: NativeSelectedSourceLimitsV1,
+  _prepared_memory: MemoryReservation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -705,7 +717,7 @@ enum SelectedDirectoryVisitV1 {
   Child(ChildEntry),
 }
 
-impl NativeSelectedNamespaceReaderV1<'_> {
+impl<'view> NativeSelectedNamespaceReaderV1<'view> {
   pub fn scan_files(
     &self,
     scope: &str,
@@ -1113,22 +1125,13 @@ impl NativeSelectedNamespaceReaderV1<'_> {
     Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, _memory: result_memory })
   }
 
-  pub fn evaluate_authoritative_source(
-    &self,
-    row: &NativeSelectedNamespaceFileRowV1,
-    catalog: &RootAwareQueryFieldCatalogV1,
+  pub fn prepare_authoritative_source<'reader, 'definition>(
+    &'reader self,
+    catalog: &'definition RootAwareQueryFieldCatalogV1,
     scope_id: &[u8],
-    parser: NativeSelectedSourceParserV1<'_>,
-    mapper: Option<&dyn PluginMapperExecutorV1>,
     limits: NativeSelectedSourceLimitsV1,
-  ) -> Result<NativeSelectedSourceEvaluationV1, NativeSelectedNamespaceReadErrorV1> {
+  ) -> Result<NativeSelectedSourceEvaluatorV1<'reader, 'view, 'definition>, NativeSelectedNamespaceReadErrorV1> {
     self.check_cancelled()?;
-    if row.authority_binding != self.authority_binding() {
-      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
-        "selected_source_row_authority",
-        "source row was not produced by this exact selected read view",
-      ));
-    }
     if catalog.database_id != self.view.database_id()
       || catalog.physical_instance_id != self.view.physical_instance_id()
       || catalog.selected_namespace_root != self.view.root_metadata().hash
@@ -1154,6 +1157,11 @@ impl NativeSelectedNamespaceReaderV1<'_> {
     let selected_scope = selected_scope.ok_or_else(|| {
       NativeSelectedNamespaceReadErrorV1::invalid("selected_source_scope_missing", "source catalog does not contain the requested ScopeId")
     })?;
+    let prepared_memory = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, SELECTED_SOURCE_PREPARED_FIXED_BYTES, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_source_memory", error.to_string()))?;
     let scope = decode_scope_definition(&selected_scope.encoded_scope_definition, self.view.hash_algorithm())
       .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()))?;
     if scope.scope_id != scope_id {
@@ -1178,6 +1186,7 @@ impl NativeSelectedNamespaceReaderV1<'_> {
       ));
     }
     let value_store_id = try_clone_selected_bytes(&evaluator.definition().value_store_id, "selected source ValueStore identity")?;
+    let scope_id = try_clone_selected_bytes(scope_id, "selected source ScopeId")?;
     let receipt_maximum = selected_source_receipt_maximum_bytes(self.view.hash_algorithm().hash_length())?;
     let maximum_retained = evaluator.maximum_outcome_retained_bytes().checked_add(receipt_maximum).ok_or_else(|| {
       NativeSelectedNamespaceReadErrorV1::resource("selected_source_retained_bytes", "source retained-byte bound overflowed")
@@ -1188,57 +1197,16 @@ impl NativeSelectedNamespaceReaderV1<'_> {
         "selected ValueStore maximum retained result exceeds the caller bound",
       ));
     }
-    let receipt_memory = self
-      .source
-      .memory
-      .reserve(MemoryOwner::Query, receipt_maximum, AdmissionClass::Workload)
-      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_source_receipt_memory", error.to_string()))?;
-    if !scope_matches_path(&scope, row.path())
-      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()))?
-    {
-      return self.finish_source_evaluation(
-        row,
-        scope_id,
-        value_store_id,
-        NativeSelectedSourceOutcomeV1::OutOfScope,
-        None,
-        0,
-        receipt_memory,
-        limits,
-      );
-    }
-    let body_source = CapturedSelectedParserBodySourceV1 { reader: self, row };
-    let native_parser = NativeIndexParserExecutorV1::new(&body_source);
-    let parser: &dyn IndexParserExecutorV1 = match parser {
-      NativeSelectedSourceParserV1::Native => &native_parser,
-      NativeSelectedSourceParserV1::Explicit(parser) => parser,
-    };
-    let evaluation = evaluator
-      .evaluate(
-        AuthoritativeSourceDocumentV1 {
-          namespace_root: &self.view.root_metadata().hash,
-          record_revision_hash: row.record_revision(),
-          file_record: row.file_record(),
-        },
-        parser,
-        mapper,
-        &|| self.view.cancellation().is_cancelled(),
-      )
-      .map_err(map_selected_source_evaluator_error)?;
-    let retained_bytes = evaluation.retained_bytes();
-    let (outcome, source_memory) = match evaluation {
-      AuthoritativeSourceEvaluationV1::Missing => (NativeSelectedSourceOutcomeV1::Missing, None),
-      AuthoritativeSourceEvaluationV1::Values { values, reservation, .. } => {
-        (NativeSelectedSourceOutcomeV1::Values(values), Some(reservation))
-      }
-      AuthoritativeSourceEvaluationV1::ParserUnindexable { failure, reservation, .. } => {
-        (NativeSelectedSourceOutcomeV1::ParserUnindexable(failure), Some(reservation))
-      }
-      AuthoritativeSourceEvaluationV1::SourceUnindexable { code, context, reservation, .. } => {
-        (NativeSelectedSourceOutcomeV1::SourceUnindexable { code, context }, Some(reservation))
-      }
-    };
-    self.finish_source_evaluation(row, scope_id, value_store_id, outcome, source_memory, retained_bytes, receipt_memory, limits)
+    Ok(NativeSelectedSourceEvaluatorV1 {
+      reader: self,
+      scope,
+      scope_id,
+      value_store_id,
+      evaluator,
+      receipt_maximum,
+      limits,
+      _prepared_memory: prepared_memory,
+    })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1552,6 +1520,86 @@ impl NativeSelectedNamespaceReaderV1<'_> {
       ));
     }
     Ok(())
+  }
+}
+
+impl NativeSelectedSourceEvaluatorV1<'_, '_, '_> {
+  pub fn evaluate(
+    &self,
+    row: &NativeSelectedNamespaceFileRowV1,
+    parser: NativeSelectedSourceParserV1<'_>,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+  ) -> Result<NativeSelectedSourceEvaluationV1, NativeSelectedNamespaceReadErrorV1> {
+    self.reader.check_cancelled()?;
+    if row.authority_binding != self.reader.authority_binding() {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_source_row_authority",
+        "source row was not produced by this exact selected read view",
+      ));
+    }
+    let receipt_memory = self
+      .reader
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, self.receipt_maximum, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_source_receipt_memory", error.to_string()))?;
+    let value_store_id = try_clone_selected_bytes(&self.value_store_id, "selected source ValueStore identity")?;
+    if !scope_matches_path(&self.scope, row.path())
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()))?
+    {
+      return self.reader.finish_source_evaluation(
+        row,
+        &self.scope_id,
+        value_store_id,
+        NativeSelectedSourceOutcomeV1::OutOfScope,
+        None,
+        0,
+        receipt_memory,
+        self.limits,
+      );
+    }
+    let body_source = CapturedSelectedParserBodySourceV1 { reader: self.reader, row };
+    let native_parser = NativeIndexParserExecutorV1::new(&body_source);
+    let parser: &dyn IndexParserExecutorV1 = match parser {
+      NativeSelectedSourceParserV1::Native => &native_parser,
+      NativeSelectedSourceParserV1::Explicit(parser) => parser,
+    };
+    let evaluation = self
+      .evaluator
+      .evaluate(
+        AuthoritativeSourceDocumentV1 {
+          namespace_root: &self.reader.view.root_metadata().hash,
+          record_revision_hash: row.record_revision(),
+          file_record: row.file_record(),
+        },
+        parser,
+        mapper,
+        &|| self.reader.view.cancellation().is_cancelled(),
+      )
+      .map_err(map_selected_source_evaluator_error)?;
+    let retained_bytes = evaluation.retained_bytes();
+    let (outcome, source_memory) = match evaluation {
+      AuthoritativeSourceEvaluationV1::Missing => (NativeSelectedSourceOutcomeV1::Missing, None),
+      AuthoritativeSourceEvaluationV1::Values { values, reservation, .. } => {
+        (NativeSelectedSourceOutcomeV1::Values(values), Some(reservation))
+      }
+      AuthoritativeSourceEvaluationV1::ParserUnindexable { failure, reservation, .. } => {
+        (NativeSelectedSourceOutcomeV1::ParserUnindexable(failure), Some(reservation))
+      }
+      AuthoritativeSourceEvaluationV1::SourceUnindexable { code, context, reservation, .. } => {
+        (NativeSelectedSourceOutcomeV1::SourceUnindexable { code, context }, Some(reservation))
+      }
+    };
+    self.reader.finish_source_evaluation(
+      row,
+      &self.scope_id,
+      value_store_id,
+      outcome,
+      source_memory,
+      retained_bytes,
+      receipt_memory,
+      self.limits,
+    )
   }
 }
 

@@ -9,8 +9,8 @@ const MAPPER_HEADER_LENGTH: usize = 16;
 const POLICY_LENGTH: usize = 128;
 const SELECTOR_MAX_LENGTH: usize = 4 * 1_024;
 const MAX_SEGMENTS: usize = 1_024;
-const REGEX_COMPILED_SIZE_LIMIT: usize = 1_024 * 1_024;
-const REGEX_DFA_SIZE_LIMIT: usize = 1_024 * 1_024;
+pub(crate) const REGEX_COMPILED_SIZE_LIMIT: usize = 1_024 * 1_024;
+pub(crate) const REGEX_DFA_SIZE_LIMIT: usize = 1_024 * 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceSelectorKind {

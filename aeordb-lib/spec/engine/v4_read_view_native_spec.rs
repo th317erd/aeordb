@@ -38,9 +38,11 @@ use aeordb::engine::v4::read_view_authorization::{
   CapturedCurrentPathAuthorizationSourceV1, CurrentPathAuthorizationV1, PathAuthorizationDecisionV1, ReadViewPermissionAuthorizerV1,
   ResolvedPathAuthorizationV1,
 };
+use aeordb::engine::v4::query_planner::RootAwareQueryFieldCatalogV1;
 use aeordb::engine::v4::read_view_native::{
-  NativeReadViewSourceV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReaderV1,
-  NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1, NativeSelectedSourceLimitsV1,
+  NativeReadViewSourceV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1,
+  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedSemanticByteLimitsV1,
+  NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1, NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1,
   NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1, default_native_selected_semantic_limits_v1,
 };
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
@@ -51,6 +53,33 @@ use aeordb::engine::permissions::{PathPermissions, PermissionLink};
 use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::{DiskKVStore, HashAlgorithm};
 use tokio_util::sync::CancellationToken;
+
+trait SelectedSourceTestExtV1 {
+  #[allow(clippy::too_many_arguments)]
+  fn evaluate_authoritative_source(
+    &self,
+    row: &NativeSelectedNamespaceFileRowV1,
+    catalog: &RootAwareQueryFieldCatalogV1,
+    scope_id: &[u8],
+    parser: NativeSelectedSourceParserV1<'_>,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+    limits: NativeSelectedSourceLimitsV1,
+  ) -> Result<NativeSelectedSourceEvaluationV1, NativeSelectedNamespaceReadErrorV1>;
+}
+
+impl SelectedSourceTestExtV1 for NativeSelectedNamespaceReaderV1<'_> {
+  fn evaluate_authoritative_source(
+    &self,
+    row: &NativeSelectedNamespaceFileRowV1,
+    catalog: &RootAwareQueryFieldCatalogV1,
+    scope_id: &[u8],
+    parser: NativeSelectedSourceParserV1<'_>,
+    mapper: Option<&dyn PluginMapperExecutorV1>,
+    limits: NativeSelectedSourceLimitsV1,
+  ) -> Result<NativeSelectedSourceEvaluationV1, NativeSelectedNamespaceReadErrorV1> {
+    self.prepare_authoritative_source(catalog, scope_id, limits)?.evaluate(row, parser, mapper)
+  }
+}
 
 fn initial_header(algorithm: HashAlgorithm, kv_block_length: u64) -> DatabaseHeaderV4 {
   let hash_width = algorithm.hash_length();
@@ -1257,6 +1286,44 @@ fn selected_source_evaluation_reads_historical_chunks_and_retains_exact_query_me
 }
 
 #[test]
+fn selected_source_prepares_one_reusable_runtime_and_releases_its_query_memory() {
+  let fixture = selected_source_fixture("json-corrected", Some("*.json"), br#"{"messages":[{"user":"prepared"}]}"#, true);
+  let reader = fixture.reader();
+  let catalogs =
+    reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = fixture.memory.snapshot().unwrap().reserved_bytes;
+  let prepared = reader
+    .prepare_authoritative_source(
+      &catalogs.catalogs()[0],
+      &fixture.graph.scope_id,
+      NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+  let prepared_bytes = fixture.memory.snapshot().unwrap().reserved_bytes;
+  assert!(prepared_bytes > baseline, "prepared runtime must retain its admitted compiled state");
+  assert!(
+    prepared_bytes - baseline >= 2 * 1024 * 1024,
+    "the fixture's compiled regex NFA/DFA ceilings must remain admitted while the prepared runtime is reusable"
+  );
+
+  for _ in 0..2 {
+    let evaluation = prepared.evaluate(&page.rows()[0], NativeSelectedSourceParserV1::Native, None).unwrap();
+    assert!(matches!(evaluation.outcome(), NativeSelectedSourceOutcomeV1::Values(values) if values.len() == 1));
+    assert!(fixture.memory.snapshot().unwrap().reserved_bytes > prepared_bytes);
+    drop(evaluation);
+    assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, prepared_bytes);
+  }
+
+  drop(prepared);
+  assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(catalogs);
+  drop(reader);
+  fixture.assert_released();
+}
+
+#[test]
 fn selected_source_metadata_and_scope_filter_never_read_missing_chunks() {
   let metadata = selected_source_fixture("metadata-hash-corrected", Some("*.json"), b"unpublished metadata body", false);
   let reader = metadata.reader();
@@ -1537,19 +1604,41 @@ fn selected_source_cancellation_pressure_and_cross_view_inputs_fail_closed_witho
   assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
   let ordinary_limit = 511 * 1024 * 1024;
   let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, ordinary_limit - baseline - 1, AdmissionClass::Workload).unwrap();
-  let error = reader
-    .evaluate_authoritative_source(
-      &page.rows()[0],
+  let error = match reader.prepare_authoritative_source(
+    &catalogs.catalogs()[0],
+    &pressured.graph.scope_id,
+    NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
+  ) {
+    Ok(_) => panic!("runtime preparation must refuse hard query pressure"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_source_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
+  let prepared = reader
+    .prepare_authoritative_source(
       &catalogs.catalogs()[0],
       &pressured.graph.scope_id,
-      NativeSelectedSourceParserV1::Native,
-      None,
       NativeSelectedSourceLimitsV1::new(128 * 1024 * 1024).unwrap(),
     )
-    .unwrap_err();
+    .unwrap();
+  let prepared_baseline = pressured.memory.snapshot().unwrap().reserved_bytes;
+  let blocker =
+    pressured.memory.reserve(MemoryOwner::ServerCaches, ordinary_limit - prepared_baseline - 1, AdmissionClass::Workload).unwrap();
+  let error = prepared.evaluate(&page.rows()[0], NativeSelectedSourceParserV1::Native, None).unwrap_err();
   assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "selected_source_receipt_memory");
   drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, prepared_baseline);
+  let blocker =
+    pressured.memory.reserve(MemoryOwner::ServerCaches, ordinary_limit - prepared_baseline - 8 * 1024, AdmissionClass::Workload).unwrap();
+  let error = prepared.evaluate(&page.rows()[0], NativeSelectedSourceParserV1::Native, None).unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_source_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, prepared_baseline);
+  drop(prepared);
   assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
   drop(page);
   drop(catalogs);
@@ -2168,7 +2257,10 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(source_text.iter().map(|source| source.matches("load_immutable_entity_at_captured_header(").count()).sum::<usize>(), 2,);
   let native = fs::read_to_string(source_root.join("engine/v4/read_view_native.rs")).unwrap();
   assert_eq!(native.matches("pub enum NativeSelectedSourceParserV1").count(), 1);
-  assert_eq!(native.matches("pub fn evaluate_authoritative_source(").count(), 1);
+  assert_eq!(native.matches("pub fn prepare_authoritative_source").count(), 1);
+  assert_eq!(native.matches("pub fn evaluate_authoritative_source(").count(), 0);
+  assert_eq!(native.matches("impl NativeSelectedSourceEvaluatorV1").count(), 1);
+  assert_eq!(native.matches("_prepared_memory: MemoryReservation").count(), 1);
   assert_eq!(native.matches("impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1").count(), 1);
   for (needle, expected) in
     [("fn resolve_path(", 1), ("fn visit_directory_children", 1), ("fn load_file_record(", 1), ("FileRecord::deserialize(", 1)]

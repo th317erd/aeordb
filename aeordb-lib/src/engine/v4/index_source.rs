@@ -11,8 +11,14 @@ use crate::engine::path_utils::file_name;
 use super::config_value::{
   CanonicalConfigValueV1, CanonicalValueBounds, canonical_value_to_json, decode_canonical_value, encode_canonical_value,
 };
-use super::source_selector::{JsonPathSegmentV1, SourceSelectorKind};
+use super::dependency::DependencyRecordV1;
+use super::parser_plan::ParserCandidateV1;
+use super::source_selector::{JsonPathSegmentV1, REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT, SourceSelectorKind};
 use super::value_store::{ValueStoreDefinitionV1, ValueStoreSemanticFamily, decode_value_store_definition};
+
+const VALUE_STORE_RUNTIME_FIXED_BYTES: u64 = 64 * 1_024;
+const VALUE_STORE_EXTRACT_WORKSPACE_FIXED_BYTES: u64 = 4 * 1_024;
+const JSON_REGEX_MAX_ESCAPE_EXPANSION: u64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceOperationalErrorClassV1 {
@@ -152,8 +158,8 @@ impl<'a> ValueStoreRuntimeV1<'a> {
         JsonPathSegmentV1::Regex { pattern, case_insensitive } => {
           let regex = regex::RegexBuilder::new(pattern)
             .case_insensitive(*case_insensitive)
-            .size_limit(1_024 * 1_024)
-            .dfa_size_limit(1_024 * 1_024)
+            .size_limit(REGEX_COMPILED_SIZE_LIMIT)
+            .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
             .build()
             .map_err(|source| {
               operational_error(SourceOperationalErrorClassV1::HostFailure, "selector_regex_compile", source.to_string())
@@ -164,6 +170,68 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       json_segments.push(segment);
     }
     Ok(Self { definition, hash_width, json_segments })
+  }
+
+  pub(crate) fn maximum_retained_bytes_for_definition(definition: &ValueStoreDefinitionV1<'_>) -> SourceOperationalResultV1<u64> {
+    let mut bytes = VALUE_STORE_RUNTIME_FIXED_BYTES;
+    bytes = checked_runtime_add(bytes, definition.value_store_id.capacity(), "ValueStore identity")?;
+    bytes = checked_runtime_array::<JsonPathSegmentV1<'_>>(bytes, definition.selector.segments.capacity(), "decoded selector segments")?;
+    bytes = checked_runtime_array::<ParserCandidateV1<'_>>(bytes, definition.parser_plan.candidates.capacity(), "parser candidates")?;
+    bytes = checked_runtime_array::<DependencyRecordV1<'_>>(bytes, definition.dependencies.records.capacity(), "dependency records")?;
+    bytes = checked_runtime_array::<CompiledJsonPathSegmentV1>(bytes, definition.selector.segments.len(), "compiled selector segments")?;
+    for segment in &definition.selector.segments {
+      match segment {
+        JsonPathSegmentV1::ObjectKey(key) => {
+          bytes = checked_runtime_add(bytes, key.len(), "compiled selector object key")?;
+        }
+        JsonPathSegmentV1::Regex { pattern, .. } => {
+          bytes = checked_runtime_add(bytes, pattern.len(), "compiled selector regex pattern")?;
+          bytes = bytes
+            .checked_add(REGEX_COMPILED_SIZE_LIMIT as u64)
+            .and_then(|value| value.checked_add(REGEX_DFA_SIZE_LIMIT as u64))
+            .ok_or_else(|| runtime_accounting_error("compiled selector regex memory overflowed"))?;
+        }
+        JsonPathSegmentV1::NumericIndex(_) | JsonPathSegmentV1::FanOut => {}
+      }
+    }
+    Ok(bytes)
+  }
+
+  pub(crate) fn maximum_extract_workspace_bytes(&self) -> SourceOperationalResultV1<u64> {
+    if self.definition.selector.kind != SourceSelectorKind::JsonPath {
+      return Ok(0);
+    }
+    // The depth-first walker retains at most one iterator continuation and one
+    // selected child per selector depth. Total work bounds runtime, not the
+    // number of simultaneously live frames.
+    let frame_count = u64::try_from(self.json_segments.len())
+      .map_err(|source| runtime_accounting_error(format!("selector depth does not fit u64: {source}")))?
+      .checked_mul(2)
+      .and_then(|count| count.checked_add(1))
+      .ok_or_else(|| runtime_accounting_error("selector frame count overflowed"))?;
+    let frame_bytes = frame_count
+      .checked_mul(std::mem::size_of::<SelectorFrameV1<'_>>() as u64)
+      .ok_or_else(|| runtime_accounting_error("selector frame workspace overflowed"))?;
+    let regex_bytes = if self.json_segments.iter().any(|segment| matches!(segment, CompiledJsonPathSegmentV1::Regex(_))) {
+      let parser_response_bytes = self
+        .definition
+        .parser_plan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.policy.max_response_bytes)
+        .max()
+        .ok_or_else(|| runtime_accounting_error("JSON selector has no parser response bound"))?;
+      let maximum_serialized_bytes = parser_response_bytes
+        .checked_mul(JSON_REGEX_MAX_ESCAPE_EXPANSION)
+        .ok_or_else(|| runtime_accounting_error("regex candidate serialization bound overflowed"))?;
+      self.definition.max_selector_examined_bytes_per_document.min(maximum_serialized_bytes)
+    } else {
+      0
+    };
+    VALUE_STORE_EXTRACT_WORKSPACE_FIXED_BYTES
+      .checked_add(frame_bytes)
+      .and_then(|bytes| bytes.checked_add(regex_bytes))
+      .ok_or_else(|| runtime_accounting_error("selector extraction workspace overflowed"))
   }
 
   pub fn definition(&self) -> &ValueStoreDefinitionV1<'a> {
@@ -533,6 +601,21 @@ impl<'a> ValueStoreRuntimeV1<'a> {
   }
 }
 
+fn checked_runtime_array<T>(bytes: u64, count: usize, label: &'static str) -> SourceOperationalResultV1<u64> {
+  let allocation =
+    count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| runtime_accounting_error(format!("{label} allocation overflowed")))?;
+  checked_runtime_add(bytes, allocation, label)
+}
+
+fn checked_runtime_add(bytes: u64, allocation: usize, label: &'static str) -> SourceOperationalResultV1<u64> {
+  let allocation = u64::try_from(allocation).map_err(|source| runtime_accounting_error(format!("{label} does not fit u64: {source}")))?;
+  bytes.checked_add(allocation).ok_or_else(|| runtime_accounting_error(format!("{label} memory overflowed")))
+}
+
+fn runtime_accounting_error(context: impl Into<String>) -> SourceOperationalErrorV1 {
+  operational_error(SourceOperationalErrorClassV1::HostFailure, "value_store_runtime_accounting", context)
+}
+
 struct SelectorBudgetV1 {
   work: u64,
   examined_bytes: u64,
@@ -803,4 +886,22 @@ fn cancelled() -> SourceOperationalErrorV1 {
 
 fn operational_error(class: SourceOperationalErrorClassV1, code: &'static str, context: impl Into<String>) -> SourceOperationalErrorV1 {
   SourceOperationalErrorV1 { class, code, context: context.into() }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn json_regex_workspace_accounts_for_worst_case_escape_expansion() {
+    let encoded = include_bytes!("../../../spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-corrected-valid.bin");
+    let runtime = ValueStoreRuntimeV1::from_encoded(encoded, HashAlgorithm::Blake3_256).unwrap();
+    let frame_count = runtime.json_segments.len() as u64 * 2 + 1;
+    let frame_bytes = frame_count * std::mem::size_of::<SelectorFrameV1<'_>>() as u64;
+
+    assert_eq!(
+      runtime.maximum_extract_workspace_bytes().unwrap(),
+      VALUE_STORE_EXTRACT_WORKSPACE_FIXED_BYTES + frame_bytes + 6 * 4 * 1_024 * 1_024,
+    );
+  }
 }

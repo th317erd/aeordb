@@ -15,7 +15,11 @@ use super::index_producer_collector::{
 };
 use super::index_source::{PluginMapperExecutorV1, SourceDocumentV1, SourceExtractionV1, SourceOperationalErrorV1, ValueStoreRuntimeV1};
 use super::parser_plan::{ParserPlanKind, ParserResolutionPlanV1};
-use super::value_store::ValueStoreDefinitionV1;
+use super::source_selector::{REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT};
+use super::value_store::{ValueStoreDefinitionV1, decode_value_store_definition};
+
+const DEFINITION_DECODE_FIXED_BYTES: u64 = REGEX_COMPILED_SIZE_LIMIT as u64 + REGEX_DFA_SIZE_LIMIT as u64 + 64 * 1_024;
+const DEFINITION_DECODE_BYTE_MULTIPLIER: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthoritativeSourceMemoryPolicyV1 {
@@ -88,8 +92,11 @@ pub struct AuthoritativeSourceEvaluatorV1<'definition> {
   runtime: ValueStoreRuntimeV1<'definition>,
   memory: MemoryCoordinator,
   policy: AuthoritativeSourceMemoryPolicyV1,
-  parser_maximum_retained_bytes: u64,
-  source_maximum_retained_bytes: u64,
+  parser_transient_bytes: u64,
+  parser_outcome_retained_bytes: u64,
+  source_transient_bytes: u64,
+  source_outcome_retained_bytes: u64,
+  _runtime_memory: MemoryReservation,
 }
 
 impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
@@ -101,7 +108,18 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
     memory: MemoryCoordinator,
     policy: AuthoritativeSourceMemoryPolicyV1,
   ) -> Result<Self, AuthoritativeSourceEvaluationErrorV1> {
-    let runtime = ValueStoreRuntimeV1::from_encoded(encoded_definition, hash_algorithm).map_err(|error| {
+    let decode_workspace = definition_decode_workspace_bytes(encoded_definition.len())?;
+    let mut runtime_memory = memory
+      .reserve(policy.source_owner, decode_workspace.max(1), policy.source_admission)
+      .map_err(|error| AuthoritativeSourceEvaluationErrorV1::ResourcePressure(error.to_string()))?;
+    let definition = decode_value_store_definition(encoded_definition, hash_algorithm).map_err(|error| {
+      AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
+    })?;
+    let runtime_bytes = ValueStoreRuntimeV1::maximum_retained_bytes_for_definition(&definition).map_err(|error| {
+      AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
+    })?;
+    resize_reservation(&mut runtime_memory, runtime_bytes)?;
+    let runtime = ValueStoreRuntimeV1::from_definition(definition, hash_algorithm.hash_length()).map_err(|error| {
       AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
     })?;
     if runtime.definition().scope_id != expected_scope_id || runtime.definition().value_store_id != expected_value_store_id {
@@ -110,9 +128,24 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
         context: "ValueStore definition does not match its selected scope and identity".to_string(),
       });
     }
-    let parser_maximum_retained_bytes = parser_transient_bytes(&runtime.definition().parser_plan)?;
-    let source_maximum_retained_bytes = source_transient_bytes(runtime.definition())?;
-    Ok(Self { runtime, memory, policy, parser_maximum_retained_bytes, source_maximum_retained_bytes })
+    let parser_transient_bytes = parser_transient_bytes(&runtime.definition().parser_plan)?;
+    let parser_outcome_retained_bytes = parser_outcome_retained_bytes(&runtime.definition().parser_plan)?;
+    let source_outcome_retained_bytes = source_outcome_retained_bytes(runtime.definition())?;
+    let source_transient_bytes = source_outcome_retained_bytes
+      .checked_add(runtime.maximum_extract_workspace_bytes().map_err(|error| {
+        AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
+      })?)
+      .ok_or_else(|| invalid("authoritative_source_accounting", "source transient bytes overflow"))?;
+    Ok(Self {
+      runtime,
+      memory,
+      policy,
+      parser_transient_bytes,
+      parser_outcome_retained_bytes,
+      source_transient_bytes,
+      source_outcome_retained_bytes,
+      _runtime_memory: runtime_memory,
+    })
   }
 
   pub fn definition(&self) -> &ValueStoreDefinitionV1<'definition> {
@@ -120,7 +153,7 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
   }
 
   pub fn maximum_outcome_retained_bytes(&self) -> u64 {
-    self.parser_maximum_retained_bytes.max(self.source_maximum_retained_bytes)
+    self.parser_outcome_retained_bytes.max(self.source_outcome_retained_bytes)
   }
 
   pub fn evaluate(
@@ -196,19 +229,19 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
   fn reserve_parser(&self) -> Result<MemoryReservation, AuthoritativeSourceEvaluationErrorV1> {
     self
       .memory
-      .reserve(self.policy.parser_owner, self.parser_maximum_retained_bytes.max(1), self.policy.parser_admission)
+      .reserve(self.policy.parser_owner, self.parser_transient_bytes.max(1), self.policy.parser_admission)
       .map_err(|error| AuthoritativeSourceEvaluationErrorV1::ResourcePressure(error.to_string()))
   }
 
   fn reserve_source(&self) -> Result<MemoryReservation, AuthoritativeSourceEvaluationErrorV1> {
     self
       .memory
-      .reserve(self.policy.source_owner, self.source_maximum_retained_bytes.max(1), self.policy.source_admission)
+      .reserve(self.policy.source_owner, self.source_transient_bytes.max(1), self.policy.source_admission)
       .map_err(|error| AuthoritativeSourceEvaluationErrorV1::ResourcePressure(error.to_string()))
   }
 }
 
-fn source_transient_bytes(definition: &ValueStoreDefinitionV1<'_>) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
+fn source_outcome_retained_bytes(definition: &ValueStoreDefinitionV1<'_>) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
   let vector_bytes = u64::from(definition.max_source_values_per_document)
     .checked_mul(2)
     .and_then(|count| count.checked_mul(size_of::<Vec<u8>>() as u64))
@@ -217,6 +250,18 @@ fn source_transient_bytes(definition: &ValueStoreDefinitionV1<'_>) -> Result<u64
     .max_canonical_source_bytes_per_document
     .checked_add(vector_bytes)
     .ok_or_else(|| invalid("authoritative_source_accounting", "source retained bytes overflow"))
+}
+
+fn parser_outcome_retained_bytes(plan: &ParserResolutionPlanV1<'_>) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
+  if plan.kind == ParserPlanKind::None {
+    return Ok(0);
+  }
+  plan
+    .candidates
+    .iter()
+    .map(|candidate| candidate.policy.max_response_bytes)
+    .max()
+    .ok_or_else(|| invalid("authoritative_parser_plan", "non-none parser plan has no candidates"))
 }
 
 fn parser_transient_bytes(plan: &ParserResolutionPlanV1<'_>) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
@@ -252,6 +297,10 @@ fn retained_value_bytes(values: &[Vec<u8>], outer_capacity: usize) -> Result<u64
 }
 
 fn shrink_reservation(reservation: &mut MemoryReservation, retained_bytes: u64) -> Result<(), AuthoritativeSourceEvaluationErrorV1> {
+  resize_reservation(reservation, retained_bytes)
+}
+
+fn resize_reservation(reservation: &mut MemoryReservation, retained_bytes: u64) -> Result<(), AuthoritativeSourceEvaluationErrorV1> {
   if retained_bytes > reservation.bytes() {
     reservation
       .grow(retained_bytes - reservation.bytes())
@@ -260,6 +309,14 @@ fn shrink_reservation(reservation: &mut MemoryReservation, retained_bytes: u64) 
     reservation.shrink(reservation.bytes() - retained_bytes).map_err(|error| invalid("authoritative_source_accounting", error))?;
   }
   Ok(())
+}
+
+fn definition_decode_workspace_bytes(encoded_length: usize) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
+  let encoded_length = u64::try_from(encoded_length).map_err(|error| invalid("authoritative_source_definition_workspace", error))?;
+  encoded_length
+    .checked_mul(DEFINITION_DECODE_BYTE_MULTIPLIER)
+    .and_then(|bytes| bytes.checked_add(DEFINITION_DECODE_FIXED_BYTES))
+    .ok_or_else(|| invalid("authoritative_source_definition_workspace", "definition decode workspace overflowed"))
 }
 
 fn invalid(code: &'static str, context: impl ToString) -> AuthoritativeSourceEvaluationErrorV1 {
