@@ -1246,13 +1246,17 @@
           - [x] P7-3b5: prove historical/current roots, flat/B-tree traversal, both hash widths, malformed/corrupt/missing closure, pressure, cancellation, identity absence/incompleteness, permission compatibility, and architecture uniqueness.
             - [x] Prepare and reuse each selected ValueStore/parser runtime across document rows instead of recompiling selector and regex state per evaluation.
             - [x] Admit compiled runtime plus selector stack/regex scratch before allocation, retain only exact output reservations, and prove release/refusal under the process memory coordinator.
-        - [ ] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.
+        - [x] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.
           - [x] P7-3c1: extract one storage-neutral correctness-bearing ArtifactDirectory/page cursor and migrate batch/compaction traversal onto it.
           - [x] P7-3c2: add one captured-header native artifact source with query-memory admission and selected-generation closure.
-          - [ ] P7-3c3: integrate validated NVT starting hints, exact directory fallback, bidirectional continuity, and the full corruption/resource matrix.
+          - [x] P7-3c3: integrate validated NVT starting hints, exact directory fallback, bidirectional continuity, and the full corruption/resource matrix.
             - [x] P7-3c3a: extract one leaf-agnostic bounded ArtifactDirectory traversal and migrate materialized Posting/NVT path validation onto it.
             - [x] P7-3c3b: compose captured-header NVT tile selection, validated PageId hinting, and exact Posting predecessor fallback.
-            - [ ] P7-3c3c: prove absent/stale/corrupt/pressure/cancellation fallback, both hash widths, and bidirectional parent/link continuity without omission or duplication.
+            - [x] P7-3c3c: prove absent/stale/corrupt/pressure/cancellation fallback, both hash widths, and bidirectional parent/link continuity without omission or duplication.
+              - [x] Prove two-level Posting and NVT traversal at both hash widths with exact previous/current/next continuity.
+              - [x] Prove absent, stale, corrupt, source-unavailable, and byte-pressure NVT states preserve the exact Posting answer and a bounded diagnostic receipt.
+              - [x] Prove cancellation remains cancellation and corrupt correctness-bearing Posting parents or links remain terminal corruption.
+              - [x] Re-run focused, adjacent, broad, suppression, static, contract, and documentation gates before landing P7-3c3.
         - [ ] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.

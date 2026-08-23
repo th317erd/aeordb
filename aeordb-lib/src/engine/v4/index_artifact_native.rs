@@ -401,8 +401,7 @@ pub(crate) fn load_native_selected_posting_seek_v1(
     Some(descriptor) => match select_native_nvt_predecessor_page_id_v1(&request, &closure, descriptor) {
       Ok(Some(page_id)) => Ok(page_id),
       Ok(None) => Err(nvt_fallback(NativeSelectedNvtFallbackReasonV1::MissingPredecessor, None)),
-      Err(error) if error.class() == NativeSelectedArtifactCursorErrorClassV1::Cancelled => return Err(error),
-      Err(error) => Err(map_nvt_fallback_error(&error)),
+      Err(error) => Err(map_nvt_fallback_error(error)?),
     },
     None => Err(nvt_fallback(NativeSelectedNvtFallbackReasonV1::Absent, None)),
   };
@@ -640,16 +639,18 @@ fn validate_native_nvt_descriptor(
   Ok(())
 }
 
-fn map_nvt_fallback_error(error: &NativeSelectedArtifactCursorErrorV1) -> NativeSelectedNvtFallbackV1 {
+fn map_nvt_fallback_error(
+  error: NativeSelectedArtifactCursorErrorV1,
+) -> Result<NativeSelectedNvtFallbackV1, NativeSelectedArtifactCursorErrorV1> {
   let reason = match error.class() {
     NativeSelectedArtifactCursorErrorClassV1::ResourceLimit => NativeSelectedNvtFallbackReasonV1::ResourceLimit,
     NativeSelectedArtifactCursorErrorClassV1::Unavailable => NativeSelectedNvtFallbackReasonV1::Unavailable,
     NativeSelectedArtifactCursorErrorClassV1::InvalidRequest | NativeSelectedArtifactCursorErrorClassV1::Corrupt => {
       NativeSelectedNvtFallbackReasonV1::Corrupt
     }
-    NativeSelectedArtifactCursorErrorClassV1::Cancelled => NativeSelectedNvtFallbackReasonV1::Unavailable,
+    NativeSelectedArtifactCursorErrorClassV1::Cancelled => return Err(error),
   };
-  nvt_fallback(reason, Some(error.code()))
+  Ok(nvt_fallback(reason, Some(error.code())))
 }
 
 const fn nvt_fallback(reason: NativeSelectedNvtFallbackReasonV1, diagnostic_code: Option<&'static str>) -> NativeSelectedNvtFallbackV1 {
@@ -1030,4 +1031,21 @@ fn copy_bytes(value: &[u8], context: &'static str) -> Result<Vec<u8>, NativeSele
   })?;
   copy.extend_from_slice(value);
   Ok(copy)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn optional_nvt_failure_mapping_preserves_unavailability_and_cancellation() {
+    let unavailable =
+      map_nvt_fallback_error(NativeSelectedArtifactCursorErrorV1::unavailable("selected_nvt_test_source", "test-only NVT source outage"))
+        .unwrap();
+    assert_eq!(unavailable.reason(), NativeSelectedNvtFallbackReasonV1::Unavailable);
+    assert_eq!(unavailable.diagnostic_code(), Some("selected_nvt_test_source"));
+
+    let cancelled = map_nvt_fallback_error(NativeSelectedArtifactCursorErrorV1::cancelled()).unwrap_err();
+    assert_eq!(cancelled.class(), NativeSelectedArtifactCursorErrorClassV1::Cancelled);
+  }
 }
