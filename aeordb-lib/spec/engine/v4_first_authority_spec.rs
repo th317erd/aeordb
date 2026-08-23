@@ -172,6 +172,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
 
   let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let first_authority_path = source_root.join("engine/v4/first_authority.rs");
+  let index_artifact_native_path = source_root.join("engine/v4/index_artifact_native.rs");
   let index_coverage_registry_path = source_root.join("engine/v4/index_coverage_registry.rs");
   let index_coverage_runtime_path = source_root.join("engine/v4/index_coverage_runtime.rs");
   let index_generation_authority_path = source_root.join("engine/v4/index_generation_authority.rs");
@@ -202,6 +203,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   assert_eq!(
     publisher_callers,
     vec![
+      &index_artifact_native_path,
       &index_coverage_registry_path,
       &index_coverage_runtime_path,
       &index_generation_authority_path,
@@ -222,6 +224,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
   for owner_path in [
+    &index_artifact_native_path,
     &index_coverage_registry_path,
     &index_coverage_runtime_path,
     &index_generation_authority_path,
@@ -251,6 +254,11 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       assert!(owner_source.contains("begin_index_runtime_installation_v1"));
       assert!(owner_source.contains("load_selected_semantic_authority"));
       assert!(!owner_source.contains("request.publisher.publish"));
+    } else if owner_path == &index_artifact_native_path {
+      assert_eq!(owner_source.matches(".load_index_artifact_at_captured_header(").count(), 1);
+      for forbidden in [".publish_index_artifacts(", ".publish_successor_authority(", ".publish("] {
+        assert!(!owner_source.contains(forbidden), "captured artifact reader gained first-authority writer {forbidden}");
+      }
     } else {
       assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");
     }

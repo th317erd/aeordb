@@ -21,6 +21,13 @@ use super::first_authority::{
   FirstAuthorityPublicationErrorV1, LoadedImmutableEntityV1, RootLifecyclePointReadErrorV1, V4FirstAuthorityPublisher,
 };
 use super::hash::digest_parts;
+use super::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
+use super::index_artifact_native::{
+  NativeSelectedArtifactCursorErrorClassV1, NativeSelectedArtifactCursorErrorV1, NativeSelectedArtifactLoadRequestV1,
+  NativeSelectedArtifactPageCursorV1, load_native_selected_artifact_page_cursor_v1,
+};
+use super::index_coverage_planner::IndexCoverageGenerationHealthV1;
+use super::index_coverage_registry::{field_definition_fingerprint, field_dependency_fingerprint};
 use super::index_native_parser::{
   NativeIndexParserBodySourceV1, NativeIndexParserBodyV1, NativeIndexParserExecutorV1, native_parser_body_reservation_bytes_v1,
 };
@@ -28,8 +35,8 @@ use super::index_producer_collector::{IndexParserExecutionErrorV1, IndexParserEx
 use super::index_source::PluginMapperExecutorV1;
 use super::namespace::{NamespaceTreeEdgeV0, SemanticAvailabilityV1};
 use super::query_planner::{
-  QueryPlanningErrorClassV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1, QueryPlanningScopeV1,
-  RootAwareQueryFieldCatalogV1, canonical_query_field_name_v1,
+  QueryPlanningCoverageGenerationV1, QueryPlanningErrorClassV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1,
+  QueryPlanningScopeV1, RootAwareQueryFieldCatalogV1, canonical_query_field_name_v1,
 };
 use super::read_view::{
   LoadedReadAuthorityV1, ReadViewAuthoritySourceV1, ReadViewAuthorizationFailureV1, ReadViewLifecycleErrorV1, ReadViewSourceErrorV1,
@@ -50,6 +57,7 @@ use super::source_evaluator::{
 };
 use super::value_store::decode_value_store_definition;
 use super::field_definition::decode_field_index_definition;
+use super::index_page::OrderedIndexRoleV1;
 
 // The frozen namespace authority permits a 48 MiB tree entity. Reserve enough
 // for that entity, its decoded form, transient validation copies, and the
@@ -246,6 +254,17 @@ pub fn default_native_selected_semantic_limits_v1() -> NativeSelectedSemanticLim
       maximum_retained_bytes: SELECTED_SEMANTIC_MAXIMUM_RETAINED_BYTES,
     },
   }
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSelectedArtifactCursorRequestV1<'a> {
+  pub catalog: &'a RootAwareQueryFieldCatalogV1,
+  pub scope_id: &'a [u8],
+  pub selected_generation: &'a QueryPlanningCoverageGenerationV1,
+  pub role: OrderedIndexRoleV1,
+  pub seek: ArtifactPageSeekV1<'a>,
+  pub neighbors: ArtifactPageNeighborModeV1,
+  pub limits: ArtifactPageCursorLimitsV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1125,6 +1144,28 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, _memory: result_memory })
   }
 
+  pub fn load_index_artifact_page_cursor(
+    &self,
+    request: &NativeSelectedArtifactCursorRequestV1<'_>,
+  ) -> Result<Option<NativeSelectedArtifactPageCursorV1>, NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    self.validate_selected_artifact_catalog(request.catalog, request.scope_id, request.selected_generation, request.role)?;
+    load_native_selected_artifact_page_cursor_v1(NativeSelectedArtifactLoadRequestV1 {
+      publisher: self.source.publisher.as_ref(),
+      memory: self.source.memory.as_ref(),
+      captured: self.view.captured_header(),
+      supported_reader_capabilities: self.view.supported_reader_capabilities(),
+      selected_root: &self.view.root_metadata().hash,
+      selected_generation: request.selected_generation,
+      role: request.role,
+      seek: request.seek,
+      neighbors: request.neighbors,
+      limits: request.limits,
+      cancellation: self.view.cancellation(),
+    })
+    .map_err(map_selected_artifact_cursor_error)
+  }
+
   pub fn prepare_authoritative_source<'reader, 'definition>(
     &'reader self,
     catalog: &'definition RootAwareQueryFieldCatalogV1,
@@ -1207,6 +1248,84 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       limits,
       _prepared_memory: prepared_memory,
     })
+  }
+
+  fn validate_selected_artifact_catalog(
+    &self,
+    catalog: &RootAwareQueryFieldCatalogV1,
+    scope_id: &[u8],
+    selected_generation: &QueryPlanningCoverageGenerationV1,
+    role: OrderedIndexRoleV1,
+  ) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    if catalog.database_id != self.view.database_id()
+      || catalog.physical_instance_id != self.view.physical_instance_id()
+      || catalog.selected_namespace_root != self.view.root_metadata().hash
+      || catalog.semantic_state_root != self.view.authority().semantic_state.object_id
+      || catalog.publication_sequence != self.view.authority().admission.publication_sequence
+      || !catalog.complete
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_artifact_catalog_authority",
+        "artifact catalog does not bind the exact complete selected semantic authority",
+      ));
+    }
+    if !matches!(role, OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState) {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_artifact_catalog_role",
+        "field-index artifact catalogs admit only Posting or IndexDocumentState roles",
+      ));
+    }
+    let coverage_is_partial = selected_generation.source_namespace_root != catalog.selected_namespace_root;
+    if selected_generation.coverage_publication_sequence > catalog.publication_sequence
+      || (coverage_is_partial && selected_generation.coverage_publication_sequence >= catalog.publication_sequence)
+      || (coverage_is_partial && selected_generation.health != IndexCoverageGenerationHealthV1::Healthy)
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_artifact_generation_interval",
+        "artifact generation is not valid for the selected target publication interval",
+      ));
+    }
+    self.validate_identity(scope_id, "ScopeId")?;
+    let mut matching_scope = None;
+    for scope in &catalog.scopes {
+      if scope.scope_id == scope_id && matching_scope.replace(scope).is_some() {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_artifact_scope_duplicate",
+          "artifact catalog repeats the selected ScopeId",
+        ));
+      }
+    }
+    let scope = matching_scope.ok_or_else(|| {
+      NativeSelectedNamespaceReadErrorV1::invalid("selected_artifact_scope_missing", "artifact catalog has no selected ScopeId")
+    })?;
+    let mut matching_generation = 0usize;
+    for candidate in &scope.indexes {
+      if candidate.index_id == selected_generation.owner_id && candidate.selected_generation.as_ref() == Some(selected_generation) {
+        let definition_fingerprint = field_definition_fingerprint(self.view.hash_algorithm(), &candidate.encoded_field_definition);
+        let dependency_fingerprint = field_dependency_fingerprint(self.view.hash_algorithm(), &scope.scope_id, &scope.value_store_id);
+        if definition_fingerprint != selected_generation.definition_fingerprint
+          || dependency_fingerprint != selected_generation.dependency_fingerprint
+        {
+          return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_artifact_catalog_fingerprint",
+            "artifact catalog semantics disagree with the selected generation fingerprints",
+          ));
+        }
+        matching_generation = matching_generation.checked_add(1).ok_or_else(|| {
+          NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_artifact_generation_count",
+            "artifact catalog generation match count overflowed",
+          )
+        })?;
+      }
+    }
+    if matching_generation != 1 {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_artifact_generation_catalog",
+        "artifact generation is not the unique selected generation of its authorized planner scope",
+      ));
+    }
+    Ok(())
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -1849,6 +1968,16 @@ fn map_semantic_catalog_error(error: SemanticCatalogReadErrorV1) -> NativeSelect
     SemanticCatalogReadErrorClassV1::Unavailable => NativeSelectedNamespaceReadErrorV1::unavailable(error.code(), error.context()),
     SemanticCatalogReadErrorClassV1::ResourceLimit => NativeSelectedNamespaceReadErrorV1::resource(error.code(), error.context()),
     SemanticCatalogReadErrorClassV1::Corrupt => NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()),
+  }
+}
+
+fn map_selected_artifact_cursor_error(error: NativeSelectedArtifactCursorErrorV1) -> NativeSelectedNamespaceReadErrorV1 {
+  match error.class() {
+    NativeSelectedArtifactCursorErrorClassV1::InvalidRequest => NativeSelectedNamespaceReadErrorV1::invalid(error.code(), error.context()),
+    NativeSelectedArtifactCursorErrorClassV1::ResourceLimit => NativeSelectedNamespaceReadErrorV1::resource(error.code(), error.context()),
+    NativeSelectedArtifactCursorErrorClassV1::Unavailable => NativeSelectedNamespaceReadErrorV1::unavailable(error.code(), error.context()),
+    NativeSelectedArtifactCursorErrorClassV1::Corrupt => NativeSelectedNamespaceReadErrorV1::corrupt(error.code(), error.context()),
+    NativeSelectedArtifactCursorErrorClassV1::Cancelled => NativeSelectedNamespaceReadErrorV1::cancelled(),
   }
 }
 

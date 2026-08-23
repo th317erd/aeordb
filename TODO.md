@@ -1248,7 +1248,7 @@
             - [x] Admit compiled runtime plus selector stack/regex scratch before allocation, retain only exact output reservations, and prove release/refusal under the process memory coordinator.
         - [ ] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.
           - [x] P7-3c1: extract one storage-neutral correctness-bearing ArtifactDirectory/page cursor and migrate batch/compaction traversal onto it.
-          - [ ] P7-3c2: add one captured-header native artifact source with query-memory admission and selected-generation closure.
+          - [x] P7-3c2: add one captured-header native artifact source with query-memory admission and selected-generation closure.
           - [ ] P7-3c3: integrate validated NVT starting hints, exact directory fallback, bidirectional continuity, and the full corruption/resource matrix.
         - [ ] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.

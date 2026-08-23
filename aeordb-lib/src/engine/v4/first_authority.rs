@@ -3280,6 +3280,38 @@ impl V4FirstAuthorityPublisher {
     load_index_artifact_entity_bounded(&self.file, &kv, header, key, maximum_value_length).map(|loaded| loaded.map(|loaded| loaded.value))
   }
 
+  /// Load one immutable IndexArtifact against exactly one captured v4 header.
+  /// Mutable HEAD and index pointers may advance, but artifacts newer than the
+  /// captured durable hot tail or write-sequence high-water remain invisible.
+  pub fn load_index_artifact_at_captured_header(
+    &self,
+    captured: &SelectedDatabaseHeaderV4,
+    key: &[u8],
+    maximum_value_length: usize,
+    cancellation: &CancellationToken,
+  ) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
+    if maximum_value_length == 0 || maximum_value_length > super::entity::WHOLE_ENTITY_V1_VALUE_CAP {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "captured_immutable_index_read_bound",
+        format!("captured IndexArtifact read bound {maximum_value_length} is outside 1..={}", super::entity::WHOLE_ENTITY_V1_VALUE_CAP),
+      ));
+    }
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let current = self.observe()?;
+    validate_captured_authority_header(captured, &current.selected, key)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, &current.selected.header)?;
+    let loaded = load_index_artifact_entity_bounded(&self.file, &kv, &captured.header, key, maximum_value_length)?;
+    ensure_captured_authority_not_cancelled(cancellation)?;
+    Ok(loaded.map(|loaded| loaded.value))
+  }
+
   pub fn load_index_active_pointer_pair(
     &self,
     database_id: &[u8; 16],

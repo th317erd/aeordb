@@ -798,6 +798,7 @@ pub struct ResolvedReadViewV1<A> {
   authorization: A,
   credential_kind: ReadViewCredentialKindV1,
   concealment: ReadViewConcealmentV1,
+  supported_reader_capabilities: CapabilitySetV1,
   system_family_registry: &'static SystemFamilyRegistryV1<'static>,
   cancellation: CancellationToken,
   _pin: RootReadPinV1,
@@ -871,6 +872,10 @@ impl<A> ResolvedReadViewV1<A> {
 
   pub const fn concealment(&self) -> ReadViewConcealmentV1 {
     self.concealment
+  }
+
+  pub const fn supported_reader_capabilities(&self) -> CapabilitySetV1 {
+    self.supported_reader_capabilities
   }
 
   pub const fn system_family_registry(&self) -> &'static SystemFamilyRegistryV1<'static> {
@@ -1000,6 +1005,7 @@ where
       authorization,
       credential_kind: current_authorization.credential_kind(),
       concealment,
+      supported_reader_capabilities: self.capability_profile.supported_reader_capabilities,
       system_family_registry: header_admission.registry,
       cancellation: cancellation.clone(),
       _pin: admission.pin,
