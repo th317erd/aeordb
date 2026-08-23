@@ -10,7 +10,7 @@ const MAPPING_LENGTH: usize = 20;
 const RANGE_LENGTH: usize = 8;
 const CHECKSUM_LENGTH: usize = 32;
 const MAXIMUM_TABLE_LENGTH: usize = 128 * 1_024;
-const EXPECTED_CHECKSUM: [u8; 32] = [
+pub const AEOR_TEXT_FOLD_TABLE_FINGERPRINT_V1: [u8; 32] = [
   0x9f, 0x1b, 0xdd, 0x82, 0xa6, 0x14, 0x2d, 0xdc, 0x38, 0x24, 0xe1, 0x25, 0xc2, 0x8a, 0xb9, 0x41, 0xde, 0x2a, 0xc9, 0xb9, 0x8f, 0xd7, 0xea,
   0xff, 0xaa, 0x5b, 0x85, 0xa3, 0xf6, 0xf8, 0x84, 0xd2,
 ];
@@ -160,7 +160,7 @@ fn validate_table(table: &[u8]) -> Result<TableLayout, TextFoldErrorV1> {
   hasher.update(DOMAIN);
   hasher.update(&table[..checksum_offset]);
   let checksum = hasher.finalize();
-  if checksum.as_bytes() != &table[checksum_offset..] || checksum.as_bytes() != &EXPECTED_CHECKSUM {
+  if checksum.as_bytes() != &table[checksum_offset..] || checksum.as_bytes() != &AEOR_TEXT_FOLD_TABLE_FINGERPRINT_V1 {
     return Err(malformed("text_fold_table_checksum", "embedded table checksum differs from the frozen semantic contract"));
   }
 

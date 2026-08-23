@@ -86,6 +86,31 @@ pub struct CompiledRouteOrderV1 {
   canonical_definition: Vec<u8>,
   fingerprint: Vec<u8>,
   component_count: usize,
+  sort: Vec<CompiledPositionSortV1>,
+  policies: CompiledPositionPoliciesV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompiledPositionComparatorV1 {
+  Payload(PositionComparatorV1),
+  FixtureNull,
+  FixtureMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CompiledPositionSortV1 {
+  pub field: String,
+  pub direction: PositionSortDirectionV1,
+  pub comparator: CompiledPositionComparatorV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CompiledPositionPoliciesV1 {
+  pub directories_first: String,
+  pub multi_value_selector: String,
+  pub name_collation: String,
+  pub null_missing_policy: String,
+  pub score_semantics: String,
 }
 
 impl CompiledRouteOrderV1 {
@@ -108,6 +133,14 @@ impl CompiledRouteOrderV1 {
   pub const fn component_count(&self) -> usize {
     self.component_count
   }
+
+  pub(super) fn sort(&self) -> &[CompiledPositionSortV1] {
+    &self.sort
+  }
+
+  pub(super) fn policies(&self) -> &CompiledPositionPoliciesV1 {
+    &self.policies
+  }
 }
 
 pub fn compile_route_order_definition(
@@ -115,6 +148,21 @@ pub fn compile_route_order_definition(
   definition: &CanonicalRouteOrderDefinitionV1<'_>,
 ) -> FormatResult<CompiledRouteOrderV1> {
   let expected_definition_length = validate_route_order_definition(definition)?;
+  let mut compiled_sort = Vec::new();
+  compiled_sort.try_reserve_exact(definition.sort.len()).map_err(|source| {
+    error(
+      MalformedInputClass::AllocationAmplification,
+      "invalid_position_order",
+      format!("cannot reserve {} compiled position components: {source}", definition.sort.len()),
+    )
+  })?;
+  for component in definition.sort {
+    compiled_sort.push(CompiledPositionSortV1 {
+      field: component.field.to_string(),
+      direction: component.direction,
+      comparator: compiled_position_sort_comparator(component.comparator)?,
+    });
+  }
 
   let sort = definition
     .sort
@@ -173,6 +221,14 @@ pub fn compile_route_order_definition(
     canonical_definition,
     fingerprint,
     component_count: definition.sort.len(),
+    sort: compiled_sort,
+    policies: CompiledPositionPoliciesV1 {
+      directories_first: definition.directories_first.to_string(),
+      multi_value_selector: definition.multi_value_selector.to_string(),
+      name_collation: definition.name_collation.to_string(),
+      null_missing_policy: definition.null_missing_policy.to_string(),
+      score_semantics: definition.score_semantics.to_string(),
+    },
   })
 }
 
@@ -294,16 +350,20 @@ fn checked_position_length_add(left: usize, right: usize, context: &'static str)
 }
 
 fn validate_position_sort_comparator(comparator: &str) -> FormatResult<()> {
+  compiled_position_sort_comparator(comparator).map(|_| ())
+}
+
+fn compiled_position_sort_comparator(comparator: &str) -> FormatResult<CompiledPositionComparatorV1> {
   match comparator {
-    "bytes_binary_order_v1"
-    | "utf8_binary_order_v1"
-    | "u64_order_v1"
-    | "i64_order_v1"
-    | "f64_finite_order_v1"
-    | "timestamp_ms_order_v1"
-    | "bool_order_v1"
-    | "null"
-    | "missing" => Ok(()),
+    "bytes_binary_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::BytesBinary)),
+    "utf8_binary_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::Utf8Binary)),
+    "u64_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::U64)),
+    "i64_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::I64)),
+    "f64_finite_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::FiniteF64)),
+    "timestamp_ms_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::TimestampMs)),
+    "bool_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::Boolean)),
+    "null" => Ok(CompiledPositionComparatorV1::FixtureNull),
+    "missing" => Ok(CompiledPositionComparatorV1::FixtureMissing),
     _ => Err(order_error(format!("unknown position sort comparator {comparator:?}"))),
   }
 }
@@ -336,6 +396,18 @@ impl PositionComparatorV1 {
       Self::FiniteF64 => 6,
       Self::TimestampMs => 7,
       Self::Boolean => 8,
+    }
+  }
+
+  pub const fn name(self) -> &'static str {
+    match self {
+      Self::BytesBinary => "bytes_binary_order_v1",
+      Self::Utf8Binary => "utf8_binary_order_v1",
+      Self::U64 => "u64_order_v1",
+      Self::I64 => "i64_order_v1",
+      Self::FiniteF64 => "f64_finite_order_v1",
+      Self::TimestampMs => "timestamp_ms_order_v1",
+      Self::Boolean => "bool_order_v1",
     }
   }
 }

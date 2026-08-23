@@ -1211,7 +1211,12 @@
             - [x] Re-run exact source/runtime route coverage, auth/CORS/route regressions, workspace/static gates, record evidence, commit, and push.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
         - [x] P7-2a: add the bounded production APOS writer and canonical route-order compiler, matching the independent both-width fixtures without activating a route schema.
-        - [ ] P7-2b: implement one logical total-order and bounded pagination-window model for directory, query, global-search, and aggregate rows.
+        - [x] P7-2b: implement one logical total-order and bounded pagination-window model for directory, query, global-search, and aggregate rows.
+          - [x] Freeze route-owned order builders and one complete-row comparator with permanent typed semantics and immutable identity ties.
+          - [x] Freeze exactly-one-origin pagination validation plus rank/exclusive-bound source seeks; never locate a deep window by materializing or discarding its prefix.
+          - [x] Retain at most `limit + 1` rows under the configured position-scan byte bound, including reverse `before` normalization.
+          - [x] Fail closed on malformed rows, order/route drift, duplicate or out-of-order source rows, incomplete receipts, cancellation, arithmetic overflow, and resource refusal.
+          - [x] Prove all four route orders and window algebra against an independent deterministic model before broad/static gates.
         - [ ] P7-2c: resolve APOS positions against authorized selected-root result universes, recompute complete ties, and fail closed on root/order/row drift.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.

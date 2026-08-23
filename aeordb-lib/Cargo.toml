@@ -719,6 +719,10 @@ name = "v4_position_writer_spec"
 path = "spec/engine/v4_position_writer_spec.rs"
 
 [[test]]
+name = "v4_position_order_spec"
+path = "spec/engine/v4_position_order_spec.rs"
+
+[[test]]
 name = "v4_active_pointer_spec"
 path = "spec/engine/v4_active_pointer_spec.rs"
 
