@@ -1164,9 +1164,9 @@
           - [ ] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
         - [x] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
-      - [ ] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.
+      - [x] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.
         - [x] P7-1a: add the compile-red `root_api_reference_spec`, then implement the 95-registration/124-method contract plus pure selector/response/error model without activating service behavior.
-        - [ ] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
+        - [x] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
           - [x] P7-1b1: add one captured-header first-authority reader for exact immutable namespace/semantic/admission closure at either frozen hash width.
           - [x] P7-1b2: add bounded selected root-lifecycle lookup with dynamic grace, cancellation, corruption, and no-state baseline proof.
             - [x] Prove current HEAD is always live and both lifecycle controls absent is the retained pre-lifecycle baseline.
@@ -1191,7 +1191,7 @@
             - [x] Prove root/share current-only policy performs no selected namespace reads and current denial preserves concealment before header, lifecycle, pin, or selected storage access.
             - [x] Prove concurrent HEAD advancement is allowed while physical-instance/regression drift fails closed, active pins exclude retirement, and all reservations/pins release after success or failure.
             - [x] Prove architecture uniqueness, run affected/broad/static/native real-file gates, update evidence, commit, and push the green landing unit.
-        - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
+        - [x] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
           - [x] P7-1c1: bind every declared and implicit Axum method to one typed runtime route witness through a single whole-router middleware, including Axum's implicit `HEAD`-for-`GET` behavior.
           - [x] P7-1c2: add behavior-preserving request adapters for the six route classes and one explicit inactive-v4 activation boundary; no handler may infer a root class or bypass the frozen contract.
             - [x] Freeze one typed execution semantic for each route class and reject inconsistent class/proof pairs before handler dispatch.
@@ -1203,7 +1203,12 @@
             - [x] Freeze every public StorageEngine, DirectoryOps, QueryEngine, QueryBuilder, FieldQueryBuilder, PluginManager, and WasmPluginRuntime method plus every WASM host import.
             - [x] Separate root-routed operations from local-only composition and internal maintenance; only root-routed operations may receive a six-class adapter.
             - [x] Provide one inactive-v4 embedded router/factory, exact source-to-registry architecture proof, high-risk classification proof, and behavior-preserving broad gates.
-          - [ ] P7-1c4: prove exact runtime/source coverage, current v3 behavior, 404/405/CORS/auth ordering, body streaming, architecture uniqueness, affected/broad/static gates, and a disposable live-server route matrix before landing and pushing.
+          - [x] P7-1c4: prove exact runtime/source coverage, current v3 behavior, 404/405/CORS/auth ordering, body streaming, architecture uniqueness, affected/broad/static gates, and a disposable live-server route matrix before landing and pushing.
+            - [x] Add a dedicated actual-CLI live target using only disposable database, hot, runtime-data, and runtime-temporary paths.
+            - [x] Exercise representatives of all six route classes, including blob staging/commit, selected-path hash retrieval, mutation, single-root read, malformed multi-root input, and public operational health.
+            - [x] Prove multi-megabyte request/response continuity, implicit HEAD, unchanged legacy-v3 response bytes/headers, unknown-route 404, undeclared-method 405, and configured CORS preflight behavior.
+            - [x] Start a separate self-contained-auth instance and prove public health remains reachable while a protected route fails with 401 before handler execution.
+            - [x] Re-run exact source/runtime route coverage, auth/CORS/route regressions, workspace/static gates, record evidence, commit, and push.
       - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
       - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.

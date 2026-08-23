@@ -86,6 +86,10 @@ name = "start_spec"
 path = "spec/start_spec.rs"
 
 [[test]]
+name = "root_route_live_spec"
+path = "spec/root_route_live_spec.rs"
+
+[[test]]
 name = "soak_worker_cli_spec"
 path = "spec/soak_worker_cli_spec.rs"
 
