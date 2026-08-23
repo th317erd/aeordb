@@ -784,6 +784,7 @@ pub struct ReadViewRootMetadataV1 {
 
 #[must_use = "dropping the resolved view releases its root request pin"]
 pub struct ResolvedReadViewV1<A> {
+  captured_header: SelectedDatabaseHeaderV4,
   database_id: [u8; 16],
   physical_instance_id: [u8; 16],
   hash_algorithm: HashAlgorithm,
@@ -816,6 +817,10 @@ impl<A> std::fmt::Debug for ResolvedReadViewV1<A> {
 }
 
 impl<A> ResolvedReadViewV1<A> {
+  pub const fn captured_header(&self) -> &SelectedDatabaseHeaderV4 {
+    &self.captured_header
+  }
+
   pub const fn database_id(&self) -> [u8; 16] {
     self.database_id
   }
@@ -999,6 +1004,7 @@ where
       cancellation: cancellation.clone(),
       _pin: admission.pin,
       _authority_memory: loaded.memory_reservation,
+      captured_header: header,
     })
   }
 }

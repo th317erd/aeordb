@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::error::Error;
+use std::fmt;
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -10,6 +12,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 use crate::engine::permission_resolver::{evaluate_ordered_path_permissions, normalize_permission_path};
 use crate::engine::permissions::{PathPermissions, PermissionLink};
+use crate::engine::path_utils::normalize_path;
 use crate::engine::{CompressionAlgorithm, EntryType};
 
 use super::database_header::SelectedDatabaseHeaderV4;
@@ -21,9 +24,11 @@ use super::hash::digest_parts;
 use super::namespace::{NamespaceTreeEdgeV0, SemanticAvailabilityV1};
 use super::read_view::{
   LoadedReadAuthorityV1, ReadViewAuthoritySourceV1, ReadViewAuthorizationFailureV1, ReadViewLifecycleErrorV1, ReadViewSourceErrorV1,
-  RootLifecycleObservationV1,
+  ResolvedReadViewV1, RootLifecycleObservationV1,
 };
-use super::read_view_authorization::{PathAuthorizationDecisionV1, SelectedRootPermissionRequestV1, SelectedRootPermissionSourceV1};
+use super::read_view_authorization::{
+  PathAuthorizationDecisionV1, ResolvedPathAuthorizationV1, SelectedRootPermissionRequestV1, SelectedRootPermissionSourceV1,
+};
 use super::root_authority::ImmutableNamespaceAuthorityV1;
 
 // The frozen namespace authority permits a 48 MiB tree entity. Reserve enough
@@ -43,6 +48,13 @@ const MAX_BTREE_SCAN_NODES: usize = 100_000;
 const MAX_DESCENDANT_DEPTH: usize = 10;
 const MAX_DESCENDANT_PERMISSION_FILES: usize = 1_000;
 const MAX_DESCENDANT_DIRECTORIES: usize = 100_000;
+const SELECTED_NAMESPACE_MAXIMUM_PAGE_DOCUMENTS: usize = 4_096;
+const SELECTED_NAMESPACE_MAXIMUM_PAGE_BYTES: u64 = 128 * 1024 * 1024;
+const SELECTED_NAMESPACE_MAXIMUM_PATH_BYTES: usize = u16::MAX as usize;
+const SELECTED_NAMESPACE_MAXIMUM_DEPTH: usize = 128;
+const SELECTED_NAMESPACE_MAXIMUM_WORK_STEPS: u64 = 10_000_000;
+const SELECTED_NAMESPACE_MAXIMUM_IDENTITY_DOCUMENTS: u64 = 10_000_000;
+const SELECTED_NAMESPACE_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One production source for captured v4 authority, lifecycle, and selected
 /// permission reads. Callers must use the same process memory coordinator for
@@ -54,9 +66,282 @@ pub struct NativeReadViewSourceV1 {
   current_configured_grace_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSelectedNamespaceLimitsV1 {
+  maximum_page_documents: usize,
+  maximum_page_bytes: u64,
+  maximum_path_bytes: usize,
+  maximum_depth: usize,
+  maximum_work_steps: u64,
+  maximum_identity_documents: u64,
+}
+
+impl NativeSelectedNamespaceLimitsV1 {
+  pub fn new(
+    maximum_page_documents: usize,
+    maximum_page_bytes: u64,
+    maximum_path_bytes: usize,
+    maximum_depth: usize,
+    maximum_work_steps: u64,
+    maximum_identity_documents: u64,
+  ) -> Result<Self, NativeSelectedNamespaceReadErrorV1> {
+    let minimum_row_slot_bytes = maximum_page_documents.checked_mul(size_of::<NativeSelectedNamespaceFileRowV1>());
+    if maximum_page_documents == 0
+      || maximum_page_documents > SELECTED_NAMESPACE_MAXIMUM_PAGE_DOCUMENTS
+      || maximum_page_bytes == 0
+      || maximum_page_bytes > SELECTED_NAMESPACE_MAXIMUM_PAGE_BYTES
+      || minimum_row_slot_bytes.is_none_or(|bytes| bytes as u64 > maximum_page_bytes)
+      || maximum_path_bytes == 0
+      || maximum_path_bytes > SELECTED_NAMESPACE_MAXIMUM_PATH_BYTES
+      || maximum_depth == 0
+      || maximum_depth > SELECTED_NAMESPACE_MAXIMUM_DEPTH
+      || maximum_work_steps == 0
+      || maximum_work_steps > SELECTED_NAMESPACE_MAXIMUM_WORK_STEPS
+      || maximum_identity_documents == 0
+      || maximum_identity_documents > SELECTED_NAMESPACE_MAXIMUM_IDENTITY_DOCUMENTS
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_namespace_limits",
+        "selected namespace limits must be nonzero, fit their retained row slots, and remain within frozen protocol maxima",
+      ));
+    }
+    Ok(Self {
+      maximum_page_documents,
+      maximum_page_bytes,
+      maximum_path_bytes,
+      maximum_depth,
+      maximum_work_steps,
+      maximum_identity_documents,
+    })
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSelectedNamespaceReadErrorClassV1 {
+  InvalidRequest,
+  ResourceLimit,
+  Unavailable,
+  Corrupt,
+  Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSelectedNamespaceReadErrorV1 {
+  class: NativeSelectedNamespaceReadErrorClassV1,
+  code: &'static str,
+  context: String,
+}
+
+impl NativeSelectedNamespaceReadErrorV1 {
+  fn invalid(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: NativeSelectedNamespaceReadErrorClassV1::InvalidRequest, code, context: context.into() }
+  }
+
+  fn resource(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: NativeSelectedNamespaceReadErrorClassV1::ResourceLimit, code, context: context.into() }
+  }
+
+  fn unavailable(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: NativeSelectedNamespaceReadErrorClassV1::Unavailable, code, context: context.into() }
+  }
+
+  fn corrupt(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: NativeSelectedNamespaceReadErrorClassV1::Corrupt, code, context: context.into() }
+  }
+
+  fn cancelled() -> Self {
+    Self {
+      class: NativeSelectedNamespaceReadErrorClassV1::Cancelled,
+      code: "selected_namespace_cancelled",
+      context: "selected namespace read was cancelled".to_string(),
+    }
+  }
+
+  pub const fn class(&self) -> NativeSelectedNamespaceReadErrorClassV1 {
+    self.class
+  }
+
+  pub const fn code(&self) -> &'static str {
+    self.code
+  }
+
+  pub fn context(&self) -> &str {
+    &self.context
+  }
+}
+
+impl fmt::Display for NativeSelectedNamespaceReadErrorV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}: {}", self.code, self.context)
+  }
+}
+
+impl Error for NativeSelectedNamespaceReadErrorV1 {}
+
+impl From<ReadViewAuthorizationFailureV1> for NativeSelectedNamespaceReadErrorV1 {
+  fn from(error: ReadViewAuthorizationFailureV1) -> Self {
+    match error {
+      ReadViewAuthorizationFailureV1::Denied => Self::corrupt(
+        "selected_namespace_authorization_invariant",
+        "an already-authorized selected namespace reader encountered a second authorization denial",
+      ),
+      ReadViewAuthorizationFailureV1::Canceled => Self::cancelled(),
+      ReadViewAuthorizationFailureV1::Corrupt(context) => Self::corrupt("selected_namespace_corrupt", context),
+      ReadViewAuthorizationFailureV1::Unavailable(context) => Self::unavailable("selected_namespace_unavailable", context),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeSelectedNamespaceFileRowV1 {
+  file_key: Vec<u8>,
+  record_revision: Vec<u8>,
+  file_record: FileRecord,
+}
+
+impl NativeSelectedNamespaceFileRowV1 {
+  pub fn file_key(&self) -> &[u8] {
+    &self.file_key
+  }
+
+  pub fn record_revision(&self) -> &[u8] {
+    &self.record_revision
+  }
+
+  pub fn path(&self) -> &str {
+    &self.file_record.path
+  }
+
+  pub const fn file_record(&self) -> &FileRecord {
+    &self.file_record
+  }
+}
+
+pub struct NativeSelectedNamespacePageV1 {
+  database_id: [u8; 16],
+  physical_instance_id: [u8; 16],
+  selected_root: Vec<u8>,
+  namespace_tree_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  publication_sequence: u64,
+  header_slot_sequence: u64,
+  rows: Vec<NativeSelectedNamespaceFileRowV1>,
+  next_resume_after: Option<String>,
+  complete: bool,
+  _memory: MemoryReservation,
+}
+
+impl NativeSelectedNamespacePageV1 {
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn physical_instance_id(&self) -> [u8; 16] {
+    self.physical_instance_id
+  }
+
+  pub fn selected_root(&self) -> &[u8] {
+    &self.selected_root
+  }
+
+  pub fn namespace_tree_root(&self) -> &[u8] {
+    &self.namespace_tree_root
+  }
+
+  pub fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub const fn publication_sequence(&self) -> u64 {
+    self.publication_sequence
+  }
+
+  pub const fn header_slot_sequence(&self) -> u64 {
+    self.header_slot_sequence
+  }
+
+  pub fn rows(&self) -> &[NativeSelectedNamespaceFileRowV1] {
+    &self.rows
+  }
+
+  pub fn next_resume_after(&self) -> Option<&str> {
+    self.next_resume_after.as_deref()
+  }
+
+  pub const fn complete(&self) -> bool {
+    self.complete
+  }
+}
+
+pub struct NativeSelectedNamespaceIdentityResultV1 {
+  database_id: [u8; 16],
+  physical_instance_id: [u8; 16],
+  selected_root: Vec<u8>,
+  namespace_tree_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
+  publication_sequence: u64,
+  header_slot_sequence: u64,
+  found: Option<NativeSelectedNamespaceFileRowV1>,
+  _memory: MemoryReservation,
+}
+
+impl NativeSelectedNamespaceIdentityResultV1 {
+  pub const fn database_id(&self) -> [u8; 16] {
+    self.database_id
+  }
+
+  pub const fn physical_instance_id(&self) -> [u8; 16] {
+    self.physical_instance_id
+  }
+
+  pub fn selected_root(&self) -> &[u8] {
+    &self.selected_root
+  }
+
+  pub fn namespace_tree_root(&self) -> &[u8] {
+    &self.namespace_tree_root
+  }
+
+  pub fn semantic_state_root(&self) -> &[u8] {
+    &self.semantic_state_root
+  }
+
+  pub const fn publication_sequence(&self) -> u64 {
+    self.publication_sequence
+  }
+
+  pub const fn header_slot_sequence(&self) -> u64 {
+    self.header_slot_sequence
+  }
+
+  pub const fn found(&self) -> Option<&NativeSelectedNamespaceFileRowV1> {
+    self.found.as_ref()
+  }
+
+  pub fn into_found(self) -> Option<NativeSelectedNamespaceFileRowV1> {
+    self.found
+  }
+
+  pub const fn is_absent(&self) -> bool {
+    self.found.is_none()
+  }
+}
+
+pub struct NativeSelectedNamespaceReaderV1<'view> {
+  source: NativeReadViewSourceV1,
+  view: &'view ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
+  authorized_scope: &'view str,
+  limits: NativeSelectedNamespaceLimitsV1,
+}
+
 struct AccountedLoadedImmutableEntityV1 {
   entity: LoadedImmutableEntityV1,
   _memory: MemoryReservation,
+}
+
+struct LoadedSelectedFileRecordV1 {
+  entity_version: u8,
+  record: FileRecord,
 }
 
 impl std::ops::Deref for AccountedLoadedImmutableEntityV1 {
@@ -79,6 +364,443 @@ impl NativeReadViewSourceV1 {
   pub fn memory_coordinator(&self) -> &Arc<MemoryCoordinator> {
     &self.memory
   }
+
+  pub fn selected_namespace_reader<'view>(
+    &self,
+    view: &'view ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
+    limits: NativeSelectedNamespaceLimitsV1,
+  ) -> Result<NativeSelectedNamespaceReaderV1<'view>, NativeSelectedNamespaceReadErrorV1> {
+    let captured = view.captured_header();
+    let authority = view.authority();
+    if captured.header.database_id != view.database_id()
+      || captured.header.physical_instance_id != view.physical_instance_id()
+      || captured.header.hash_algorithm != view.hash_algorithm()
+      || captured.header.slot_sequence != view.header_slot_sequence()
+      || captured.header.write_sequence_high_water != view.write_sequence_high_water()
+      || authority.root.root_hash != view.root_metadata().hash
+      || authority.namespace_tree.root_hash != authority.root.namespace_tree_root
+      || authority.semantic_state.object_id != authority.root.semantic_state_root
+      || authority.admission.database_id != view.database_id()
+      || authority.admission.namespace_root != view.root_metadata().hash
+      || authority.admission.publication_sequence == 0
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_view_closure",
+        "resolved read view does not retain one exact captured selected-root closure",
+      ));
+    }
+    if !view.authorization().is_direct()
+      || !matches!(
+        view.authorization().operation(),
+        crate::engine::permission_resolver::CrudlifyOp::Read | crate::engine::permission_resolver::CrudlifyOp::List
+      )
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_namespace_authorization_scope",
+        "selected namespace reader requires direct read or list authority",
+      ));
+    }
+    let authorized_scope = canonical_selected_authorization_scope(view.authorization().path())?;
+    Ok(NativeSelectedNamespaceReaderV1 { source: self.clone(), view, authorized_scope, limits })
+  }
+}
+
+struct SelectedNamespaceScanStateV1<'request> {
+  resume_after: Option<&'request str>,
+  resume_seen: bool,
+  rows: Vec<NativeSelectedNamespaceFileRowV1>,
+  has_more: bool,
+  work_steps: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedDirectoryVisitControlV1 {
+  Continue,
+  Break,
+}
+
+enum SelectedDirectoryVisitV1 {
+  Node,
+  Child(ChildEntry),
+}
+
+impl NativeSelectedNamespaceReaderV1<'_> {
+  pub fn scan_files(
+    &self,
+    scope: &str,
+    resume_after: Option<&str>,
+  ) -> Result<NativeSelectedNamespacePageV1, NativeSelectedNamespaceReadErrorV1> {
+    self.validate_path(scope, true)?;
+    self.validate_authorized_scope(scope)?;
+    if let Some(resume_after) = resume_after {
+      self.validate_path(resume_after, false)?;
+      if !selected_path_is_within_scope(scope, resume_after) {
+        return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+          "selected_namespace_resume_scope",
+          "selected namespace resume path is outside the requested scope",
+        ));
+      }
+    }
+    self.check_cancelled()?;
+    let mut page_memory = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, self.limits.maximum_page_bytes, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_page_memory", error.to_string()))?;
+    let _workspace = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, SELECTED_NAMESPACE_WORKSPACE_BYTES, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_workspace_memory", error.to_string()))?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(self.limits.maximum_page_documents).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_page_allocation",
+        format!("cannot reserve selected namespace page rows: {error}"),
+      )
+    })?;
+    let mut state =
+      SelectedNamespaceScanStateV1 { resume_after, resume_seen: resume_after.is_none(), rows, has_more: false, work_steps: 0 };
+    let reference = self
+      .source
+      .resolve_path(self.view.captured_header(), &self.view.authority().namespace_tree.root_hash, scope, self.view.cancellation())
+      .map_err(map_selected_namespace_error)?;
+    if let Some(reference) = reference {
+      self.scan_reference(scope, reference, selected_path_depth(scope), &mut state)?;
+    }
+    if !state.resume_seen {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_resume_missing",
+        "selected immutable namespace no longer contains its own resume path",
+      ));
+    }
+    self.check_cancelled()?;
+    let complete = !state.has_more;
+    let next_resume_after =
+      if complete { None } else { state.rows.last().map(|row| try_clone_selected_string(row.path(), "resume path")).transpose()? };
+    let selected_root = try_clone_selected_bytes(&self.view.root_metadata().hash, "selected root")?;
+    let namespace_tree_root = try_clone_selected_bytes(&self.view.authority().namespace_tree.root_hash, "namespace tree root")?;
+    let semantic_state_root = try_clone_selected_bytes(&self.view.authority().semantic_state.object_id, "semantic state root")?;
+    let retained = selected_namespace_page_retained_bytes(
+      &state.rows,
+      state.rows.capacity(),
+      None,
+      [selected_root.capacity(), namespace_tree_root.capacity(), semantic_state_root.capacity()],
+      next_resume_after.as_ref().map_or(0, String::capacity),
+    )?;
+    if retained > self.limits.maximum_page_bytes {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_page_bytes",
+        "selected namespace page exceeds its retained-byte bound",
+      ));
+    }
+    page_memory
+      .shrink(page_memory.bytes().checked_sub(retained).ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_page_accounting",
+          "selected namespace retained page exceeds its memory reservation",
+        )
+      })?)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_page_accounting", error.to_string()))?;
+    Ok(NativeSelectedNamespacePageV1 {
+      database_id: self.view.database_id(),
+      physical_instance_id: self.view.physical_instance_id(),
+      selected_root,
+      namespace_tree_root,
+      semantic_state_root,
+      publication_sequence: self.view.authority().admission.publication_sequence,
+      header_slot_sequence: self.view.header_slot_sequence(),
+      rows: state.rows,
+      next_resume_after,
+      complete,
+      _memory: page_memory,
+    })
+  }
+
+  pub fn resolve_file_identity(
+    &self,
+    scope: &str,
+    file_key: &[u8],
+    record_revision: &[u8],
+  ) -> Result<NativeSelectedNamespaceIdentityResultV1, NativeSelectedNamespaceReadErrorV1> {
+    self.validate_path(scope, true)?;
+    self.validate_authorized_scope(scope)?;
+    self.validate_identity(file_key, "FileKey")?;
+    self.validate_identity(record_revision, "RecordRevision")?;
+    self.check_cancelled()?;
+    let _workspace = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, SELECTED_NAMESPACE_WORKSPACE_BYTES, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_workspace_memory", error.to_string()))?;
+    let result_memory = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, self.limits.maximum_page_bytes, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_identity_memory", error.to_string()))?;
+    let reference = self
+      .source
+      .resolve_path(self.view.captured_header(), &self.view.authority().namespace_tree.root_hash, scope, self.view.cancellation())
+      .map_err(map_selected_namespace_error)?;
+    let mut state = SelectedNamespaceIdentityStateV1 { file_key, record_revision, visited_documents: 0, work_steps: 0, found: None };
+    if let Some(reference) = reference {
+      self.find_identity(scope, reference, selected_path_depth(scope), &mut state)?;
+    }
+    self.check_cancelled()?;
+    self.build_identity_result(state.found, result_memory)
+  }
+
+  fn scan_reference(
+    &self,
+    path: &str,
+    reference: ChildEntry,
+    depth: usize,
+    state: &mut SelectedNamespaceScanStateV1<'_>,
+  ) -> Result<SelectedDirectoryVisitControlV1, NativeSelectedNamespaceReadErrorV1> {
+    self.step(&mut state.work_steps)?;
+    let entry_type = EntryType::from_u8(reference.entry_type)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_entry_type", error.to_string()))?;
+    match entry_type {
+      EntryType::FileRecord => {
+        if !state.resume_seen {
+          if state.resume_after == Some(path) {
+            state.resume_seen = true;
+          }
+          return Ok(SelectedDirectoryVisitControlV1::Continue);
+        }
+        if state.rows.len() >= self.limits.maximum_page_documents {
+          state.has_more = true;
+          return Ok(SelectedDirectoryVisitControlV1::Break);
+        }
+        let row = self.load_file_row(&reference, path)?;
+        let prospective = selected_namespace_page_retained_bytes(
+          &state.rows,
+          state.rows.capacity(),
+          Some(&row),
+          [
+            self.view.root_metadata().hash.len(),
+            self.view.authority().namespace_tree.root_hash.len(),
+            self.view.authority().semantic_state.object_id.len(),
+          ],
+          row.path().len(),
+        )?;
+        if prospective > self.limits.maximum_page_bytes {
+          if state.rows.is_empty() {
+            return Err(NativeSelectedNamespaceReadErrorV1::resource(
+              "selected_namespace_row_bytes",
+              "the first selected namespace row cannot fit in the page byte bound",
+            ));
+          }
+          state.has_more = true;
+          return Ok(SelectedDirectoryVisitControlV1::Break);
+        }
+        state.rows.push(row);
+        Ok(SelectedDirectoryVisitControlV1::Continue)
+      }
+      EntryType::DirectoryIndex => {
+        if depth >= self.limits.maximum_depth {
+          return Err(NativeSelectedNamespaceReadErrorV1::resource(
+            "selected_namespace_depth",
+            "selected namespace traversal exceeds its path-depth bound",
+          ));
+        }
+        let source = self.source.clone();
+        source.visit_directory_children(self.view.captured_header(), &reference.hash, self.view.cancellation(), |visit| match visit {
+          SelectedDirectoryVisitV1::Node => {
+            self.step(&mut state.work_steps)?;
+            Ok(SelectedDirectoryVisitControlV1::Continue)
+          }
+          SelectedDirectoryVisitV1::Child(child) => {
+            let child_path = join_selected_path(path, &child.name, self.limits.maximum_path_bytes)?;
+            self.scan_reference(&child_path, child, depth + 1, state)
+          }
+        })
+      }
+      EntryType::Symlink => Ok(SelectedDirectoryVisitControlV1::Continue),
+      EntryType::Chunk | EntryType::DeletionRecord | EntryType::Snapshot | EntryType::Void | EntryType::Fork => {
+        Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_child_role",
+          "selected namespace directory contains an entity role that cannot be a namespace child",
+        ))
+      }
+    }
+  }
+
+  fn load_file_row(
+    &self,
+    reference: &ChildEntry,
+    path: &str,
+  ) -> Result<NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceReadErrorV1> {
+    let loaded = self
+      .source
+      .load_file_record(self.view.captured_header(), reference, path, self.view.cancellation())
+      .map_err(map_selected_namespace_error)?;
+    let file_key = digest_parts(self.view.hash_algorithm(), &[b"file:", path.as_bytes()]);
+    Ok(NativeSelectedNamespaceFileRowV1 {
+      file_key,
+      record_revision: try_clone_selected_bytes(&reference.hash, "record revision")?,
+      file_record: loaded.record,
+    })
+  }
+
+  fn find_identity(
+    &self,
+    path: &str,
+    reference: ChildEntry,
+    depth: usize,
+    state: &mut SelectedNamespaceIdentityStateV1<'_>,
+  ) -> Result<SelectedDirectoryVisitControlV1, NativeSelectedNamespaceReadErrorV1> {
+    self.step(&mut state.work_steps)?;
+    let entry_type = EntryType::from_u8(reference.entry_type)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_entry_type", error.to_string()))?;
+    match entry_type {
+      EntryType::FileRecord => {
+        state.visited_documents = state.visited_documents.checked_add(1).ok_or_else(|| {
+          NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_identity_count", "identity document count overflowed")
+        })?;
+        if state.visited_documents > self.limits.maximum_identity_documents {
+          return Err(NativeSelectedNamespaceReadErrorV1::resource(
+            "selected_namespace_identity_count",
+            "selected namespace identity lookup exceeded its document bound",
+          ));
+        }
+        let derived = digest_parts(self.view.hash_algorithm(), &[b"file:", path.as_bytes()]);
+        if derived != state.file_key {
+          return Ok(SelectedDirectoryVisitControlV1::Continue);
+        }
+        if reference.hash != state.record_revision {
+          return Ok(SelectedDirectoryVisitControlV1::Break);
+        }
+        state.found = Some(self.load_file_row(&reference, path)?);
+        Ok(SelectedDirectoryVisitControlV1::Break)
+      }
+      EntryType::DirectoryIndex => {
+        if depth >= self.limits.maximum_depth {
+          return Err(NativeSelectedNamespaceReadErrorV1::resource(
+            "selected_namespace_depth",
+            "selected namespace traversal exceeds its path-depth bound",
+          ));
+        }
+        let source = self.source.clone();
+        source.visit_directory_children(self.view.captured_header(), &reference.hash, self.view.cancellation(), |visit| match visit {
+          SelectedDirectoryVisitV1::Node => {
+            self.step(&mut state.work_steps)?;
+            Ok(SelectedDirectoryVisitControlV1::Continue)
+          }
+          SelectedDirectoryVisitV1::Child(child) => {
+            let child_path = join_selected_path(path, &child.name, self.limits.maximum_path_bytes)?;
+            self.find_identity(&child_path, child, depth + 1, state)
+          }
+        })
+      }
+      EntryType::Symlink => Ok(SelectedDirectoryVisitControlV1::Continue),
+      EntryType::Chunk | EntryType::DeletionRecord | EntryType::Snapshot | EntryType::Void | EntryType::Fork => {
+        Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_child_role",
+          "selected namespace directory contains an entity role that cannot be a namespace child",
+        ))
+      }
+    }
+  }
+
+  fn validate_path(&self, path: &str, allow_root: bool) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    if path.len() > self.limits.maximum_path_bytes {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_path_bytes",
+        "selected namespace path exceeds its byte bound",
+      ));
+    }
+    if path.is_empty() || (!allow_root && path == "/") || path.as_bytes().contains(&0) || normalize_path(path) != path {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_namespace_path",
+        "selected namespace path is not canonical for this operation",
+      ));
+    }
+    Ok(())
+  }
+
+  fn build_identity_result(
+    &self,
+    found: Option<NativeSelectedNamespaceFileRowV1>,
+    mut memory: MemoryReservation,
+  ) -> Result<NativeSelectedNamespaceIdentityResultV1, NativeSelectedNamespaceReadErrorV1> {
+    let selected_root = try_clone_selected_bytes(&self.view.root_metadata().hash, "selected root")?;
+    let namespace_tree_root = try_clone_selected_bytes(&self.view.authority().namespace_tree.root_hash, "namespace tree root")?;
+    let semantic_state_root = try_clone_selected_bytes(&self.view.authority().semantic_state.object_id, "semantic state root")?;
+    let retained = selected_namespace_identity_retained_bytes(
+      found.as_ref(),
+      [selected_root.capacity(), namespace_tree_root.capacity(), semantic_state_root.capacity()],
+    )?;
+    if retained > memory.bytes() {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_identity_bytes",
+        "selected namespace identity result exceeds its retained-byte bound",
+      ));
+    }
+    memory
+      .shrink(memory.bytes() - retained)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_identity_accounting", error.to_string()))?;
+    Ok(NativeSelectedNamespaceIdentityResultV1 {
+      database_id: self.view.database_id(),
+      physical_instance_id: self.view.physical_instance_id(),
+      selected_root,
+      namespace_tree_root,
+      semantic_state_root,
+      publication_sequence: self.view.authority().admission.publication_sequence,
+      header_slot_sequence: self.view.header_slot_sequence(),
+      found,
+      _memory: memory,
+    })
+  }
+
+  fn validate_identity(&self, identity: &[u8], label: &'static str) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    if identity.len() != self.view.hash_algorithm().hash_length() || identity.iter().all(|byte| *byte == 0) {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_namespace_identity",
+        format!("{label} has the wrong width or is all zero"),
+      ));
+    }
+    Ok(())
+  }
+
+  fn validate_authorized_scope(&self, scope: &str) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    if !selected_path_is_within_scope(self.authorized_scope, scope) {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_namespace_authorization_scope",
+        "selected namespace scope is outside the resolved read-view authorization",
+      ));
+    }
+    Ok(())
+  }
+
+  fn check_cancelled(&self) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    if self.view.cancellation().is_cancelled() {
+      return Err(NativeSelectedNamespaceReadErrorV1::cancelled());
+    }
+    Ok(())
+  }
+
+  fn step(&self, work_steps: &mut u64) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    *work_steps = work_steps
+      .checked_add(1)
+      .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_work", "selected namespace work count overflowed"))?;
+    if *work_steps > self.limits.maximum_work_steps {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_work",
+        "selected namespace traversal exceeds its work bound",
+      ));
+    }
+    Ok(())
+  }
+}
+
+struct SelectedNamespaceIdentityStateV1<'request> {
+  file_key: &'request [u8],
+  record_revision: &'request [u8],
+  visited_documents: u64,
+  work_steps: u64,
+  found: Option<NativeSelectedNamespaceFileRowV1>,
 }
 
 impl ReadViewAuthoritySourceV1 for NativeReadViewSourceV1 {
@@ -293,26 +1015,11 @@ impl NativeReadViewSourceV1 {
     expected_path: &str,
     cancellation: &CancellationToken,
   ) -> Result<Vec<u8>, ReadViewAuthorizationFailureV1> {
-    let entity = self
-      .load_entity_at_header(header, &entry.hash, MAX_FILE_RECORD_ENTITY_BYTES, cancellation)?
-      .ok_or_else(|| selected_corrupt(expected_path, "selected FileRecord is missing"))?;
-    if entity.entry_type != EntryTypeV4::FileRecord
-      || !matches!(entity.entity_version, 0 | 1)
-      || entity.flags != 0
-      || entity.compression_algorithm != CompressionAlgorithm::None
-      || entity.key != entry.hash
-      || digest_parts(header.header.hash_algorithm, &[b"filec:", &entity.stored_value]) != entry.hash
-    {
-      return Err(selected_corrupt(expected_path, "selected FileRecord representation or identity is invalid"));
-    }
-    let record = FileRecord::deserialize(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
-      .map_err(|error| selected_corrupt(expected_path, error))?;
-    if record.path != expected_path
-      || record.total_size != entry.total_size
-      || record.content_type != entry.content_type
-      || record.total_size > MAX_PERMISSION_DOCUMENT_BYTES as u64
-    {
-      return Err(selected_corrupt(expected_path, "selected FileRecord metadata does not match its directory entry"));
+    let loaded = self.load_file_record(header, entry, expected_path, cancellation)?;
+    let entity_version = loaded.entity_version;
+    let record = loaded.record;
+    if record.total_size > MAX_PERMISSION_DOCUMENT_BYTES as u64 {
+      return Err(selected_corrupt(expected_path, "selected permission FileRecord exceeds its byte bound"));
     }
     if record.chunk_hashes.len() > MAX_PERMISSION_DOCUMENT_CHUNKS {
       return Err(selected_corrupt(expected_path, "selected permission FileRecord exceeds its chunk-count bound"));
@@ -339,10 +1046,42 @@ impl NativeReadViewSourceV1 {
     if bytes.len() != output_length {
       return Err(selected_corrupt(expected_path, "selected file chunks do not match the declared length"));
     }
-    if entity.entity_version == 1 && digest_parts(header.header.hash_algorithm, &[&bytes]) != record.content_hash {
+    if entity_version == 1 && digest_parts(header.header.hash_algorithm, &[&bytes]) != record.content_hash {
       return Err(selected_corrupt(expected_path, "selected file content hash is invalid"));
     }
     Ok(bytes)
+  }
+
+  fn load_file_record(
+    &self,
+    header: &SelectedDatabaseHeaderV4,
+    entry: &ChildEntry,
+    expected_path: &str,
+    cancellation: &CancellationToken,
+  ) -> Result<LoadedSelectedFileRecordV1, ReadViewAuthorizationFailureV1> {
+    let entity = self
+      .load_entity_at_header(header, &entry.hash, MAX_FILE_RECORD_ENTITY_BYTES, cancellation)?
+      .ok_or_else(|| selected_corrupt(expected_path, "selected FileRecord is missing"))?;
+    if entity.entry_type != EntryTypeV4::FileRecord
+      || !matches!(entity.entity_version, 0 | 1)
+      || entity.flags != 0
+      || entity.compression_algorithm != CompressionAlgorithm::None
+      || entity.key != entry.hash
+      || digest_parts(header.header.hash_algorithm, &[b"filec:", &entity.stored_value]) != entry.hash
+    {
+      return Err(selected_corrupt(expected_path, "selected FileRecord representation or identity is invalid"));
+    }
+    let record = FileRecord::deserialize(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
+      .map_err(|error| selected_corrupt(expected_path, error))?;
+    if record.path != expected_path
+      || record.total_size != entry.total_size
+      || record.content_type != entry.content_type
+      || record.created_at != entry.created_at
+      || record.updated_at != entry.updated_at
+    {
+      return Err(selected_corrupt(expected_path, "selected FileRecord metadata does not match its directory entry"));
+    }
+    Ok(LoadedSelectedFileRecordV1 { entity_version: entity.entity_version, record })
   }
 
   fn load_entity_at_header(
@@ -427,79 +1166,93 @@ impl NativeReadViewSourceV1 {
     if *visited_directories > MAX_DESCENDANT_DIRECTORIES {
       return Err(selected_unavailable(parent_path, "selected descendant permission scan exceeded its directory bound"));
     }
-    self.visit_directory_children(header, directory_hash, cancellation, |child| {
-      if child.name == ".aeordb-permissions" {
-        *permission_files = permission_files.saturating_add(1);
-        if *permission_files > MAX_DESCENDANT_PERMISSION_FILES {
-          return Err(selected_unavailable(parent_path, "selected descendant permission scan exceeded its permission-file bound"));
+    self.visit_directory_children(header, directory_hash, cancellation, |visit| {
+      if let SelectedDirectoryVisitV1::Child(child) = visit {
+        if child.name == ".aeordb-permissions" {
+          *permission_files = permission_files.saturating_add(1);
+          if *permission_files > MAX_DESCENDANT_PERMISSION_FILES {
+            return Err(selected_unavailable(parent_path, "selected descendant permission scan exceeded its permission-file bound"));
+          }
+          let permission_path = join_path(directory_path, &child.name);
+          let Some(document) = self.load_permission_document(header, tree_root, &permission_path, cancellation)? else {
+            return Err(selected_corrupt(&permission_path, "listed permission authority disappeared"));
+          };
+          collect_descendant_children(&document.links, current_groups, parent_path, directory_path, allowed_children);
+        } else if EntryType::from_u8(child.entry_type).map_err(|error| selected_corrupt(directory_path, error))?
+          == EntryType::DirectoryIndex
+          && depth < MAX_DESCENDANT_DEPTH
+        {
+          let child_path = join_path(directory_path, &child.name);
+          self.scan_descendant_directory(
+            header,
+            tree_root,
+            parent_path,
+            &child_path,
+            &child.hash,
+            depth + 1,
+            current_groups,
+            cancellation,
+            visited_directories,
+            permission_files,
+            allowed_children,
+          )?;
         }
-        let permission_path = join_path(directory_path, &child.name);
-        let Some(document) = self.load_permission_document(header, tree_root, &permission_path, cancellation)? else {
-          return Err(selected_corrupt(&permission_path, "listed permission authority disappeared"));
-        };
-        collect_descendant_children(&document.links, current_groups, parent_path, directory_path, allowed_children);
-      } else if EntryType::from_u8(child.entry_type).map_err(|error| selected_corrupt(directory_path, error))? == EntryType::DirectoryIndex
-        && depth < MAX_DESCENDANT_DEPTH
-      {
-        let child_path = join_path(directory_path, &child.name);
-        self.scan_descendant_directory(
-          header,
-          tree_root,
-          parent_path,
-          &child_path,
-          &child.hash,
-          depth + 1,
-          current_groups,
-          cancellation,
-          visited_directories,
-          permission_files,
-          allowed_children,
-        )?;
       }
-      Ok(())
-    })
+      Ok(SelectedDirectoryVisitControlV1::Continue)
+    })?;
+    Ok(())
   }
 
-  fn visit_directory_children(
+  fn visit_directory_children<E>(
     &self,
     header: &SelectedDatabaseHeaderV4,
     root_hash: &[u8],
     cancellation: &CancellationToken,
-    mut visitor: impl FnMut(ChildEntry) -> Result<(), ReadViewAuthorizationFailureV1>,
-  ) -> Result<(), ReadViewAuthorizationFailureV1> {
+    mut visitor: impl FnMut(SelectedDirectoryVisitV1) -> Result<SelectedDirectoryVisitControlV1, E>,
+  ) -> Result<SelectedDirectoryVisitControlV1, E>
+  where
+    E: From<ReadViewAuthorizationFailureV1>,
+  {
     let mut stack = vec![(root_hash.to_vec(), 0usize, false)];
     let mut visited_nodes = 0usize;
     let mut previous = None;
     while let Some((hash, depth, btree_child)) = stack.pop() {
-      ensure_selected_not_cancelled(cancellation)?;
+      ensure_selected_not_cancelled(cancellation).map_err(E::from)?;
       visited_nodes = visited_nodes.saturating_add(1);
       if depth > MAX_BTREE_DEPTH || visited_nodes > MAX_BTREE_SCAN_NODES {
-        return Err(selected_corrupt(&hex::encode(root_hash), "selected directory B-tree exceeds its depth or node bound"));
+        return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected directory B-tree exceeds its depth or node bound")));
       }
-      let entity = self.load_directory_entity(header, &hash, cancellation)?;
+      if visitor(SelectedDirectoryVisitV1::Node)? == SelectedDirectoryVisitControlV1::Break {
+        return Ok(SelectedDirectoryVisitControlV1::Break);
+      }
+      let entity = self.load_directory_entity(header, &hash, cancellation).map_err(E::from)?;
       if !is_btree_format(&entity.stored_value) {
         if btree_child {
-          return Err(selected_corrupt(&hex::encode(root_hash), "selected B-tree child uses the flat-directory format"));
+          return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected B-tree child uses the flat-directory format")));
         }
         let children = deserialize_child_entries(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
-          .map_err(|error| selected_corrupt(&hex::encode(root_hash), error))?;
+          .map_err(|error| E::from(selected_corrupt(&hex::encode(root_hash), error)))?;
         if children.len() > MAX_FLAT_DIRECTORY_ENTRIES {
-          return Err(selected_corrupt(&hex::encode(root_hash), "selected flat directory exceeds its entry bound"));
+          return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected flat directory exceeds its entry bound")));
         }
-        validate_sorted_children(&children, &hex::encode(root_hash))?;
+        validate_sorted_children(&children, &hex::encode(root_hash)).map_err(E::from)?;
         for child in children {
-          validate_child_order(previous.as_deref(), &child.name)?;
+          validate_child_order(previous.as_deref(), &child.name).map_err(E::from)?;
           previous = Some(child.name.clone());
-          visitor(child)?;
+          if visitor(SelectedDirectoryVisitV1::Child(child))? == SelectedDirectoryVisitControlV1::Break {
+            return Ok(SelectedDirectoryVisitControlV1::Break);
+          }
         }
         continue;
       }
-      match decode_canonical_btree_node(&entity, header.header.hash_algorithm.hash_length(), &hex::encode(root_hash))? {
+      match decode_canonical_btree_node(&entity, header.header.hash_algorithm.hash_length(), &hex::encode(root_hash)).map_err(E::from)? {
         BTreeNode::Leaf(leaf) => {
           for child in leaf.entries {
-            validate_child_order(previous.as_deref(), &child.name)?;
+            validate_child_order(previous.as_deref(), &child.name).map_err(E::from)?;
             previous = Some(child.name.clone());
-            visitor(child)?;
+            if visitor(SelectedDirectoryVisitV1::Child(child))? == SelectedDirectoryVisitControlV1::Break {
+              return Ok(SelectedDirectoryVisitControlV1::Break);
+            }
           }
         }
         BTreeNode::Internal(internal) => {
@@ -509,8 +1262,170 @@ impl NativeReadViewSourceV1 {
         }
       }
     }
-    Ok(())
+    Ok(SelectedDirectoryVisitControlV1::Continue)
   }
+}
+
+fn map_selected_namespace_error(error: ReadViewAuthorizationFailureV1) -> NativeSelectedNamespaceReadErrorV1 {
+  error.into()
+}
+
+fn canonical_selected_authorization_scope(path: &str) -> Result<&str, NativeSelectedNamespaceReadErrorV1> {
+  if path == "/" {
+    return Ok(path);
+  }
+  let scope = match path.strip_suffix('/') {
+    Some(scope) => scope,
+    None => path,
+  };
+  if scope.is_empty()
+    || !scope.starts_with('/')
+    || scope.ends_with('/')
+    || scope.len() > SELECTED_NAMESPACE_MAXIMUM_PATH_BYTES
+    || scope.as_bytes().contains(&0)
+    || scope.trim() != scope
+    || scope.split('/').skip(1).any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+  {
+    return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+      "selected_namespace_authorization_scope",
+      "resolved read-view authorization path is not a canonical selected namespace scope",
+    ));
+  }
+  Ok(scope)
+}
+
+fn join_selected_path(parent: &str, child: &str, maximum_path_bytes: usize) -> Result<String, NativeSelectedNamespaceReadErrorV1> {
+  if child.is_empty() || matches!(child, "." | "..") || child.contains('/') || child.as_bytes().contains(&0) {
+    return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+      "selected_namespace_child_name",
+      "selected namespace contains a noncanonical child name",
+    ));
+  }
+  let separator_bytes = usize::from(parent != "/");
+  let joined_length = parent.len().checked_add(separator_bytes).and_then(|length| length.checked_add(child.len())).ok_or_else(|| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_path_bytes", "selected namespace path length overflowed")
+  })?;
+  if joined_length > maximum_path_bytes {
+    return Err(NativeSelectedNamespaceReadErrorV1::resource(
+      "selected_namespace_path_bytes",
+      "selected namespace path exceeds its byte bound",
+    ));
+  }
+  let mut path = String::new();
+  path
+    .try_reserve_exact(joined_length)
+    .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_path_allocation", error.to_string()))?;
+  if parent == "/" {
+    path.push('/');
+  } else {
+    path.push_str(parent);
+    path.push('/');
+  }
+  path.push_str(child);
+  if normalize_path(&path) != path {
+    return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+      "selected_namespace_child_path",
+      "selected namespace child does not produce a canonical path",
+    ));
+  }
+  Ok(path)
+}
+
+fn selected_path_depth(path: &str) -> usize {
+  path.split('/').filter(|segment| !segment.is_empty()).count()
+}
+
+fn selected_path_is_within_scope(scope: &str, path: &str) -> bool {
+  if scope == "/" {
+    return path.starts_with('/');
+  }
+  path == scope || path.strip_prefix(scope).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn try_clone_selected_bytes(bytes: &[u8], label: &'static str) -> Result<Vec<u8>, NativeSelectedNamespaceReadErrorV1> {
+  let mut cloned = Vec::new();
+  cloned.try_reserve_exact(bytes.len()).map_err(|error| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_result_allocation", format!("cannot allocate {label}: {error}"))
+  })?;
+  cloned.extend_from_slice(bytes);
+  Ok(cloned)
+}
+
+fn try_clone_selected_string(value: &str, label: &'static str) -> Result<String, NativeSelectedNamespaceReadErrorV1> {
+  String::from_utf8(try_clone_selected_bytes(value.as_bytes(), label)?).map_err(|error| {
+    NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_result_encoding", format!("cannot retain {label}: {error}"))
+  })
+}
+
+fn selected_namespace_row_heap_bytes(row: &NativeSelectedNamespaceFileRowV1) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  let record = &row.file_record;
+  let chunk_vector_bytes = record
+    .chunk_hashes
+    .capacity()
+    .checked_mul(size_of::<Vec<u8>>())
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "chunk vector size overflowed"))?;
+  let mut bytes = 0u64;
+  for capacity in [
+    row.file_key.capacity(),
+    row.record_revision.capacity(),
+    record.path.capacity(),
+    record.content_type.as_ref().map_or(0, String::capacity),
+    record.metadata.capacity(),
+    record.content_hash.capacity(),
+    chunk_vector_bytes,
+  ] {
+    bytes = bytes
+      .checked_add(capacity as u64)
+      .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "row size overflowed"))?;
+  }
+  for chunk_hash in &record.chunk_hashes {
+    bytes = bytes
+      .checked_add(chunk_hash.capacity() as u64)
+      .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "row size overflowed"))?;
+  }
+  Ok(bytes)
+}
+
+fn selected_namespace_identity_retained_bytes(
+  found: Option<&NativeSelectedNamespaceFileRowV1>,
+  root_capacities: [usize; 3],
+) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  let mut bytes = (size_of::<NativeSelectedNamespaceIdentityResultV1>() as u64)
+    .checked_add(root_capacities[0] as u64)
+    .and_then(|total| total.checked_add(root_capacities[1] as u64))
+    .and_then(|total| total.checked_add(root_capacities[2] as u64))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "identity size overflowed"))?;
+  if let Some(found) = found {
+    bytes = bytes
+      .checked_add(selected_namespace_row_heap_bytes(found)?)
+      .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "identity row size overflowed"))?;
+  }
+  Ok(bytes)
+}
+
+fn selected_namespace_page_retained_bytes(
+  rows: &[NativeSelectedNamespaceFileRowV1],
+  rows_capacity: usize,
+  pending: Option<&NativeSelectedNamespaceFileRowV1>,
+  root_capacities: [usize; 3],
+  resume_capacity: usize,
+) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  let row_capacity_bytes = rows_capacity
+    .checked_mul(size_of::<NativeSelectedNamespaceFileRowV1>())
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "page row capacity overflowed"))?;
+  let mut bytes = (size_of::<NativeSelectedNamespacePageV1>() as u64)
+    .checked_add(row_capacity_bytes as u64)
+    .and_then(|total| total.checked_add(root_capacities[0] as u64))
+    .and_then(|total| total.checked_add(root_capacities[1] as u64))
+    .and_then(|total| total.checked_add(root_capacities[2] as u64))
+    .and_then(|total| total.checked_add(resume_capacity as u64))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "page size overflowed"))?;
+  for row in rows.iter().chain(pending) {
+    bytes = bytes
+      .checked_add(selected_namespace_row_heap_bytes(row)?)
+      .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_retained_bytes", "page row size overflowed"))?;
+  }
+  Ok(bytes)
 }
 
 fn permission_document_path(level: &str) -> String {

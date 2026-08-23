@@ -1230,6 +1230,11 @@
           - [x] Represent complete, partial-candidate, degraded, no-compatible, and historical-unavailable coverage without allowing a candidate or hint to claim result authority.
           - [x] Select drivers from bounded page/posting/cardinality/coverage/fallback estimates, with stable authorization-safe logical diagnostics and no physical details.
         - [ ] P7-3b: implement one shared bounded native selected-root namespace reader for FileKey/revision/path rows, authoritative source values, and position universes.
+          - [x] P7-3b1: retain the exact captured header in `ResolvedReadView` and implement one query-accounted selected-root namespace reader for canonical path lookup, bounded file pages, and FileKey/revision identity lookup.
+          - [x] P7-3b2: route selected-root permission entity traversal through the shared reader and prove no second captured-header namespace walker remains.
+          - [ ] P7-3b3: load exact selected semantic catalogs under query admission and produce planner catalogs without borrowing current mutable semantic state.
+          - [ ] P7-3b4: evaluate authoritative source values through the selected ValueStore runtime with explicit parser/mapper dependency, cancellation, and retained-byte outcomes.
+          - [ ] P7-3b5: prove historical/current roots, flat/B-tree traversal, both hash widths, malformed/corrupt/missing closure, pressure, cancellation, identity absence/incompleteness, permission compatibility, and architecture uniqueness.
         - [ ] P7-3c: implement one shared bounded immutable ArtifactDirectory/page cursor with rank/key/range seeks, exact fallback, and disposable NVT hints.
         - [ ] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.

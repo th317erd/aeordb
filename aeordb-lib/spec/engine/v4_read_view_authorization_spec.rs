@@ -265,7 +265,9 @@ fn authorizer_reuses_current_identity_and_selected_decision_only_restricts() {
   let resolved =
     authorizer.restrict_to_selected_root(current.authorization(), &selected_header(), &loaded_authority(), &cancellation).unwrap();
 
-  assert_eq!(resolved, selected_decision);
+  assert_eq!(resolved.path(), "/docs/");
+  assert_eq!(resolved.operation(), CrudlifyOp::List);
+  assert_eq!(resolved.decision(), &selected_decision);
   assert_eq!(current_calls.load(Ordering::SeqCst), 1);
   assert_eq!(selected_calls.load(Ordering::SeqCst), 1);
   let requests = authorizer.selected_source().requests.lock().unwrap();

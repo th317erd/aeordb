@@ -65,6 +65,41 @@ impl PathAuthorizationDecisionV1 {
   }
 }
 
+/// The exact request scope and operation whose current/selected permission
+/// intersection authorized a resolved read view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPathAuthorizationV1 {
+  path: String,
+  operation: CrudlifyOp,
+  decision: PathAuthorizationDecisionV1,
+}
+
+impl ResolvedPathAuthorizationV1 {
+  fn new(current: &CurrentPathAuthorizationV1, decision: PathAuthorizationDecisionV1) -> Self {
+    Self { path: current.path.clone(), operation: current.operation, decision }
+  }
+
+  pub fn path(&self) -> &str {
+    &self.path
+  }
+
+  pub const fn operation(&self) -> CrudlifyOp {
+    self.operation
+  }
+
+  pub const fn decision(&self) -> &PathAuthorizationDecisionV1 {
+    &self.decision
+  }
+
+  pub const fn is_direct(&self) -> bool {
+    self.decision.is_direct()
+  }
+
+  pub const fn allowed_children(&self) -> Option<&BTreeSet<String>> {
+    self.decision.allowed_children()
+  }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectedRootRestrictionV1 {
   PermissionDocuments,
@@ -220,7 +255,7 @@ where
   S: SelectedRootPermissionSourceV1,
 {
   type CurrentAuthorization = CurrentPathAuthorizationV1;
-  type ResolvedAuthorization = PathAuthorizationDecisionV1;
+  type ResolvedAuthorization = ResolvedPathAuthorizationV1;
 
   fn authorize_current(
     &self,
@@ -256,7 +291,7 @@ where
       current.selected_root_restriction(),
       SelectedRootRestrictionV1::RootCurrentPolicy | SelectedRootRestrictionV1::ShareCurrentPolicy
     ) {
-      return Ok(current.decision().clone());
+      return Ok(ResolvedPathAuthorizationV1::new(current, current.decision().clone()));
     }
 
     let request =
@@ -268,6 +303,10 @@ where
     let Some(selected) = selected else {
       return Err(ReadViewAuthorizationFailureV1::Denied);
     };
-    current.decision().intersect(&selected).ok_or(ReadViewAuthorizationFailureV1::Denied)
+    current
+      .decision()
+      .intersect(&selected)
+      .map(|decision| ResolvedPathAuthorizationV1::new(current, decision))
+      .ok_or(ReadViewAuthorizationFailureV1::Denied)
   }
 }

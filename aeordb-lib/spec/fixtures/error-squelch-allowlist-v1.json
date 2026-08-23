@@ -11226,7 +11226,7 @@
     {
       "id": "esq-v1-cca4aa854c71b6848fed-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 1054,
+      "line": 1060,
       "column": 14,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",
@@ -11236,7 +11236,7 @@
     {
       "id": "esq-v1-8e07aab909c0b553b8cd-00",
       "file": "aeordb-lib/src/engine/v4/read_view.rs",
-      "line": 1056,
+      "line": 1062,
       "column": 18,
       "enclosing_item": "validate_root_capabilities",
       "kind": "error_conversion",
