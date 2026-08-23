@@ -1162,7 +1162,7 @@
           - [x] Bound corrected Office/ODF ZIP expansion cumulatively with declared-size and streaming checks while preserving the legacy parser contract unchanged.
           - [x] Enforce corrected JSON node, depth, member, and scalar limits during deserialization instead of after the full value tree is allocated.
           - [ ] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
-        - [ ] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
+        - [x] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

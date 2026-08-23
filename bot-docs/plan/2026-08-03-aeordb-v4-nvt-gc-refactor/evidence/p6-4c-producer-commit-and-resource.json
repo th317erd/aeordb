@@ -1,0 +1,148 @@
+{
+  "schema": "aeordb-v4-p6-4c-producer-commit-and-resource-v1",
+  "source_commit": "afdadfc77cda5641991cf9692ca0333f24fd3a93",
+  "captured_at": "2026-08-23T05:12:33Z",
+  "production_database_touched": false,
+  "http_existing_chunk_commit": {
+    "database": "disposable loopback database under the bounded Codex home cache",
+    "authentication": "disabled on loopback only",
+    "chunk_bytes": 262144,
+    "unique_uploaded_chunks": 1,
+    "chunk_references_per_file": 20000,
+    "logical_file_bytes": 5242880000,
+    "manifest_bytes": 1520283,
+    "distinct_committed_files": 25,
+    "initial_http_status": 200,
+    "initial_client_seconds": 0.165816,
+    "initial_engine_trace": {
+      "total_ms": 137,
+      "chunk_metadata_lookup_us": 20310,
+      "chunk_validation_ms": 94,
+      "namespace_publication_ms": 41,
+      "supplied_content_hash_files": 1,
+      "supplied_size_files": 1,
+      "asserted_hash_fast_path_files": 1,
+      "chunk_body_read_us": 0,
+      "chunk_body_read_bytes": 0,
+      "first_chunk_sniff_reads": 0,
+      "first_chunk_sniff_bytes": 0
+    },
+    "repeated_commit_latency_seconds": {
+      "samples": 24,
+      "failures": 0,
+      "minimum": 0.145756,
+      "average": 0.162418,
+      "maximum": 0.176837
+    },
+    "concurrent_health_latency_seconds": {
+      "samples": 83,
+      "failures": 0,
+      "minimum": 0.000660,
+      "average": 0.000981,
+      "maximum": 0.001321
+    },
+    "server_rss_kib": {
+      "before_repeated_commits": 85780,
+      "after_repeated_commits": 106156,
+      "after_clean_restart": 60260
+    },
+    "restart": {
+      "ready_elapsed_ms_from_log_timestamps": 596,
+      "files_visible": 25,
+      "target_size_bytes": 5242880000,
+      "first_range_status": 206,
+      "last_range_status": 206,
+      "range_bytes": 32,
+      "first_and_last_ranges_byte_exact": true
+    },
+    "offline_verification": {
+      "before_restart_status": "OK",
+      "after_restart_status": "OK",
+      "valid_entries": 462,
+      "corrupt_hashes": 0,
+      "corrupt_headers": 0,
+      "missing_children": 0,
+      "dangling_records": 0,
+      "btree_issues": 0,
+      "kv_issues": 0,
+      "void_issues": 0,
+      "database_file_bytes": 58663913,
+      "logical_current_data": "122.1 GB"
+    },
+    "evidence_sha256": {
+      "database": "4e07e4080806eabbcecf38a70f2099cc3ded722222f7d04e2898fecc3b64f180",
+      "initial_server_log": "9e8075fbec71272150eedf28e9ba38fbab811a46e1f139a71bfea792ba26e2c5",
+      "restart_server_log": "fce4a4267b702a6e30a4c8bb5281b73ce2d669fd8d35034c704eac43a68e90a3",
+      "commit_series": "8f4c9bfb03f540a23fa73f0c2cbbec80fc896471e24ebe9288d164288fb539f2",
+      "health_series": "f1ba7f7eac1987f21d90a64187328704e23b35c3d2a03f7925c52c14b888050f",
+      "verify_before_restart": "6dc01d1a08893e8c1f96f4bdb6c0ad4d2b70dfff27c133c72d1160c5303a2d37",
+      "verify_after_restart": "6dc01d1a08893e8c1f96f4bdb6c0ad4d2b70dfff27c133c72d1160c5303a2d37",
+      "restart_stats": "38c03b4714f120b5f736aec5783c1a8d491a5ffcb9f94a642be010f9582e6c79"
+    }
+  },
+  "native_runtime_trace": {
+    "platform": "linux-x86_64",
+    "test": "content_only_shadow_runtime_installs_once_after_exact_identity_and_cancellation_checks",
+    "result": "1 passed; 0 failed",
+    "test_seconds": 0.12,
+    "wall_seconds": 0.14,
+    "maximum_rss_kib": 21960,
+    "major_faults": 15,
+    "swaps": 0,
+    "trace_mode": "strace -f -yy -ttt over write/pwrite64/fsync/fdatasync/open/close/rename-family syscalls",
+    "phase_boundaries": {
+      "hard_user_commit": {
+        "trace_lines": "348-399",
+        "source_database_lines": 52,
+        "shadow_or_workspace_lines": 0,
+        "writes": 49,
+        "positioned_writes": 1,
+        "data_syncs": 2,
+        "full_syncs": 0
+      },
+      "post_acknowledgement_memory_refusal": {
+        "trace_lines": "400-419",
+        "source_database_lines": 0,
+        "shadow_database_lines": 20,
+        "data_syncs": 3,
+        "full_syncs": 1,
+        "interpretation": "the immutable journal became durable after hard authority; memory refusal restored the leased notice and did not admit a task"
+      },
+      "successful_two_task_cadence": {
+        "trace_lines": "420-504",
+        "elapsed_ms": 25,
+        "source_database_lines": 0,
+        "shadow_database_lines": 37,
+        "task_workspace_lines": 24,
+        "manifest_workspace_lines": 24,
+        "writes": 25,
+        "positioned_writes": 6,
+        "data_syncs": 7,
+        "full_syncs": 13,
+        "interpretation": "task, manifest, checkpoint, and selector durability occurs on the cadence owner after acknowledgement, not on the user commit"
+      },
+      "shutdown_flush": {
+        "trace_lines": "505-522",
+        "source_database_lines": 12,
+        "shadow_database_lines": 6,
+        "data_syncs": 6,
+        "full_syncs": 0,
+        "interpretation": "separate shutdown work; excluded from commit and cadence amplification counts"
+      }
+    },
+    "evidence_sha256": {
+      "trace": "d5b49ea091bda590da01b18981ca0b1af5330a3477fa6d978165a88afe5ece1c",
+      "test_log": "74f47d69a1eb135935dcad87c6260ebf29a584436d230db3d2b7ba22de63f73f",
+      "resource_log": "88a5214b52b27f5530bd132dfd39ec5090b60b3c4ae0cbb16683f53172e5e0f9"
+    }
+  },
+  "contract_result": {
+    "existing_chunk_commit_reads_scale_with_manifest_metadata_not_logical_bytes": true,
+    "derived_v4_work_occurs_before_user_acknowledgement": false,
+    "health_starvation_observed": false,
+    "restart_and_offline_integrity_green": true,
+    "transitional_v3_query_compatibility_writer_still_synchronous": true,
+    "transitional_v3_writer_removal_owner": "P7 coordinated reader/writer cutover",
+    "windows_native_parser_qualification": "required, unwaived, externally blocked by the unavailable win11vm endpoint"
+  }
+}
