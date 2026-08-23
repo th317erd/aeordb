@@ -1164,6 +1164,14 @@
           - [ ] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
         - [x] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
     - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
+      - [ ] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.
+        - [x] P7-1a: add the compile-red `root_api_reference_spec`, then implement the 95-registration/124-method contract plus pure selector/response/error model without activating service behavior.
+        - [ ] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
+        - [ ] P7-1c: integrate every single-root, multi-root, hash, content-staging, mutation, and operational route through its declared contract without changing v3 service activation before P8.
+      - [ ] P7-2: implement APOS decoder/validator integration and route-specific total-order scans.
+      - [ ] P7-3: convert query/search/sort/aggregate/EXPLAIN planning and execution to exact selected-root coverage.
+      - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
+      - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
       - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

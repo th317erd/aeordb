@@ -1289,6 +1289,10 @@ path = "spec/engine/integrity_scanner_spec.rs"
 name = "v4_index_native_compaction_spec"
 path = "spec/engine/v4_index_native_compaction_spec.rs"
 
+[[test]]
+name = "root_api_reference_spec"
+path = "spec/http/root_api_reference_spec.rs"
+
 
 [lints]
 workspace = true

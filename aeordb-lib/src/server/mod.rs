@@ -14,6 +14,7 @@ pub mod gc_routes;
 pub mod json_merge_patch;
 pub mod portal_routes;
 pub mod responses;
+pub mod root_api;
 pub mod route_permissions;
 pub mod routes;
 pub mod search_locators;
