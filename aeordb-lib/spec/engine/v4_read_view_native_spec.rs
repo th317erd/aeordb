@@ -25,10 +25,15 @@ use aeordb::engine::v4::index_artifact::{
 };
 use aeordb::engine::v4::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
 use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
-use aeordb::engine::v4::index_coverage_registry::{field_definition_fingerprint, field_dependency_fingerprint};
+use aeordb::engine::v4::index_coverage_registry::{IndexCoverageNvtDescriptorV1, field_definition_fingerprint, field_dependency_fingerprint};
+use aeordb::engine::v4::index_manifest::FieldNvtManifestBodyV1;
+use aeordb::engine::v4::index_nvt::{
+  NvtBasisStatusV1, NvtEntryWriteV1, NvtTileWriteV1, encode_nvt_tile, pin_field_index_v1, validate_field_nvt_basis_v1,
+};
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
-  decode_artifact_directory, decode_ordered_page, encode_artifact_directory, encode_ordered_page, encode_posting_record,
+  decode_artifact_directory, decode_ordered_page, decode_ordered_record, encode_artifact_directory, encode_ordered_page,
+  encode_posting_record, ordered_record_order_key,
 };
 use aeordb::engine::v4::index_producer_collector::{
   IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
@@ -52,7 +57,8 @@ use aeordb::engine::v4::read_view_authorization::{
 use aeordb::engine::v4::query_planner::{QueryPlanningCoverageGenerationV1, RootAwareQueryFieldCatalogV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
-  NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1,
+  NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
+  NativeSelectedNamespaceReaderV1, NativeSelectedPostingSeekRequestV1, NativeSelectedPostingSeekSourceV1,
   NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1,
   NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
   default_native_selected_semantic_limits_v1,
@@ -927,6 +933,15 @@ struct SelectedArtifactFixture {
   generation: QueryPlanningCoverageGenerationV1,
   posting_page: EncodedImmutableIndexArtifactV1,
   posting_root: EncodedImmutableIndexArtifactV1,
+  nvt_descriptor: Option<IndexCoverageNvtDescriptorV1>,
+  target_posting_position: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedArtifactLayoutV1 {
+  SinglePage,
+  ValidNvtPageHint,
+  StaleNvtPageHint,
 }
 
 impl SelectedArtifactFixture {
@@ -969,15 +984,63 @@ fn selected_artifact_cursor_request<'a>(
 }
 
 fn selected_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
-  selected_artifact_fixture_with_options(algorithm, 0, true, false, [0; 32], all_capabilities_profile())
+  selected_artifact_fixture_with_options(
+    algorithm,
+    0,
+    true,
+    false,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::SinglePage,
+  )
 }
 
 fn selected_artifact_fixture_with_manifest_live_delta(algorithm: HashAlgorithm, manifest_live_delta: u64) -> SelectedArtifactFixture {
-  selected_artifact_fixture_with_options(algorithm, manifest_live_delta, true, false, [0; 32], all_capabilities_profile())
+  selected_artifact_fixture_with_options(
+    algorithm,
+    manifest_live_delta,
+    true,
+    false,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::SinglePage,
+  )
 }
 
 fn selected_partial_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
-  selected_artifact_fixture_with_options(algorithm, 0, true, true, [0; 32], all_capabilities_profile())
+  selected_artifact_fixture_with_options(
+    algorithm,
+    0,
+    true,
+    true,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::SinglePage,
+  )
+}
+
+fn selected_stale_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
+  selected_artifact_fixture_with_options(
+    algorithm,
+    0,
+    true,
+    false,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::StaleNvtPageHint,
+  )
+}
+
+fn selected_valid_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
+  selected_artifact_fixture_with_options(
+    algorithm,
+    0,
+    true,
+    false,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::ValidNvtPageHint,
+  )
 }
 
 fn selected_artifact_fixture_with_unadmitted_capability(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
@@ -990,6 +1053,7 @@ fn selected_artifact_fixture_with_unadmitted_capability(algorithm: HashAlgorithm
     false,
     required_reader_capabilities,
     BinaryCapabilityProfileV1::new(baseline, baseline),
+    SelectedArtifactLayoutV1::SinglePage,
   )
 }
 
@@ -1000,6 +1064,7 @@ fn selected_artifact_fixture_with_options(
   advance_target_root: bool,
   field_required_reader_capabilities: [u8; 32],
   capability_profile: BinaryCapabilityProfileV1,
+  layout: SelectedArtifactLayoutV1,
 ) -> SelectedArtifactFixture {
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
@@ -1015,6 +1080,17 @@ fn selected_artifact_fixture_with_options(
     posting_key: &17u64.to_le_bytes(),
   })
   .unwrap();
+  let second_posting_record = (layout == SelectedArtifactLayoutV1::StaleNvtPageHint).then(|| {
+    encode_posting_record(&PostingRecordV1 {
+      tombstone: false,
+      coordinate: 29,
+      document_ordinal: 2,
+      source_value_ordinal: 0,
+      expansion_ordinal: 0,
+      posting_key: &29u64.to_le_bytes(),
+    })
+    .unwrap()
+  });
   let posting_page = encode_ordered_page(&OrderedPageWriteV1 {
     hash_algorithm: algorithm,
     role: OrderedIndexRoleV1::Posting,
@@ -1022,30 +1098,60 @@ fn selected_artifact_fixture_with_options(
     generation: 7,
     page_id: 1,
     previous_page_id: 0,
-    next_page_id: 0,
+    next_page_id: u64::from(second_posting_record.is_some()) * 2,
     records: &[posting_record.as_slice()],
   })
   .unwrap();
+  let second_posting_page = second_posting_record.as_ref().map(|record| {
+    encode_ordered_page(&OrderedPageWriteV1 {
+      hash_algorithm: algorithm,
+      role: OrderedIndexRoleV1::Posting,
+      owner_id: &graph.field_index_id,
+      generation: 7,
+      page_id: 2,
+      previous_page_id: 1,
+      next_page_id: 0,
+      records: &[record.as_slice()],
+    })
+    .unwrap()
+  });
   let decoded_page = decode_ordered_page(&posting_page.value, algorithm).unwrap();
+  let decoded_second_page = second_posting_page.as_ref().map(|page| decode_ordered_page(&page.value, algorithm).unwrap());
+  let mut posting_entries = vec![ArtifactDirectoryEntryWriteV1 {
+    lower_fence: decoded_page.lower_fence,
+    upper_fence: decoded_page.upper_fence,
+    child_hash: &posting_page.key,
+    child_generation: decoded_page.generation,
+    live_count: u64::from(decoded_page.live_count),
+    tombstone_count: u64::from(decoded_page.tombstone_count),
+    page_count: 1,
+    logical_bytes: decoded_page.logical_live_bytes,
+    minimum_page_id: decoded_page.page_id,
+    maximum_page_id: decoded_page.page_id,
+    physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+  }];
+  if let (Some(page), Some(decoded)) = (second_posting_page.as_ref(), decoded_second_page.as_ref()) {
+    posting_entries.push(ArtifactDirectoryEntryWriteV1 {
+      lower_fence: decoded.lower_fence,
+      upper_fence: decoded.upper_fence,
+      child_hash: &page.key,
+      child_generation: decoded.generation,
+      live_count: u64::from(decoded.live_count),
+      tombstone_count: u64::from(decoded.tombstone_count),
+      page_count: 1,
+      logical_bytes: decoded.logical_live_bytes,
+      minimum_page_id: decoded.page_id,
+      maximum_page_id: decoded.page_id,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    });
+  }
   let posting_root = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
     hash_algorithm: algorithm,
     role: OrderedIndexRoleV1::Posting,
     owner_id: &graph.field_index_id,
     generation: 7,
     level: 0,
-    entries: &[ArtifactDirectoryEntryWriteV1 {
-      lower_fence: decoded_page.lower_fence,
-      upper_fence: decoded_page.upper_fence,
-      child_hash: &posting_page.key,
-      child_generation: decoded_page.generation,
-      live_count: u64::from(decoded_page.live_count),
-      tombstone_count: u64::from(decoded_page.tombstone_count),
-      page_count: 1,
-      logical_bytes: decoded_page.logical_live_bytes,
-      minimum_page_id: decoded_page.page_id,
-      maximum_page_id: decoded_page.page_id,
-      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
-    }],
+    entries: &posting_entries,
   })
   .unwrap();
   let decoded_root = decode_artifact_directory(&posting_root.value, algorithm).unwrap();
@@ -1104,13 +1210,13 @@ fn selected_artifact_fixture_with_options(
       posting_directory_root: Some(&posting_root.key),
       document_state_directory_root: None,
       first_page_id: decoded_page.page_id,
-      last_page_id: decoded_page.page_id,
-      next_page_id: decoded_page.page_id + 1,
+      last_page_id: decoded_second_page.as_ref().map_or(decoded_page.page_id, |page| page.page_id),
+      next_page_id: decoded_second_page.as_ref().map_or(decoded_page.page_id, |page| page.page_id) + 1,
       posting_page_count: decoded_root.page_count,
       state_page_count: 0,
       live_posting_count: decoded_root.live_count + manifest_live_delta,
       posting_tombstone_count: decoded_root.tombstone_count,
-      posting_document_count: 1,
+      posting_document_count: u64::from(second_posting_page.is_some()) + 1,
       unindexable_document_count: 0,
       state_tombstone_count: 0,
       live_canonical_posting_bytes: decoded_root.logical_bytes,
@@ -1118,9 +1224,97 @@ fn selected_artifact_fixture_with_options(
     }),
   })
   .unwrap();
+  let nvt_tile = (layout != SelectedArtifactLayoutV1::SinglePage).then(|| {
+    encode_nvt_tile(&NvtTileWriteV1 {
+      hash_algorithm: algorithm,
+      owner_id: &graph.field_index_id,
+      generation: 8,
+      resolution: 1024,
+      tile_start_cell: 0,
+      tile_cell_count: 1024,
+      basis_posting_generation: 7,
+      entries: &[NvtEntryWriteV1 {
+        relative_cell: 0,
+        predecessor_page_id: Some(if layout == SelectedArtifactLayoutV1::StaleNvtPageHint { 2 } else { 1 }),
+        successor_page_id: None,
+        approximate_live_postings: 1,
+        sample_coordinate: 17,
+      }],
+    })
+    .unwrap()
+  });
+  let nvt_root = nvt_tile.as_ref().map(|tile| {
+    let tile_start = 0u64.to_le_bytes();
+    encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+      hash_algorithm: algorithm,
+      role: OrderedIndexRoleV1::NvtTile,
+      owner_id: &graph.field_index_id,
+      generation: 8,
+      level: 0,
+      entries: &[ArtifactDirectoryEntryWriteV1 {
+        lower_fence: &tile_start,
+        upper_fence: &tile_start,
+        child_hash: &tile.key,
+        child_generation: 8,
+        live_count: 1,
+        tombstone_count: 0,
+        page_count: 1,
+        logical_bytes: u64::try_from(tile.value.len()).unwrap(),
+        minimum_page_id: 0,
+        maximum_page_id: 0,
+        physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+      }],
+    })
+    .unwrap()
+  });
+  let nvt_manifest = nvt_root.as_ref().map(|root| {
+    encode_index_manifest(&IndexManifestWriteV1 {
+      hash_algorithm: algorithm,
+      generation: 8,
+      owner_id: &graph.field_index_id,
+      body: IndexManifestBodyV1::FieldNvt(FieldNvtManifestBodyV1 {
+        required_reader_capabilities: [0; 32],
+        tile_cells: 1024,
+        resolution: 1024,
+        basis_posting_generation: 7,
+        basis_source_head_hash: &selected_root,
+        tile_directory_root: Some(&root.key),
+        tile_count: 1,
+        populated_cell_count: 1,
+        approximate_live_posting_count: 1,
+      }),
+    })
+    .unwrap()
+  });
+  let nvt_descriptor = nvt_manifest.as_ref().map(|manifest| {
+    let field = pin_field_index_v1(&field_manifest.value, algorithm).unwrap();
+    let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(&manifest.value)) else {
+      panic!("selected native NVT fixture must have a usable basis");
+    };
+    IndexCoverageNvtDescriptorV1::try_from_pinned(&basis).unwrap()
+  });
+  let target_posting_position = (layout != SelectedArtifactLayoutV1::SinglePage).then(|| {
+    let target = encode_posting_record(&PostingRecordV1 {
+      tombstone: false,
+      coordinate: 20,
+      document_ordinal: u64::MAX,
+      source_value_ordinal: u32::MAX,
+      expansion_ordinal: u32::MAX,
+      posting_key: &20u64.to_le_bytes(),
+    })
+    .unwrap();
+    let decoded = decode_ordered_record(&target, algorithm, OrderedIndexRoleV1::Posting).unwrap();
+    ordered_record_order_key(&decoded).unwrap()
+  });
   let mut artifacts = vec![&scope_manifest, &value_manifest, &field_manifest, &posting_root];
   if publish_posting_page {
     artifacts.push(&posting_page);
+    if let Some(page) = second_posting_page.as_ref() {
+      artifacts.push(page);
+    }
+  }
+  if let (Some(tile), Some(root), Some(manifest)) = (nvt_tile.as_ref(), nvt_root.as_ref(), nvt_manifest.as_ref()) {
+    artifacts.extend([tile, root, manifest]);
   }
   publisher
     .publish_index_artifacts(IndexArtifactBatchPublicationRequestV1 {
@@ -1219,6 +1413,8 @@ fn selected_artifact_fixture_with_options(
     generation,
     posting_page,
     posting_root,
+    nvt_descriptor,
+    target_posting_position,
   }
 }
 
@@ -2594,6 +2790,7 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   let native = fs::read_to_string(source_root.join("engine/v4/read_view_native.rs")).unwrap();
   assert_eq!(native.matches("pub enum NativeSelectedSourceParserV1").count(), 1);
   assert_eq!(native.matches("pub fn prepare_authoritative_source").count(), 1);
+  assert_eq!(native.matches("pub fn seek_posting_page").count(), 1);
   assert_eq!(native.matches("pub fn evaluate_authoritative_source(").count(), 0);
   assert_eq!(native.matches("impl NativeSelectedSourceEvaluatorV1").count(), 1);
   assert_eq!(native.matches("_prepared_memory: MemoryReservation").count(), 1);
@@ -2609,6 +2806,7 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   let artifact = fs::read_to_string(source_root.join("engine/v4/index_artifact_native.rs")).unwrap();
   assert_eq!(artifact.matches("impl ArtifactCursorSourceV1 for CapturedNativeArtifactCursorSourceV1").count(), 1);
   assert_eq!(artifact.matches("load_artifact_page_cursor_v1(").count(), 1);
+  assert_eq!(artifact.matches("load_artifact_leaf_cursor_v1(").count(), 1);
   assert_eq!(artifact.matches("load_index_artifact_at_captured_header(").count(), 1);
   assert!(!artifact.contains("BinaryCapabilityProfileV1::current()"));
   for forbidden in ["load_index_artifact_bounded(", "load_index_artifact(", "crate::server", "DirectoryOps", "StorageEngine"] {
@@ -2829,6 +3027,93 @@ fn selected_artifact_cursor_uses_captured_authority_and_retains_query_memory_at_
 }
 
 #[test]
+fn selected_posting_seek_without_nvt_uses_exact_directory_and_rejects_a_malformed_target() {
+  let fixture = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  let target_posting_position = decode_ordered_page(&fixture.posting_page.value, HashAlgorithm::Blake3_256).unwrap().lower_fence.to_vec();
+  let reader = fixture.reader();
+  let request = NativeSelectedPostingSeekRequestV1 {
+    catalog: &fixture.catalog,
+    scope_id: &fixture.scope_id,
+    selected_generation: &fixture.generation,
+    nvt_descriptor: None,
+    target_coordinate: 17,
+    target_posting_position: &target_posting_position,
+    neighbors: ArtifactPageNeighborModeV1::None,
+    limits: ArtifactPageCursorLimitsV1::new(4, 2 * 1024 * 1024).unwrap(),
+  };
+  let selected = reader.seek_posting_page(&request).unwrap().unwrap();
+  assert_eq!(selected.source(), NativeSelectedPostingSeekSourceV1::ExactDirectory);
+  assert_eq!(selected.nvt_fallback().map(|fallback| fallback.reason()), Some(NativeSelectedNvtFallbackReasonV1::Absent));
+  assert_eq!(selected.nvt_fallback().and_then(|fallback| fallback.diagnostic_code()), None);
+  drop(selected);
+
+  let malformed = NativeSelectedPostingSeekRequestV1 { target_posting_position: &[0], ..request };
+  let error = reader.seek_posting_page(&malformed).unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "selected_posting_target");
+  drop(reader);
+  fixture.assert_released();
+}
+
+#[test]
+fn selected_native_nvt_returns_a_validated_posting_start_without_exact_fallback() {
+  let fixture = selected_valid_nvt_artifact_fixture(HashAlgorithm::Blake3_256);
+  let reader = fixture.reader();
+  let selected = reader
+    .seek_posting_page(&NativeSelectedPostingSeekRequestV1 {
+      catalog: &fixture.catalog,
+      scope_id: &fixture.scope_id,
+      selected_generation: &fixture.generation,
+      nvt_descriptor: fixture.nvt_descriptor.as_ref(),
+      target_coordinate: 20,
+      target_posting_position: fixture.target_posting_position.as_deref().unwrap(),
+      neighbors: ArtifactPageNeighborModeV1::Both,
+      limits: ArtifactPageCursorLimitsV1::new(4, 2 * 1024 * 1024).unwrap(),
+    })
+    .unwrap()
+    .unwrap();
+
+  assert_eq!(selected.source(), NativeSelectedPostingSeekSourceV1::NvtHint);
+  assert!(selected.nvt_fallback().is_none());
+  assert_eq!(decode_ordered_page(selected.cursor().cursor().page(), HashAlgorithm::Blake3_256).unwrap().page_id, 1);
+  drop(selected);
+  drop(reader);
+  fixture.assert_released();
+}
+
+#[test]
+fn selected_native_nvt_rejects_a_structural_stale_page_and_uses_the_exact_posting_predecessor() {
+  let fixture = selected_stale_nvt_artifact_fixture(HashAlgorithm::Blake3_256);
+  let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let reader = fixture.reader();
+  let selected = reader
+    .seek_posting_page(&NativeSelectedPostingSeekRequestV1 {
+      catalog: &fixture.catalog,
+      scope_id: &fixture.scope_id,
+      selected_generation: &fixture.generation,
+      nvt_descriptor: fixture.nvt_descriptor.as_ref(),
+      target_coordinate: 20,
+      target_posting_position: fixture.target_posting_position.as_deref().unwrap(),
+      neighbors: ArtifactPageNeighborModeV1::Both,
+      limits: ArtifactPageCursorLimitsV1::new(4, 2 * 1024 * 1024).unwrap(),
+    })
+    .unwrap()
+    .unwrap();
+
+  assert_eq!(selected.source(), NativeSelectedPostingSeekSourceV1::ExactDirectory);
+  assert_eq!(selected.nvt_fallback().map(|fallback| fallback.reason()), Some(NativeSelectedNvtFallbackReasonV1::StalePageHint));
+  assert_eq!(selected.nvt_fallback().and_then(|fallback| fallback.diagnostic_code()), None);
+  assert_eq!(decode_ordered_page(selected.cursor().cursor().page(), HashAlgorithm::Blake3_256).unwrap().page_id, 1);
+  assert!(selected.cursor().cursor().previous_page().is_none());
+  assert_eq!(decode_ordered_page(selected.cursor().cursor().next_page().unwrap(), HashAlgorithm::Blake3_256).unwrap().page_id, 2);
+  assert!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > before);
+  drop(selected);
+  drop(reader);
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  fixture.assert_released();
+}
+
+#[test]
 fn selected_artifact_cursor_rejects_catalog_manifest_and_root_closure_drift() {
   let fixture = selected_artifact_fixture(HashAlgorithm::Blake3_256);
   let reader = fixture.reader();
@@ -2991,8 +3276,15 @@ fn selected_artifact_cursor_rejects_catalog_manifest_and_root_closure_drift() {
   drop(reader);
   mismatched.assert_released();
 
-  let missing_page =
-    selected_artifact_fixture_with_options(HashAlgorithm::Blake3_256, 0, false, false, [0; 32], all_capabilities_profile());
+  let missing_page = selected_artifact_fixture_with_options(
+    HashAlgorithm::Blake3_256,
+    0,
+    false,
+    false,
+    [0; 32],
+    all_capabilities_profile(),
+    SelectedArtifactLayoutV1::SinglePage,
+  );
   let reader = missing_page.reader();
   let missing_page_error = reader
     .load_index_artifact_page_cursor(&selected_artifact_cursor_request(

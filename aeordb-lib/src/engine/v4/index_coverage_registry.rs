@@ -24,7 +24,7 @@ use super::index_artifact::{
   validate_correctness_manifest_chain,
 };
 use super::index_coverage_planner::{IndexCoverageGenerationHealthV1, IndexCoverageGenerationV1};
-use super::index_nvt::{NvtBasisStatusV1, NvtFallbackReasonV1, pin_field_index_v1, validate_field_nvt_basis_v1};
+use super::index_nvt::{PinnedFieldNvtV1, NvtBasisStatusV1, NvtFallbackReasonV1, pin_field_index_v1, validate_field_nvt_basis_v1};
 
 const MANIFEST_READ_CAP: usize = 1_048_576;
 const MANIFEST_READ_RESERVATION_BYTES: u64 = MANIFEST_READ_CAP as u64 + 4 * 1_024;
@@ -223,6 +223,16 @@ pub struct IndexCoverageNvtDescriptorV1 {
 }
 
 impl IndexCoverageNvtDescriptorV1 {
+  pub fn try_from_pinned(nvt: &PinnedFieldNvtV1<'_>) -> Result<Self, IndexCoverageRegistryErrorV1> {
+    Ok(Self {
+      manifest_hash: try_copy_descriptor_bytes(&nvt.manifest_key, "NVT manifest hash")?,
+      generation: nvt.generation,
+      resolution: nvt.resolution,
+      tile_cells: nvt.tile_cells,
+      tile_directory_root: nvt.tile_directory_root.map(|root| try_copy_descriptor_bytes(root, "NVT tile directory root")).transpose()?,
+    })
+  }
+
   pub fn manifest_hash(&self) -> &[u8] {
     &self.manifest_hash
   }
@@ -608,13 +618,13 @@ impl IndexCoverageRegistryV1 {
         if nvt.manifest_key != pointer.target_manifest_hash || nvt.generation != pointer.generation {
           IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::CorruptManifest)
         } else {
-          IndexCoverageNvtStatusV1::Usable(IndexCoverageNvtDescriptorV1 {
-            manifest_hash: nvt.manifest_key,
-            generation: nvt.generation,
-            resolution: nvt.resolution,
-            tile_cells: nvt.tile_cells,
-            tile_directory_root: nvt.tile_directory_root.map(ToOwned::to_owned),
-          })
+          match IndexCoverageNvtDescriptorV1::try_from_pinned(&nvt) {
+            Ok(descriptor) => IndexCoverageNvtStatusV1::Usable(descriptor),
+            Err(IndexCoverageRegistryErrorV1::Allocation(_)) => {
+              IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::ResourceLimit)
+            }
+            Err(error) => return Err(error),
+          }
         }
       }
       NvtBasisStatusV1::Unavailable(fallback) => IndexCoverageNvtStatusV1::Unavailable(match fallback.reason {
@@ -651,6 +661,15 @@ impl IndexCoverageRegistryV1 {
     }
     Ok(status)
   }
+}
+
+fn try_copy_descriptor_bytes(value: &[u8], context: &'static str) -> Result<Vec<u8>, IndexCoverageRegistryErrorV1> {
+  let mut copy = Vec::new();
+  copy
+    .try_reserve_exact(value.len())
+    .map_err(|error| IndexCoverageRegistryErrorV1::Allocation(format!("{context} allocation failed: {error}")))?;
+  copy.extend_from_slice(value);
+  Ok(copy)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]

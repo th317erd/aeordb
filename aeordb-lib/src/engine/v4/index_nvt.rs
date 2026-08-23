@@ -927,8 +927,8 @@ fn load_materialized_nvt_tile_cursor(
   loaded.ok_or_else(|| lookup_closure_error("NVT directory predecessor path selected no descriptor"))
 }
 
-struct NvtTileLeafValidatorV1<'a> {
-  basis: &'a PinnedFieldNvtV1<'a>,
+pub(crate) struct NvtTileLeafValidatorV1<'a> {
+  pub(crate) basis: &'a PinnedFieldNvtV1<'a>,
 }
 
 impl ArtifactLeafValidatorV1 for NvtTileLeafValidatorV1<'_> {

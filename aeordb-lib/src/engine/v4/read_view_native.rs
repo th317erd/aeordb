@@ -24,10 +24,14 @@ use super::hash::digest_parts;
 use super::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
 use super::index_artifact_native::{
   NativeSelectedArtifactCursorErrorClassV1, NativeSelectedArtifactCursorErrorV1, NativeSelectedArtifactLoadRequestV1,
-  NativeSelectedArtifactPageCursorV1, load_native_selected_artifact_page_cursor_v1,
+  NativeSelectedArtifactPageCursorV1, NativeSelectedPostingSeekLoadRequestV1, load_native_selected_artifact_page_cursor_v1,
+  load_native_selected_posting_seek_v1,
+};
+pub use super::index_artifact_native::{
+  NativeSelectedNvtFallbackReasonV1, NativeSelectedNvtFallbackV1, NativeSelectedPostingPageV1, NativeSelectedPostingSeekSourceV1,
 };
 use super::index_coverage_planner::IndexCoverageGenerationHealthV1;
-use super::index_coverage_registry::{field_definition_fingerprint, field_dependency_fingerprint};
+use super::index_coverage_registry::{IndexCoverageNvtDescriptorV1, field_definition_fingerprint, field_dependency_fingerprint};
 use super::index_native_parser::{
   NativeIndexParserBodySourceV1, NativeIndexParserBodyV1, NativeIndexParserExecutorV1, native_parser_body_reservation_bytes_v1,
 };
@@ -263,6 +267,18 @@ pub struct NativeSelectedArtifactCursorRequestV1<'a> {
   pub selected_generation: &'a QueryPlanningCoverageGenerationV1,
   pub role: OrderedIndexRoleV1,
   pub seek: ArtifactPageSeekV1<'a>,
+  pub neighbors: ArtifactPageNeighborModeV1,
+  pub limits: ArtifactPageCursorLimitsV1,
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSelectedPostingSeekRequestV1<'a> {
+  pub catalog: &'a RootAwareQueryFieldCatalogV1,
+  pub scope_id: &'a [u8],
+  pub selected_generation: &'a QueryPlanningCoverageGenerationV1,
+  pub nvt_descriptor: Option<&'a IndexCoverageNvtDescriptorV1>,
+  pub target_coordinate: u64,
+  pub target_posting_position: &'a [u8],
   pub neighbors: ArtifactPageNeighborModeV1,
   pub limits: ArtifactPageCursorLimitsV1,
 }
@@ -1159,6 +1175,29 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       selected_generation: request.selected_generation,
       role: request.role,
       seek: request.seek,
+      neighbors: request.neighbors,
+      limits: request.limits,
+      cancellation: self.view.cancellation(),
+    })
+    .map_err(map_selected_artifact_cursor_error)
+  }
+
+  pub fn seek_posting_page(
+    &self,
+    request: &NativeSelectedPostingSeekRequestV1<'_>,
+  ) -> Result<Option<NativeSelectedPostingPageV1>, NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    self.validate_selected_artifact_catalog(request.catalog, request.scope_id, request.selected_generation, OrderedIndexRoleV1::Posting)?;
+    load_native_selected_posting_seek_v1(NativeSelectedPostingSeekLoadRequestV1 {
+      publisher: self.source.publisher.as_ref(),
+      memory: self.source.memory.as_ref(),
+      captured: self.view.captured_header(),
+      supported_reader_capabilities: self.view.supported_reader_capabilities(),
+      selected_root: &self.view.root_metadata().hash,
+      selected_generation: request.selected_generation,
+      nvt_descriptor: request.nvt_descriptor,
+      target_coordinate: request.target_coordinate,
+      target_posting_position: request.target_posting_position,
       neighbors: request.neighbors,
       limits: request.limits,
       cancellation: self.view.cancellation(),
