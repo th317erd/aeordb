@@ -60,7 +60,7 @@ use aeordb::engine::v4::query_planner::{
 };
 use aeordb::engine::v4::query_scope_execution::{
   QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1, QueryExactScopeExecutionRequestV1, QueryExactScopeFallbackDiagnosticV1,
-  execute_exact_query_scope_v1,
+  execute_exact_query_scope_into_v1, execute_exact_query_scope_v1,
 };
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
@@ -1195,8 +1195,8 @@ struct CompleteCandidateRecordingSink {
   begin_calls: u64,
   selected_namespace_root: Vec<u8>,
   scope_id: Option<Vec<u8>>,
-  staged: Vec<(Vec<u8>, Vec<u8>, String)>,
-  committed: Vec<(Vec<u8>, Vec<u8>, String)>,
+  staged: Vec<(Vec<u8>, Vec<u8>, Option<String>)>,
+  committed: Vec<(Vec<u8>, Vec<u8>, Option<String>)>,
   committed_receipt: Option<(u64, u64, u64)>,
   rollbacks: u64,
 }
@@ -1245,14 +1245,8 @@ impl QueryExecutionMatchSinkV1 for CompleteCandidateRecordingSink {
       return Err(self.error());
     }
     let path = match matched.path {
-      QueryExecutionMatchPathV1::Canonical(path) => path.to_string(),
-      QueryExecutionMatchPathV1::RequiresSelectedRootLookup => {
-        return Err(QueryExecutionSinkErrorV1::new(
-          QueryExecutionSinkErrorClassV1::Internal,
-          "fixture_complete_candidate_path",
-          "complete candidate unexpectedly omitted its rechecked canonical path",
-        ));
-      }
+      QueryExecutionMatchPathV1::Canonical(path) => Some(path.to_string()),
+      QueryExecutionMatchPathV1::RequiresSelectedRootLookup => None,
     };
     self.staged.push((matched.file_key.to_vec(), matched.record_revision.to_vec(), path));
     Ok(())
@@ -1690,7 +1684,7 @@ fn complete_candidate_streaming_sink_matches_collected_root_and_scope_results() 
     .execution()
     .matches()
     .iter()
-    .map(|matched| (matched.file_key().to_vec(), matched.record_revision().to_vec(), matched.path().to_string()))
+    .map(|matched| (matched.file_key().to_vec(), matched.record_revision().to_vec(), Some(matched.path().to_string())))
     .collect::<Vec<_>>();
 
   let root_memory = memory(32 * 1_024 * 1_024);
@@ -2812,12 +2806,20 @@ fn exact_scope_orchestrator_delegates_every_correctness_authority() {
   let source = include_str!("../../src/engine/v4/query_scope_execution.rs");
   for required in [
     "compose_boolean_candidate_plan_v1",
+    "execute_exact_query_scope_with_output_v1",
+    "execute_authoritative_scope_query_into_v1",
     "execute_authoritative_scope_query_v1",
+    "execute_complete_candidate_scope_query_into_v1",
     "execute_complete_candidate_scope_query_v1",
     "execute_composed_partial_candidates_v1",
   ] {
     assert!(source.contains(required), "scope orchestrator stopped delegating to {required}");
   }
+  assert_eq!(
+    source.matches("compose_boolean_candidate_plan_v1(").count(),
+    1,
+    "collected and streaming scope execution must share one candidate-selection and fallback state machine"
+  );
   for forbidden in [
     "StorageEngine",
     "impl QueryAuthoritativeScopeSourceV1",
@@ -3526,6 +3528,252 @@ fn exact_scope_dispatches_authoritative_complete_and_exact_partial_paths() {
   );
   drop(partial);
   assert_eq!(partial_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn exact_scope_streaming_sink_dispatches_authoritative_complete_and_proven_partial_paths() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let paths = ["/alpha.json", "/beta.json"];
+  let cancellation = CancellationToken::new();
+
+  let authoritative_plan = planned_query_with_generation_sources(
+    predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+    None,
+    None,
+  );
+  let authoritative_documents = filename_execution_documents(algorithm, &authoritative_plan.scope_id, &paths);
+  let expected_file_key = authoritative_documents.iter().find(|document| document.path == "/alpha.json").unwrap().file_key.clone();
+  let mut authoritative_source = AuthoritativeExecutionSource {
+    root: authoritative_plan.root.clone(),
+    publication_sequence: authoritative_plan.plan.publication_sequence(),
+    documents: authoritative_documents,
+  };
+  let authoritative_memory = memory(32 * 1_024 * 1_024);
+  let mut authoritative_sink = CompleteCandidateRecordingSink::new(CompleteCandidateSinkFault::None);
+  let authoritative = execute_exact_query_scope_into_v1(
+    QueryExactScopeExecutionRequestV1 {
+      plan: &authoritative_plan.plan,
+      catalogs: &authoritative_plan.catalogs,
+      scope_id: &authoritative_plan.scope_id,
+      authoritative_source: &mut authoritative_source,
+      complete_source: None,
+      partial_source: None,
+      complement: None,
+      rechecker: None,
+      memory: &authoritative_memory,
+      cancellation: &cancellation,
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    },
+    &mut authoritative_sink,
+  )
+  .unwrap();
+  assert_eq!(authoritative.path(), QueryExactScopeExecutionPathV1::Authoritative);
+  assert_eq!(authoritative.scope_id(), authoritative_plan.scope_id);
+  assert_eq!(authoritative.receipt().scope_id(), Some(authoritative_plan.scope_id.as_slice()));
+  assert_eq!(authoritative.receipt().selected_namespace_root(), authoritative_plan.root);
+  assert_eq!(authoritative_sink.committed.len(), 1);
+  assert_eq!(authoritative_sink.committed[0].0, expected_file_key);
+  assert_eq!(authoritative_sink.committed[0].2.as_deref(), Some("/alpha.json"));
+  assert_eq!(authoritative_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let complete_plan = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let complete_documents = filename_execution_documents(algorithm, &complete_plan.scope_id, &paths);
+  let mut complete_source = single_complete_candidate_source(algorithm, &complete_plan, complete_documents, &[1]);
+  let mut unused_authority = PanicAuthoritativeSource;
+  let complete_memory = memory(32 * 1_024 * 1_024);
+  let mut complete_sink = CompleteCandidateRecordingSink::new(CompleteCandidateSinkFault::None);
+  let complete = execute_exact_query_scope_into_v1(
+    QueryExactScopeExecutionRequestV1 {
+      plan: &complete_plan.plan,
+      catalogs: &complete_plan.catalogs,
+      scope_id: &complete_plan.scope_id,
+      authoritative_source: &mut unused_authority,
+      complete_source: Some(&mut complete_source),
+      partial_source: None,
+      complement: None,
+      rechecker: None,
+      memory: &complete_memory,
+      cancellation: &cancellation,
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    },
+    &mut complete_sink,
+  )
+  .unwrap();
+  assert_eq!(complete.path(), QueryExactScopeExecutionPathV1::Complete);
+  assert_eq!(complete.scope_id(), complete_plan.scope_id);
+  assert_eq!(complete.receipt().selected_namespace_root(), complete_plan.root);
+  assert_eq!(complete_sink.committed.len(), 1);
+  assert_eq!(complete_sink.committed[0].2.as_deref(), Some("/alpha.json"));
+  assert_eq!(complete_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let partial_plan = planned_partial_candidate(algorithm);
+  let partial_documents = filename_execution_documents(algorithm, &partial_plan.scope_id, &paths);
+  let alpha = partial_documents.iter().find(|document| document.ordinal == 1).unwrap();
+  let expected_partial_identity = (alpha.file_key.clone(), alpha.revision.clone(), None);
+  let candidate_rows = [(&partial_plan.candidate, 1u64)];
+  let mut by_ordinal = partial_documents.iter().collect::<Vec<_>>();
+  by_ordinal.sort_unstable_by_key(|document| document.ordinal);
+  let scope_rows = by_ordinal
+    .iter()
+    .map(|document| (document.ordinal, document.file_key.as_slice(), document.revision.as_slice(), document.path.as_str()))
+    .collect::<Vec<_>>();
+  let mut partial_source = partial_artifact_source(algorithm, &partial_plan.scope_id, &candidate_rows, &scope_rows);
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  rechecker
+    .outcomes
+    .insert(alpha.file_key.clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: alpha.revision.clone(), matches: true });
+  let mut unused_authority = PanicAuthoritativeSource;
+  let partial_memory = memory(32 * 1_024 * 1_024);
+  let mut partial_sink = CompleteCandidateRecordingSink::new(CompleteCandidateSinkFault::None);
+  let partial = execute_exact_query_scope_into_v1(
+    QueryExactScopeExecutionRequestV1 {
+      plan: &partial_plan.plan,
+      catalogs: &partial_plan.catalogs,
+      scope_id: &partial_plan.scope_id,
+      authoritative_source: &mut unused_authority,
+      complete_source: None,
+      partial_source: Some(&mut partial_source),
+      complement: Some(&mut complement),
+      rechecker: Some(&mut rechecker),
+      memory: &partial_memory,
+      cancellation: &cancellation,
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    },
+    &mut partial_sink,
+  )
+  .unwrap();
+  assert_eq!(partial.path(), QueryExactScopeExecutionPathV1::Partial);
+  assert_eq!(partial.scope_id(), partial_plan.scope_id);
+  assert_eq!(partial.receipt().selected_namespace_root(), partial_plan.root);
+  assert_eq!(partial.receipt().match_count(), 1);
+  assert_eq!(partial.receipt().examined_documents(), 1);
+  assert_eq!(partial.receipt().examined_field_values(), 0);
+  assert_eq!(partial_sink.committed, vec![expected_partial_identity]);
+  assert_eq!(partial_sink.begin_calls, 1);
+  assert_eq!(partial_sink.rollbacks, 0);
+  assert_eq!(partial_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn exact_partial_scope_never_opens_or_exposes_a_sink_batch_before_proof_completion() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_partial_candidate(algorithm);
+  let documents = filename_execution_documents(algorithm, &planned.scope_id, &["/alpha.json", "/beta.json"]);
+  let alpha = documents.iter().find(|document| document.ordinal == 1).unwrap();
+  let candidate_rows = [(&planned.candidate, 1u64)];
+  let mut by_ordinal = documents.iter().collect::<Vec<_>>();
+  by_ordinal.sort_unstable_by_key(|document| document.ordinal);
+  let scope_rows = by_ordinal
+    .iter()
+    .map(|document| (document.ordinal, document.file_key.as_slice(), document.revision.as_slice(), document.path.as_str()))
+    .collect::<Vec<_>>();
+  let mut partial_source = partial_artifact_source(algorithm, &planned.scope_id, &candidate_rows, &scope_rows);
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  assert!(!rechecker.outcomes.contains_key(&alpha.file_key), "fixture must fail during selected-root proof");
+  let mut unused_authority = PanicAuthoritativeSource;
+  let memory = memory(32 * 1_024 * 1_024);
+  let mut sink = CompleteCandidateRecordingSink::new(CompleteCandidateSinkFault::None);
+
+  let error = execute_exact_query_scope_into_v1(
+    QueryExactScopeExecutionRequestV1 {
+      plan: &planned.plan,
+      catalogs: &planned.catalogs,
+      scope_id: &planned.scope_id,
+      authoritative_source: &mut unused_authority,
+      complete_source: None,
+      partial_source: Some(&mut partial_source),
+      complement: Some(&mut complement),
+      rechecker: Some(&mut rechecker),
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    },
+    &mut sink,
+  )
+  .unwrap_err();
+
+  match error {
+    QueryExactScopeExecutionErrorV1::Partial(error) => assert_eq!(error.code(), "partial_fixture_recheck"),
+    error => panic!("unexpected partial proof failure: {error:?}"),
+  }
+  assert_eq!(sink.begin_calls, 0);
+  assert_eq!(sink.rollbacks, 0);
+  assert!(sink.staged.is_empty());
+  assert!(sink.committed.is_empty());
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn exact_partial_scope_sink_failure_is_terminal_and_rolls_back_the_proven_batch() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_partial_candidate(algorithm);
+  let documents = filename_execution_documents(algorithm, &planned.scope_id, &["/alpha.json", "/beta.json"]);
+  let alpha = documents.iter().find(|document| document.ordinal == 1).unwrap();
+  let candidate_rows = [(&planned.candidate, 1u64)];
+  let mut by_ordinal = documents.iter().collect::<Vec<_>>();
+  by_ordinal.sort_unstable_by_key(|document| document.ordinal);
+  let scope_rows = by_ordinal
+    .iter()
+    .map(|document| (document.ordinal, document.file_key.as_slice(), document.revision.as_slice(), document.path.as_str()))
+    .collect::<Vec<_>>();
+  let mut partial_source = partial_artifact_source(algorithm, &planned.scope_id, &candidate_rows, &scope_rows);
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  rechecker
+    .outcomes
+    .insert(alpha.file_key.clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: alpha.revision.clone(), matches: true });
+  let mut unused_authority = PanicAuthoritativeSource;
+  let memory = memory(32 * 1_024 * 1_024);
+  let mut sink = CompleteCandidateRecordingSink::new(CompleteCandidateSinkFault::Push);
+
+  let error = execute_exact_query_scope_into_v1(
+    QueryExactScopeExecutionRequestV1 {
+      plan: &planned.plan,
+      catalogs: &planned.catalogs,
+      scope_id: &planned.scope_id,
+      authoritative_source: &mut unused_authority,
+      complete_source: None,
+      partial_source: Some(&mut partial_source),
+      complement: Some(&mut complement),
+      rechecker: Some(&mut rechecker),
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    },
+    &mut sink,
+  )
+  .unwrap_err();
+
+  match error {
+    QueryExactScopeExecutionErrorV1::Execution(error) => {
+      assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
+      assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Sink);
+      assert_eq!(error.code(), "fixture_complete_candidate_sink");
+    }
+    error => panic!("partial sink failure was retried or misclassified: {error:?}"),
+  }
+  assert_eq!(sink.begin_calls, 1);
+  assert_eq!(sink.rollbacks, 1);
+  assert!(sink.staged.is_empty());
+  assert!(sink.committed.is_empty());
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
 
 #[test]

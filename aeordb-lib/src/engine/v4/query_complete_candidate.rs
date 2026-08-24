@@ -548,6 +548,10 @@ impl QueryCompleteCandidateStreamExecutionV1 {
   pub const fn authoritative_rechecks(&self) -> u64 {
     self.authoritative_rechecks
   }
+
+  pub fn into_receipt(self) -> QueryExecutionStreamReceiptV1 {
+    self.receipt
+  }
 }
 
 #[derive(Default)]

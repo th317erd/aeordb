@@ -24,11 +24,13 @@ use super::query_candidate_composition::{
 };
 use super::query_complete_candidate::{
   QueryCompleteCandidateExecutionV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateScopeExecutionRequestV1,
-  QueryCompleteCandidateSourceV1, execute_complete_candidate_scope_query_v1,
+  QueryCompleteCandidateSourceV1, execute_complete_candidate_scope_query_into_v1, execute_complete_candidate_scope_query_v1,
 };
 use super::query_executor::{
-  QueryAuthoritativeScopeSourceV1, QueryExecutionErrorClassV1, QueryExecutionErrorOriginV1, QueryExecutionErrorV1, QueryExecutionLimitsV1,
-  QueryExecutionMatchV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1, execute_authoritative_scope_query_v1,
+  ActiveQuerySinkBatchV1, QueryAuthoritativeScopeSourceV1, QueryExecutionErrorClassV1, QueryExecutionErrorOriginV1, QueryExecutionErrorV1,
+  QueryExecutionLimitsV1, QueryExecutionMatchPathV1, QueryExecutionMatchRefV1, QueryExecutionMatchSinkV1, QueryExecutionMatchV1,
+  QueryExecutionSinkBatchV1, QueryExecutionStreamReceiptV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1,
+  execute_authoritative_scope_query_into_v1, execute_authoritative_scope_query_v1, require_not_cancelled,
 };
 use super::query_partial_candidate::{
   QueryComposedPartialCandidateExecutionRequestV1, QueryPartialCandidateArtifactSourceV1, execute_composed_partial_candidates_v1,
@@ -180,6 +182,44 @@ impl QueryExactScopeExecutionV1 {
   }
 }
 
+pub struct QueryExactScopeStreamExecutionV1 {
+  scope_id: [u8; 64],
+  scope_id_length: usize,
+  path: QueryExactScopeExecutionPathV1,
+  fallback_diagnostic: Option<QueryExactScopeFallbackDiagnosticV1>,
+  receipt: QueryExecutionStreamReceiptV1,
+}
+
+impl fmt::Debug for QueryExactScopeStreamExecutionV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("QueryExactScopeStreamExecutionV1")
+      .field("scope_id", &hex::encode(self.scope_id()))
+      .field("path", &self.path)
+      .field("fallback_diagnostic", &self.fallback_diagnostic)
+      .field("receipt", &self.receipt)
+      .finish()
+  }
+}
+
+impl QueryExactScopeStreamExecutionV1 {
+  pub fn scope_id(&self) -> &[u8] {
+    &self.scope_id[..self.scope_id_length]
+  }
+
+  pub const fn path(&self) -> QueryExactScopeExecutionPathV1 {
+    self.path
+  }
+
+  pub const fn fallback_diagnostic(&self) -> Option<&QueryExactScopeFallbackDiagnosticV1> {
+    self.fallback_diagnostic.as_ref()
+  }
+
+  pub const fn receipt(&self) -> &QueryExecutionStreamReceiptV1 {
+    &self.receipt
+  }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryExactScopeIdentityRefV1<'a> {
   file_key: &'a [u8],
@@ -229,6 +269,163 @@ impl ExactSizeIterator for QueryExactScopeIdentityIterV1<'_> {}
 pub fn execute_exact_query_scope_v1(
   request: QueryExactScopeExecutionRequestV1<'_>,
 ) -> Result<QueryExactScopeExecutionV1, QueryExactScopeExecutionErrorV1> {
+  let mut output = QueryExactScopeRetainedOutputV1;
+  let execution = execute_exact_query_scope_with_output_v1(request, &mut output)?;
+  Ok(QueryExactScopeExecutionV1 {
+    scope_id: execution.scope_id.0,
+    scope_id_length: execution.scope_id.1,
+    path: execution.path,
+    fallback_diagnostic: execution.fallback_diagnostic,
+    retained: execution.output,
+  })
+}
+
+pub fn execute_exact_query_scope_into_v1(
+  request: QueryExactScopeExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryExactScopeStreamExecutionV1, QueryExactScopeExecutionErrorV1> {
+  let mut output = QueryExactScopeStreamingOutputV1 { sink };
+  let execution = execute_exact_query_scope_with_output_v1(request, &mut output)?;
+  Ok(QueryExactScopeStreamExecutionV1 {
+    scope_id: execution.scope_id.0,
+    scope_id_length: execution.scope_id.1,
+    path: execution.path,
+    fallback_diagnostic: execution.fallback_diagnostic,
+    receipt: execution.output,
+  })
+}
+
+struct QueryExactScopeCoreExecutionV1<T> {
+  scope_id: ([u8; 64], usize),
+  path: QueryExactScopeExecutionPathV1,
+  fallback_diagnostic: Option<QueryExactScopeFallbackDiagnosticV1>,
+  output: T,
+}
+
+trait QueryExactScopeOutputV1 {
+  type Execution;
+
+  fn execute_authoritative(&mut self, request: RootAwareQueryScopeExecutionRequestV1<'_>)
+    -> Result<Self::Execution, QueryExecutionErrorV1>;
+
+  fn execute_complete(
+    &mut self,
+    request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1>;
+
+  fn execute_partial(
+    &mut self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+    limits: QueryExecutionLimitsV1,
+    execution: ExactPartialIndexAccelerationV1,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1>;
+}
+
+struct QueryExactScopeRetainedOutputV1;
+
+impl QueryExactScopeOutputV1 for QueryExactScopeRetainedOutputV1 {
+  type Execution = QueryExactScopeRetainedExecutionV1;
+
+  fn execute_authoritative(
+    &mut self,
+    request: RootAwareQueryScopeExecutionRequestV1<'_>,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    execute_authoritative_scope_query_v1(request).map(QueryExactScopeRetainedExecutionV1::Authoritative)
+  }
+
+  fn execute_complete(
+    &mut self,
+    request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    execute_complete_candidate_scope_query_v1(request).map(QueryExactScopeRetainedExecutionV1::Complete)
+  }
+
+  fn execute_partial(
+    &mut self,
+    _plan: &CompiledRootAwareQueryPlanV1,
+    _scope_id: &[u8],
+    _cancellation: &CancellationToken,
+    _limits: QueryExecutionLimitsV1,
+    execution: ExactPartialIndexAccelerationV1,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    Ok(QueryExactScopeRetainedExecutionV1::Partial(execution))
+  }
+}
+
+struct QueryExactScopeStreamingOutputV1<'a> {
+  sink: &'a mut dyn QueryExecutionMatchSinkV1,
+}
+
+impl QueryExactScopeOutputV1 for QueryExactScopeStreamingOutputV1<'_> {
+  type Execution = QueryExecutionStreamReceiptV1;
+
+  fn execute_authoritative(
+    &mut self,
+    request: RootAwareQueryScopeExecutionRequestV1<'_>,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    execute_authoritative_scope_query_into_v1(request, self.sink)
+  }
+
+  fn execute_complete(
+    &mut self,
+    request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    execute_complete_candidate_scope_query_into_v1(request, self.sink).map(|execution| execution.into_receipt())
+  }
+
+  fn execute_partial(
+    &mut self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+    limits: QueryExecutionLimitsV1,
+    execution: ExactPartialIndexAccelerationV1,
+  ) -> Result<Self::Execution, QueryExecutionErrorV1> {
+    if execution.proof().target_namespace_root() != plan.selected_namespace_root() {
+      return Err(QueryExecutionErrorV1::internal(
+        "query_scope_partial_target_root",
+        "exact partial proof does not target the selected namespace root",
+      ));
+    }
+    let examined_documents = execution
+      .proof()
+      .changed_document_count()
+      .checked_add(execution.rechecked_candidate_count())
+      .and_then(|count| count.checked_sub(execution.overlap_deduplicated_count()))
+      .ok_or_else(|| {
+        QueryExecutionErrorV1::internal(
+          "query_scope_partial_examined_count",
+          "exact partial examined-document count overflowed or underflowed",
+        )
+      })?;
+    require_not_cancelled(cancellation)?;
+    let mut batch = ActiveQuerySinkBatchV1::begin(
+      self.sink,
+      QueryExecutionSinkBatchV1 {
+        selected_namespace_root: plan.selected_namespace_root(),
+        scope_id: Some(scope_id),
+        maximum_matches: limits.maximum_matches(),
+      },
+    )?;
+    for matched in execution.matches() {
+      require_not_cancelled(cancellation)?;
+      batch.push(QueryExecutionMatchRefV1 {
+        file_key: matched.file_key(),
+        record_revision: matched.record_revision_hash(),
+        path: QueryExecutionMatchPathV1::RequiresSelectedRootLookup,
+      })?;
+    }
+    require_not_cancelled(cancellation)?;
+    batch.commit(plan.selected_namespace_root(), Some(scope_id), examined_documents, 0)
+  }
+}
+
+fn execute_exact_query_scope_with_output_v1<O: QueryExactScopeOutputV1>(
+  request: QueryExactScopeExecutionRequestV1<'_>,
+  output: &mut O,
+) -> Result<QueryExactScopeCoreExecutionV1<O::Execution>, QueryExactScopeExecutionErrorV1> {
   let QueryExactScopeExecutionRequestV1 {
     plan,
     catalogs,
@@ -262,6 +459,7 @@ pub fn execute_exact_query_scope_v1(
         QueryExactScopeExecutionPathV1::CompositionFallback,
         diagnostic,
         retained_scope_id,
+        output,
       );
     }
     Err(error) => return Err(QueryExactScopeExecutionErrorV1::Composition(error)),
@@ -269,21 +467,25 @@ pub fn execute_exact_query_scope_v1(
 
   match candidate_plan.kind() {
     QueryBooleanCandidatePlanKindV1::Authoritative => {
-      let execution = execute_authoritative_scope(plan, catalogs, scope_id, authoritative_source, memory, cancellation, execution_limits)
+      let execution = output
+        .execute_authoritative(RootAwareQueryScopeExecutionRequestV1 {
+          plan,
+          catalogs,
+          scope_id,
+          source: authoritative_source,
+          memory,
+          cancellation,
+          limits: execution_limits,
+        })
         .map_err(QueryExactScopeExecutionErrorV1::Execution)?;
-      Ok(exact_scope_execution(
-        retained_scope_id,
-        QueryExactScopeExecutionPathV1::Authoritative,
-        None,
-        QueryExactScopeRetainedExecutionV1::Authoritative(execution),
-      ))
+      Ok(exact_scope_core_execution(retained_scope_id, QueryExactScopeExecutionPathV1::Authoritative, None, execution))
     }
     QueryBooleanCandidatePlanKindV1::Complete => {
       let source = complete_source.ok_or(QueryExactScopeExecutionErrorV1::InvalidRequest {
         code: "query_scope_complete_source",
         context: "complete scope execution requires a complete-candidate source",
       })?;
-      match execute_complete_candidate_scope_query_v1(QueryCompleteCandidateScopeExecutionRequestV1 {
+      match output.execute_complete(QueryCompleteCandidateScopeExecutionRequestV1 {
         plan,
         catalogs,
         scope_id,
@@ -293,12 +495,7 @@ pub fn execute_exact_query_scope_v1(
         execution_limits,
         candidate_limits,
       }) {
-        Ok(execution) => Ok(exact_scope_execution(
-          retained_scope_id,
-          QueryExactScopeExecutionPathV1::Complete,
-          None,
-          QueryExactScopeRetainedExecutionV1::Complete(execution),
-        )),
+        Ok(execution) => Ok(exact_scope_core_execution(retained_scope_id, QueryExactScopeExecutionPathV1::Complete, None, execution)),
         Err(error) if complete_failure_can_retry_authoritatively(&error) => execute_authoritative_fallback(
           plan,
           catalogs,
@@ -310,6 +507,7 @@ pub fn execute_exact_query_scope_v1(
           QueryExactScopeExecutionPathV1::CompleteFallback,
           QueryExactScopeFallbackDiagnosticV1::Complete(error),
           retained_scope_id,
+          output,
         ),
         Err(error) => Err(QueryExactScopeExecutionErrorV1::Execution(error)),
       }
@@ -340,12 +538,12 @@ pub fn execute_exact_query_scope_v1(
       })
       .map_err(QueryExactScopeExecutionErrorV1::Partial)?
       {
-        IndexPartialAccelerationOutcomeV1::Exact(execution) => Ok(exact_scope_execution(
-          retained_scope_id,
-          QueryExactScopeExecutionPathV1::Partial,
-          None,
-          QueryExactScopeRetainedExecutionV1::Partial(execution),
-        )),
+        IndexPartialAccelerationOutcomeV1::Exact(execution) => {
+          let execution = output
+            .execute_partial(plan, scope_id, cancellation, execution_limits, execution)
+            .map_err(QueryExactScopeExecutionErrorV1::Execution)?;
+          Ok(exact_scope_core_execution(retained_scope_id, QueryExactScopeExecutionPathV1::Partial, None, execution))
+        }
         IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, diagnostic } => execute_authoritative_fallback(
           plan,
           catalogs,
@@ -357,6 +555,7 @@ pub fn execute_exact_query_scope_v1(
           QueryExactScopeExecutionPathV1::PartialFallback,
           QueryExactScopeFallbackDiagnosticV1::Partial { reason, diagnostic },
           retained_scope_id,
+          output,
         ),
       }
     }
@@ -364,7 +563,7 @@ pub fn execute_exact_query_scope_v1(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_authoritative_fallback(
+fn execute_authoritative_fallback<O: QueryExactScopeOutputV1>(
   plan: &CompiledRootAwareQueryPlanV1,
   catalogs: &[RootAwareQueryFieldCatalogV1],
   scope_id: &[u8],
@@ -375,22 +574,29 @@ fn execute_authoritative_fallback(
   path: QueryExactScopeExecutionPathV1,
   diagnostic: QueryExactScopeFallbackDiagnosticV1,
   retained_scope_id: ([u8; 64], usize),
-) -> Result<QueryExactScopeExecutionV1, QueryExactScopeExecutionErrorV1> {
-  match execute_authoritative_scope(plan, catalogs, scope_id, source, memory, cancellation, limits) {
-    Ok(execution) => {
-      Ok(exact_scope_execution(retained_scope_id, path, Some(diagnostic), QueryExactScopeRetainedExecutionV1::Authoritative(execution)))
-    }
+  output: &mut O,
+) -> Result<QueryExactScopeCoreExecutionV1<O::Execution>, QueryExactScopeExecutionErrorV1> {
+  match output.execute_authoritative(RootAwareQueryScopeExecutionRequestV1 {
+    plan,
+    catalogs,
+    scope_id,
+    source,
+    memory,
+    cancellation,
+    limits,
+  }) {
+    Ok(execution) => Ok(exact_scope_core_execution(retained_scope_id, path, Some(diagnostic), execution)),
     Err(authoritative) => Err(QueryExactScopeExecutionErrorV1::AuthoritativeFallbackFailed { diagnostic, authoritative }),
   }
 }
 
-fn exact_scope_execution(
+fn exact_scope_core_execution<T>(
   retained_scope_id: ([u8; 64], usize),
   path: QueryExactScopeExecutionPathV1,
   fallback_diagnostic: Option<QueryExactScopeFallbackDiagnosticV1>,
-  retained: QueryExactScopeRetainedExecutionV1,
-) -> QueryExactScopeExecutionV1 {
-  QueryExactScopeExecutionV1 { scope_id: retained_scope_id.0, scope_id_length: retained_scope_id.1, path, fallback_diagnostic, retained }
+  output: T,
+) -> QueryExactScopeCoreExecutionV1<T> {
+  QueryExactScopeCoreExecutionV1 { scope_id: retained_scope_id, path, fallback_diagnostic, output }
 }
 
 fn retain_scope_id(plan: &CompiledRootAwareQueryPlanV1, scope_id: &[u8]) -> Result<([u8; 64], usize), QueryExactScopeExecutionErrorV1> {
@@ -409,26 +615,6 @@ fn retain_scope_id(plan: &CompiledRootAwareQueryPlanV1, scope_id: &[u8]) -> Resu
   let mut retained = [0u8; 64];
   retained[..scope_id.len()].copy_from_slice(scope_id);
   Ok((retained, scope_id.len()))
-}
-
-fn execute_authoritative_scope(
-  plan: &CompiledRootAwareQueryPlanV1,
-  catalogs: &[RootAwareQueryFieldCatalogV1],
-  scope_id: &[u8],
-  source: &mut dyn QueryAuthoritativeScopeSourceV1,
-  memory: &MemoryCoordinator,
-  cancellation: &CancellationToken,
-  limits: QueryExecutionLimitsV1,
-) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
-  execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
-    plan,
-    catalogs,
-    scope_id,
-    source,
-    memory,
-    cancellation,
-    limits,
-  })
 }
 
 fn complete_failure_can_retry_authoritatively(error: &QueryExecutionErrorV1) -> bool {

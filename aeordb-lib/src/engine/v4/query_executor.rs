@@ -88,6 +88,10 @@ impl QueryExecutionLimitsV1 {
   pub const fn new(counts: QueryExecutionCountLimitsV1, bytes: QueryExecutionByteLimitsV1) -> Self {
     Self { counts, bytes }
   }
+
+  pub const fn maximum_matches(self) -> u64 {
+    self.counts.maximum_matches
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -441,7 +445,7 @@ impl QueryExecutionErrorV1 {
     }
   }
 
-  fn internal(code: &'static str, context: impl Into<String>) -> Self {
+  pub(super) fn internal(code: &'static str, context: impl Into<String>) -> Self {
     Self { class: QueryExecutionErrorClassV1::Internal, origin: QueryExecutionErrorOriginV1::Execution, code, context: context.into() }
   }
 
@@ -694,7 +698,7 @@ struct WorkBudgetV1<'a> {
   cancellation: &'a CancellationToken,
 }
 
-struct ActiveQuerySinkBatchV1<'a> {
+pub(super) struct ActiveQuerySinkBatchV1<'a> {
   sink: &'a mut dyn QueryExecutionMatchSinkV1,
   maximum_matches: u64,
   match_count: u64,
@@ -702,12 +706,15 @@ struct ActiveQuerySinkBatchV1<'a> {
 }
 
 impl<'a> ActiveQuerySinkBatchV1<'a> {
-  fn begin(sink: &'a mut dyn QueryExecutionMatchSinkV1, batch: QueryExecutionSinkBatchV1<'_>) -> Result<Self, QueryExecutionErrorV1> {
+  pub(super) fn begin(
+    sink: &'a mut dyn QueryExecutionMatchSinkV1,
+    batch: QueryExecutionSinkBatchV1<'_>,
+  ) -> Result<Self, QueryExecutionErrorV1> {
     sink.begin_batch(batch).map_err(QueryExecutionErrorV1::sink)?;
     Ok(Self { sink, maximum_matches: batch.maximum_matches, match_count: 0, active: true })
   }
 
-  fn push(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionErrorV1> {
+  pub(super) fn push(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionErrorV1> {
     if self.match_count >= self.maximum_matches {
       return Err(QueryExecutionErrorV1::resource(
         "query_execution_match_limit",
@@ -722,7 +729,7 @@ impl<'a> ActiveQuerySinkBatchV1<'a> {
     Ok(())
   }
 
-  fn commit(
+  pub(super) fn commit(
     mut self,
     selected_namespace_root: &[u8],
     scope_id: Option<&[u8]>,
@@ -3049,7 +3056,7 @@ fn map_semantic_error(error: super::index_converter::IndexSemanticErrorV1) -> Qu
   }
 }
 
-fn require_not_cancelled(cancellation: &CancellationToken) -> Result<(), QueryExecutionErrorV1> {
+pub(super) fn require_not_cancelled(cancellation: &CancellationToken) -> Result<(), QueryExecutionErrorV1> {
   if cancellation.is_cancelled() {
     Err(QueryExecutionErrorV1::cancelled())
   } else {
