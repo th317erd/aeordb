@@ -498,6 +498,14 @@ fn validate_component(
   Ok(())
 }
 
+pub fn validate_logical_order_component_v1(
+  comparator: PositionComparatorV1,
+  component: &LogicalOrderComponentOwnedV1,
+  field: &str,
+) -> PositionOrderResultV1<()> {
+  validate_component(CompiledPositionComparatorV1::Payload(comparator), component, field)
+}
+
 fn validate_present_payload(comparator: PositionComparatorV1, payload: &[u8], field: &str) -> PositionOrderResultV1<()> {
   match comparator {
     PositionComparatorV1::BytesBinary => {}

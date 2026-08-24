@@ -1069,6 +1069,33 @@ fn validate_request_collections(request: &QueryPlanningRequestV1<'_>) -> QueryPl
   if request.result_limit == 0 || request.result_limit > request.limits.maximum_returned_documents {
     return Err(invalid_request("query_result_limit", "result limit is zero or exceeds the admitted maximum"));
   }
+  for (index, field) in request.sort_fields.iter().enumerate() {
+    let canonical = canonical_field_name(&field.field_name)?;
+    for prior in &request.sort_fields[..index] {
+      if canonical_field_name(&prior.field_name)? == canonical {
+        return Err(invalid_request("query_duplicate_sort", format!("sort field {canonical} is declared more than once")));
+      }
+    }
+  }
+  for (index, field) in request.aggregate_fields.iter().enumerate() {
+    let canonical = canonical_field_name(&field.field_name)?;
+    for prior in &request.aggregate_fields[..index] {
+      if prior.kind == field.kind && canonical_field_name(&prior.field_name)? == canonical {
+        return Err(invalid_request(
+          "query_duplicate_aggregate",
+          format!("aggregate {kind:?} for {canonical} is declared more than once", kind = field.kind),
+        ));
+      }
+    }
+  }
+  for (index, field) in request.group_fields.iter().enumerate() {
+    let canonical = canonical_field_name(field)?;
+    for prior in &request.group_fields[..index] {
+      if canonical_field_name(prior)? == canonical {
+        return Err(invalid_request("query_duplicate_group", format!("group field {canonical} is declared more than once")));
+      }
+    }
+  }
   Ok(())
 }
 
@@ -1709,7 +1736,24 @@ fn compile_auxiliary_field(
       format!("selected root has no reproducible ordered semantics for {field_name}"),
     )
   })?;
+  validate_auxiliary_operation(operation, order_semantics.comparator, field_name)?;
   Ok(CompiledQueryAuxiliaryFieldPlanV1 { field_name: clone_string(field_name, "auxiliary field")?, operation, order_semantics, scopes })
+}
+
+fn validate_auxiliary_operation(
+  operation: CompiledQueryAuxiliaryOperationV1,
+  comparator: PositionComparatorV1,
+  field_name: &str,
+) -> QueryPlanningResultV1<()> {
+  if matches!(operation, CompiledQueryAuxiliaryOperationV1::Aggregate(QueryAggregateKindV1::Sum | QueryAggregateKindV1::Average))
+    && !matches!(comparator, PositionComparatorV1::U64 | PositionComparatorV1::I64 | PositionComparatorV1::FiniteF64)
+  {
+    return Err(invalid_request(
+      "query_aggregate_numeric_required",
+      format!("sum/average field {field_name} must use a corrected numeric comparator"),
+    ));
+  }
+  Ok(())
 }
 
 fn compile_auxiliary_order_semantics(

@@ -598,6 +598,41 @@ fn sort_aggregate_and_explain_are_definition_aware_bounded_and_authorization_saf
 }
 
 #[test]
+fn aggregate_admission_rejects_nonnumeric_reducers_and_duplicate_declarations() {
+  let planning_context = context();
+  let expression = QueryExpressionV1::And(Vec::new());
+  let (value_store, field) = definitions("@filename", "utf8_binary_order_v1");
+  let query_scope = scope(value_store, vec![candidate(field, None, QueryPlanningIndexEstimatesV1::new(1, 1, 1, 1, 0).unwrap())], 1);
+  let catalogs = [catalog("@filename", vec![query_scope])];
+  let sum = [QueryAggregateFieldV1 { field_name: "@filename".to_string(), kind: QueryAggregateKindV1::Sum }];
+  let mut query_request = request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false);
+  query_request.aggregate_fields = &sum;
+  let error = plan_root_aware_query_v1(&query_request).unwrap_err();
+  assert_eq!(error.class(), QueryPlanningErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_aggregate_numeric_required");
+
+  let duplicate_aggregates = [sum[0].clone(), sum[0].clone()];
+  query_request.aggregate_fields = &duplicate_aggregates;
+  let error = plan_root_aware_query_v1(&query_request).unwrap_err();
+  assert_eq!(error.code(), "query_duplicate_aggregate");
+
+  query_request.aggregate_fields = &[];
+  let duplicate_groups = ["@filename".to_string(), "@file_name".to_string()];
+  query_request.group_fields = &duplicate_groups;
+  let error = plan_root_aware_query_v1(&query_request).unwrap_err();
+  assert_eq!(error.code(), "query_duplicate_group");
+
+  query_request.group_fields = &[];
+  let duplicate_sorts = [
+    QuerySortFieldV1 { field_name: "@filename".to_string(), direction: QuerySortDirectionV1::Ascending },
+    QuerySortFieldV1 { field_name: "@file_name".to_string(), direction: QuerySortDirectionV1::Descending },
+  ];
+  query_request.sort_fields = &duplicate_sorts;
+  let error = plan_root_aware_query_v1(&query_request).unwrap_err();
+  assert_eq!(error.code(), "query_duplicate_sort");
+}
+
+#[test]
 fn cancellation_and_resource_refusal_remain_typed_non_success() {
   let planning_context = context();
   let expression = QueryExpressionV1::And(Vec::new());

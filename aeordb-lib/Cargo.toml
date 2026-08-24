@@ -735,6 +735,10 @@ name = "v4_query_order_execution_spec"
 path = "spec/engine/v4_query_order_execution_spec.rs"
 
 [[test]]
+name = "v4_query_aggregate_execution_spec"
+path = "spec/engine/v4_query_aggregate_execution_spec.rs"
+
+[[test]]
 name = "v4_query_executor_spec"
 path = "spec/engine/v4_query_executor_spec.rs"
 
