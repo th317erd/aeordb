@@ -1307,6 +1307,9 @@
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
             - [x] P7-3d5a: freeze one shared effective-scope winner resolver and correct every producer/native-query consumer to use the ratified one-config-per-file rule.
             - [ ] P7-3d5b: implement one page-bounded native authoritative field-partition source over the captured selected-root reader and shared source evaluator.
+              - [x] P7-3d5b1: retain the complete applicable ScopeDefinition universe in the captured semantic catalog and prove exact accounting/identity.
+              - [ ] P7-3d5b2: build one private, checksummed, cancellation-aware multi-pass FileKey ordering workspace from bounded selected-namespace pages.
+              - [ ] P7-3d5b3: expose independent field cursors over the shared workspace with exact scope resolution, source evaluation, receipts, and retained-memory ownership.
             - [ ] P7-3d5c: implement native selected-root position-universe and aggregate-input sources without adding another parser, converter, or document-identity authority.
             - [ ] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
             - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.

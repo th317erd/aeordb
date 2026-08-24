@@ -348,6 +348,16 @@ fn complete_semantic_graph_with_definitions(
   value_store_fixture: &str,
   field_index_fixture: &str,
 ) -> CompleteSemanticGraph {
+  complete_semantic_graph_with_extra_scopes(algorithm, scope, value_store_fixture, field_index_fixture, &[])
+}
+
+fn complete_semantic_graph_with_extra_scopes(
+  algorithm: HashAlgorithm,
+  scope: Vec<u8>,
+  value_store_fixture: &str,
+  field_index_fixture: &str,
+  extra_scopes: &[Vec<u8>],
+) -> CompleteSemanticGraph {
   let hash_width = algorithm.hash_length();
   let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
   let mut value_store = semantic_definition_fixture(algorithm, "value-store-definition-v1", "avst", value_store_fixture);
@@ -359,8 +369,13 @@ fn complete_semantic_graph_with_definitions(
   let scope_definition = scope.clone();
   let value_store_definition = value_store.clone();
   let field_index_definition = field_index.clone();
-  let definitions =
-    [(3u16, scope_id.clone(), scope), (4u16, value_store_id.clone(), value_store), (5u16, field_index_id.clone(), field_index)];
+  let mut definitions =
+    vec![(3u16, scope_id.clone(), scope), (4u16, value_store_id.clone(), value_store), (5u16, field_index_id.clone(), field_index)];
+  for extra_scope in extra_scopes {
+    let extra_scope_id = decode_scope_definition(extra_scope, algorithm).unwrap().scope_id;
+    definitions.push((3u16, extra_scope_id, extra_scope.clone()));
+  }
+  let definition_count = u64::try_from(definitions.len()).unwrap();
   let mut objects = Vec::new();
   let mut bindings = Vec::new();
   for (kind, semantic_id, definition) in definitions {
@@ -387,7 +402,7 @@ fn complete_semantic_graph_with_definitions(
         catalog_root,
         catalog_record_count: record_count,
         catalog_node_count: node_count,
-        definition_count: 3,
+        definition_count,
         dependency_count: 0,
       },
     },
@@ -1615,6 +1630,22 @@ fn assert_selected_nvt_exact_fallback(
 }
 
 fn selected_source_fixture(value_store_fixture: &str, scope_glob: Option<&str>, body: &[u8], publish_chunk: bool) -> SelectedSourceFixture {
+  selected_source_fixture_with_scopes(
+    value_store_fixture,
+    semantic_scope_definition(HashAlgorithm::Blake3_256, "/docs", scope_glob),
+    &[],
+    body,
+    publish_chunk,
+  )
+}
+
+fn selected_source_fixture_with_scopes(
+  value_store_fixture: &str,
+  primary_scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+  body: &[u8],
+  publish_chunk: bool,
+) -> SelectedSourceFixture {
   let algorithm = HashAlgorithm::Blake3_256;
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
@@ -1629,8 +1660,8 @@ fn selected_source_fixture(value_store_fixture: &str, scope_glob: Option<&str>, 
   );
   let chunk_offset = publisher.locator(&chunk_hash).unwrap().map(|locator| (locator.offset, locator.total_length));
   let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
-  let scope = semantic_scope_definition(algorithm, "/docs", scope_glob);
-  let graph = complete_semantic_graph_with_definitions(algorithm, scope, value_store_fixture, "typed_exact_blake3_v1");
+  let graph =
+    complete_semantic_graph_with_extra_scopes(algorithm, primary_scope, value_store_fixture, "typed_exact_blake3_v1", extra_scopes);
   let field_name = match value_store_fixture {
     "metadata-hash-corrected" => "@hash",
     "json-corrected" => "messages",
@@ -2466,6 +2497,35 @@ fn selected_semantic_catalog_keeps_descendant_glob_scopes_for_directory_queries(
     assert_eq!(pins.active_pin_count().unwrap(), 0);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }
+}
+
+#[test]
+fn selected_semantic_catalog_retains_fieldless_nearer_scopes_for_effective_resolution() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let primary = semantic_scope_definition(algorithm, "/", Some("**/*.json"));
+  let nearer = semantic_scope_definition(algorithm, "/docs", None);
+  let primary_id = decode_scope_definition(&primary, algorithm).unwrap().scope_id;
+  let nearer_id = decode_scope_definition(&nearer, algorithm).unwrap().scope_id;
+  let fixture = selected_source_fixture_with_scopes("metadata-hash-corrected", primary, &[nearer], b"{}", true);
+  let reader = fixture.reader();
+
+  let selected = reader.load_planner_catalogs("/docs", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+
+  assert_eq!(selected.catalogs().len(), 1);
+  assert_eq!(selected.catalogs()[0].scopes.len(), 1);
+  assert_eq!(selected.catalogs()[0].scopes[0].scope_id, primary_id);
+  let retained = selected
+    .scope_definitions()
+    .iter()
+    .map(|scope| (scope.scope_id().to_vec(), scope.encoded_definition().to_vec()))
+    .collect::<BTreeMap<_, _>>();
+  assert_eq!(retained.len(), 2);
+  assert_eq!(retained.get(&primary_id).map(Vec::as_slice), Some(selected.catalogs()[0].scopes[0].encoded_scope_definition.as_slice()));
+  assert!(retained.contains_key(&nearer_id));
+
+  drop(selected);
+  drop(reader);
+  fixture.assert_released();
 }
 
 fn assert_selected_semantic_catalog_uses_historical_root(algorithm: HashAlgorithm) {

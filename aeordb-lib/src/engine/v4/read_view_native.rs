@@ -599,7 +599,24 @@ pub struct NativeSelectedSemanticCatalogV1 {
   selected_root: Vec<u8>,
   semantic_state_root: Vec<u8>,
   catalogs: Vec<RootAwareQueryFieldCatalogV1>,
+  scope_definitions: Vec<NativeSelectedScopeDefinitionV1>,
   _memory: MemoryReservation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSelectedScopeDefinitionV1 {
+  scope_id: Vec<u8>,
+  encoded_definition: Vec<u8>,
+}
+
+impl NativeSelectedScopeDefinitionV1 {
+  pub fn scope_id(&self) -> &[u8] {
+    &self.scope_id
+  }
+
+  pub fn encoded_definition(&self) -> &[u8] {
+    &self.encoded_definition
+  }
 }
 
 impl NativeSelectedSemanticCatalogV1 {
@@ -613,6 +630,14 @@ impl NativeSelectedSemanticCatalogV1 {
 
   pub fn catalogs(&self) -> &[RootAwareQueryFieldCatalogV1] {
     &self.catalogs
+  }
+
+  /// Every selected semantic scope that can overlap the authorized query
+  /// path, including scopes that do not define one of the requested fields.
+  /// Effective-scope resolution must use this complete set before selecting a
+  /// field-specific ValueStore.
+  pub fn scope_definitions(&self) -> &[NativeSelectedScopeDefinitionV1] {
+    &self.scope_definitions
   }
 }
 
@@ -1140,9 +1165,28 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         scopes: planner_scopes,
       });
     }
+    let mut scope_definitions = Vec::new();
+    scope_definitions.try_reserve_exact(scopes.len()).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_semantic_result_allocation",
+        format!("scope-definition catalog allocation failed: {error}"),
+      )
+    })?;
+    scope_definitions.extend(
+      scopes
+        .into_iter()
+        .map(|(scope_id, scope)| NativeSelectedScopeDefinitionV1 { scope_id, encoded_definition: scope.encoded_definition }),
+    );
     let selected_root = try_clone_selected_bytes(&self.view.root_metadata().hash, "selected semantic root receipt")?;
     let semantic_state_root = try_clone_selected_bytes(&self.view.authority().semantic_state.object_id, "selected semantic state receipt")?;
-    let retained = selected_semantic_catalog_retained_bytes(&selected_root, &semantic_state_root, &catalogs)?;
+    let retained = selected_semantic_catalog_retained_bytes(
+      &selected_root,
+      &semantic_state_root,
+      &catalogs,
+      catalogs.capacity(),
+      &scope_definitions,
+      scope_definitions.capacity(),
+    )?;
     if retained > limits.bytes.maximum_retained_bytes {
       return Err(NativeSelectedNamespaceReadErrorV1::resource(
         "selected_semantic_retained_bytes",
@@ -1157,7 +1201,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         )
       })?)
       .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_semantic_result_accounting", error.to_string()))?;
-    Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, _memory: result_memory })
+    Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, scope_definitions, _memory: result_memory })
   }
 
   pub fn load_index_artifact_page_cursor(
@@ -2038,14 +2082,21 @@ fn selected_semantic_catalog_retained_bytes(
   selected_root: &[u8],
   semantic_state_root: &[u8],
   catalogs: &[RootAwareQueryFieldCatalogV1],
+  catalog_capacity: usize,
+  scope_definitions: &[NativeSelectedScopeDefinitionV1],
+  scope_definition_capacity: usize,
 ) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
-  let catalog_slots = catalogs.len().checked_mul(size_of::<RootAwareQueryFieldCatalogV1>()).ok_or_else(|| {
+  let catalog_slots = catalog_capacity.checked_mul(size_of::<RootAwareQueryFieldCatalogV1>()).ok_or_else(|| {
     NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner catalog slot accounting overflowed")
+  })?;
+  let scope_slots = scope_definition_capacity.checked_mul(size_of::<NativeSelectedScopeDefinitionV1>()).ok_or_else(|| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "complete scope-definition slot accounting overflowed")
   })?;
   let mut retained = size_of::<NativeSelectedSemanticCatalogV1>()
     .checked_add(selected_root.len())
     .and_then(|value| value.checked_add(semantic_state_root.len()))
     .and_then(|value| value.checked_add(catalog_slots))
+    .and_then(|value| value.checked_add(scope_slots))
     .ok_or_else(|| {
       NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "planner catalog accounting overflowed")
     })?;
@@ -2076,6 +2127,14 @@ fn selected_semantic_catalog_retained_bytes(
           })?;
       }
     }
+  }
+  for scope in scope_definitions {
+    retained = retained
+      .checked_add(scope.scope_id.capacity())
+      .and_then(|value| value.checked_add(scope.encoded_definition.capacity()))
+      .ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::resource("selected_semantic_retained_bytes", "complete scope-definition accounting overflowed")
+      })?;
   }
   u64::try_from(retained).map_err(|error| {
     NativeSelectedNamespaceReadErrorV1::resource(
