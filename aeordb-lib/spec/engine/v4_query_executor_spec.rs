@@ -8,12 +8,14 @@ use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::index_coverage_planner::{IndexCoverageGenerationHealthV1, IndexSemanticQueryAvailabilityV1};
 use aeordb::engine::v4::index_coverage_registry::{field_definition_fingerprint, field_dependency_fingerprint};
 use aeordb::engine::v4::query_executor::{
-  QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1,
-  QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1,
-  QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
-  QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorV1,
-  QueryExecutionSourceErrorClassV1, RootAwareQueryExecutionRequestV1, RootAwareQueryScopeExecutionRequestV1,
-  execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
+  QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1,
+  QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1, QueryExecutionByteLimitsV1,
+  QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1, QueryExecutionFieldDocumentV1,
+  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldReadReceiptV1,
+  QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1, QueryExecutionScanErrorV1,
+  QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorV1, QueryExecutionSourceErrorClassV1,
+  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionRequestV1, RootAwareQueryScopeExecutionRequestV1,
+  execute_authoritative_partitioned_query_v1, execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryExpressionV1, QueryFuzzyAlgorithmV1, QueryPlanDriverV1, QueryPlanningContextV1,
@@ -74,6 +76,129 @@ struct DocumentFieldFeed<'a> {
 
 struct SquelchingScopeFeed {
   inner: ScopeFeed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartitionFeedFault {
+  None,
+  OmitSecondSizeDocument,
+  DuplicateFirstFilenameDocument,
+  ReverseFilenameDocuments,
+  WrongFilenameScope,
+  DishonestFilenameReceipt,
+}
+
+struct PartitionFeed {
+  root: Vec<u8>,
+  publication_sequence: u64,
+  documents: Vec<DocumentFixture>,
+  field_scopes: BTreeMap<String, Vec<Vec<u8>>>,
+  fault: PartitionFeedFault,
+  opened_fields: Vec<String>,
+}
+
+struct PartitionCursor {
+  root: Vec<u8>,
+  publication_sequence: u64,
+  field_name: String,
+  requested_scope_ids: Vec<Vec<u8>>,
+  rows: Vec<QueryExecutionFieldDocumentV1>,
+  next_index: usize,
+  dishonest_receipt: bool,
+}
+
+impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionFeed {
+  fn open_field_partition(
+    &mut self,
+    request: QueryExecutionFieldPartitionOpenRequestV1<'_>,
+  ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1>, QueryExecutionSourceErrorV1> {
+    assert_eq!(request.selected_namespace_root, self.root);
+    assert_eq!(request.publication_sequence, self.publication_sequence);
+    assert_eq!(request.query_path, "/");
+    let requested_scope_ids = request.scope_ids.iter().map(|scope_id| scope_id.to_vec()).collect::<Vec<_>>();
+    let assignments = self.field_scopes.get(request.field_name).expect("field scope assignments");
+    assert_eq!(assignments.len(), self.documents.len());
+    let mut rows = Vec::new();
+    for (document_index, (document, scope_id)) in self.documents.iter().zip(assignments).enumerate() {
+      if self.fault == PartitionFeedFault::OmitSecondSizeDocument && request.field_name == "@size" && document_index == 1 {
+        continue;
+      }
+      let mut scope_id = scope_id.clone();
+      if self.fault == PartitionFeedFault::WrongFilenameScope && request.field_name == "@filename" && document_index == 0 {
+        scope_id = vec![0x99; scope_id.len()];
+      }
+      let (state, canonical_values) = match document.fields.get(request.field_name).cloned().unwrap_or(FieldFixture::Missing) {
+        FieldFixture::Missing => (QueryExecutionFieldStateV1::Missing, Vec::new()),
+        FieldFixture::Values(values)
+        | FieldFixture::SquelchedValues(values)
+        | FieldFixture::Incomplete(values)
+        | FieldFixture::Dishonest(values) => (QueryExecutionFieldStateV1::Values, values),
+        FieldFixture::Unindexable => (QueryExecutionFieldStateV1::DeterministicUnindexable, Vec::new()),
+      };
+      rows.push(QueryExecutionFieldDocumentV1 {
+        scope_id,
+        file_key: document.file_key.clone(),
+        record_revision: document.revision.clone(),
+        path: document.path.clone(),
+        state,
+        canonical_values,
+      });
+    }
+    if self.fault == PartitionFeedFault::DuplicateFirstFilenameDocument && request.field_name == "@filename" {
+      rows.insert(1, rows[0].clone());
+    }
+    if self.fault == PartitionFeedFault::ReverseFilenameDocuments && request.field_name == "@filename" {
+      rows.reverse();
+    }
+    self.opened_fields.push(request.field_name.to_string());
+    Ok(Box::new(PartitionCursor {
+      root: self.root.clone(),
+      publication_sequence: self.publication_sequence,
+      field_name: request.field_name.to_string(),
+      requested_scope_ids,
+      rows,
+      next_index: 0,
+      dishonest_receipt: self.fault == PartitionFeedFault::DishonestFilenameReceipt && request.field_name == "@filename",
+    }))
+  }
+}
+
+impl QueryAuthoritativeFieldPartitionCursorV1 for PartitionCursor {
+  fn next_document(
+    &mut self,
+    cancellation: &CancellationToken,
+  ) -> Result<Option<QueryExecutionFieldDocumentV1>, QueryExecutionSourceErrorV1> {
+    if cancellation.is_cancelled() {
+      return Err(QueryExecutionSourceErrorV1::new(
+        QueryExecutionSourceErrorClassV1::Cancelled,
+        "fixture_partition_cancelled",
+        "partition cursor was cancelled",
+      ));
+    }
+    let row = self.rows.get(self.next_index).cloned();
+    self.next_index = self.next_index.saturating_add(usize::from(row.is_some()));
+    Ok(row)
+  }
+
+  fn finish(&mut self) -> Result<QueryExecutionFieldPartitionReceiptV1, QueryExecutionSourceErrorV1> {
+    let mut scope_document_counts = self
+      .requested_scope_ids
+      .iter()
+      .map(|scope_id| self.rows.iter().filter(|row| row.scope_id == *scope_id).count() as u64)
+      .collect::<Vec<_>>();
+    if self.dishonest_receipt {
+      scope_document_counts[0] = scope_document_counts[0].saturating_add(1);
+    }
+    Ok(QueryExecutionFieldPartitionReceiptV1 {
+      selected_namespace_root: self.root.clone(),
+      publication_sequence: self.publication_sequence,
+      field_name: self.field_name.clone(),
+      scope_ids: self.requested_scope_ids.clone(),
+      scope_document_counts,
+      document_count: self.rows.len() as u64,
+      complete: true,
+    })
+  }
 }
 
 impl QueryAuthoritativeFieldSourceV1 for DocumentFieldFeed<'_> {
@@ -391,6 +516,26 @@ fn memory(limit: u64) -> MemoryCoordinator {
   MemoryCoordinator::new(MemoryPolicy::new(limit - (1 << 20), limit, 1, 1 << 20).unwrap())
 }
 
+fn partition_feed(
+  documents: Vec<DocumentFixture>,
+  direct_scope_id: &[u8],
+  alternate_scope_id: &[u8],
+  fault: PartitionFeedFault,
+) -> PartitionFeed {
+  let filename_scopes = (0..documents.len())
+    .map(|index| if index % 2 == 0 { direct_scope_id.to_vec() } else { alternate_scope_id.to_vec() })
+    .collect::<Vec<_>>();
+  let size_scopes = vec![direct_scope_id.to_vec(); documents.len()];
+  PartitionFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    field_scopes: BTreeMap::from([("@filename".to_string(), filename_scopes), ("@size".to_string(), size_scopes)]),
+    documents,
+    fault,
+    opened_fields: Vec::new(),
+  }
+}
+
 fn execute(
   plan: &CompiledRootAwareQueryPlanV1,
   catalogs: &[RootAwareQueryFieldCatalogV1],
@@ -532,6 +677,216 @@ fn nonidentical_cross_field_scope_partitions_never_silently_omit_a_valid_scope()
   assert_eq!(error.class(), QueryExecutionErrorClassV1::HistoricalViewUnavailable);
   assert_eq!(error.code(), "query_execution_scope_partition_unavailable");
   assert_eq!(feed.field_reads.get(), 0, "partition refusal must precede authoritative source work");
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_authoritative_execution_joins_nonidentical_field_scopes_by_file_key() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, mut catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+  catalogs.reverse();
+  let documents = documents();
+  let expected = reference_truth(&documents);
+  let mut source = partition_feed(documents, &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let memory = memory(64 << 20);
+
+  let execution = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    limits: limits(),
+  })
+  .unwrap();
+
+  assert_eq!(execution.matches().iter().map(|row| row.file_key().to_vec()).collect::<Vec<_>>(), expected);
+  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_authoritative_execution_accepts_an_empty_authoritative_universe() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+  let mut source = partition_feed(Vec::new(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let memory = memory(64 << 20);
+
+  let execution = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    limits: limits(),
+  })
+  .unwrap();
+
+  assert!(execution.matches().is_empty());
+  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_authoritative_execution_rejects_every_incomplete_or_malformed_file_key_join() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+
+  for fault in [
+    PartitionFeedFault::OmitSecondSizeDocument,
+    PartitionFeedFault::DuplicateFirstFilenameDocument,
+    PartitionFeedFault::ReverseFilenameDocuments,
+    PartitionFeedFault::WrongFilenameScope,
+    PartitionFeedFault::DishonestFilenameReceipt,
+  ] {
+    let memory = memory(64 << 20);
+    let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, fault);
+    let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut source,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    })
+    .unwrap_err();
+    assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource, "fault {fault:?}: {error}");
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0, "fault {fault:?}");
+  }
+
+  for malformed_catalogs in [vec![catalogs[0].clone()], vec![catalogs[0].clone(), catalogs[0].clone()]] {
+    let memory = memory(64 << 20);
+    let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+    let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &malformed_catalogs,
+      source: &mut source,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    })
+    .unwrap_err();
+    assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource);
+    assert_eq!(error.code(), "query_execution_catalog_partition");
+    assert!(source.opened_fields.is_empty());
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  let pressure_memory = memory(64 << 20);
+  let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &pressure_memory,
+    cancellation: &cancellation,
+    limits: limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::Cancelled);
+  assert!(source.opened_fields.is_empty());
+  assert_eq!(pressure_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_execution_fails_before_open_under_pressure_and_preserves_field_state_direction() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+
+  let pressured_limits = QueryExecutionLimitsV1::new(
+    QueryExecutionCountLimitsV1::new(100, 100, 100, 1_000_000).unwrap(),
+    QueryExecutionByteLimitsV1::new(8 << 20, 8 << 20, 1 << 20).unwrap(),
+  );
+  let pressure_memory = memory(64 << 20);
+  let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &pressure_memory,
+    cancellation: &CancellationToken::new(),
+    limits: pressured_limits,
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
+  assert!(source.opened_fields.is_empty());
+  assert_eq!(pressure_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  for (field, expected) in [
+    (FieldFixture::Values(Vec::new()), QueryExecutionErrorClassV1::CorruptSource),
+    (FieldFixture::Unindexable, QueryExecutionErrorClassV1::HistoricalViewUnavailable),
+  ] {
+    let mut invalid_documents = documents();
+    invalid_documents[0].fields.insert("@filename".to_string(), field);
+    let memory = memory(64 << 20);
+    let mut source = partition_feed(invalid_documents, &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+    let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut source,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    })
+    .unwrap_err();
+    assert_eq!(error.class(), expected);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn partitioned_execution_charges_catalog_partition_and_sort_work_before_source_open() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+  let mut source = partition_feed(Vec::new(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let memory = memory(64 << 20);
+  let limits = QueryExecutionLimitsV1::new(
+    QueryExecutionCountLimitsV1::new(100, 100, 100, 1_740).unwrap(),
+    QueryExecutionByteLimitsV1::new(1 << 20, 8 << 20, 16 << 20).unwrap(),
+  );
+
+  let error = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    limits,
+  })
+  .unwrap_err();
+
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "query_execution_work_limit");
+  assert!(source.opened_fields.is_empty());
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
 

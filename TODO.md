@@ -1276,6 +1276,11 @@
                 - [x] Rerun authoritative truth after typed partial refusal and retryable complete-candidate failure while retaining the discarded-accelerator diagnostic.
                 - [x] Prove boolean equivalence, terminal cancellation/internal/authoritative corruption, retry bounds, and exact reservation release before landing.
           - [ ] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
+            - [x] P7-3d4a: freeze one pull-bounded FileKey join over nonidentical cross-field scope partitions and prove it produces the same authoritative boolean truth as an independent document model without materializing a field or scope universe.
+            - [ ] P7-3d4b: route authoritative, complete, and partial exact matches through one fallible streaming sink while retaining the existing bounded collected-result adapters and terminal/fallback semantics.
+            - [ ] P7-3d4c: compile compatible cross-scope comparator/collation authority, read exact auxiliary values at the selected root, and retain only bounded logical top-K rows with canonical path/FileKey/revision ties.
+            - [ ] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
+            - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
