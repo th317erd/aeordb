@@ -1275,7 +1275,7 @@
                 - [x] Add one typed scope result that borrows exact FileKey/revision identities from authoritative, complete, or partial retained storage without a second result allocation.
                 - [x] Rerun authoritative truth after typed partial refusal and retryable complete-candidate failure while retaining the discarded-accelerator diagnostic.
                 - [x] Prove boolean equivalence, terminal cancellation/internal/authoritative corruption, retry bounds, and exact reservation release before landing.
-          - [ ] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
+          - [x] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
             - [x] P7-3d4a: freeze one pull-bounded FileKey join over nonidentical cross-field scope partitions and prove it produces the same authoritative boolean truth as an independent document model without materializing a field or scope universe.
             - [x] P7-3d4b: route authoritative, complete, and partial exact matches through one fallible streaming sink while retaining the existing bounded collected-result adapters and terminal/fallback semantics.
               - [x] P7-3d4b1: freeze a transactional fallible match sink and route authoritative scope/root/partition execution through it, with the existing retained result implemented as a sink adapter.
@@ -1299,7 +1299,11 @@
                 - [x] Cover unsigned, signed, finite-float, typed-null, missing, deterministic-unindexable, duplicate, and ordered multi-value boundaries.
                 - [x] Prove every source class, malformed row/receipt, cancellation point, coordinator/retained pressure boundary, rollback/retry, and reservation release.
                 - [x] Run the affected, common, suppression, static, documentation, and contract gates, then complete an adversarial architecture review.
-            - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.
+            - [x] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.
+              - [x] Add one composed authoritative-partition-to-transactional-sink proof target for shared and nonidentical effective scopes at both frozen hash widths.
+              - [x] Differentially compare default-path top-K and grouped aggregate output with independent models across presence, multi-value, and numeric boundaries.
+              - [x] Prove duplicate/missing identities, dishonest receipts, cancellation, and overlapping executor/sink memory pressure roll back atomically and release every reservation.
+              - [x] Run affected, common, suppression, static, documentation, and contract gates, then record the adversarial architecture review.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
