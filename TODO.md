@@ -1278,6 +1278,10 @@
           - [ ] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
             - [x] P7-3d4a: freeze one pull-bounded FileKey join over nonidentical cross-field scope partitions and prove it produces the same authoritative boolean truth as an independent document model without materializing a field or scope universe.
             - [ ] P7-3d4b: route authoritative, complete, and partial exact matches through one fallible streaming sink while retaining the existing bounded collected-result adapters and terminal/fallback semantics.
+              - [x] P7-3d4b1: freeze a transactional fallible match sink and route authoritative scope/root/partition execution through it, with the existing retained result implemented as a sink adapter.
+              - [ ] P7-3d4b2: route complete candidate execution through the same sink without permitting staged output to survive a retryable accelerator failure.
+              - [ ] P7-3d4b3: publish exact partial identities only after complement/recheck proof completion and expose one exact-scope sink facade without duplicating fallback policy.
+              - [ ] P7-3d4b4: prove sink begin/push/commit failure, rollback, cancellation, retry, no duplicate visibility, memory bounds, and collected-adapter equivalence.
             - [ ] P7-3d4c: compile compatible cross-scope comparator/collation authority, read exact auxiliary values at the selected root, and retain only bounded logical top-K rows with canonical path/FileKey/revision ties.
             - [ ] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
             - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.

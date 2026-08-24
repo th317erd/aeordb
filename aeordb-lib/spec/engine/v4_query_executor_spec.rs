@@ -10,12 +10,15 @@ use aeordb::engine::v4::index_coverage_registry::{field_definition_fingerprint, 
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1,
   QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1, QueryExecutionByteLimitsV1,
-  QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1, QueryExecutionFieldDocumentV1,
-  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldReadReceiptV1,
-  QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1, QueryExecutionScanErrorV1,
-  QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorV1, QueryExecutionSourceErrorClassV1,
+  QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1, QueryExecutionErrorOriginV1,
+  QueryExecutionFieldDocumentV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1,
+  QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
+  QueryExecutionMatchPathV1, QueryExecutionMatchRefV1, QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1,
+  QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSinkBatchReceiptV1, QueryExecutionSinkBatchV1,
+  QueryExecutionSinkErrorClassV1, QueryExecutionSinkErrorV1, QueryExecutionSourceErrorV1, QueryExecutionSourceErrorClassV1,
   RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionRequestV1, RootAwareQueryScopeExecutionRequestV1,
-  execute_authoritative_partitioned_query_v1, execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
+  execute_authoritative_partitioned_query_into_v1, execute_authoritative_partitioned_query_v1, execute_authoritative_root_query_into_v1,
+  execute_authoritative_root_query_v1, execute_authoritative_scope_query_into_v1, execute_authoritative_scope_query_v1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryExpressionV1, QueryFuzzyAlgorithmV1, QueryPlanDriverV1, QueryPlanningContextV1,
@@ -105,6 +108,99 @@ struct PartitionCursor {
   rows: Vec<QueryExecutionFieldDocumentV1>,
   next_index: usize,
   dishonest_receipt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SinkFault {
+  None,
+  Begin,
+  Push,
+  Commit,
+}
+
+struct RecordingSink {
+  fault: SinkFault,
+  error_class: QueryExecutionSinkErrorClassV1,
+  active: bool,
+  begin_calls: u64,
+  scope_id: Option<Vec<u8>>,
+  staged: Vec<(Vec<u8>, Vec<u8>, Option<String>)>,
+  committed: Vec<(Vec<u8>, Vec<u8>, Option<String>)>,
+  committed_receipt: Option<(u64, u64, u64)>,
+  rollbacks: u64,
+}
+
+impl RecordingSink {
+  fn new(fault: SinkFault) -> Self {
+    Self {
+      fault,
+      error_class: QueryExecutionSinkErrorClassV1::ResourceLimit,
+      active: false,
+      begin_calls: 0,
+      scope_id: None,
+      staged: Vec::new(),
+      committed: Vec::new(),
+      committed_receipt: None,
+      rollbacks: 0,
+    }
+  }
+
+  fn with_error_class(fault: SinkFault, error_class: QueryExecutionSinkErrorClassV1) -> Self {
+    Self { error_class, ..Self::new(fault) }
+  }
+
+  fn error(&self) -> QueryExecutionSinkErrorV1 {
+    QueryExecutionSinkErrorV1::new(self.error_class, "fixture_sink_failure", "injected sink failure")
+  }
+}
+
+impl QueryExecutionMatchSinkV1 for RecordingSink {
+  fn begin_batch(&mut self, batch: QueryExecutionSinkBatchV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    assert!(!self.active);
+    assert_eq!(batch.selected_namespace_root, ROOT);
+    self.begin_calls += 1;
+    if self.fault == SinkFault::Begin {
+      return Err(self.error());
+    }
+    self.active = true;
+    self.scope_id = batch.scope_id.map(<[u8]>::to_vec);
+    self.staged.clear();
+    Ok(())
+  }
+
+  fn push_match(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    assert!(self.active);
+    if self.fault == SinkFault::Push {
+      return Err(self.error());
+    }
+    let path = match matched.path {
+      QueryExecutionMatchPathV1::Canonical(path) => Some(path.to_string()),
+      QueryExecutionMatchPathV1::RequiresSelectedRootLookup => None,
+    };
+    self.staged.push((matched.file_key.to_vec(), matched.record_revision.to_vec(), path));
+    Ok(())
+  }
+
+  fn commit_batch(&mut self, receipt: QueryExecutionSinkBatchReceiptV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    assert!(self.active);
+    assert_eq!(receipt.selected_namespace_root, ROOT);
+    assert_eq!(receipt.match_count as usize, self.staged.len());
+    if self.fault == SinkFault::Commit {
+      return Err(self.error());
+    }
+    self.committed.append(&mut self.staged);
+    self.committed_receipt = Some((receipt.match_count, receipt.examined_documents, receipt.examined_field_values));
+    self.active = false;
+    Ok(())
+  }
+
+  fn rollback_batch(&mut self) {
+    self.staged.clear();
+    if self.active {
+      self.rollbacks += 1;
+    }
+    self.active = false;
+  }
 }
 
 impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionFeed {
@@ -651,6 +747,372 @@ fn authoritative_truth_is_identical_for_authoritative_complete_and_partial_plans
 }
 
 #[test]
+fn authoritative_streaming_sink_commits_only_validated_root_and_scope_batches() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  let expected = reference_truth(&documents());
+  let root_memory = memory(64 << 20);
+  let mut feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut sink = RecordingSink::new(SinkFault::None);
+
+  let receipt = execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut feed,
+      memory: &root_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut sink,
+  )
+  .unwrap();
+
+  assert_eq!(receipt.selected_namespace_root(), ROOT);
+  assert_eq!(receipt.scope_id(), None);
+  assert_eq!(receipt.match_count(), expected.len() as u64);
+  assert_eq!(receipt.examined_documents(), 4);
+  assert_eq!(receipt.examined_field_values(), 11);
+  assert_eq!(sink.begin_calls, 1);
+  assert_eq!(sink.scope_id, None);
+  assert_eq!(sink.committed.iter().map(|row| row.0.clone()).collect::<Vec<_>>(), expected);
+  assert_eq!(sink.committed.iter().map(|row| row.2.as_deref()).collect::<Vec<_>>(), [Some("/alpha"), Some("/special")]);
+  assert_eq!(sink.committed_receipt, Some((2, 4, 11)));
+  assert_eq!(sink.rollbacks, 0);
+  assert!(!sink.active);
+  assert_eq!(root_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let scope_memory = memory(64 << 20);
+  let mut scope_feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut scope_sink = RecordingSink::new(SinkFault::None);
+  let scope_receipt = execute_authoritative_scope_query_into_v1(
+    RootAwareQueryScopeExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      scope_id: &scope_id,
+      source: &mut scope_feed,
+      memory: &scope_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut scope_sink,
+  )
+  .unwrap();
+  assert_eq!(scope_receipt.scope_id(), Some(scope_id.as_slice()));
+  assert_eq!(scope_sink.scope_id, Some(scope_id));
+  assert_eq!(scope_sink.committed.iter().map(|row| row.0.clone()).collect::<Vec<_>>(), expected);
+  assert_eq!(scope_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn authoritative_streaming_sink_rolls_back_unvalidated_source_output() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  let honest_memory = memory(64 << 20);
+  let mut feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 1,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut sink = RecordingSink::new(SinkFault::None);
+
+  let error = execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut feed,
+      memory: &honest_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut sink,
+  )
+  .unwrap_err();
+
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource);
+  assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Execution);
+  assert_eq!(sink.begin_calls, 1);
+  assert_eq!(sink.rollbacks, 1);
+  assert!(sink.staged.is_empty());
+  assert!(sink.committed.is_empty());
+  assert!(sink.committed_receipt.is_none());
+  assert!(!sink.active);
+  assert_eq!(honest_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn authoritative_streaming_sink_commits_an_exact_empty_batch() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  let memory = memory(64 << 20);
+  let mut feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: Vec::new(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut sink = RecordingSink::new(SinkFault::None);
+  let receipt = execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut feed,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut sink,
+  )
+  .unwrap();
+  assert_eq!(receipt.match_count(), 0);
+  assert_eq!(receipt.examined_documents(), 0);
+  assert_eq!(receipt.examined_field_values(), 0);
+  assert_eq!(sink.committed_receipt, Some((0, 0, 0)));
+  assert!(sink.staged.is_empty());
+  assert!(sink.committed.is_empty());
+  assert_eq!(sink.rollbacks, 0);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn authoritative_streaming_sink_does_not_reserve_the_collected_result_budget() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  let constrained = memory(20 << 20);
+  let mut feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut sink = RecordingSink::new(SinkFault::None);
+  execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut feed,
+      memory: &constrained,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut sink,
+  )
+  .unwrap();
+  assert_eq!(sink.committed.len(), 2);
+  assert_eq!(constrained.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let collected_memory = memory(20 << 20);
+  let mut collected_feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let error = execute_authoritative_root_query_v1(RootAwareQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut collected_feed,
+    memory: &collected_memory,
+    cancellation: &CancellationToken::new(),
+    limits: limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "query_execution_semantic_memory");
+  assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Execution);
+  assert_eq!(collected_feed.field_reads.get(), 0);
+  assert_eq!(collected_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn authoritative_streaming_sink_failures_are_terminal_and_atomic() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  for fault in [SinkFault::Begin, SinkFault::Push, SinkFault::Commit] {
+    let memory = memory(64 << 20);
+    let mut feed = ScopeFeed {
+      root: ROOT.to_vec(),
+      publication_sequence: 41,
+      documents: documents(),
+      complete: true,
+      receipt_count_delta: 0,
+      source_error: None,
+      cancel_after_documents: None,
+      field_reads: Cell::new(0),
+    };
+    let mut sink = RecordingSink::new(fault);
+
+    let error = execute_authoritative_root_query_into_v1(
+      RootAwareQueryExecutionRequestV1 {
+        plan: &plan,
+        catalogs: &catalogs,
+        source: &mut feed,
+        memory: &memory,
+        cancellation: &CancellationToken::new(),
+        limits: limits(),
+      },
+      &mut sink,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit, "fault {fault:?}: {error}");
+    assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Sink, "fault {fault:?}: {error}");
+    assert_eq!(error.code(), "fixture_sink_failure");
+    assert_eq!(sink.begin_calls, 1);
+    assert_eq!(sink.rollbacks, u64::from(fault != SinkFault::Begin));
+    assert!(sink.staged.is_empty());
+    assert!(sink.committed.is_empty());
+    assert!(sink.committed_receipt.is_none());
+    assert!(!sink.active);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0, "fault {fault:?}");
+  }
+}
+
+#[test]
+fn authoritative_streaming_sink_rolls_back_staged_rows_on_cancellation_and_match_limit() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  let cancellation = CancellationToken::new();
+  let cancellation_memory = memory(64 << 20);
+  let mut cancelled_feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: Some(1),
+    field_reads: Cell::new(0),
+  };
+  let mut cancelled_sink = RecordingSink::new(SinkFault::None);
+  let error = execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut cancelled_feed,
+      memory: &cancellation_memory,
+      cancellation: &cancellation,
+      limits: limits(),
+    },
+    &mut cancelled_sink,
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::Cancelled);
+  assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Execution);
+  assert_eq!(cancelled_sink.rollbacks, 1);
+  assert!(cancelled_sink.staged.is_empty());
+  assert!(cancelled_sink.committed.is_empty());
+  assert_eq!(cancellation_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let limited_memory = memory(64 << 20);
+  let mut limited_feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: documents(),
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+  let mut limited_sink = RecordingSink::new(SinkFault::None);
+  let limited = QueryExecutionLimitsV1::new(
+    QueryExecutionCountLimitsV1::new(100, 100, 1, 1_000_000).unwrap(),
+    QueryExecutionByteLimitsV1::new(1 << 20, 8 << 20, 16 << 20).unwrap(),
+  );
+  let error = execute_authoritative_root_query_into_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut limited_feed,
+      memory: &limited_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limited,
+    },
+    &mut limited_sink,
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
+  assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Execution);
+  assert_eq!(error.code(), "query_execution_match_limit");
+  assert_eq!(limited_sink.rollbacks, 1);
+  assert!(limited_sink.staged.is_empty());
+  assert!(limited_sink.committed.is_empty());
+  assert_eq!(limited_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn authoritative_streaming_sink_preserves_every_sink_error_class() {
+  let (plan, catalogs) = plan(CoverageFixture::Authoritative);
+  for (sink_class, expected) in [
+    (QueryExecutionSinkErrorClassV1::Cancelled, QueryExecutionErrorClassV1::Cancelled),
+    (QueryExecutionSinkErrorClassV1::Internal, QueryExecutionErrorClassV1::Internal),
+  ] {
+    let memory = memory(64 << 20);
+    let mut feed = ScopeFeed {
+      root: ROOT.to_vec(),
+      publication_sequence: 41,
+      documents: documents(),
+      complete: true,
+      receipt_count_delta: 0,
+      source_error: None,
+      cancel_after_documents: None,
+      field_reads: Cell::new(0),
+    };
+    let mut sink = RecordingSink::with_error_class(SinkFault::Begin, sink_class);
+    let error = execute_authoritative_root_query_into_v1(
+      RootAwareQueryExecutionRequestV1 {
+        plan: &plan,
+        catalogs: &catalogs,
+        source: &mut feed,
+        memory: &memory,
+        cancellation: &CancellationToken::new(),
+        limits: limits(),
+      },
+      &mut sink,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), expected);
+    assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Sink);
+    assert_eq!(error.code(), "fixture_sink_failure");
+    assert_eq!(sink.rollbacks, 0);
+    assert!(sink.committed.is_empty());
+    assert_eq!(feed.field_reads.get(), 0);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
 fn nonidentical_cross_field_scope_partitions_never_silently_omit_a_valid_scope() {
   let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
   filename.scopes.push(catalog_scope(
@@ -709,6 +1171,62 @@ fn partitioned_authoritative_execution_joins_nonidentical_field_scopes_by_file_k
   assert_eq!(source.opened_fields, ["@filename", "@size"]);
   drop(execution);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_streaming_sink_commits_only_after_every_field_receipt_validates() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+  let expected = reference_truth(&documents());
+
+  let honest_memory = memory(64 << 20);
+  let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::None);
+  let mut sink = RecordingSink::new(SinkFault::None);
+  let receipt = execute_authoritative_partitioned_query_into_v1(
+    RootAwarePartitionedQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut source,
+      memory: &honest_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut sink,
+  )
+  .unwrap();
+  assert_eq!(receipt.scope_id(), None);
+  assert_eq!(receipt.match_count(), expected.len() as u64);
+  assert_eq!(sink.committed.iter().map(|row| row.0.clone()).collect::<Vec<_>>(), expected);
+  assert_eq!(sink.rollbacks, 0);
+  assert_eq!(honest_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let dishonest_memory = memory(64 << 20);
+  let mut dishonest_source =
+    partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::DishonestFilenameReceipt);
+  let mut dishonest_sink = RecordingSink::new(SinkFault::None);
+  let error = execute_authoritative_partitioned_query_into_v1(
+    RootAwarePartitionedQueryExecutionRequestV1 {
+      plan: &plan,
+      catalogs: &catalogs,
+      source: &mut dishonest_source,
+      memory: &dishonest_memory,
+      cancellation: &CancellationToken::new(),
+      limits: limits(),
+    },
+    &mut dishonest_sink,
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource);
+  assert_eq!(error.origin(), QueryExecutionErrorOriginV1::Execution);
+  assert_eq!(dishonest_sink.rollbacks, 1);
+  assert!(dishonest_sink.staged.is_empty());
+  assert!(dishonest_sink.committed.is_empty());
+  assert_eq!(dishonest_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
 
 #[test]

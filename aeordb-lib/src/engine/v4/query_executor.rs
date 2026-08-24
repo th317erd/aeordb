@@ -280,6 +280,85 @@ impl fmt::Display for QueryExecutionSourceErrorV1 {
 
 impl Error for QueryExecutionSourceErrorV1 {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryExecutionMatchPathV1<'a> {
+  Canonical(&'a str),
+  RequiresSelectedRootLookup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryExecutionMatchRefV1<'a> {
+  pub file_key: &'a [u8],
+  pub record_revision: &'a [u8],
+  pub path: QueryExecutionMatchPathV1<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryExecutionSinkBatchV1<'a> {
+  pub selected_namespace_root: &'a [u8],
+  pub scope_id: Option<&'a [u8]>,
+  pub maximum_matches: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryExecutionSinkBatchReceiptV1<'a> {
+  pub selected_namespace_root: &'a [u8],
+  pub scope_id: Option<&'a [u8]>,
+  pub match_count: u64,
+  pub examined_documents: u64,
+  pub examined_field_values: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryExecutionSinkErrorClassV1 {
+  ResourceLimit,
+  Cancelled,
+  Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryExecutionSinkErrorV1 {
+  class: QueryExecutionSinkErrorClassV1,
+  code: &'static str,
+  context: String,
+}
+
+impl QueryExecutionSinkErrorV1 {
+  pub fn new(class: QueryExecutionSinkErrorClassV1, code: &'static str, context: impl Into<String>) -> Self {
+    Self { class, code, context: context.into() }
+  }
+
+  pub const fn class(&self) -> QueryExecutionSinkErrorClassV1 {
+    self.class
+  }
+
+  pub const fn code(&self) -> &'static str {
+    self.code
+  }
+
+  pub fn context(&self) -> &str {
+    &self.context
+  }
+}
+
+impl fmt::Display for QueryExecutionSinkErrorV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{}: {}", self.code, self.context)
+  }
+}
+
+impl Error for QueryExecutionSinkErrorV1 {}
+
+/// A sink transaction must not expose staged matches until `commit_batch`
+/// succeeds. A failed commit remains rollback-able, and `rollback_batch` must
+/// be infallible and idempotent.
+pub trait QueryExecutionMatchSinkV1 {
+  fn begin_batch(&mut self, batch: QueryExecutionSinkBatchV1<'_>) -> Result<(), QueryExecutionSinkErrorV1>;
+  fn push_match(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionSinkErrorV1>;
+  fn commit_batch(&mut self, receipt: QueryExecutionSinkBatchReceiptV1<'_>) -> Result<(), QueryExecutionSinkErrorV1>;
+  fn rollback_batch(&mut self);
+}
+
 #[derive(Debug)]
 pub enum QueryExecutionScanErrorV1 {
   Source(QueryExecutionSourceErrorV1),
@@ -296,9 +375,16 @@ pub enum QueryExecutionErrorClassV1 {
   Internal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryExecutionErrorOriginV1 {
+  Execution,
+  Sink,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryExecutionErrorV1 {
   class: QueryExecutionErrorClassV1,
+  origin: QueryExecutionErrorOriginV1,
   code: &'static str,
   context: String,
 }
@@ -306,6 +392,10 @@ pub struct QueryExecutionErrorV1 {
 impl QueryExecutionErrorV1 {
   pub const fn class(&self) -> QueryExecutionErrorClassV1 {
     self.class
+  }
+
+  pub const fn origin(&self) -> QueryExecutionErrorOriginV1 {
+    self.origin
   }
 
   pub const fn code(&self) -> &'static str {
@@ -317,31 +407,51 @@ impl QueryExecutionErrorV1 {
   }
 
   fn invalid(code: &'static str, context: impl Into<String>) -> Self {
-    Self { class: QueryExecutionErrorClassV1::InvalidRequest, code, context: context.into() }
+    Self {
+      class: QueryExecutionErrorClassV1::InvalidRequest,
+      origin: QueryExecutionErrorOriginV1::Execution,
+      code,
+      context: context.into(),
+    }
   }
 
   fn resource(code: &'static str, context: impl Into<String>) -> Self {
-    Self { class: QueryExecutionErrorClassV1::ResourceLimit, code, context: context.into() }
+    Self { class: QueryExecutionErrorClassV1::ResourceLimit, origin: QueryExecutionErrorOriginV1::Execution, code, context: context.into() }
   }
 
   fn unavailable(code: &'static str, context: impl Into<String>) -> Self {
-    Self { class: QueryExecutionErrorClassV1::HistoricalViewUnavailable, code, context: context.into() }
+    Self {
+      class: QueryExecutionErrorClassV1::HistoricalViewUnavailable,
+      origin: QueryExecutionErrorOriginV1::Execution,
+      code,
+      context: context.into(),
+    }
   }
 
   fn corrupt(code: &'static str, context: impl Into<String>) -> Self {
-    Self { class: QueryExecutionErrorClassV1::CorruptSource, code, context: context.into() }
+    Self { class: QueryExecutionErrorClassV1::CorruptSource, origin: QueryExecutionErrorOriginV1::Execution, code, context: context.into() }
   }
 
   fn cancelled() -> Self {
     Self {
       class: QueryExecutionErrorClassV1::Cancelled,
+      origin: QueryExecutionErrorOriginV1::Execution,
       code: "query_execution_cancelled",
       context: "selected-root query execution was cancelled".to_string(),
     }
   }
 
   fn internal(code: &'static str, context: impl Into<String>) -> Self {
-    Self { class: QueryExecutionErrorClassV1::Internal, code, context: context.into() }
+    Self { class: QueryExecutionErrorClassV1::Internal, origin: QueryExecutionErrorOriginV1::Execution, code, context: context.into() }
+  }
+
+  fn sink(error: QueryExecutionSinkErrorV1) -> Self {
+    let class = match error.class {
+      QueryExecutionSinkErrorClassV1::ResourceLimit => QueryExecutionErrorClassV1::ResourceLimit,
+      QueryExecutionSinkErrorClassV1::Cancelled => QueryExecutionErrorClassV1::Cancelled,
+      QueryExecutionSinkErrorClassV1::Internal => QueryExecutionErrorClassV1::Internal,
+    };
+    Self { class, origin: QueryExecutionErrorOriginV1::Sink, code: error.code, context: error.context }
   }
 }
 
@@ -415,6 +525,75 @@ impl RootAwareQueryExecutionV1 {
 
   pub const fn retained_bytes(&self) -> u64 {
     self.retained_bytes
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryExecutionStreamReceiptV1 {
+  selected_namespace_root: [u8; 64],
+  selected_namespace_root_length: usize,
+  scope_id: [u8; 64],
+  scope_id_length: usize,
+  match_count: u64,
+  examined_documents: u64,
+  examined_field_values: u64,
+}
+
+impl QueryExecutionStreamReceiptV1 {
+  pub fn selected_namespace_root(&self) -> &[u8] {
+    &self.selected_namespace_root[..self.selected_namespace_root_length]
+  }
+
+  pub fn scope_id(&self) -> Option<&[u8]> {
+    (self.scope_id_length != 0).then_some(&self.scope_id[..self.scope_id_length])
+  }
+
+  pub const fn match_count(&self) -> u64 {
+    self.match_count
+  }
+
+  pub const fn examined_documents(&self) -> u64 {
+    self.examined_documents
+  }
+
+  pub const fn examined_field_values(&self) -> u64 {
+    self.examined_field_values
+  }
+
+  fn new(
+    selected_namespace_root: &[u8],
+    scope_id: Option<&[u8]>,
+    match_count: u64,
+    examined_documents: u64,
+    examined_field_values: u64,
+  ) -> Result<Self, QueryExecutionErrorV1> {
+    if selected_namespace_root.is_empty()
+      || selected_namespace_root.len() > 64
+      || scope_id.is_some_and(|scope| scope.is_empty() || scope.len() > 64)
+    {
+      return Err(QueryExecutionErrorV1::internal(
+        "query_execution_stream_receipt_identity",
+        "validated query identity cannot fit the fixed stream receipt",
+      ));
+    }
+    let mut retained_root = [0u8; 64];
+    retained_root[..selected_namespace_root.len()].copy_from_slice(selected_namespace_root);
+    let mut retained_scope = [0u8; 64];
+    let scope_id_length = if let Some(scope_id) = scope_id {
+      retained_scope[..scope_id.len()].copy_from_slice(scope_id);
+      scope_id.len()
+    } else {
+      0
+    };
+    Ok(Self {
+      selected_namespace_root: retained_root,
+      selected_namespace_root_length: selected_namespace_root.len(),
+      scope_id: retained_scope,
+      scope_id_length,
+      match_count,
+      examined_documents,
+      examined_field_values,
+    })
   }
 }
 
@@ -515,6 +694,67 @@ struct WorkBudgetV1<'a> {
   cancellation: &'a CancellationToken,
 }
 
+struct ActiveQuerySinkBatchV1<'a> {
+  sink: &'a mut dyn QueryExecutionMatchSinkV1,
+  maximum_matches: u64,
+  match_count: u64,
+  active: bool,
+}
+
+impl<'a> ActiveQuerySinkBatchV1<'a> {
+  fn begin(sink: &'a mut dyn QueryExecutionMatchSinkV1, batch: QueryExecutionSinkBatchV1<'_>) -> Result<Self, QueryExecutionErrorV1> {
+    sink.begin_batch(batch).map_err(QueryExecutionErrorV1::sink)?;
+    Ok(Self { sink, maximum_matches: batch.maximum_matches, match_count: 0, active: true })
+  }
+
+  fn push(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionErrorV1> {
+    if self.match_count >= self.maximum_matches {
+      return Err(QueryExecutionErrorV1::resource(
+        "query_execution_match_limit",
+        "authoritative query produced more matches than the admitted internal result bound",
+      ));
+    }
+    self.sink.push_match(matched).map_err(QueryExecutionErrorV1::sink)?;
+    self.match_count = self
+      .match_count
+      .checked_add(1)
+      .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_match_limit", "streamed query match count overflowed"))?;
+    Ok(())
+  }
+
+  fn commit(
+    mut self,
+    selected_namespace_root: &[u8],
+    scope_id: Option<&[u8]>,
+    examined_documents: u64,
+    examined_field_values: u64,
+  ) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
+    let retained =
+      QueryExecutionStreamReceiptV1::new(selected_namespace_root, scope_id, self.match_count, examined_documents, examined_field_values)?;
+    self
+      .sink
+      .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+        selected_namespace_root,
+        scope_id,
+        match_count: self.match_count,
+        examined_documents,
+        examined_field_values,
+      })
+      .map_err(QueryExecutionErrorV1::sink)?;
+    self.active = false;
+    Ok(retained)
+  }
+}
+
+impl Drop for ActiveQuerySinkBatchV1<'_> {
+  fn drop(&mut self) {
+    if self.active {
+      self.sink.rollback_batch();
+      self.active = false;
+    }
+  }
+}
+
 struct QueryResultCollectorV1 {
   selected_namespace_root: Vec<u8>,
   matches: Vec<QueryExecutionMatchV1>,
@@ -522,6 +762,10 @@ struct QueryResultCollectorV1 {
   maximum_retained_bytes: u64,
   retained_bytes: u64,
   memory: MemoryReservation,
+  active: bool,
+  committed: bool,
+  examined_documents: u64,
+  examined_field_values: u64,
 }
 
 impl QueryResultCollectorV1 {
@@ -559,17 +803,30 @@ impl QueryResultCollectorV1 {
       maximum_retained_bytes: limits.bytes.maximum_retained_bytes,
       retained_bytes,
       memory: reservation,
+      active: false,
+      committed: false,
+      examined_documents: 0,
+      examined_field_values: 0,
     })
   }
 
-  fn push(&mut self, document: QueryExecutionDocumentV1<'_>) -> Result<(), QueryExecutionErrorV1> {
+  fn push_retained(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionErrorV1> {
     if self.matches.len() as u64 >= self.maximum_matches {
       return Err(QueryExecutionErrorV1::resource(
         "query_execution_match_limit",
         "authoritative query produced more matches than the admitted internal result bound",
       ));
     }
-    let prospective_row_bytes = result_row_bytes(document.file_key.len(), document.record_revision.len(), document.path.len())?;
+    let path = match matched.path {
+      QueryExecutionMatchPathV1::Canonical(path) => path,
+      QueryExecutionMatchPathV1::RequiresSelectedRootLookup => {
+        return Err(QueryExecutionErrorV1::internal(
+          "query_execution_result_path",
+          "the retained authoritative result adapter requires a canonical path",
+        ));
+      }
+    };
+    let prospective_row_bytes = result_row_bytes(matched.file_key.len(), matched.record_revision.len(), path.len())?;
     let prospective_retained = self
       .retained_bytes
       .checked_add(prospective_row_bytes)
@@ -581,9 +838,9 @@ impl QueryResultCollectorV1 {
       ));
     }
     let row = QueryExecutionMatchV1 {
-      file_key: try_clone_bytes(document.file_key, "result FileKey")?,
-      record_revision: try_clone_bytes(document.record_revision, "result RecordRevision")?,
-      path: try_clone_string(document.path, "result path")?,
+      file_key: try_clone_bytes(matched.file_key, "result FileKey")?,
+      record_revision: try_clone_bytes(matched.record_revision, "result RecordRevision")?,
+      path: try_clone_string(path, "result path")?,
     };
     let actual_row_bytes = result_row_bytes(row.file_key.capacity(), row.record_revision.capacity(), row.path.capacity())?;
     let actual_retained = self
@@ -601,24 +858,101 @@ impl QueryResultCollectorV1 {
     Ok(())
   }
 
-  fn finish(mut self, examined_documents: u64, examined_field_values: u64) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
-    let retained_bytes = result_retained_bytes(&self.selected_namespace_root, &self.matches, self.matches.capacity())?;
+  fn finish(self) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+    if !self.committed || self.active {
+      return Err(QueryExecutionErrorV1::sink(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::Internal,
+        "query_execution_result_state",
+        "retained query result escaped without one committed sink batch",
+      )));
+    }
+    Ok(RootAwareQueryExecutionV1 {
+      selected_namespace_root: self.selected_namespace_root,
+      matches: self.matches,
+      examined_documents: self.examined_documents,
+      examined_field_values: self.examined_field_values,
+      retained_bytes: self.retained_bytes,
+      _memory: self.memory,
+    })
+  }
+}
+
+impl QueryExecutionMatchSinkV1 for QueryResultCollectorV1 {
+  fn begin_batch(&mut self, batch: QueryExecutionSinkBatchV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    if self.active || self.committed || !self.matches.is_empty() || batch.selected_namespace_root != self.selected_namespace_root {
+      return Err(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::Internal,
+        "query_execution_result_state",
+        "retained query result received an invalid sink transaction",
+      ));
+    }
+    if batch.maximum_matches != self.maximum_matches {
+      return Err(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::Internal,
+        "query_execution_result_limit",
+        "retained query result and executor disagree on the match limit",
+      ));
+    }
+    self.active = true;
+    Ok(())
+  }
+
+  fn push_match(&mut self, matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    if !self.active || self.committed {
+      return Err(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::Internal,
+        "query_execution_result_state",
+        "retained query result received a match outside an active transaction",
+      ));
+    }
+    self.push_retained(matched).map_err(map_collector_error)
+  }
+
+  fn commit_batch(&mut self, receipt: QueryExecutionSinkBatchReceiptV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    if !self.active
+      || self.committed
+      || receipt.selected_namespace_root != self.selected_namespace_root
+      || receipt.match_count != self.matches.len() as u64
+    {
+      return Err(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::Internal,
+        "query_execution_result_receipt",
+        "retained query result received an inconsistent commit receipt",
+      ));
+    }
+    let retained_bytes =
+      result_retained_bytes(&self.selected_namespace_root, &self.matches, self.matches.capacity()).map_err(map_collector_error)?;
     if retained_bytes != self.retained_bytes || retained_bytes > self.maximum_retained_bytes {
-      return Err(QueryExecutionErrorV1::resource(
+      return Err(QueryExecutionSinkErrorV1::new(
+        QueryExecutionSinkErrorClassV1::ResourceLimit,
         "query_execution_retained_bytes",
         "query execution result exceeds its retained-byte limit or disagrees with incremental accounting",
       ));
     }
-    shrink_reservation(&mut self.memory, retained_bytes)?;
-    Ok(RootAwareQueryExecutionV1 {
-      selected_namespace_root: self.selected_namespace_root,
-      matches: self.matches,
-      examined_documents,
-      examined_field_values,
-      retained_bytes,
-      _memory: self.memory,
-    })
+    shrink_reservation(&mut self.memory, retained_bytes).map_err(map_collector_error)?;
+    self.examined_documents = receipt.examined_documents;
+    self.examined_field_values = receipt.examined_field_values;
+    self.active = false;
+    self.committed = true;
+    Ok(())
   }
+
+  fn rollback_batch(&mut self) {
+    self.matches.clear();
+    self.active = false;
+  }
+}
+
+fn map_collector_error(error: QueryExecutionErrorV1) -> QueryExecutionSinkErrorV1 {
+  let class = match error.class {
+    QueryExecutionErrorClassV1::ResourceLimit => QueryExecutionSinkErrorClassV1::ResourceLimit,
+    QueryExecutionErrorClassV1::Cancelled => QueryExecutionSinkErrorClassV1::Cancelled,
+    QueryExecutionErrorClassV1::InvalidRequest
+    | QueryExecutionErrorClassV1::HistoricalViewUnavailable
+    | QueryExecutionErrorClassV1::CorruptSource
+    | QueryExecutionErrorClassV1::Internal => QueryExecutionSinkErrorClassV1::Internal,
+  };
+  QueryExecutionSinkErrorV1 { class, code: error.code, context: error.context }
 }
 
 #[derive(Clone, Copy)]
@@ -674,14 +1008,37 @@ fn sort_work_bound(length: usize) -> Result<u64, QueryExecutionErrorV1> {
 pub fn execute_authoritative_root_query_v1(
   request: RootAwareQueryExecutionRequestV1<'_>,
 ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
-  execute_authoritative_query_v1(request, None)
+  require_not_cancelled(request.cancellation)?;
+  validate_execution_request(&request)?;
+  let mut collector = QueryResultCollectorV1::new(request.plan.selected_namespace_root(), request.memory, request.limits)?;
+  execute_authoritative_root_query_into_v1(request, &mut collector)?;
+  collector.finish()
+}
+
+pub fn execute_authoritative_root_query_into_v1(
+  request: RootAwareQueryExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
+  execute_authoritative_query_into_v1(request, None, sink)
 }
 
 pub fn execute_authoritative_scope_query_v1(
   request: RootAwareQueryScopeExecutionRequestV1<'_>,
 ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+  require_not_cancelled(request.cancellation)?;
+  validate_execution_plan(request.plan)?;
+  validate_scope_selection(request.plan, Some(request.scope_id))?;
+  let mut collector = QueryResultCollectorV1::new(request.plan.selected_namespace_root(), request.memory, request.limits)?;
+  execute_authoritative_scope_query_into_v1(request, &mut collector)?;
+  collector.finish()
+}
+
+pub fn execute_authoritative_scope_query_into_v1(
+  request: RootAwareQueryScopeExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
   let scope_id = request.scope_id;
-  execute_authoritative_query_v1(
+  execute_authoritative_query_into_v1(
     RootAwareQueryExecutionRequestV1 {
       plan: request.plan,
       catalogs: request.catalogs,
@@ -691,6 +1048,7 @@ pub fn execute_authoritative_scope_query_v1(
       limits: request.limits,
     },
     Some(scope_id),
+    sink,
   )
 }
 
@@ -700,6 +1058,16 @@ pub fn execute_authoritative_partitioned_query_v1(
   require_not_cancelled(request.cancellation)?;
   validate_execution_plan(request.plan)?;
   let mut collector = QueryResultCollectorV1::new(request.plan.selected_namespace_root(), request.memory, request.limits)?;
+  execute_authoritative_partitioned_query_into_v1(request, &mut collector)?;
+  collector.finish()
+}
+
+pub fn execute_authoritative_partitioned_query_into_v1(
+  request: RootAwarePartitionedQueryExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
+  require_not_cancelled(request.cancellation)?;
+  validate_execution_plan(request.plan)?;
   let _workspace =
     reserve_query_memory(request.memory, request.limits.bytes.maximum_semantic_scratch_bytes, "query_execution_semantic_memory")?;
   let mut work = WorkBudgetV1 { work: 0, limit: request.limits.counts.maximum_work_steps, cancellation: request.cancellation };
@@ -762,6 +1130,15 @@ pub fn execute_authoritative_partitioned_query_v1(
       exhausted: false,
     });
   }
+
+  let mut active_sink = ActiveQuerySinkBatchV1::begin(
+    sink,
+    QueryExecutionSinkBatchV1 {
+      selected_namespace_root: request.plan.selected_namespace_root(),
+      scope_id: None,
+      maximum_matches: request.limits.counts.maximum_matches,
+    },
+  )?;
 
   let mut examined_documents = 0u64;
   let mut examined_field_values = 0u64;
@@ -862,10 +1239,10 @@ pub fn execute_authoritative_partitioned_query_v1(
       let document = cursors[0].head.as_ref().ok_or_else(|| {
         QueryExecutionErrorV1::internal("query_execution_partition_state", "validated field cursor lost its current document")
       })?;
-      collector.push(QueryExecutionDocumentV1 {
+      active_sink.push(QueryExecutionMatchRefV1 {
         file_key: &document.file_key,
         record_revision: &document.record_revision,
-        path: &document.path,
+        path: QueryExecutionMatchPathV1::Canonical(&document.path),
       })?;
     }
     for active in &mut cursors {
@@ -882,17 +1259,17 @@ pub fn execute_authoritative_partitioned_query_v1(
     validate_partition_receipt(request.plan, active, &receipt)?;
   }
   require_not_cancelled(request.cancellation)?;
-  collector.finish(examined_documents, examined_field_values)
+  active_sink.commit(request.plan.selected_namespace_root(), None, examined_documents, examined_field_values)
 }
 
-fn execute_authoritative_query_v1(
+fn execute_authoritative_query_into_v1(
   request: RootAwareQueryExecutionRequestV1<'_>,
   scope_id: Option<&[u8]>,
-) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
   require_not_cancelled(request.cancellation)?;
   validate_execution_request(&request)?;
   validate_scope_selection(request.plan, scope_id)?;
-  let mut collector = QueryResultCollectorV1::new(request.plan.selected_namespace_root(), request.memory, request.limits)?;
   let _workspace =
     reserve_query_memory(request.memory, request.limits.bytes.maximum_semantic_scratch_bytes, "query_execution_semantic_memory")?;
   let mut work = WorkBudgetV1 { work: 0, limit: request.limits.counts.maximum_work_steps, cancellation: request.cancellation };
@@ -918,6 +1295,15 @@ fn execute_authoritative_query_v1(
     })?;
   require_not_cancelled(request.cancellation)?;
 
+  let mut active_sink = ActiveQuerySinkBatchV1::begin(
+    sink,
+    QueryExecutionSinkBatchV1 {
+      selected_namespace_root: request.plan.selected_namespace_root(),
+      scope_id,
+      maximum_matches: request.limits.counts.maximum_matches,
+    },
+  )?;
+
   let mut examined_documents = 0u64;
   let mut examined_field_values = 0u64;
 
@@ -932,7 +1318,7 @@ fn execute_authoritative_query_v1(
       scope,
       limits: request.limits,
       semantic_dynamic_bytes,
-      collector: &mut collector,
+      sink: &mut active_sink,
       examined_documents: &mut examined_documents,
       examined_field_values: &mut examined_field_values,
       work: &mut work,
@@ -959,10 +1345,10 @@ fn execute_authoritative_query_v1(
   }
   require_not_cancelled(request.cancellation)?;
 
-  collector.finish(examined_documents, examined_field_values)
+  active_sink.commit(request.plan.selected_namespace_root(), scope_id, examined_documents, examined_field_values)
 }
 
-struct ScopeVisitorV1<'authority, 'plan, 'value, 'field, 'scope, 'state, 'budget, 'cancellation> {
+struct ScopeVisitorV1<'authority, 'plan, 'value, 'field, 'scope, 'state, 'sink, 'budget, 'cancellation> {
   hash_algorithm: HashAlgorithm,
   selected_root: &'authority [u8],
   query_path: &'authority str,
@@ -971,7 +1357,7 @@ struct ScopeVisitorV1<'authority, 'plan, 'value, 'field, 'scope, 'state, 'budget
   scope: &'scope PreparedScopeV1<'plan, 'value, 'field>,
   limits: QueryExecutionLimitsV1,
   semantic_dynamic_bytes: u64,
-  collector: &'state mut QueryResultCollectorV1,
+  sink: &'state mut ActiveQuerySinkBatchV1<'sink>,
   examined_documents: &'state mut u64,
   examined_field_values: &'state mut u64,
   work: &'budget mut WorkBudgetV1<'cancellation>,
@@ -980,7 +1366,7 @@ struct ScopeVisitorV1<'authority, 'plan, 'value, 'field, 'scope, 'state, 'budget
   failure: Option<QueryExecutionErrorV1>,
 }
 
-impl QueryAuthoritativeDocumentVisitorV1 for ScopeVisitorV1<'_, '_, '_, '_, '_, '_, '_, '_> {
+impl QueryAuthoritativeDocumentVisitorV1 for ScopeVisitorV1<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
   fn visit(
     &mut self,
     document: QueryExecutionDocumentV1<'_>,
@@ -997,7 +1383,7 @@ impl QueryAuthoritativeDocumentVisitorV1 for ScopeVisitorV1<'_, '_, '_, '_, '_, 
   }
 }
 
-impl ScopeVisitorV1<'_, '_, '_, '_, '_, '_, '_, '_> {
+impl ScopeVisitorV1<'_, '_, '_, '_, '_, '_, '_, '_, '_> {
   fn visit_document(
     &mut self,
     document: QueryExecutionDocumentV1<'_>,
@@ -1074,7 +1460,11 @@ impl ScopeVisitorV1<'_, '_, '_, '_, '_, '_, '_, '_> {
     }
 
     if evaluate_expression(self.expression, &predicate_matches)? {
-      self.collector.push(document)?;
+      self.sink.push(QueryExecutionMatchRefV1 {
+        file_key: document.file_key,
+        record_revision: document.record_revision,
+        path: QueryExecutionMatchPathV1::Canonical(document.path),
+      })?;
     }
     Ok(())
   }
