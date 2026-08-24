@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
@@ -148,6 +148,14 @@ fn aggregate_plan(algorithm: HashAlgorithm) -> aeordb::engine::v4::query_planner
 }
 
 fn multi_field_group_plan(algorithm: HashAlgorithm) -> aeordb::engine::v4::query_planner::CompiledRootAwareQueryPlanV1 {
+  multi_field_group_plan_for(algorithm, &[QueryAggregateKindV1::Average, QueryAggregateKindV1::Maximum], 4)
+}
+
+fn multi_field_group_plan_for(
+  algorithm: HashAlgorithm,
+  aggregate_kinds: &[QueryAggregateKindV1],
+  result_limit: usize,
+) -> aeordb::engine::v4::query_planner::CompiledRootAwareQueryPlanV1 {
   let hash_width = algorithm.hash_length();
   let root = vec![0x33; hash_width];
   let semantic_root = vec![0x44; hash_width];
@@ -157,10 +165,8 @@ fn multi_field_group_plan(algorithm: HashAlgorithm) -> aeordb::engine::v4::query
   ];
   let context = QueryPlanningContextV1::new(DATABASE_ID, PHYSICAL_INSTANCE_ID, algorithm, &root, &semantic_root, 41).unwrap();
   let expression = QueryExpressionV1::And(Vec::new());
-  let aggregates = [
-    QueryAggregateFieldV1 { field_name: "@size".to_string(), kind: QueryAggregateKindV1::Average },
-    QueryAggregateFieldV1 { field_name: "@size".to_string(), kind: QueryAggregateKindV1::Maximum },
-  ];
+  let aggregates =
+    aggregate_kinds.iter().map(|kind| QueryAggregateFieldV1 { field_name: "@size".to_string(), kind: *kind }).collect::<Vec<_>>();
   plan_root_aware_query_v1(&QueryPlanningRequestV1 {
     context: &context,
     query_path: "/",
@@ -169,7 +175,7 @@ fn multi_field_group_plan(algorithm: HashAlgorithm) -> aeordb::engine::v4::query
     sort_fields: &[],
     aggregate_fields: &aggregates,
     group_fields: &["@updated_at".to_string(), "@size".to_string()],
-    result_limit: 4,
+    result_limit,
     limits: default_query_planning_limits_v1(),
     is_cancelled: &|| false,
   })
@@ -270,6 +276,26 @@ fn found_two_field_row(
   size: u64,
   updated_at: i64,
 ) -> QueryAggregateInputLookupResultV1 {
+  found_two_field_state_row(
+    input,
+    file_key,
+    revision,
+    QueryExecutionFieldStateV1::Values,
+    vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, size.to_le_bytes().to_vec())],
+    QueryExecutionFieldStateV1::Values,
+    vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::I64, updated_at.to_le_bytes().to_vec())],
+  )
+}
+
+fn found_two_field_state_row(
+  input: &CompiledQueryAggregateInputV1,
+  file_key: &[u8],
+  revision: &[u8],
+  size_state: QueryExecutionFieldStateV1,
+  size_values: Vec<LogicalOrderComponentOwnedV1>,
+  updated_at_state: QueryExecutionFieldStateV1,
+  updated_at_values: Vec<LogicalOrderComponentOwnedV1>,
+) -> QueryAggregateInputLookupResultV1 {
   assert_eq!(input.fields().len(), 2);
   assert_eq!(input.fields()[0].field_name(), "@size");
   assert_eq!(input.fields()[1].field_name(), "@updated_at");
@@ -281,17 +307,66 @@ fn found_two_field_row(
       QueryAggregateInputFieldV1 {
         field_name: "@size".to_string(),
         scope_id: input.fields()[0].scope_ids()[0].to_vec(),
-        state: QueryExecutionFieldStateV1::Values,
-        values: vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, size.to_le_bytes().to_vec())],
+        state: size_state,
+        values: size_values,
       },
       QueryAggregateInputFieldV1 {
         field_name: "@updated_at".to_string(),
         scope_id: input.fields()[1].scope_ids()[0].to_vec(),
-        state: QueryExecutionFieldStateV1::Values,
-        values: vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::I64, updated_at.to_le_bytes().to_vec())],
+        state: updated_at_state,
+        values: updated_at_values,
       },
     ],
   })
+}
+
+fn independent_comparator_tag(comparator: PositionComparatorV1) -> u16 {
+  match comparator {
+    PositionComparatorV1::BytesBinary => 2,
+    PositionComparatorV1::Utf8Binary => 3,
+    PositionComparatorV1::U64 => 4,
+    PositionComparatorV1::I64 => 5,
+    PositionComparatorV1::FiniteF64 => 6,
+    PositionComparatorV1::TimestampMs => 7,
+    PositionComparatorV1::Boolean => 8,
+  }
+}
+
+fn independent_group_tuple(fields: &[(QueryExecutionFieldStateV1, &[LogicalOrderComponentOwnedV1])]) -> Vec<u8> {
+  let mut output = Vec::from(b"AGTP".as_slice());
+  output.extend_from_slice(&1u16.to_le_bytes());
+  output.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+  for (field_state, values) in fields {
+    let state = match field_state {
+      QueryExecutionFieldStateV1::Values => 0,
+      QueryExecutionFieldStateV1::Missing => 1,
+      QueryExecutionFieldStateV1::DeterministicUnindexable => 2,
+    };
+    let values_length = values.iter().map(|value| 8 + value.payload.len()).sum::<usize>();
+    output.push(state);
+    output.extend_from_slice(&[0, 0, 0]);
+    output.extend_from_slice(&(values.len() as u32).to_le_bytes());
+    output.extend_from_slice(&(values_length as u32).to_le_bytes());
+    for value in *values {
+      let (tag, state) = match value.state {
+        PositionComponentStateV1::Present => (independent_comparator_tag(value.comparator.unwrap()), 0),
+        PositionComponentStateV1::TypedNull => (0, 1),
+        PositionComponentStateV1::Missing => panic!("independent group fixture contains a per-value missing component"),
+      };
+      output.extend_from_slice(&tag.to_le_bytes());
+      output.push(state);
+      output.push(0);
+      output.extend_from_slice(&(value.payload.len() as u32).to_le_bytes());
+      output.extend_from_slice(&value.payload);
+    }
+  }
+  output
+}
+
+#[derive(Default)]
+struct IndependentUnsignedGroup {
+  document_count: u64,
+  values: Vec<u64>,
 }
 
 struct QueueAggregateSource {
@@ -307,6 +382,22 @@ impl QueryAggregateInputSourceV1 for QueueAggregateSource {
   ) -> Result<QueryAggregateInputLookupResultV1, QueryExecutionSourceErrorV1> {
     self.calls += 1;
     self.results.pop_front().expect("aggregate source received an unexpected lookup")
+  }
+}
+
+struct CancelAfterResolveSource {
+  result: Option<QueryAggregateInputLookupResultV1>,
+}
+
+impl QueryAggregateInputSourceV1 for CancelAfterResolveSource {
+  fn resolve_aggregate_input(
+    &mut self,
+    _request: QueryAggregateInputLookupRequestV1<'_>,
+    cancellation: &CancellationToken,
+  ) -> Result<QueryAggregateInputLookupResultV1, QueryExecutionSourceErrorV1> {
+    let result = self.result.take().expect("cancelling source received an unexpected lookup");
+    cancellation.cancel();
+    Ok(result)
   }
 }
 
@@ -1354,4 +1445,605 @@ fn grouped_reducer_rolls_back_distinct_group_tuple_and_cancellation_pressure() {
   );
   drop(sink);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn grouped_reducer_matches_independent_bounded_model_for_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let plan = multi_field_group_plan_for(
+      algorithm,
+      &[
+        QueryAggregateKindV1::Count,
+        QueryAggregateKindV1::Sum,
+        QueryAggregateKindV1::Average,
+        QueryAggregateKindV1::Minimum,
+        QueryAggregateKindV1::Maximum,
+      ],
+      17,
+    );
+    let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+    let identities = (1..=96).map(|seed| identity(algorithm, seed)).collect::<Vec<_>>();
+    let mut expected = BTreeMap::<Vec<u8>, IndependentUnsignedGroup>::new();
+    let mut rows = VecDeque::new();
+    let mut examined_field_values = 0u64;
+
+    for (index, (file_key, revision)) in identities.iter().enumerate() {
+      let size_state = if index % 11 == 0 {
+        QueryExecutionFieldStateV1::Missing
+      } else if index % 13 == 0 {
+        QueryExecutionFieldStateV1::DeterministicUnindexable
+      } else {
+        QueryExecutionFieldStateV1::Values
+      };
+      let mut size_values = Vec::new();
+      if size_state == QueryExecutionFieldStateV1::Values {
+        let primary = ((index * 17) % 23) as u64;
+        size_values.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, primary.to_le_bytes().to_vec()));
+        if index % 3 == 0 {
+          size_values.push(LogicalOrderComponentOwnedV1::typed_null());
+        }
+        if index % 5 == 0 {
+          size_values.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, primary.to_le_bytes().to_vec()));
+        }
+        if index % 7 == 0 {
+          size_values.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, (primary + 100).to_le_bytes().to_vec()));
+        }
+      }
+
+      let updated_at_state = if index % 9 == 0 {
+        QueryExecutionFieldStateV1::Missing
+      } else if index % 10 == 0 {
+        QueryExecutionFieldStateV1::DeterministicUnindexable
+      } else {
+        QueryExecutionFieldStateV1::Values
+      };
+      let mut updated_at_values = Vec::new();
+      if updated_at_state == QueryExecutionFieldStateV1::Values {
+        let primary = (index as i64 % 8) - 4;
+        updated_at_values.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::I64, primary.to_le_bytes().to_vec()));
+        if index % 4 == 0 {
+          updated_at_values.push(LogicalOrderComponentOwnedV1::typed_null());
+        }
+        if index % 6 == 0 {
+          updated_at_values.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::I64, (primary - 20).to_le_bytes().to_vec()));
+        }
+      }
+
+      let tuple = independent_group_tuple(&[(updated_at_state, &updated_at_values), (size_state, &size_values)]);
+      let group = expected.entry(tuple).or_default();
+      group.document_count += 1;
+      group.values.extend(size_values.iter().filter_map(|value| {
+        (value.state == PositionComponentStateV1::Present).then(|| u64::from_le_bytes(value.payload.as_slice().try_into().unwrap()))
+      }));
+      examined_field_values += u64::try_from(size_values.len() + updated_at_values.len()).unwrap();
+      rows.push_back(Ok(found_two_field_state_row(
+        &input,
+        file_key,
+        revision,
+        size_state,
+        size_values,
+        updated_at_state,
+        updated_at_values,
+      )));
+    }
+
+    let total_group_count = expected.len();
+    let mut expected = expected.into_iter().collect::<Vec<_>>();
+    expected.sort_by(|(left_tuple, left), (right_tuple, right)| {
+      right.document_count.cmp(&left.document_count).then_with(|| left_tuple.cmp(right_tuple))
+    });
+    expected.truncate(17);
+
+    let mut source = QueueAggregateSource { results: rows, calls: 0 };
+    let coordinator = memory(64 << 20);
+    let cancellation = CancellationToken::new();
+    let mut sink = QueryGroupedAggregateSinkV1::new(
+      &input,
+      &mut source,
+      &coordinator,
+      &cancellation,
+      QueryGroupedAggregateLimitsV1::new(128, 1 << 20, 32 << 20).unwrap(),
+    )
+    .unwrap();
+    sink
+      .begin_batch(QueryExecutionSinkBatchV1 {
+        selected_namespace_root: input.selected_namespace_root(),
+        scope_id: None,
+        maximum_matches: identities.len() as u64,
+      })
+      .unwrap();
+    for (file_key, revision) in &identities {
+      push_match(&mut sink, file_key, revision).unwrap();
+    }
+    sink
+      .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+        selected_namespace_root: input.selected_namespace_root(),
+        scope_id: None,
+        match_count: identities.len() as u64,
+        examined_documents: 211,
+        examined_field_values,
+      })
+      .unwrap();
+
+    let result = sink.finish().unwrap();
+    assert_eq!(result.total_document_count(), identities.len() as u64);
+    assert_eq!(result.total_group_count(), total_group_count as u64);
+    assert_eq!(result.groups().len(), expected.len());
+    assert_eq!(result.has_more(), total_group_count > expected.len());
+    assert_eq!(result.examined_documents(), 211);
+    assert_eq!(result.examined_field_values(), examined_field_values);
+    assert_eq!(result.aggregate_values_examined(), examined_field_values);
+    assert_eq!(result.selected_namespace_root(), input.selected_namespace_root());
+    assert_eq!(result.scope_id(), None);
+
+    for (index, ((expected_tuple, expected_group), actual)) in expected.iter().zip(result.groups()).enumerate() {
+      assert_eq!(actual.canonical_group_tuple(), expected_tuple);
+      assert_eq!(actual.document_count(), expected_group.document_count);
+      assert_eq!(actual.position_row().route, PositionRouteV1::AggregateGroups);
+      assert_eq!(actual.position_row().components[1].payload, *expected_tuple);
+      assert_eq!(actual.position_row().file_key_tie, digest_parts(algorithm, &[expected_tuple]));
+      assert_eq!(actual.position_row().record_revision_tie, input.selected_namespace_root());
+      assert_eq!(
+        result.group_value(index, "@size", QueryAggregateKindV1::Count),
+        Some(QueryAggregateReducedValueRefV1::Count(expected_group.values.len() as u64))
+      );
+      if expected_group.values.is_empty() {
+        for kind in [QueryAggregateKindV1::Sum, QueryAggregateKindV1::Average, QueryAggregateKindV1::Minimum, QueryAggregateKindV1::Maximum]
+        {
+          assert_eq!(result.group_value(index, "@size", kind), Some(QueryAggregateReducedValueRefV1::Empty));
+        }
+      } else {
+        let sum = expected_group.values.iter().map(|value| u128::from(*value)).sum::<u128>();
+        assert_eq!(
+          result.group_value(index, "@size", QueryAggregateKindV1::Sum),
+          Some(QueryAggregateReducedValueRefV1::Numeric(QueryAggregateNumericV1::UnsignedRatio { numerator: sum, denominator: 1 }))
+        );
+        assert_eq!(
+          result.group_value(index, "@size", QueryAggregateKindV1::Average),
+          Some(QueryAggregateReducedValueRefV1::Numeric(QueryAggregateNumericV1::UnsignedRatio {
+            numerator: sum,
+            denominator: expected_group.values.len() as u64,
+          }))
+        );
+        for (kind, value) in [
+          (QueryAggregateKindV1::Minimum, expected_group.values.iter().min().unwrap()),
+          (QueryAggregateKindV1::Maximum, expected_group.values.iter().max().unwrap()),
+        ] {
+          let Some(QueryAggregateReducedValueRefV1::Ordered(actual)) = result.group_value(index, "@size", kind) else {
+            panic!("ordered aggregate is absent")
+          };
+          assert_eq!(actual.payload, value.to_le_bytes());
+        }
+      }
+    }
+    assert!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > 0);
+    drop(result);
+    assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+    assert_eq!(source.calls, identities.len());
+  }
+}
+
+#[test]
+fn grouped_reducer_preserves_source_failures_and_rejects_malformed_rows() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let plan = aggregate_plan(algorithm);
+  let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+  let matched = identity(algorithm, 1);
+  let expected = [
+    (QueryExecutionSourceErrorClassV1::Unavailable, QueryExecutionSinkErrorClassV1::HistoricalViewUnavailable),
+    (QueryExecutionSourceErrorClassV1::ResourceLimit, QueryExecutionSinkErrorClassV1::ResourceLimit),
+    (QueryExecutionSourceErrorClassV1::Corrupt, QueryExecutionSinkErrorClassV1::CorruptSource),
+    (QueryExecutionSourceErrorClassV1::Cancelled, QueryExecutionSinkErrorClassV1::Cancelled),
+    (QueryExecutionSourceErrorClassV1::Internal, QueryExecutionSinkErrorClassV1::Internal),
+  ];
+  for (source_class, sink_class) in expected {
+    let mut source = QueueAggregateSource {
+      results: VecDeque::from([Err(QueryExecutionSourceErrorV1::new(
+        source_class,
+        "injected_grouped_source",
+        "injected grouped source failure",
+      ))]),
+      calls: 0,
+    };
+    let coordinator = memory(64 << 20);
+    let cancellation = CancellationToken::new();
+    let mut sink = QueryGroupedAggregateSinkV1::new(
+      &input,
+      &mut source,
+      &coordinator,
+      &cancellation,
+      QueryGroupedAggregateLimitsV1::new(32, 1 << 20, 8 << 20).unwrap(),
+    )
+    .unwrap();
+    sink
+      .begin_batch(QueryExecutionSinkBatchV1 {
+        selected_namespace_root: input.selected_namespace_root(),
+        scope_id: None,
+        maximum_matches: 1,
+      })
+      .unwrap();
+    let error = push_match(&mut sink, &matched.0, &matched.1).unwrap_err();
+    assert_eq!(error.class(), sink_class);
+    assert_eq!(error.code(), "injected_grouped_source");
+    sink.rollback_batch();
+    drop(sink);
+    assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+    assert_eq!(source.calls, 1);
+  }
+
+  let mut malformed = match found_row(
+    &input,
+    &matched.0,
+    &matched.1,
+    vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, 7u64.to_le_bytes().to_vec())],
+  ) {
+    QueryAggregateInputLookupResultV1::Found(row) => row,
+    QueryAggregateInputLookupResultV1::Absent => unreachable!(),
+  };
+  malformed.selected_namespace_root[0] ^= 0xff;
+  for result in [QueryAggregateInputLookupResultV1::Absent, QueryAggregateInputLookupResultV1::Found(malformed)] {
+    let mut source = QueueAggregateSource { results: VecDeque::from([Ok(result)]), calls: 0 };
+    let coordinator = memory(64 << 20);
+    let cancellation = CancellationToken::new();
+    let mut sink = QueryGroupedAggregateSinkV1::new(
+      &input,
+      &mut source,
+      &coordinator,
+      &cancellation,
+      QueryGroupedAggregateLimitsV1::new(32, 1 << 20, 8 << 20).unwrap(),
+    )
+    .unwrap();
+    sink
+      .begin_batch(QueryExecutionSinkBatchV1 {
+        selected_namespace_root: input.selected_namespace_root(),
+        scope_id: None,
+        maximum_matches: 1,
+      })
+      .unwrap();
+    assert_eq!(push_match(&mut sink, &matched.0, &matched.1).unwrap_err().class(), QueryExecutionSinkErrorClassV1::CorruptSource);
+    sink.rollback_batch();
+    drop(sink);
+    assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn grouped_reducer_rolls_back_bad_receipts_and_mid_push_cancellation() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let plan = aggregate_plan_for_limit(algorithm, "u64_order_v1", &[QueryAggregateKindV1::Count, QueryAggregateKindV1::Sum], true, 4);
+  let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+  let matched = identity(algorithm, 1);
+  let row = |value: u64| {
+    found_row(
+      &input,
+      &matched.0,
+      &matched.1,
+      vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, value.to_le_bytes().to_vec())],
+    )
+  };
+  let coordinator = memory(64 << 20);
+  let cancellation = CancellationToken::new();
+  let scope_id = vec![0x88; algorithm.hash_length()];
+  let mut source = QueueAggregateSource { results: VecDeque::from([Ok(row(50)), Ok(row(60)), Ok(row(70)), Ok(row(5))]), calls: 0 };
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &input,
+    &mut source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(4, 1 << 20, 8 << 20).unwrap(),
+  )
+  .unwrap();
+  let batch =
+    QueryExecutionSinkBatchV1 { selected_namespace_root: input.selected_namespace_root(), scope_id: Some(&scope_id), maximum_matches: 1 };
+  let wrong_root = vec![0x99; algorithm.hash_length()];
+  for receipt in [
+    QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: &wrong_root,
+      scope_id: Some(&scope_id),
+      match_count: 1,
+      examined_documents: 1,
+      examined_field_values: 1,
+    },
+    QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: input.selected_namespace_root(),
+      scope_id: None,
+      match_count: 1,
+      examined_documents: 1,
+      examined_field_values: 1,
+    },
+    QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: input.selected_namespace_root(),
+      scope_id: Some(&scope_id),
+      match_count: 0,
+      examined_documents: 1,
+      examined_field_values: 1,
+    },
+  ] {
+    sink.begin_batch(batch).unwrap();
+    push_match(&mut sink, &matched.0, &matched.1).unwrap();
+    let error = sink.commit_batch(receipt).unwrap_err();
+    assert_eq!(error.class(), QueryExecutionSinkErrorClassV1::Internal);
+    assert_eq!(error.code(), "query_aggregate_group_receipt");
+    sink.rollback_batch();
+  }
+
+  sink.begin_batch(batch).unwrap();
+  push_match(&mut sink, &matched.0, &matched.1).unwrap();
+  sink
+    .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: input.selected_namespace_root(),
+      scope_id: Some(&scope_id),
+      match_count: 1,
+      examined_documents: 2,
+      examined_field_values: 1,
+    })
+    .unwrap();
+  let result = sink.finish().unwrap();
+  assert_eq!(result.scope_id(), Some(scope_id.as_slice()));
+  assert_eq!(result.total_document_count(), 1);
+  assert_eq!(result.groups().len(), 1);
+  assert_eq!(
+    result.group_value(0, "@size", QueryAggregateKindV1::Sum),
+    Some(QueryAggregateReducedValueRefV1::Numeric(QueryAggregateNumericV1::UnsignedRatio { numerator: 5, denominator: 1 }))
+  );
+  drop(result);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(source.calls, 4);
+
+  let cancellation = CancellationToken::new();
+  let coordinator = memory(64 << 20);
+  let mut source = QueueAggregateSource { results: VecDeque::from([Ok(row(8))]), calls: 0 };
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &input,
+    &mut source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(4, 1 << 20, 8 << 20).unwrap(),
+  )
+  .unwrap();
+  sink
+    .begin_batch(QueryExecutionSinkBatchV1 { selected_namespace_root: input.selected_namespace_root(), scope_id: None, maximum_matches: 1 })
+    .unwrap();
+  push_match(&mut sink, &matched.0, &matched.1).unwrap();
+  cancellation.cancel();
+  let error = sink
+    .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: input.selected_namespace_root(),
+      scope_id: None,
+      match_count: 1,
+      examined_documents: 1,
+      examined_field_values: 1,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSinkErrorClassV1::Cancelled);
+  sink.rollback_batch();
+  drop(sink);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let cancellation = CancellationToken::new();
+  let coordinator = memory(64 << 20);
+  let mut source = CancelAfterResolveSource { result: Some(row(7)) };
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &input,
+    &mut source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(4, 1 << 20, 8 << 20).unwrap(),
+  )
+  .unwrap();
+  sink
+    .begin_batch(QueryExecutionSinkBatchV1 { selected_namespace_root: input.selected_namespace_root(), scope_id: None, maximum_matches: 1 })
+    .unwrap();
+  assert_eq!(push_match(&mut sink, &matched.0, &matched.1).unwrap_err().class(), QueryExecutionSinkErrorClassV1::Cancelled);
+  sink.rollback_batch();
+  drop(sink);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let constrained = memory(4 << 20);
+  let mut source = QueueAggregateSource { results: VecDeque::new(), calls: 0 };
+  let error = match QueryGroupedAggregateSinkV1::new(
+    &input,
+    &mut source,
+    &constrained,
+    &CancellationToken::new(),
+    QueryGroupedAggregateLimitsV1::new(4, 1 << 20, 8 << 20).unwrap(),
+  ) {
+    Ok(_) => panic!("grouped aggregate coordinator admission unexpectedly succeeded"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSinkErrorClassV1::ResourceLimit);
+  assert_eq!(constrained.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn grouped_reducer_preserves_signed_and_compensated_finite_numeric_boundaries() {
+  let algorithm = HashAlgorithm::Sha512;
+  let operations = [
+    QueryAggregateKindV1::Count,
+    QueryAggregateKindV1::Sum,
+    QueryAggregateKindV1::Average,
+    QueryAggregateKindV1::Minimum,
+    QueryAggregateKindV1::Maximum,
+  ];
+  let signed_plan = aggregate_plan_for_limit(algorithm, "i64_order_v1", &operations, true, 4);
+  let signed_input =
+    CompiledQueryAggregateInputV1::from_plan(&signed_plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+  let signed_identity = identity(algorithm, 1);
+  let mut signed_source = QueueAggregateSource {
+    results: VecDeque::from([Ok(found_row(
+      &signed_input,
+      &signed_identity.0,
+      &signed_identity.1,
+      [i64::MIN, -1, i64::MAX]
+        .into_iter()
+        .map(|value| LogicalOrderComponentOwnedV1::present(PositionComparatorV1::I64, value.to_le_bytes().to_vec()))
+        .collect(),
+    ))]),
+    calls: 0,
+  };
+  let coordinator = memory(64 << 20);
+  let cancellation = CancellationToken::new();
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &signed_input,
+    &mut signed_source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(8, 1 << 20, 8 << 20).unwrap(),
+  )
+  .unwrap();
+  sink
+    .begin_batch(QueryExecutionSinkBatchV1 {
+      selected_namespace_root: signed_input.selected_namespace_root(),
+      scope_id: None,
+      maximum_matches: 1,
+    })
+    .unwrap();
+  push_match(&mut sink, &signed_identity.0, &signed_identity.1).unwrap();
+  sink
+    .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: signed_input.selected_namespace_root(),
+      scope_id: None,
+      match_count: 1,
+      examined_documents: 1,
+      examined_field_values: 3,
+    })
+    .unwrap();
+  let result = sink.finish().unwrap();
+  assert_eq!(result.group_value(0, "@size", QueryAggregateKindV1::Count), Some(QueryAggregateReducedValueRefV1::Count(3)));
+  assert_eq!(
+    result.group_value(0, "@size", QueryAggregateKindV1::Sum),
+    Some(QueryAggregateReducedValueRefV1::Numeric(QueryAggregateNumericV1::SignedRatio { numerator: -2, denominator: 1 }))
+  );
+  assert_eq!(
+    result.group_value(0, "@size", QueryAggregateKindV1::Average),
+    Some(QueryAggregateReducedValueRefV1::Numeric(QueryAggregateNumericV1::SignedRatio { numerator: -2, denominator: 3 }))
+  );
+  for (kind, expected) in [(QueryAggregateKindV1::Minimum, i64::MIN), (QueryAggregateKindV1::Maximum, i64::MAX)] {
+    let Some(QueryAggregateReducedValueRefV1::Ordered(actual)) = result.group_value(0, "@size", kind) else {
+      panic!("signed ordered aggregate is absent")
+    };
+    assert_eq!(i64::from_le_bytes(actual.payload.as_slice().try_into().unwrap()), expected);
+  }
+  drop(result);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let float_plan = aggregate_plan_for_limit(algorithm, "f64_finite_order_v1", &operations, true, 4);
+  let float_input =
+    CompiledQueryAggregateInputV1::from_plan(&float_plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+  let first = identity(algorithm, 2);
+  let second = identity(algorithm, 3);
+  let row = |identity: &(Vec<u8>, Vec<u8>), values: &[f64]| {
+    found_row(
+      &float_input,
+      &identity.0,
+      &identity.1,
+      values
+        .iter()
+        .map(|value| LogicalOrderComponentOwnedV1::present(PositionComparatorV1::FiniteF64, value.to_le_bytes().to_vec()))
+        .collect(),
+    )
+  };
+  let mut float_source = QueueAggregateSource {
+    results: VecDeque::from([Ok(row(&first, &[f64::MAX, f64::MAX])), Ok(row(&second, &[1.0e16, 1.0, -1.0e16]))]),
+    calls: 0,
+  };
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &float_input,
+    &mut float_source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(8, 1 << 20, 8 << 20).unwrap(),
+  )
+  .unwrap();
+  let batch =
+    QueryExecutionSinkBatchV1 { selected_namespace_root: float_input.selected_namespace_root(), scope_id: None, maximum_matches: 1 };
+  sink.begin_batch(batch).unwrap();
+  let error = push_match(&mut sink, &first.0, &first.1).unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSinkErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "query_aggregate_numeric_overflow");
+  sink.rollback_batch();
+
+  sink.begin_batch(batch).unwrap();
+  push_match(&mut sink, &second.0, &second.1).unwrap();
+  sink
+    .commit_batch(QueryExecutionSinkBatchReceiptV1 {
+      selected_namespace_root: float_input.selected_namespace_root(),
+      scope_id: None,
+      match_count: 1,
+      examined_documents: 1,
+      examined_field_values: 3,
+    })
+    .unwrap();
+  let result = sink.finish().unwrap();
+  let Some(QueryAggregateReducedValueRefV1::Numeric(sum)) = result.group_value(0, "@size", QueryAggregateKindV1::Sum) else {
+    panic!("finite grouped sum is absent")
+  };
+  let Some(QueryAggregateReducedValueRefV1::Numeric(average)) = result.group_value(0, "@size", QueryAggregateKindV1::Average) else {
+    panic!("finite grouped average is absent")
+  };
+  assert_eq!(sum.finite_f64(), Some(1.0));
+  assert_eq!(average.finite_f64(), Some(1.0 / 3.0));
+  drop(result);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(float_source.calls, 2);
+}
+
+#[test]
+fn grouped_reducer_rejects_dynamic_state_at_the_exact_retained_memory_floor() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let plan = aggregate_plan(algorithm);
+  let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 8, 32, 1 << 20).unwrap()).unwrap();
+  let mut lower = 1u64;
+  let mut upper = 8 << 20;
+  while lower < upper {
+    let candidate = lower + ((upper - lower) / 2);
+    let coordinator = memory(64 << 20);
+    let cancellation = CancellationToken::new();
+    let mut source = QueueAggregateSource { results: VecDeque::new(), calls: 0 };
+    let accepted = QueryGroupedAggregateSinkV1::new(
+      &input,
+      &mut source,
+      &coordinator,
+      &cancellation,
+      QueryGroupedAggregateLimitsV1::new(32, 1 << 20, candidate).unwrap(),
+    )
+    .is_ok();
+    assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+    if accepted {
+      upper = candidate;
+    } else {
+      lower = candidate + 1;
+    }
+  }
+
+  let matched = identity(algorithm, 1);
+  let mut source = QueueAggregateSource {
+    results: VecDeque::from([Ok(found_row(
+      &input,
+      &matched.0,
+      &matched.1,
+      vec![LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, 7u64.to_le_bytes().to_vec())],
+    ))]),
+    calls: 0,
+  };
+  let coordinator = memory(64 << 20);
+  let cancellation = CancellationToken::new();
+  let mut sink = QueryGroupedAggregateSinkV1::new(
+    &input,
+    &mut source,
+    &coordinator,
+    &cancellation,
+    QueryGroupedAggregateLimitsV1::new(32, 1 << 20, lower).unwrap(),
+  )
+  .unwrap();
+  sink
+    .begin_batch(QueryExecutionSinkBatchV1 { selected_namespace_root: input.selected_namespace_root(), scope_id: None, maximum_matches: 1 })
+    .unwrap();
+  let error = push_match(&mut sink, &matched.0, &matched.1).unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSinkErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "query_aggregate_reducer_bytes");
+  sink.rollback_batch();
+  drop(sink);
+  assert_eq!(coordinator.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(source.calls, 1);
 }

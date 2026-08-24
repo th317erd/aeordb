@@ -1290,11 +1290,15 @@
               - [x] P7-3d4c1: compile one permanent query order from selected-root auxiliary definitions and reject incompatible corrected comparator/collation semantics within or across effective scopes.
               - [x] P7-3d4c2: resolve every exact match to canonical path and auxiliary values at the selected root, then transactionally retain only the bounded logical top-K through the existing order comparator.
               - [x] P7-3d4c3: prove differential ordering, multi-value/presence/numeric boundaries, malformed or stale lookup receipts, cancellation, pressure, both hash widths, deterministic ties, and exact reservation release.
-            - [ ] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
+            - [x] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
               - [x] P7-3d4d1: freeze and validate one plural selected-root aggregate-input lookup contract over compiler-owned auxiliary field semantics, immutable match identities, cancellation, and explicit row/value/byte bounds.
               - [x] P7-3d4d2: implement transactional ungrouped document count plus per-field count/sum/average/minimum/maximum reducers without retaining the matched-document result set.
               - [x] P7-3d4d3: implement bounded canonical multi-field group tuples, incremental per-group reducers, and aggregate-group top-K through the permanent logical-order comparator.
-              - [ ] P7-3d4d4: prove independent aggregate/group equivalence, every presence/multi-value/numeric boundary, malformed lookup/receipt closure, cancellation, pressure, both hash widths, and exact reservation release.
+              - [x] P7-3d4d4: prove independent aggregate/group equivalence, every presence/multi-value/numeric boundary, malformed lookup/receipt closure, cancellation, pressure, both hash widths, and exact reservation release.
+                - [x] Differentially compare bounded grouped output with an independent canonical tuple/reducer model at both frozen hash widths.
+                - [x] Cover unsigned, signed, finite-float, typed-null, missing, deterministic-unindexable, duplicate, and ordered multi-value boundaries.
+                - [x] Prove every source class, malformed row/receipt, cancellation point, coordinator/retained pressure boundary, rollback/retry, and reservation release.
+                - [x] Run the affected, common, suppression, static, documentation, and contract gates, then complete an adversarial architecture review.
             - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
