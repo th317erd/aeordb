@@ -1310,7 +1310,11 @@
               - [x] P7-3d5b1: retain the complete applicable ScopeDefinition universe in the captured semantic catalog and prove exact accounting/identity.
               - [x] P7-3d5b2: build one private, checksummed, cancellation-aware multi-pass FileKey ordering workspace from bounded selected-namespace pages.
               - [x] P7-3d5b3: expose independent field cursors over the shared workspace with exact scope resolution, source evaluation, receipts, and retained-memory ownership.
-            - [ ] P7-3d5c: implement native selected-root position-universe and aggregate-input sources without adding another parser, converter, or document-identity authority.
+            - [x] P7-3d5c: implement native selected-root position-universe and aggregate-input sources without adding another parser, converter, or document-identity authority.
+              - [x] P7-3d5c1: permit an unconfigured aggregate field to retain `scope_id: None`, `Missing`, and no values without inheriting an ancestor definition.
+              - [x] P7-3d5c2: add one bounded exact FileKey lookup over the private ordering workspace, with checksum, cancellation, pressure, absence, and corruption proof.
+              - [x] P7-3d5c3: compile one plan-bound native auxiliary source that restores the exact selected-root row and reuses the shared parser, ValueStore, and converter authorities for position and aggregate results.
+              - [x] P7-3d5c4: prove real-file sort/group/aggregate behavior, both hash widths, fieldless scopes, stale identities, cancellation, pressure, corruption, and exact resource release before landing.
             - [ ] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
             - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
               - [ ] Prove and, if required, replace per-document native evaluator preparation with a bounded reusable prepared-runtime cache whose eviction cannot alter results.

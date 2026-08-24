@@ -54,12 +54,27 @@ use aeordb::engine::v4::read_view_authorization::{
   CapturedCurrentPathAuthorizationSourceV1, CurrentPathAuthorizationV1, PathAuthorizationDecisionV1, ReadViewPermissionAuthorizerV1,
   ResolvedPathAuthorizationV1,
 };
-use aeordb::engine::v4::query_planner::{QueryPlanningCoverageGenerationV1, RootAwareQueryFieldCatalogV1};
+use aeordb::engine::v4::position::{PositionComponentStateV1, PositionRouteV1};
+use aeordb::engine::v4::position_resolver::{
+  PositionUniverseLookupRequestV1, PositionUniverseLookupResultV1, PositionUniverseSourceErrorV1, PositionUniverseSourceV1,
+  resolve_position_universe_row_v1,
+};
+use aeordb::engine::v4::query_aggregate_execution::{
+  CompiledQueryAggregateInputV1, QueryAggregateInputLimitsV1, QueryAggregateInputLookupRequestV1, QueryAggregateInputLookupResultV1,
+  QueryAggregateInputSourceV1, resolve_query_aggregate_input_v1,
+};
+use aeordb::engine::v4::query_planner::{
+  CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1, QueryPlanningContextV1,
+  QueryPlanningCoverageGenerationV1, QueryPlanningRequestV1, QuerySortDirectionV1, QuerySortFieldV1, RootAwareQueryFieldCatalogV1,
+  default_query_planning_limits_v1, plan_root_aware_query_v1,
+};
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldStateV1,
   QueryExecutionSourceErrorClassV1,
 };
-use aeordb::engine::v4::query_native_source::{NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1};
+use aeordb::engine::v4::query_native_source::{
+  NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
+};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
@@ -370,6 +385,42 @@ fn complete_semantic_graph_with_extra_scopes(
   let value_store_id = decode_value_store_definition(&value_store, algorithm).unwrap().value_store_id;
   let mut field_index = semantic_definition_fixture(algorithm, "field-index-definition-v1", "afix", field_index_fixture);
   field_index[32..32 + hash_width].copy_from_slice(&value_store_id);
+  complete_semantic_graph_from_encoded(algorithm, scope, value_store, field_index, extra_scopes)
+}
+
+fn complete_size_semantic_graph_with_extra_scopes(
+  algorithm: HashAlgorithm,
+  scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+) -> CompleteSemanticGraph {
+  let hash_width = algorithm.hash_length();
+  let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
+  let mut value_store = semantic_definition_fixture(algorithm, "value-store-definition-v1", "avst", "metadata-hash-corrected");
+  value_store[32..32 + hash_width].copy_from_slice(&scope_id);
+  let field_start = 112 + hash_width;
+  let old_field_length = u32::from_le_bytes(value_store[32 + hash_width..36 + hash_width].try_into().unwrap()) as usize;
+  value_store.splice(field_start..field_start + old_field_length, b"@size".iter().copied());
+  let total_length = value_store.len() as u32;
+  value_store[8..12].copy_from_slice(&total_length.to_le_bytes());
+  value_store[32 + hash_width..36 + hash_width].copy_from_slice(&("@size".len() as u32).to_le_bytes());
+  let selector_start = field_start + "@size".len();
+  value_store[selector_start + 32..selector_start + 34].copy_from_slice(&5u16.to_le_bytes());
+  let value_store_id = decode_value_store_definition(&value_store, algorithm).unwrap().value_store_id;
+  let mut field_index = semantic_definition_fixture(algorithm, "field-index-definition-v1", "afix", "u64_order_v1");
+  field_index[32..32 + hash_width].copy_from_slice(&value_store_id);
+  complete_semantic_graph_from_encoded(algorithm, scope, value_store, field_index, extra_scopes)
+}
+
+fn complete_semantic_graph_from_encoded(
+  algorithm: HashAlgorithm,
+  scope: Vec<u8>,
+  value_store: Vec<u8>,
+  field_index: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+) -> CompleteSemanticGraph {
+  let hash_width = algorithm.hash_length();
+  let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
+  let value_store_id = decode_value_store_definition(&value_store, algorithm).unwrap().value_store_id;
   let field_index_id = decode_field_index_definition(&field_index, algorithm).unwrap().index_id;
   let scope_definition = scope.clone();
   let value_store_definition = value_store.clone();
@@ -777,16 +828,40 @@ fn publish_file_tree(
   names: &[&str],
   corruption: FileTreeCorruption,
 ) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+  publish_file_tree_with_sizes(
+    publisher,
+    algorithm,
+    expected_head_hash,
+    file_record_version,
+    btree,
+    names,
+    &vec![0; names.len()],
+    corruption,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_file_tree_with_sizes(
+  publisher: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  expected_head_hash: Vec<u8>,
+  file_record_version: u8,
+  btree: bool,
+  names: &[&str],
+  sizes: &[u64],
+  corruption: FileTreeCorruption,
+) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+  assert_eq!(names.len(), sizes.len());
   let timestamp = 1_700_000_000_400;
   let mut file_entities = Vec::new();
   let mut entries = Vec::new();
   let mut identities = Vec::new();
-  for (index, name) in names.iter().enumerate() {
+  for (index, (name, total_size)) in names.iter().zip(sizes).enumerate() {
     let path = format!("/docs/{name}");
     let mut record = FileRecord {
       path: path.clone(),
       content_type: Some("application/json".to_string()),
-      total_size: 0,
+      total_size: *total_size,
       created_at: timestamp,
       updated_at: timestamp,
       metadata: Vec::new(),
@@ -805,7 +880,7 @@ fn publish_file_tree(
         EntryTypeV4::FileRecord.to_u8()
       },
       hash: record_revision.clone(),
-      total_size: 0,
+      total_size: *total_size,
       created_at: timestamp,
       updated_at: if corruption == FileTreeCorruption::LastMetadata && index + 1 == names.len() { timestamp + 1 } else { timestamp },
       name: (*name).to_string(),
@@ -1702,6 +1777,7 @@ struct NativePartitionFixture {
   scope_id: Vec<u8>,
   field_name: String,
   maximum_documents: u64,
+  plan: CompiledRootAwareQueryPlanV1,
 }
 
 impl NativePartitionFixture {
@@ -1750,6 +1826,21 @@ fn native_partition_fixture(
   let SelectedSourceFixture { _directory, source: backing_source, memory, pins, cancellation, view, graph, field_name, .. } = fixture;
   let selected_root = view.root_metadata().hash.clone();
   let publication_sequence = view.authority().admission.publication_sequence;
+  let context = QueryPlanningContextV1::from_resolved_view(&view).unwrap();
+  let expression = QueryExpressionV1::And(Vec::new());
+  let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: "/docs",
+    expression: &expression,
+    catalogs: &[],
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 20,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
   let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
     NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
     8,
@@ -1781,6 +1872,7 @@ fn native_partition_fixture(
     scope_id: graph.scope_id,
     field_name,
     maximum_documents: 8,
+    plan,
   }
 }
 
@@ -1789,13 +1881,83 @@ fn native_partition_many_fixture(
   file_record_version: u8,
   btree: bool,
   names: &[&str],
-) -> (NativePartitionFixture, Vec<(Vec<u8>, String)>) {
+) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+  native_partition_many_fixture_configured(
+    algorithm,
+    file_record_version,
+    btree,
+    names,
+    &vec![0; names.len()],
+    "@hash",
+    false,
+    semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+    &[],
+  )
+}
+
+fn native_auxiliary_size_fixture(
+  algorithm: HashAlgorithm,
+  names: &[&str],
+  sizes: &[u64],
+) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+  native_partition_many_fixture_configured(
+    algorithm,
+    1,
+    true,
+    names,
+    sizes,
+    "@size",
+    true,
+    semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+    &[],
+  )
+}
+
+fn native_auxiliary_size_fieldless_fixture(algorithm: HashAlgorithm) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+  let nearer = [semantic_scope_definition(algorithm, "/docs", None)];
+  native_partition_many_fixture_configured(
+    algorithm,
+    1,
+    false,
+    &["fieldless.json"],
+    &[17],
+    "@size",
+    true,
+    semantic_scope_definition(algorithm, "/", Some("**/*.json")),
+    &nearer,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_partition_many_fixture_configured(
+  algorithm: HashAlgorithm,
+  file_record_version: u8,
+  btree: bool,
+  names: &[&str],
+  sizes: &[u64],
+  field_name: &str,
+  size_auxiliary: bool,
+  primary_scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
   let (directory, _path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
-  let (content_root, identities) =
-    publish_file_tree(&publisher, algorithm, first.namespace_root.root_hash, file_record_version, btree, names, FileTreeCorruption::None);
+  let (content_root, identities) = publish_file_tree_with_sizes(
+    &publisher,
+    algorithm,
+    first.namespace_root.root_hash,
+    file_record_version,
+    btree,
+    names,
+    sizes,
+    FileTreeCorruption::None,
+  );
   let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
-  let graph = complete_semantic_graph_with_scope(algorithm, semantic_scope_definition(algorithm, "/docs", Some("*.json")));
+  let graph = if size_auxiliary {
+    complete_size_semantic_graph_with_extra_scopes(algorithm, primary_scope, extra_scopes)
+  } else {
+    complete_semantic_graph_with_extra_scopes(algorithm, primary_scope, "metadata-hash-corrected", "typed_exact_blake3_v1", extra_scopes)
+  };
   let selected_root = publish_complete_semantic_root(&publisher, algorithm, &content_root_value, content_root, &graph);
   let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(256 * 1024 * 1024, 512 * 1024 * 1024, 1, 1024 * 1024).unwrap()));
   let backing_source = Arc::new(NativeReadViewSourceV1::new(Arc::new(publisher), Arc::clone(&memory), 86_400_000));
@@ -1814,8 +1976,45 @@ fn native_partition_many_fixture(
   let reader = backing_source
     .selected_namespace_reader(&view, NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap())
     .unwrap();
-  let semantic_catalog = reader.load_planner_catalogs("/docs", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+  let semantic_catalog = reader.load_planner_catalogs("/docs", &[field_name], default_native_selected_semantic_limits_v1()).unwrap();
   drop(reader);
+  let context = QueryPlanningContextV1::from_resolved_view(&view).unwrap();
+  let expression = QueryExpressionV1::And(Vec::new());
+  let plan = if size_auxiliary {
+    let sort_fields = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Ascending }];
+    let aggregate_fields = [
+      QueryAggregateFieldV1 { field_name: "@size".to_string(), kind: QueryAggregateKindV1::Count },
+      QueryAggregateFieldV1 { field_name: "@size".to_string(), kind: QueryAggregateKindV1::Sum },
+    ];
+    let group_fields = ["@size".to_string()];
+    plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+      context: &context,
+      query_path: "/docs",
+      expression: &expression,
+      catalogs: semantic_catalog.catalogs(),
+      sort_fields: &sort_fields,
+      aggregate_fields: &aggregate_fields,
+      group_fields: &group_fields,
+      result_limit: 20,
+      limits: default_query_planning_limits_v1(),
+      is_cancelled: &|| false,
+    })
+    .unwrap()
+  } else {
+    plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+      context: &context,
+      query_path: "/docs",
+      expression: &expression,
+      catalogs: &[],
+      sort_fields: &[],
+      aggregate_fields: &[],
+      group_fields: &[],
+      result_limit: 20,
+      limits: default_query_planning_limits_v1(),
+      is_cancelled: &|| false,
+    })
+    .unwrap()
+  };
   let maximum_documents = u64::try_from(names.len()).unwrap();
   let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
     NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
@@ -1836,7 +2035,10 @@ fn native_partition_many_fixture(
     &cancellation,
   )
   .unwrap();
-  let expected = identities.into_iter().map(|(path, _)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), path)).collect::<Vec<_>>();
+  let expected = identities
+    .into_iter()
+    .map(|(path, revision)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), revision, path))
+    .collect::<Vec<_>>();
   (
     NativePartitionFixture {
       _directory: directory,
@@ -1848,8 +2050,9 @@ fn native_partition_many_fixture(
       selected_root,
       publication_sequence,
       scope_id: graph.scope_id,
-      field_name: "@hash".to_string(),
+      field_name: field_name.to_string(),
       maximum_documents,
+      plan,
     },
     expected,
   )
@@ -2730,21 +2933,261 @@ fn native_authoritative_partition_streams_selected_root_values_and_exact_receipt
 fn native_authoritative_partition_reorders_one_document_pages_by_file_key() {
   let names = ["a.json", "b.json", "c.json", "d.json", "e.json", "f.json", "g.json"];
   let (mut fixture, mut expected) = native_partition_many_fixture(HashAlgorithm::Blake3_256, 1, true, &names);
-  let path_page_order = expected.iter().map(|(file_key, _)| file_key.clone()).collect::<Vec<_>>();
+  let path_page_order = expected.iter().map(|(file_key, _, _)| file_key.clone()).collect::<Vec<_>>();
   expected.sort_by(|left, right| left.0.cmp(&right.0));
-  assert_ne!(path_page_order, expected.iter().map(|(file_key, _)| file_key.clone()).collect::<Vec<_>>());
+  assert_ne!(path_page_order, expected.iter().map(|(file_key, _, _)| file_key.clone()).collect::<Vec<_>>());
 
   let mut cursor = fixture.open_cursor(u16::MAX as u64);
   let mut observed = Vec::new();
   while let Some(document) = cursor.next_document(&fixture.cancellation).unwrap() {
     observed.push((document.file_key, document.path));
   }
-  assert_eq!(observed, expected);
+  assert_eq!(observed, expected.into_iter().map(|(file_key, _, path)| (file_key, path)).collect::<Vec<_>>());
   let receipt = cursor.finish().unwrap();
   assert_eq!(receipt.scope_document_counts, vec![names.len() as u64]);
   assert_eq!(receipt.unconfigured_document_count, 0);
   assert_eq!(receipt.document_count, names.len() as u64);
   drop(cursor);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_auxiliary_source_resolves_selected_root_path_and_stale_revision() {
+  let (fixture, expected) = native_partition_many_fixture(HashAlgorithm::Blake3_256, 1, true, &["a.json", "z.json"]);
+  let mut source = fixture
+    .source
+    .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+    .unwrap();
+  let (file_key, revision, path) = &expected[0];
+  let request = PositionUniverseLookupRequestV1::new(
+    fixture.plan.database_id(),
+    fixture.plan.physical_instance_id(),
+    fixture.plan.selected_namespace_root(),
+    fixture.plan.query_order(),
+    file_key,
+    revision,
+    1024 * 1024,
+  );
+  let PositionUniverseLookupResultV1::Found(row) = resolve_position_universe_row_v1(request, &mut source, &fixture.cancellation).unwrap()
+  else {
+    panic!("selected-root FileKey and RecordRevision must resolve")
+  };
+  assert_eq!(row.route, PositionRouteV1::Query);
+  assert_eq!(row.components.len(), 1);
+  assert_eq!(row.components[0].state, PositionComponentStateV1::Present);
+  assert_eq!(row.components[0].payload, path.as_bytes());
+
+  let stale_revision = digest_parts(HashAlgorithm::Blake3_256, &[b"stale native auxiliary revision"]);
+  let stale = resolve_position_universe_row_v1(
+    PositionUniverseLookupRequestV1::new(
+      fixture.plan.database_id(),
+      fixture.plan.physical_instance_id(),
+      fixture.plan.selected_namespace_root(),
+      fixture.plan.query_order(),
+      file_key,
+      &stale_revision,
+      1024 * 1024,
+    ),
+    &mut source,
+    &fixture.cancellation,
+  )
+  .unwrap();
+  assert_eq!(stale, PositionUniverseLookupResultV1::Absent);
+  drop(source);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_auxiliary_source_reuses_selected_definitions_for_position_and_aggregate_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let names = ["large.json", "middle.json", "small.json"];
+    let sizes = [90u64, 10, 50];
+    let (fixture, expected) = native_auxiliary_size_fixture(algorithm, &names, &sizes);
+    let aggregate =
+      CompiledQueryAggregateInputV1::from_plan(&fixture.plan, QueryAggregateInputLimitsV1::new(8, 8, 8, 1024 * 1024).unwrap()).unwrap();
+    let mut position_source = fixture
+      .source
+      .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+      .unwrap();
+    let mut aggregate_source = fixture
+      .source
+      .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+      .unwrap();
+
+    for ((file_key, revision, path), size) in expected.iter().zip(sizes) {
+      let PositionUniverseLookupResultV1::Found(position) = resolve_position_universe_row_v1(
+        PositionUniverseLookupRequestV1::new(
+          fixture.plan.database_id(),
+          fixture.plan.physical_instance_id(),
+          fixture.plan.selected_namespace_root(),
+          fixture.plan.query_order(),
+          file_key,
+          revision,
+          1024 * 1024,
+        ),
+        &mut position_source,
+        &fixture.cancellation,
+      )
+      .unwrap() else {
+        panic!("selected-root size position must resolve")
+      };
+      assert_eq!(position.components.len(), 2);
+      assert_eq!(position.components[0].payload, size.to_le_bytes());
+      assert_eq!(position.components[1].payload, path.as_bytes());
+
+      let QueryAggregateInputLookupResultV1::Found(row) = resolve_query_aggregate_input_v1(
+        QueryAggregateInputLookupRequestV1::new(&aggregate, file_key, revision),
+        &mut aggregate_source,
+        &fixture.cancellation,
+      )
+      .unwrap() else {
+        panic!("selected-root size aggregate must resolve")
+      };
+      assert_eq!(row.fields.len(), 1);
+      assert_eq!(row.fields[0].scope_id.as_deref(), Some(fixture.scope_id.as_slice()));
+      assert_eq!(row.fields[0].state, QueryExecutionFieldStateV1::Values);
+      assert_eq!(row.fields[0].values.len(), 1);
+      assert_eq!(row.fields[0].values[0].payload, size.to_le_bytes());
+    }
+    drop(position_source);
+    drop(aggregate_source);
+    fixture.assert_released();
+  }
+}
+
+#[test]
+fn native_auxiliary_source_retains_a_nearer_fieldless_scope_as_missing() {
+  let (fixture, expected) = native_auxiliary_size_fieldless_fixture(HashAlgorithm::Blake3_256);
+  let aggregate =
+    CompiledQueryAggregateInputV1::from_plan(&fixture.plan, QueryAggregateInputLimitsV1::new(8, 8, 8, 1024 * 1024).unwrap()).unwrap();
+  let limits = NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap();
+  let mut position_source = fixture.source.open_auxiliary_source(&fixture.plan, limits).unwrap();
+  let mut aggregate_source = fixture.source.open_auxiliary_source(&fixture.plan, limits).unwrap();
+  let (file_key, revision, path) = &expected[0];
+
+  let PositionUniverseLookupResultV1::Found(position) = resolve_position_universe_row_v1(
+    PositionUniverseLookupRequestV1::new(
+      fixture.plan.database_id(),
+      fixture.plan.physical_instance_id(),
+      fixture.plan.selected_namespace_root(),
+      fixture.plan.query_order(),
+      file_key,
+      revision,
+      1024 * 1024,
+    ),
+    &mut position_source,
+    &fixture.cancellation,
+  )
+  .unwrap() else {
+    panic!("fieldless selected-root position must resolve")
+  };
+  assert_eq!(position.components[0].state, PositionComponentStateV1::Missing);
+  assert_eq!(position.components[1].payload, path.as_bytes());
+
+  let QueryAggregateInputLookupResultV1::Found(row) = resolve_query_aggregate_input_v1(
+    QueryAggregateInputLookupRequestV1::new(&aggregate, file_key, revision),
+    &mut aggregate_source,
+    &fixture.cancellation,
+  )
+  .unwrap() else {
+    panic!("fieldless selected-root aggregate must resolve")
+  };
+  assert_eq!(row.fields.len(), 1);
+  assert_eq!(row.fields[0].scope_id, None);
+  assert_eq!(row.fields[0].state, QueryExecutionFieldStateV1::Missing);
+  assert!(row.fields[0].values.is_empty());
+  drop(position_source);
+  drop(aggregate_source);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_auxiliary_source_fails_closed_on_binding_pressure_and_cancellation() {
+  let (pressured, _) = native_auxiliary_size_fixture(HashAlgorithm::Blake3_256, &["record.json"], &[7]);
+  let before = pressured.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let error = match pressured
+    .source
+    .open_auxiliary_source(&pressured.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1, u16::MAX as u64).unwrap())
+  {
+    Ok(_) => panic!("one byte cannot admit native auxiliary bindings"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "native_auxiliary_binding_limit");
+  assert_eq!(pressured.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  pressured.assert_released();
+
+  let (cancelled, expected) = native_partition_many_fixture(HashAlgorithm::Blake3_256, 1, false, &["record.json"]);
+  let mut source = cancelled
+    .source
+    .open_auxiliary_source(&cancelled.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+    .unwrap();
+  let request_cancellation = CancellationToken::new();
+  request_cancellation.cancel();
+  let (file_key, revision, _) = &expected[0];
+  let error = resolve_position_universe_row_v1(
+    PositionUniverseLookupRequestV1::new(
+      cancelled.plan.database_id(),
+      cancelled.plan.physical_instance_id(),
+      cancelled.plan.selected_namespace_root(),
+      cancelled.plan.query_order(),
+      file_key,
+      revision,
+      1024 * 1024,
+    ),
+    &mut source,
+    &request_cancellation,
+  )
+  .unwrap_err();
+  assert!(matches!(error, aeordb::engine::v4::position_resolver::PositionUniverseSourceErrorV1::Cancelled));
+  drop(source);
+  cancelled.assert_released();
+}
+
+#[test]
+fn native_auxiliary_source_rejects_an_oversized_position_row_before_return() {
+  let (fixture, expected) = native_partition_many_fixture(HashAlgorithm::Blake3_256, 1, false, &["record.json"]);
+  let mut source = fixture
+    .source
+    .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+    .unwrap();
+  let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let (file_key, revision, _) = &expected[0];
+  let error = source
+    .resolve_position(
+      PositionUniverseLookupRequestV1::new(
+        fixture.plan.database_id(),
+        fixture.plan.physical_instance_id(),
+        fixture.plan.selected_namespace_root(),
+        fixture.plan.query_order(),
+        file_key,
+        revision,
+        1,
+      ),
+      &fixture.cancellation,
+    )
+    .unwrap_err();
+  assert!(matches!(error, PositionUniverseSourceErrorV1::ResourceLimit(_)));
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  drop(source);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_auxiliary_source_rejects_an_oversized_aggregate_row_before_return() {
+  let (fixture, expected) = native_auxiliary_size_fixture(HashAlgorithm::Blake3_256, &["record.json"], &[7]);
+  let input = CompiledQueryAggregateInputV1::from_plan(&fixture.plan, QueryAggregateInputLimitsV1::new(8, 8, 8, 1).unwrap()).unwrap();
+  let mut source = fixture
+    .source
+    .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+    .unwrap();
+  let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let (file_key, revision, _) = &expected[0];
+  let error =
+    source.resolve_aggregate_input(QueryAggregateInputLookupRequestV1::new(&input, file_key, revision), &fixture.cancellation).unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::ResourceLimit);
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  drop(source);
   fixture.assert_released();
 }
 

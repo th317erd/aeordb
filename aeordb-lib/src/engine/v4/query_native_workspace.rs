@@ -712,8 +712,37 @@ impl NativeQueryOrderingWorkspaceV1 {
   }
 
   pub(crate) fn open_cursor(&self) -> Result<NativeQueryOrderingCursorV1, NativeQueryOrderingWorkspaceErrorV1> {
+    let (run_file, run_count, data, decode_memory) = self.open_access()?;
+    Ok(NativeQueryOrderingCursorV1 {
+      run: RunReaderV1 { file: run_file, hash_length: self.hash_length, remaining: run_count },
+      data,
+      hash_algorithm: self.hash_algorithm,
+      hash_length: self.hash_length,
+      data_length: self.data_length,
+      cancellation: self.cancellation.clone(),
+      row: NativeQueryOrderingRowV1::empty(),
+      _decode_memory: decode_memory,
+    })
+  }
+
+  pub(crate) fn open_lookup(&self) -> Result<NativeQueryOrderingLookupV1, NativeQueryOrderingWorkspaceErrorV1> {
+    let (run, record_count, data, decode_memory) = self.open_access()?;
+    Ok(NativeQueryOrderingLookupV1 {
+      run,
+      data,
+      hash_algorithm: self.hash_algorithm,
+      hash_length: self.hash_length,
+      record_count,
+      data_length: self.data_length,
+      cancellation: self.cancellation.clone(),
+      row: NativeQueryOrderingRowV1::empty(),
+      _decode_memory: decode_memory,
+    })
+  }
+
+  fn open_access(&self) -> Result<(File, u64, File, MemoryReservation), NativeQueryOrderingWorkspaceErrorV1> {
     require_not_cancelled(&self.cancellation)?;
-    let run = RunReaderV1::open(self.directory.path(), &self.order_run, self.hash_length)?;
+    let (run, record_count) = open_validated_run_file(self.directory.path(), &self.order_run, self.hash_length)?;
     let data = open_regular_file_no_follow(&self.data_path)
       .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_data_open", error.to_string()))?;
     validate_private_regular_file(&self.data_path, &data, "native query row spool").map_err(map_private_workspace_error)?;
@@ -734,16 +763,7 @@ impl NativeQueryOrderingWorkspaceV1 {
       .memory
       .reserve(MemoryOwner::Query, decode_bytes, AdmissionClass::Workload)
       .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::resource("native_query_order_decode_memory", error.to_string()))?;
-    Ok(NativeQueryOrderingCursorV1 {
-      run,
-      data,
-      hash_algorithm: self.hash_algorithm,
-      hash_length: self.hash_length,
-      data_length: self.data_length,
-      cancellation: self.cancellation.clone(),
-      row: NativeQueryOrderingRowV1::empty(),
-      _decode_memory: decode_memory,
-    })
+    Ok((run, record_count, data, decode_memory))
   }
 
   #[cfg(test)]
@@ -773,35 +793,80 @@ impl NativeQueryOrderingCursorV1 {
     let Some(reference) = self.run.next_reference()? else {
       return Ok(None);
     };
-    let frame_end = reference
-      .data_offset
-      .checked_add(u64::from(reference.data_length))
-      .ok_or_else(|| NativeQueryOrderingWorkspaceErrorV1::corrupt("native_query_order_data_reference", "row frame range overflowed"))?;
-    if frame_end > self.data_length
-      || reference.data_length as usize > MAXIMUM_ENCODED_FILE_RECORD_BYTES + DATA_HEADER_LENGTH + self.hash_length
-    {
-      return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
-        "native_query_order_data_reference",
-        "ordering run references a row frame outside the completed spool",
-      ));
-    }
-    self
-      .data
-      .seek(SeekFrom::Start(reference.data_offset))
-      .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_data_seek", error.to_string()))?;
-    self.row.frame.clear();
-    self.row.frame.try_reserve_exact(reference.data_length as usize).map_err(|error| {
-      NativeQueryOrderingWorkspaceErrorV1::resource("native_query_order_decode_allocation", format!("row-frame allocation failed: {error}"))
-    })?;
-    self.row.frame.resize(reference.data_length as usize, 0);
-    read_exact_classified(&mut self.data, &mut self.row.frame, "native_query_order_data_read")?;
-    validate_data_frame(&self.row.frame, self.hash_length, reference.data_checksum)?;
-    self.row.file_key = reference.file_key;
-    self.row.scope_id = reference.scope_id;
-    self.row.hash_length = self.hash_length;
-    self.row.entity_version = self.row.frame[6];
-    self.row.hash_algorithm = self.hash_algorithm;
+    read_ordered_row(&mut self.data, self.data_length, self.hash_algorithm, self.hash_length, &reference, &mut self.row)?;
     Ok(Some(&self.row))
+  }
+}
+
+pub(crate) struct NativeQueryOrderingLookupV1 {
+  run: File,
+  data: File,
+  hash_algorithm: HashAlgorithm,
+  hash_length: usize,
+  record_count: u64,
+  data_length: u64,
+  cancellation: CancellationToken,
+  row: NativeQueryOrderingRowV1,
+  _decode_memory: MemoryReservation,
+}
+
+impl NativeQueryOrderingLookupV1 {
+  pub(crate) fn find_row(
+    &mut self,
+    file_key: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<Option<&NativeQueryOrderingRowV1>, NativeQueryOrderingWorkspaceErrorV1> {
+    require_not_cancelled(cancellation)?;
+    require_not_cancelled(&self.cancellation)?;
+    validate_identity(file_key, self.hash_length, "lookup FileKey")?;
+    let mut lower = 0u64;
+    let mut upper = self.record_count;
+    while lower < upper {
+      require_not_cancelled(cancellation)?;
+      require_not_cancelled(&self.cancellation)?;
+      let middle = lower + (upper - lower) / 2;
+      let reference = read_reference_at(&mut self.run, middle, self.hash_length, self.record_count)?;
+      match reference.file_key().cmp(file_key) {
+        Ordering::Less => lower = middle + 1,
+        Ordering::Greater => upper = middle,
+        Ordering::Equal => return self.load_reference(reference).map(Some),
+      }
+    }
+    let reference = self.scan_absent_target(file_key, cancellation)?;
+    match reference {
+      Some(reference) => self.load_reference(reference).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  fn scan_absent_target(
+    &mut self,
+    file_key: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<Option<WorkspaceReferenceV1>, NativeQueryOrderingWorkspaceErrorV1> {
+    let mut prior = None;
+    let mut found = None;
+    for index in 0..self.record_count {
+      require_not_cancelled(cancellation)?;
+      require_not_cancelled(&self.cancellation)?;
+      let reference = read_reference_at(&mut self.run, index, self.hash_length, self.record_count)?;
+      if prior.as_ref().is_some_and(|prior: &WorkspaceReferenceV1| prior.file_key() >= reference.file_key()) {
+        return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
+          "native_query_order_lookup_order",
+          "ordering run is not in strict FileKey order",
+        ));
+      }
+      if reference.file_key() == file_key {
+        found = Some(reference.clone());
+      }
+      prior = Some(reference);
+    }
+    Ok(found)
+  }
+
+  fn load_reference(&mut self, reference: WorkspaceReferenceV1) -> Result<&NativeQueryOrderingRowV1, NativeQueryOrderingWorkspaceErrorV1> {
+    read_ordered_row(&mut self.data, self.data_length, self.hash_algorithm, self.hash_length, &reference, &mut self.row)?;
+    Ok(&self.row)
   }
 }
 
@@ -861,29 +926,7 @@ struct RunReaderV1 {
 
 impl RunReaderV1 {
   fn open(directory: &Path, run: &RunFileV1, hash_length: usize) -> Result<Self, NativeQueryOrderingWorkspaceErrorV1> {
-    let path = run_path(directory, run.run_id);
-    let mut file = open_regular_file_no_follow(&path)
-      .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_run_open", error.to_string()))?;
-    validate_private_regular_file(&path, &file, "native query ordering run").map_err(map_private_workspace_error)?;
-    let observed = file
-      .metadata()
-      .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_run_metadata", error.to_string()))?
-      .len();
-    if observed != run.byte_length {
-      return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
-        "native_query_order_run_length",
-        "ordering run physical length changed after completion",
-      ));
-    }
-    let mut header = [0; RUN_HEADER_LENGTH];
-    read_exact_classified(&mut file, &mut header, "native_query_order_run_header")?;
-    let count = decode_run_header(&header, hash_length)?;
-    if count != run.record_count || run_byte_length(hash_length, count)? != observed {
-      return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
-        "native_query_order_run_header",
-        "ordering run header disagrees with its completed receipt",
-      ));
-    }
+    let (file, count) = open_validated_run_file(directory, run, hash_length)?;
     Ok(Self { file, hash_length, remaining: count })
   }
 
@@ -898,6 +941,100 @@ impl RunReaderV1 {
     self.remaining -= 1;
     Ok(Some(reference))
   }
+}
+
+fn open_validated_run_file(
+  directory: &Path,
+  run: &RunFileV1,
+  hash_length: usize,
+) -> Result<(File, u64), NativeQueryOrderingWorkspaceErrorV1> {
+  let path = run_path(directory, run.run_id);
+  let mut file = open_regular_file_no_follow(&path)
+    .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_run_open", error.to_string()))?;
+  validate_private_regular_file(&path, &file, "native query ordering run").map_err(map_private_workspace_error)?;
+  let observed = file
+    .metadata()
+    .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_run_metadata", error.to_string()))?
+    .len();
+  if observed != run.byte_length {
+    return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
+      "native_query_order_run_length",
+      "ordering run physical length changed after completion",
+    ));
+  }
+  let mut header = [0; RUN_HEADER_LENGTH];
+  read_exact_classified(&mut file, &mut header, "native_query_order_run_header")?;
+  let count = decode_run_header(&header, hash_length)?;
+  if count != run.record_count || run_byte_length(hash_length, count)? != observed {
+    return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
+      "native_query_order_run_header",
+      "ordering run header disagrees with its completed receipt",
+    ));
+  }
+  Ok((file, count))
+}
+
+fn read_reference_at(
+  file: &mut File,
+  index: u64,
+  hash_length: usize,
+  record_count: u64,
+) -> Result<WorkspaceReferenceV1, NativeQueryOrderingWorkspaceErrorV1> {
+  if index >= record_count {
+    return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
+      "native_query_order_lookup_index",
+      "ordering lookup index exceeds its completed run",
+    ));
+  }
+  let length = u64::try_from(reference_length(hash_length)?).map_err(|error| {
+    NativeQueryOrderingWorkspaceErrorV1::resource("native_query_order_lookup_offset", format!("reference length exceeds u64: {error}"))
+  })?;
+  let offset = index
+    .checked_mul(length)
+    .and_then(|offset| offset.checked_add(RUN_HEADER_LENGTH as u64))
+    .ok_or_else(|| NativeQueryOrderingWorkspaceErrorV1::resource("native_query_order_lookup_offset", "run offset overflowed"))?;
+  file
+    .seek(SeekFrom::Start(offset))
+    .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_lookup_seek", error.to_string()))?;
+  let mut bytes = [0; 2 * MAXIMUM_HASH_LENGTH + 20];
+  read_exact_classified(file, &mut bytes[..length as usize], "native_query_order_lookup_read")?;
+  decode_reference(&bytes[..length as usize], hash_length)
+}
+
+fn read_ordered_row(
+  data: &mut File,
+  data_length: u64,
+  hash_algorithm: HashAlgorithm,
+  hash_length: usize,
+  reference: &WorkspaceReferenceV1,
+  row: &mut NativeQueryOrderingRowV1,
+) -> Result<(), NativeQueryOrderingWorkspaceErrorV1> {
+  let frame_end = reference
+    .data_offset
+    .checked_add(u64::from(reference.data_length))
+    .ok_or_else(|| NativeQueryOrderingWorkspaceErrorV1::corrupt("native_query_order_data_reference", "row frame range overflowed"))?;
+  if frame_end > data_length || reference.data_length as usize > MAXIMUM_ENCODED_FILE_RECORD_BYTES + DATA_HEADER_LENGTH + hash_length {
+    return Err(NativeQueryOrderingWorkspaceErrorV1::corrupt(
+      "native_query_order_data_reference",
+      "ordering run references a row frame outside the completed spool",
+    ));
+  }
+  data
+    .seek(SeekFrom::Start(reference.data_offset))
+    .map_err(|error| NativeQueryOrderingWorkspaceErrorV1::unavailable("native_query_order_data_seek", error.to_string()))?;
+  row.frame.clear();
+  row.frame.try_reserve_exact(reference.data_length as usize).map_err(|error| {
+    NativeQueryOrderingWorkspaceErrorV1::resource("native_query_order_decode_allocation", format!("row-frame allocation failed: {error}"))
+  })?;
+  row.frame.resize(reference.data_length as usize, 0);
+  read_exact_classified(data, &mut row.frame, "native_query_order_data_read")?;
+  validate_data_frame(&row.frame, hash_length, reference.data_checksum)?;
+  row.file_key = reference.file_key;
+  row.scope_id = reference.scope_id;
+  row.hash_length = hash_length;
+  row.entity_version = row.frame[6];
+  row.hash_algorithm = hash_algorithm;
+  Ok(())
 }
 
 #[derive(Eq, PartialEq)]
@@ -1274,6 +1411,46 @@ mod tests {
   }
 
   #[test]
+  fn exact_lookup_finds_both_hash_widths_and_proves_absence_without_scanning_database_state() {
+    for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+      let directory = tempfile::tempdir().unwrap();
+      let memory = memory();
+      let cancellation = CancellationToken::new();
+      let mut builder = NativeQueryOrderingWorkspaceBuilderV1::new(
+        directory.path(),
+        algorithm,
+        Arc::clone(&memory),
+        cancellation.clone(),
+        limits(16 * 1024 * 1024, 2),
+      )
+      .unwrap();
+      let scope_id = digest_parts(algorithm, &[b"scope"]);
+      let mut expected = BTreeMap::new();
+      for name in ["g.json", "a.json", "e.json", "b.json", "f.json", "c.json", "d.json"] {
+        let path = format!("/docs/{name}");
+        let (file_key, record_revision, record) = record_parts(algorithm, &path);
+        builder.append_parts(&file_key, Some(&scope_id), &record_revision, 1, &record).unwrap();
+        expected.insert(file_key, (record_revision, path));
+      }
+      let workspace = builder.finish().unwrap();
+      let mut lookup = workspace.open_lookup().unwrap();
+
+      for (file_key, (record_revision, path)) in expected.iter().rev() {
+        let row = lookup.find_row(file_key, &cancellation).unwrap().unwrap();
+        assert_eq!(row.file_key(), file_key);
+        assert_eq!(row.record_revision(), record_revision);
+        let record = FileRecord::deserialize(row.encoded_file_record(), algorithm.hash_length(), row.entity_version()).unwrap();
+        assert_eq!(&record.path, path);
+      }
+      let absent = digest_parts(algorithm, &[b"absent FileKey"]);
+      assert!(lookup.find_row(&absent, &cancellation).unwrap().is_none());
+      drop(lookup);
+      drop(workspace);
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    }
+  }
+
+  #[test]
   fn incremental_compaction_keeps_run_metadata_logarithmically_bounded() {
     let algorithm = HashAlgorithm::Blake3_256;
     let directory = tempfile::tempdir().unwrap();
@@ -1437,8 +1614,12 @@ mod tests {
     let error = workspace.open_cursor().err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Resource);
     assert_eq!(error.code(), "native_query_order_decode_memory");
+    let error = workspace.open_lookup().err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Resource);
+    assert_eq!(error.code(), "native_query_order_decode_memory");
     drop(held);
     drop(workspace.open_cursor().unwrap());
+    drop(workspace.open_lookup().unwrap());
     drop(workspace);
     assert_eq!(cursor_memory.snapshot().unwrap().reserved_bytes, 0);
   }
@@ -1480,6 +1661,8 @@ mod tests {
     shared.cancel();
     let error = workspace.open_cursor().err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Cancelled);
+    let error = workspace.open_lookup().err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Cancelled);
     drop(workspace);
 
     let workspace = one_record_workspace(directory.path(), algorithm, Arc::clone(&memory), CancellationToken::new());
@@ -1489,6 +1672,11 @@ mod tests {
     let error = cursor.next_row(&request).err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Cancelled);
     drop(cursor);
+    let mut lookup = workspace.open_lookup().unwrap();
+    let file_key = digest_parts(algorithm, &[b"file:", b"/docs/one.json"]);
+    let error = lookup.find_row(&file_key, &request).err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Cancelled);
+    drop(lookup);
     drop(workspace);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }
@@ -1508,12 +1696,18 @@ mod tests {
     let error = workspace.open_cursor().err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
     assert_eq!(error.code(), "native_query_order_run_header");
+    let error = workspace.open_lookup().err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_query_order_run_header");
     drop(workspace);
 
     let workspace = one_record_workspace(directory.path(), algorithm, Arc::clone(&memory), CancellationToken::new());
     let run = run_path(workspace.directory.path(), workspace.order_run.run_id);
     OpenOptions::new().write(true).open(run).unwrap().set_len(RUN_HEADER_LENGTH as u64).unwrap();
     let error = workspace.open_cursor().err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_query_order_run_length");
+    let error = workspace.open_lookup().err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
     assert_eq!(error.code(), "native_query_order_run_length");
     drop(workspace);
@@ -1532,11 +1726,20 @@ mod tests {
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
     assert_eq!(error.code(), "native_query_order_data_frame");
     drop(cursor);
+    let mut lookup = workspace.open_lookup().unwrap();
+    let file_key = digest_parts(algorithm, &[b"file:", b"/docs/one.json"]);
+    let error = lookup.find_row(&file_key, &CancellationToken::new()).err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_query_order_data_frame");
+    drop(lookup);
     drop(workspace);
 
     let workspace = one_record_workspace(directory.path(), algorithm, Arc::clone(&memory), CancellationToken::new());
     OpenOptions::new().write(true).open(&workspace.data_path).unwrap().set_len(1).unwrap();
     let error = workspace.open_cursor().err().unwrap();
+    assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_query_order_data_length");
+    let error = workspace.open_lookup().err().unwrap();
     assert_eq!(error.class(), NativeQueryOrderingWorkspaceErrorClassV1::Corrupt);
     assert_eq!(error.code(), "native_query_order_data_length");
     drop(workspace);

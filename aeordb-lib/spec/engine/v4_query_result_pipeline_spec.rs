@@ -544,7 +544,7 @@ impl QueryAggregateInputSourceV1 for ModelAggregateSource {
         };
         QueryAggregateInputFieldV1 {
           field_name: definition.field_name().to_string(),
-          scope_id: definition.scope_ids()[0].clone(),
+          scope_id: Some(definition.scope_ids()[0].clone()),
           state: model.state,
           values: model.values.clone(),
         }

@@ -242,7 +242,7 @@ fn found_row(
     record_revision: revision.to_vec(),
     fields: vec![QueryAggregateInputFieldV1 {
       field_name: "@size".to_string(),
-      scope_id: input.fields()[0].scope_ids()[0].to_vec(),
+      scope_id: Some(input.fields()[0].scope_ids()[0].to_vec()),
       state: QueryExecutionFieldStateV1::Values,
       values,
     }],
@@ -262,7 +262,7 @@ fn found_state_row(
     record_revision: revision.to_vec(),
     fields: vec![QueryAggregateInputFieldV1 {
       field_name: "@size".to_string(),
-      scope_id: input.fields()[0].scope_ids()[0].to_vec(),
+      scope_id: Some(input.fields()[0].scope_ids()[0].to_vec()),
       state,
       values,
     }],
@@ -306,13 +306,13 @@ fn found_two_field_state_row(
     fields: vec![
       QueryAggregateInputFieldV1 {
         field_name: "@size".to_string(),
-        scope_id: input.fields()[0].scope_ids()[0].to_vec(),
+        scope_id: Some(input.fields()[0].scope_ids()[0].to_vec()),
         state: size_state,
         values: size_values,
       },
       QueryAggregateInputFieldV1 {
         field_name: "@updated_at".to_string(),
-        scope_id: input.fields()[1].scope_ids()[0].to_vec(),
+        scope_id: Some(input.fields()[1].scope_ids()[0].to_vec()),
         state: updated_at_state,
         values: updated_at_values,
       },
@@ -451,6 +451,39 @@ fn selected_root_aggregate_input_deduplicates_fields_and_validates_complete_rows
 }
 
 #[test]
+fn selected_root_aggregate_input_retains_an_unconfigured_effective_field_as_missing() {
+  let plan = aggregate_plan(HashAlgorithm::Blake3_256);
+  let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 4, 4, 512).unwrap()).unwrap();
+  let file_key = vec![0x55; 32];
+  let revision = vec![0x66; 32];
+  let row = QueryAggregateInputLookupResultV1::Found(QueryAggregateInputRowV1 {
+    selected_namespace_root: input.selected_namespace_root().to_vec(),
+    file_key: file_key.clone(),
+    record_revision: revision.clone(),
+    fields: vec![QueryAggregateInputFieldV1 {
+      field_name: "@size".to_string(),
+      scope_id: None,
+      state: QueryExecutionFieldStateV1::Missing,
+      values: Vec::new(),
+    }],
+  });
+  let mut source = ModelAggregateSource { result: Some(Ok(row)), calls: 0 };
+
+  let resolved = resolve_query_aggregate_input_v1(
+    QueryAggregateInputLookupRequestV1::new(&input, &file_key, &revision),
+    &mut source,
+    &CancellationToken::new(),
+  )
+  .unwrap();
+  let QueryAggregateInputLookupResultV1::Found(resolved) = resolved else {
+    panic!("expected selected-root row")
+  };
+  assert_eq!(resolved.fields[0].scope_id, None);
+  assert_eq!(resolved.fields[0].state, QueryExecutionFieldStateV1::Missing);
+  assert!(resolved.fields[0].values.is_empty());
+}
+
+#[test]
 fn selected_root_aggregate_input_rejects_absent_malformed_oversized_and_cancelled_rows() {
   let plan = aggregate_plan(HashAlgorithm::Blake3_256);
   let input = CompiledQueryAggregateInputV1::from_plan(&plan, QueryAggregateInputLimitsV1::new(32, 2, 2, 512).unwrap()).unwrap();
@@ -519,7 +552,7 @@ fn aggregate_input_rejects_field_state_scope_and_hidden_capacity_lies() {
 
   let mut wrong_scope = wrong_name.clone();
   wrong_scope.fields[0].field_name = "@size".to_string();
-  wrong_scope.fields[0].scope_id = vec![0x77; 32];
+  wrong_scope.fields[0].scope_id = Some(vec![0x77; 32]);
 
   let mut missing_with_value = wrong_name.clone();
   missing_with_value.fields[0].field_name = "@size".to_string();
@@ -563,7 +596,7 @@ fn aggregate_input_rejects_field_state_scope_and_hidden_capacity_lies() {
     record_revision: revision.clone(),
     fields: vec![QueryAggregateInputFieldV1 {
       field_name: "@size".to_string(),
-      scope_id: input.fields()[0].scope_ids()[0].to_vec(),
+      scope_id: Some(input.fields()[0].scope_ids()[0].to_vec()),
       state: QueryExecutionFieldStateV1::DeterministicUnindexable,
       values: Vec::new(),
     }],

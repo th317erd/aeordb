@@ -380,7 +380,9 @@ impl<'a> QueryAggregateInputLookupRequestV1<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAggregateInputFieldV1 {
   pub field_name: String,
-  pub scope_id: Vec<u8>,
+  /// The effective scope only when it defines this field. `None` retains a
+  /// document whose effective configuration omits the field as `Missing`.
+  pub scope_id: Option<Vec<u8>>,
   pub state: QueryExecutionFieldStateV1,
   pub values: Vec<LogicalOrderComponentOwnedV1>,
 }
@@ -2530,9 +2532,11 @@ fn validate_lookup_row(
   }
   let mut total_values = 0u64;
   for (expected, field) in request.fields().iter().zip(&row.fields) {
+    let configured_scope = field.scope_id.as_ref();
     if field.field_name != expected.field_name
-      || !expected.scope_ids.contains(&field.scope_id)
-      || field.scope_id.len() != request.selected_namespace_root().len()
+      || configured_scope
+        .is_some_and(|scope_id| !expected.scope_ids.contains(scope_id) || scope_id.len() != request.selected_namespace_root().len())
+      || configured_scope.is_none() && (field.state != QueryExecutionFieldStateV1::Missing || !field.values.is_empty())
     {
       return Err(source_error(
         QueryExecutionSourceErrorClassV1::Corrupt,
@@ -2588,7 +2592,7 @@ fn validate_lookup_row(
       })?;
     }
   }
-  let row_bytes = aggregate_input_row_allocated_bytes(row)?;
+  let row_bytes = query_aggregate_input_row_allocated_bytes_v1(row)?;
   if row_bytes > request.limits().maximum_row_bytes {
     return Err(source_error(
       QueryExecutionSourceErrorClassV1::ResourceLimit,
@@ -2643,7 +2647,7 @@ fn validate_aggregate_operation(
   Ok(())
 }
 
-fn aggregate_input_row_allocated_bytes(row: &QueryAggregateInputRowV1) -> Result<u64, QueryExecutionSourceErrorV1> {
+pub(super) fn query_aggregate_input_row_allocated_bytes_v1(row: &QueryAggregateInputRowV1) -> Result<u64, QueryExecutionSourceErrorV1> {
   let mut bytes = u64::try_from(size_of::<QueryAggregateInputRowV1>()).map_err(|source| {
     source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "query_aggregate_input_row_bytes", source.to_string())
   })?;
@@ -2653,7 +2657,7 @@ fn aggregate_input_row_allocated_bytes(row: &QueryAggregateInputRowV1) -> Result
   bytes = add_slots::<QueryAggregateInputFieldV1>(bytes, row.fields.capacity(), "field slots")?;
   for field in &row.fields {
     bytes = add_capacity(bytes, field.field_name.capacity(), "field name")?;
-    bytes = add_capacity(bytes, field.scope_id.capacity(), "ScopeId")?;
+    bytes = add_capacity(bytes, field.scope_id.as_ref().map_or(0, Vec::capacity), "ScopeId")?;
     bytes = add_slots::<LogicalOrderComponentOwnedV1>(bytes, field.values.capacity(), "value slots")?;
     for value in &field.values {
       bytes = add_capacity(bytes, value.payload.capacity(), "value payload")?;
