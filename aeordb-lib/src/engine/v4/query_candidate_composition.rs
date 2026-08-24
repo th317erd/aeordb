@@ -130,6 +130,7 @@ impl QueryCandidateSelectionV1 {
 
 pub struct QueryBooleanCandidatePlanV1 {
   kind: QueryBooleanCandidatePlanKindV1,
+  query_fingerprint: Vec<u8>,
   scope_id: Vec<u8>,
   source_namespace_root: Vec<u8>,
   covered_through_publication_sequence: Option<u64>,
@@ -144,6 +145,7 @@ impl fmt::Debug for QueryBooleanCandidatePlanV1 {
     formatter
       .debug_struct("QueryBooleanCandidatePlanV1")
       .field("kind", &self.kind)
+      .field("query_fingerprint", &hex::encode(&self.query_fingerprint))
       .field("scope_id", &hex::encode(&self.scope_id))
       .field("source_namespace_root", &hex::encode(&self.source_namespace_root))
       .field("covered_through_publication_sequence", &self.covered_through_publication_sequence)
@@ -157,6 +159,10 @@ impl fmt::Debug for QueryBooleanCandidatePlanV1 {
 impl QueryBooleanCandidatePlanV1 {
   pub const fn kind(&self) -> QueryBooleanCandidatePlanKindV1 {
     self.kind
+  }
+
+  pub fn query_fingerprint(&self) -> Option<&[u8]> {
+    (self.kind == QueryBooleanCandidatePlanKindV1::Partial).then_some(self.query_fingerprint.as_slice())
   }
 
   pub fn scope_id(&self) -> Option<&[u8]> {
@@ -282,9 +288,11 @@ pub fn compose_boolean_candidate_plan_v1(
         ));
       }
       let scope_id = try_clone_bytes(scope_id, "scope id")?;
+      let query_fingerprint = try_clone_bytes(plan.query_fingerprint(), "query fingerprint")?;
       let source_namespace_root = try_clone_bytes(basis.source_namespace_root, "source NamespaceRoot")?;
       Ok(QueryBooleanCandidatePlanV1 {
         kind: QueryBooleanCandidatePlanKindV1::Partial,
+        query_fingerprint,
         scope_id,
         source_namespace_root,
         covered_through_publication_sequence: Some(basis.covered_through_publication_sequence),
@@ -300,6 +308,7 @@ pub fn compose_boolean_candidate_plan_v1(
 fn empty_plan(kind: QueryBooleanCandidatePlanKindV1, estimated_work: u64) -> QueryBooleanCandidatePlanV1 {
   QueryBooleanCandidatePlanV1 {
     kind,
+    query_fingerprint: Vec::new(),
     scope_id: Vec::new(),
     source_namespace_root: Vec::new(),
     covered_through_publication_sequence: None,
@@ -615,6 +624,7 @@ fn composition_retained_bytes(
   COMPOSITION_BASE_BYTES
     .checked_add(selection_bytes)
     .and_then(|bytes| bytes.checked_add(scope_bytes))
+    .and_then(|bytes| bytes.checked_add(hash_bytes))
     .and_then(|bytes| bytes.checked_add(hash_bytes))
     .ok_or_else(|| {
       QueryCandidateCompositionErrorV1::invalid(

@@ -37,8 +37,9 @@ use aeordb::engine::v4::query_candidate_composition::{
   compose_boolean_candidate_plan_v1,
 };
 use aeordb::engine::v4::query_partial_candidate::{
-  QueryPartialCandidateArtifactSourceV1, QueryPartialCandidateExecutionRequestV1, QueryPartialPostingRootReceiptV1,
-  QueryPartialPostingRootRequestV1, QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1, execute_planned_partial_candidate_v1,
+  QueryComposedPartialCandidateExecutionRequestV1, QueryPartialCandidateArtifactSourceV1, QueryPartialCandidateExecutionRequestV1,
+  QueryPartialPostingRootReceiptV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1,
+  execute_composed_partial_candidates_v1, execute_planned_partial_candidate_v1,
 };
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1,
@@ -1729,12 +1730,15 @@ fn complete_index_unions_match_authoritative_truth_with_nonempty_and_empty_branc
 struct PartialArtifactSource {
   artifacts: Source,
   posting_root: Option<QueryCandidateArtifactRootV1>,
+  posting_roots: BTreeMap<Vec<u8>, QueryCandidateArtifactRootV1>,
   scope_root: Option<QueryCandidateArtifactRootV1>,
   posting_complete: bool,
   posting_error: Option<IndexPartialSourceErrorV1>,
   posting_manifest_override: Option<Vec<u8>>,
+  posting_manifest_overrides: BTreeMap<Vec<u8>, Vec<u8>>,
   scope_error: Option<IndexPartialSourceErrorV1>,
   scope_source_override: Option<Vec<u8>>,
+  posting_resolutions: usize,
   scope_resolutions: usize,
 }
 
@@ -1749,10 +1753,18 @@ impl QueryPartialCandidateArtifactSourceV1 for PartialArtifactSource {
     &mut self,
     request: QueryPartialPostingRootRequestV1<'_>,
   ) -> Result<QueryPartialPostingRootReceiptV1, IndexPartialSourceErrorV1> {
+    self.posting_resolutions += 1;
     if let Some(error) = self.posting_error.clone() {
       return Err(error);
     }
     let generation = request.candidate.selected_generation().unwrap();
+    let root = self.posting_roots.get(request.candidate.index_id()).cloned().or_else(|| self.posting_root.clone());
+    let generation_manifest_hash = self
+      .posting_manifest_overrides
+      .get(request.candidate.index_id())
+      .cloned()
+      .or_else(|| self.posting_manifest_override.clone())
+      .unwrap_or_else(|| generation.manifest_hash.clone());
     Ok(QueryPartialPostingRootReceiptV1 {
       target_namespace_root: request.target_namespace_root.to_vec(),
       target_publication_sequence: request.target_publication_sequence,
@@ -1761,8 +1773,8 @@ impl QueryPartialCandidateArtifactSourceV1 for PartialArtifactSource {
       scope_id: request.scope_id.to_vec(),
       index_id: request.candidate.index_id().to_vec(),
       generation: generation.generation,
-      generation_manifest_hash: self.posting_manifest_override.clone().unwrap_or_else(|| generation.manifest_hash.clone()),
-      root: self.posting_root.clone(),
+      generation_manifest_hash,
+      root,
       complete: self.posting_complete,
     })
   }
@@ -1844,6 +1856,68 @@ impl IndexPartialCandidateRecheckerV1 for PartialRechecker {
 
 fn partial_acceleration_limits() -> IndexPartialAccelerationLimitsV1 {
   IndexPartialAccelerationLimitsV1::new(128, 128, 128, 2 * 1_024 * 1_024).unwrap()
+}
+
+fn partial_artifact_source(
+  algorithm: HashAlgorithm,
+  scope_id: &[u8],
+  candidate_rows: &[(&CompiledQueryIndexCandidateV1, u64)],
+  scope_rows: &[(u64, &[u8], &[u8], &str)],
+) -> PartialArtifactSource {
+  let mut artifacts = Source::default();
+  let mut posting_roots = BTreeMap::new();
+  for (candidate, document_ordinal) in candidate_rows {
+    let generation = candidate.selected_generation().unwrap();
+    let (coordinate, posting_key) = candidate_posting_point(candidate);
+    let posting = candidate
+      .compiled_literals()
+      .iter()
+      .flat_map(|literal| literal.compiled().postings.iter())
+      .find(|posting| posting.coordinate == coordinate && posting.posting_key == posting_key)
+      .unwrap();
+    let encoded = encode_posting_record(&PostingRecordV1 {
+      tombstone: false,
+      coordinate: posting.coordinate,
+      document_ordinal: *document_ordinal,
+      source_value_ordinal: 0,
+      expansion_ordinal: posting.expansion_ordinal,
+      posting_key: &posting.posting_key,
+    })
+    .unwrap();
+    let page = ordered_page(algorithm, OrderedIndexRoleV1::Posting, candidate.index_id(), generation.generation, 1, &[encoded]);
+    let directory = leaf_directory(algorithm, OrderedIndexRoleV1::Posting, candidate.index_id(), generation.generation, &[&page]);
+    artifacts.insert(&page);
+    artifacts.insert(&directory);
+    posting_roots.insert(candidate.index_id().to_vec(), root_authority(algorithm, candidate.index_id(), generation.generation, &directory));
+  }
+  let encoded_scope_rows = scope_rows
+    .iter()
+    .map(|(document_ordinal, file_key, revision, path)| {
+      encode_scope_document_record(
+        &ScopeDocumentRecordV1 { tombstone: false, document_ordinal: *document_ordinal, file_key, record_revision_hash: revision, path },
+        algorithm,
+      )
+      .unwrap()
+    })
+    .collect::<Vec<_>>();
+  let scope_page = ordered_page(algorithm, OrderedIndexRoleV1::ScopeOrdinal, scope_id, 5, 0, &encoded_scope_rows);
+  let scope_directory = leaf_directory(algorithm, OrderedIndexRoleV1::ScopeOrdinal, scope_id, 5, &[&scope_page]);
+  artifacts.insert(&scope_page);
+  artifacts.insert(&scope_directory);
+  PartialArtifactSource {
+    artifacts,
+    posting_root: None,
+    posting_roots,
+    scope_root: Some(root_authority(algorithm, scope_id, 5, &scope_directory)),
+    posting_complete: true,
+    posting_error: None,
+    posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
+    scope_error: None,
+    scope_source_override: None,
+    posting_resolutions: 0,
+    scope_resolutions: 0,
+  }
 }
 
 #[test]
@@ -1972,12 +2046,15 @@ fn planner_partial_artifacts_feed_the_exact_complement_engine_at_both_hash_width
     let mut source = PartialArtifactSource {
       artifacts,
       posting_root: Some(root_authority(algorithm, planned.candidate.index_id(), 7, &posting_directory)),
+      posting_roots: BTreeMap::new(),
       scope_root: Some(root_authority(algorithm, &planned.scope_id, 5, &scope_directory)),
       posting_complete: true,
       posting_error: None,
       posting_manifest_override: None,
+      posting_manifest_overrides: BTreeMap::new(),
       scope_error: None,
       scope_source_override: None,
+      posting_resolutions: 0,
       scope_resolutions: 0,
     };
     let memory = memory(32 * 1_024 * 1_024);
@@ -2086,12 +2163,15 @@ fn malformed_partial_root_receipts_fall_back_but_internal_source_failures_remain
   let mut source = PartialArtifactSource {
     artifacts: Source::default(),
     posting_root: None,
+    posting_roots: BTreeMap::new(),
     scope_root: None,
     posting_complete: false,
     posting_error: None,
     posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
     scope_error: None,
     scope_source_override: None,
+    posting_resolutions: 0,
     scope_resolutions: 0,
   };
   let mut complement = PartialComplement::default();
@@ -2253,12 +2333,15 @@ fn one_candidate_partial_adapter_rejects_union_drivers_until_all_branches_are_co
   let mut source = PartialArtifactSource {
     artifacts: Source::default(),
     posting_root: None,
+    posting_roots: BTreeMap::new(),
     scope_root: None,
     posting_complete: false,
     posting_error: None,
     posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
     scope_error: None,
     scope_source_override: None,
+    posting_resolutions: 0,
     scope_resolutions: 0,
   };
   let mut complement = PartialComplement::default();
@@ -2547,4 +2630,235 @@ fn candidate_composition_is_bounded_cancelled_and_storage_neutral() {
   for forbidden in ["StorageEngine", "FieldNvt", "Nvt", "server::", "axum::", "tokio::spawn", "std::thread::spawn"] {
     assert!(!source.contains(forbidden), "candidate composition gained forbidden authority: {forbidden}");
   }
+}
+
+#[test]
+fn composed_partial_candidates_share_one_exact_complement_and_validate_every_branch() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let expression = QueryExpressionV1::Or(vec![
+    predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+    predicate("@size", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5))),
+  ]);
+  let planned = planned_query_with_generation_sources(expression, Some((source_root.clone(), 40)), Some((source_root.clone(), 40)));
+  let composition_memory = memory(16 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let composed =
+    compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &composition_memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.selections().len(), 2);
+
+  let filename_candidate = &planned.plan.predicates()[0].scopes()[0].candidates()[0];
+  let size_candidate = &planned.plan.predicates()[1].scopes()[0].candidates()[0];
+  let candidate_rows = [(filename_candidate, 1u64), (size_candidate, 2u64)];
+  let paths = ["/alpha.json", "/beta.json"];
+  let keys = paths.map(|path| digest_parts(algorithm, &[b"file:", path.as_bytes()]));
+  let revisions = [1u64, 2].map(|ordinal| digest_parts(algorithm, &[b"basis:", &ordinal.to_le_bytes()]));
+  let scope_rows =
+    [(1u64, keys[0].as_slice(), revisions[0].as_slice(), paths[0]), (2u64, keys[1].as_slice(), revisions[1].as_slice(), paths[1])];
+  let mut source = partial_artifact_source(algorithm, &planned.scope_id, &candidate_rows, &scope_rows);
+
+  let encoded_alpha = encode_canonical_value(
+    &CanonicalConfigValueV1::String("alpha.json".to_string()),
+    aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+  )
+  .unwrap();
+  let encoded_beta = encode_canonical_value(
+    &CanonicalConfigValueV1::String("beta.json".to_string()),
+    aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+  )
+  .unwrap();
+  let encoded_one =
+    encode_canonical_value(&CanonicalConfigValueV1::Unsigned(1), aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE)
+      .unwrap();
+  let encoded_five =
+    encode_canonical_value(&CanonicalConfigValueV1::Unsigned(5), aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE)
+      .unwrap();
+  let mut documents = vec![
+    ExecutionDocument {
+      scope_id: planned.scope_id.clone(),
+      ordinal: 1,
+      file_key: keys[0].clone(),
+      revision: revisions[0].clone(),
+      path: paths[0].to_string(),
+      fields: BTreeMap::from([("@filename".to_string(), encoded_alpha), ("@size".to_string(), encoded_one)]),
+    },
+    ExecutionDocument {
+      scope_id: planned.scope_id.clone(),
+      ordinal: 2,
+      file_key: keys[1].clone(),
+      revision: revisions[1].clone(),
+      path: paths[1].to_string(),
+      fields: BTreeMap::from([("@filename".to_string(), encoded_beta), ("@size".to_string(), encoded_five)]),
+    },
+  ];
+  documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+  let authoritative_memory = memory(16 * 1_024 * 1_024);
+  let mut authoritative_source =
+    AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+  let authoritative = execute_authoritative_root_query_v1(RootAwareQueryExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    source: &mut authoritative_source,
+    memory: &authoritative_memory,
+    cancellation: &cancellation,
+    limits: execution_limits(),
+  })
+  .unwrap();
+
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  for index in 0..2 {
+    rechecker
+      .outcomes
+      .insert(keys[index].clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: revisions[index].clone(), matches: true });
+  }
+  let execution_memory = memory(32 * 1_024 * 1_024);
+  let outcome = execute_composed_partial_candidates_v1(QueryComposedPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    candidate_plan: &composed,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &execution_memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::Exact(exact) = outcome else {
+    panic!("composed partial candidates did not produce exact target-root truth")
+  };
+  assert_eq!(
+    exact.matches().iter().map(|row| (row.file_key().to_vec(), row.record_revision_hash().to_vec())).collect::<Vec<_>>(),
+    authoritative.matches().iter().map(|row| (row.file_key().to_vec(), row.record_revision().to_vec())).collect::<Vec<_>>()
+  );
+  assert_eq!(exact.observed_candidate_count(), 2);
+  assert_eq!(exact.proof().source_namespace_root(), source_root);
+  assert_eq!(exact.proof().query_fingerprint(), planned.plan.query_fingerprint());
+  assert_ne!(exact.proof().generation_manifest_hash(), filename_candidate.selected_generation().unwrap().manifest_hash);
+  assert_ne!(exact.proof().generation_manifest_hash(), size_candidate.selected_generation().unwrap().manifest_hash);
+  assert_eq!(source.posting_resolutions, 2);
+  assert_eq!(source.scope_resolutions, 2);
+  assert_eq!(complement.scans, 1, "a candidate set must use one exact immutable-root complement");
+  drop(exact);
+  drop(authoritative);
+  assert_eq!(execution_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  assert_eq!(authoritative_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  source.posting_manifest_overrides.insert(size_candidate.index_id().to_vec(), vec![0xee; algorithm.hash_length()]);
+  let outcome = execute_composed_partial_candidates_v1(QueryComposedPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    candidate_plan: &composed,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &execution_memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+    panic!("a substituted branch manifest exposed a composed partial result")
+  };
+  assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateCorrupt);
+  assert_eq!(complement.scans, 1);
+  source.posting_manifest_overrides.clear();
+
+  let aggregate_limited = IndexPartialAccelerationLimitsV1::new(128, 1, 128, 2 * 1_024 * 1_024).unwrap();
+  let outcome = execute_composed_partial_candidates_v1(QueryComposedPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    candidate_plan: &composed,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &execution_memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: aggregate_limited,
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+    panic!("an over-limit composed candidate stream exposed truncated matches")
+  };
+  assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateResourceLimit);
+  assert_eq!(complement.scans, 1);
+  assert_eq!(execution_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let foreign = planned_partial_size_candidate(algorithm);
+  let error = execute_composed_partial_candidates_v1(QueryComposedPartialCandidateExecutionRequestV1 {
+    plan: &foreign.plan,
+    candidate_plan: &composed,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &execution_memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_composed_partial_candidate_fingerprint");
+  assert_eq!(complement.scans, 1);
+}
+
+#[test]
+fn composed_partial_index_union_streams_every_planner_selected_branch() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let planned = planned_phonetic_union_query_with_source("Schmidt", Some((source_root, 40)));
+  let composition_memory = memory(16 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let composed =
+    compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &composition_memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.selections().len(), 2);
+
+  let scope = &planned.plan.predicates()[0].scopes()[0];
+  let first = &scope.candidates()[composed.selections()[0].candidate_index()];
+  let second = &scope.candidates()[composed.selections()[1].candidate_index()];
+  let paths = ["/schmidt-a.txt", "/schmidt-b.txt"];
+  let keys = paths.map(|path| digest_parts(algorithm, &[b"file:", path.as_bytes()]));
+  let revisions = [1u64, 2].map(|ordinal| digest_parts(algorithm, &[b"basis:", &ordinal.to_le_bytes()]));
+  let candidate_rows = [(first, 1u64), (second, 2u64)];
+  let scope_rows =
+    [(1u64, keys[0].as_slice(), revisions[0].as_slice(), paths[0]), (2u64, keys[1].as_slice(), revisions[1].as_slice(), paths[1])];
+  let mut source = partial_artifact_source(algorithm, &planned.scope_id, &candidate_rows, &scope_rows);
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  for index in 0..2 {
+    rechecker
+      .outcomes
+      .insert(keys[index].clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: revisions[index].clone(), matches: true });
+  }
+  let execution_memory = memory(32 * 1_024 * 1_024);
+  let outcome = execute_composed_partial_candidates_v1(QueryComposedPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    candidate_plan: &composed,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &execution_memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::Exact(exact) = outcome else {
+    panic!("planner-selected partial IndexUnion did not produce exact target-root truth")
+  };
+  let mut expected = vec![(keys[0].clone(), revisions[0].clone()), (keys[1].clone(), revisions[1].clone())];
+  expected.sort_unstable();
+  assert_eq!(
+    exact.matches().iter().map(|row| (row.file_key().to_vec(), row.record_revision_hash().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  assert_eq!(exact.observed_candidate_count(), 2);
+  assert_eq!(source.posting_resolutions, 2);
+  assert_eq!(source.scope_resolutions, 2);
+  assert_eq!(complement.scans, 1);
+  drop(exact);
+  assert_eq!(execution_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }

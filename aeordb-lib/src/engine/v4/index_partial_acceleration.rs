@@ -346,7 +346,7 @@ impl IndexPartialAccelerationErrorV1 {
     Self { class: IndexPartialAccelerationErrorClassV1::Cancelled, code, context: context.into() }
   }
 
-  fn internal(code: &'static str, context: impl Into<String>) -> Self {
+  pub(crate) fn internal(code: &'static str, context: impl Into<String>) -> Self {
     Self { class: IndexPartialAccelerationErrorClassV1::Internal, code, context: context.into() }
   }
 }
