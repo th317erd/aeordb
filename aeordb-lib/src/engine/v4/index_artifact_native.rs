@@ -95,7 +95,6 @@ pub struct NativeSelectedArtifactPageCursorV1 {
   generation: u64,
   role: OrderedIndexRoleV1,
   cursor: LoadedArtifactPageCursorV1,
-  _artifact_memory: Vec<MemoryReservation>,
   _workspace_memory: MemoryReservation,
 }
 
@@ -212,11 +211,6 @@ impl NativeSelectedArtifactPageCursorV1 {
   }
 }
 
-struct AccountedArtifactBytesV1 {
-  bytes: Vec<u8>,
-  _memory: MemoryReservation,
-}
-
 #[derive(Debug)]
 struct SelectedDirectoryClosureV1 {
   root_key: Vec<u8>,
@@ -236,16 +230,12 @@ struct CapturedNativeArtifactCursorSourceV1<'a> {
   captured: &'a SelectedDatabaseHeaderV4,
   cancellation: &'a CancellationToken,
   memory: &'a MemoryCoordinator,
-  reservations: Vec<MemoryReservation>,
 }
 
 impl ArtifactCursorSourceV1 for CapturedNativeArtifactCursorSourceV1<'_> {
   fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
     match load_accounted_artifact(self.publisher, self.captured, key, maximum_bytes, self.cancellation, self.memory) {
-      Ok(Some(loaded)) => {
-        self.reservations.push(loaded._memory);
-        Ok(RetainedArtifactBytesV1::from_bytes(loaded.bytes))
-      }
+      Ok(Some(loaded)) => Ok(loaded),
       Ok(None) => Err(ArtifactCursorReadErrorV1::Missing),
       Err(error) => Err(map_native_source_error(error)),
     }
@@ -339,7 +329,7 @@ fn load_native_selected_artifact_page_cursor_from_closure_v1(
   workspace_memory: MemoryReservation,
 ) -> Result<Option<NativeSelectedArtifactPageCursorV1>, NativeSelectedArtifactCursorErrorV1> {
   require_not_cancelled(cancellation)?;
-  let mut source = CapturedNativeArtifactCursorSourceV1 { publisher, captured, cancellation, memory, reservations: Vec::new() };
+  let mut source = CapturedNativeArtifactCursorSourceV1 { publisher, captured, cancellation, memory };
   let request = ArtifactPageCursorRequestV1 {
     root: ArtifactPageCursorRootV1 {
       hash_algorithm: captured.header.hash_algorithm,
@@ -367,7 +357,6 @@ fn load_native_selected_artifact_page_cursor_from_closure_v1(
     generation: closure.generation,
     role,
     cursor,
-    _artifact_memory: source.reservations,
     _workspace_memory: workspace_memory,
   }))
 }
@@ -508,10 +497,10 @@ fn select_native_nvt_predecessor_page_id_v1(
     "selected FieldNvt hint manifest",
     request.cancellation,
   )?;
-  let nvt_manifest = decode_index_manifest(&nvt_bytes.bytes, request.captured.header.hash_algorithm)
+  let nvt_manifest = decode_index_manifest(nvt_bytes.bytes(), request.captured.header.hash_algorithm)
     .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_nvt_manifest", error.to_string()))?;
   require_manifest_capabilities(&nvt_manifest, request.supported_reader_capabilities)?;
-  let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(&nvt_bytes.bytes)) else {
+  let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(nvt_bytes.bytes())) else {
     return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
       "selected_nvt_basis",
       "selected FieldNvt does not match the exact selected Posting generation",
@@ -530,7 +519,6 @@ fn select_native_nvt_predecessor_page_id_v1(
     captured: request.captured,
     cancellation: request.cancellation,
     memory: request.memory,
-    reservations: Vec::new(),
   };
   let validator = NvtTileLeafValidatorV1 { basis: &basis };
   let mut lookup_cell = target_tile_start;
@@ -668,7 +656,7 @@ fn load_selected_directory_closure(
 ) -> Result<Option<SelectedDirectoryClosureV1>, NativeSelectedArtifactCursorErrorV1> {
   let selected_bytes =
     load_required_manifest(publisher, memory, captured, &selected_generation.manifest_hash, "selected generation manifest", cancellation)?;
-  let selected = decode_index_manifest(&selected_bytes.bytes, captured.header.hash_algorithm)
+  let selected = decode_index_manifest(selected_bytes.bytes(), captured.header.hash_algorithm)
     .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_manifest", error.to_string()))?;
   validate_selected_manifest_identity(&selected, selected_generation)?;
   require_manifest_capabilities(&selected, supported_reader_capabilities)?;
@@ -708,7 +696,7 @@ fn load_selected_directory_closure(
         "selected ValueStore dependency",
         cancellation,
       )?;
-      let value = decode_index_manifest(&value_bytes.bytes, captured.header.hash_algorithm)
+      let value = decode_index_manifest(value_bytes.bytes(), captured.header.hash_algorithm)
         .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_value_manifest", error.to_string()))?;
       require_manifest_capabilities(&value, supported_reader_capabilities)?;
       let IndexManifestBodyV1::ValueStore(value_body) = &value.details else {
@@ -725,7 +713,7 @@ fn load_selected_directory_closure(
         "selected ScopeCatalog dependency",
         cancellation,
       )?;
-      let scope = decode_index_manifest(&scope_bytes.bytes, captured.header.hash_algorithm)
+      let scope = decode_index_manifest(scope_bytes.bytes(), captured.header.hash_algorithm)
         .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_scope_manifest", error.to_string()))?;
       require_manifest_capabilities(&scope, supported_reader_capabilities)?;
       validate_correctness_manifest_chain(&scope, &value, &selected, captured.header.hash_algorithm)
@@ -918,7 +906,7 @@ fn load_required_manifest(
   key: &[u8],
   context: &'static str,
   cancellation: &CancellationToken,
-) -> Result<AccountedArtifactBytesV1, NativeSelectedArtifactCursorErrorV1> {
+) -> Result<RetainedArtifactBytesV1, NativeSelectedArtifactCursorErrorV1> {
   debug_assert_eq!(ImmutableIndexArtifactKindV1::FieldIndexManifest.maximum_encoded_length(), MANIFEST_READ_MAXIMUM_BYTES);
   load_accounted_artifact(publisher, captured, key, MANIFEST_READ_MAXIMUM_BYTES, cancellation, memory)?
     .ok_or_else(|| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_manifest_missing", format!("{context} is missing")))
@@ -931,7 +919,7 @@ fn load_accounted_artifact(
   maximum_value_length: usize,
   cancellation: &CancellationToken,
   memory: &MemoryCoordinator,
-) -> Result<Option<AccountedArtifactBytesV1>, NativeSelectedArtifactCursorErrorV1> {
+) -> Result<Option<RetainedArtifactBytesV1>, NativeSelectedArtifactCursorErrorV1> {
   require_not_cancelled(cancellation)?;
   let maximum_entity_length = checked_whole_entity_encoded_length(captured.header.hash_algorithm, key.len(), maximum_value_length)
     .map_err(|error| NativeSelectedArtifactCursorErrorV1::resource("selected_artifact_read_bound", error.to_string()))?;
@@ -958,7 +946,7 @@ fn load_accounted_artifact(
       .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_memory_accounting", error.to_string()))?;
   }
   require_not_cancelled(cancellation)?;
-  Ok(Some(AccountedArtifactBytesV1 { bytes, _memory: reservation }))
+  Ok(Some(RetainedArtifactBytesV1::from_accounted(bytes, reservation)))
 }
 
 fn map_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> NativeSelectedArtifactCursorErrorV1 {

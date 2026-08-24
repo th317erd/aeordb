@@ -5,6 +5,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::engine::HashAlgorithm;
+use crate::engine::memory_coordinator::MemoryReservation;
 
 use super::index_artifact::EncodedImmutableIndexArtifactV1;
 use super::index_page::{
@@ -34,6 +35,18 @@ pub enum ArtifactCursorReadErrorV1 {
 pub enum RetainedArtifactBytesV1 {
   Encoded(Arc<EncodedImmutableIndexArtifactV1>),
   Bytes(Arc<Vec<u8>>),
+  Accounted(Arc<AccountedRetainedArtifactBytesV1>),
+}
+
+pub struct AccountedRetainedArtifactBytesV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+impl std::fmt::Debug for AccountedRetainedArtifactBytesV1 {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.debug_struct("AccountedRetainedArtifactBytesV1").field("length", &self.bytes.len()).finish_non_exhaustive()
+  }
 }
 
 impl RetainedArtifactBytesV1 {
@@ -45,10 +58,15 @@ impl RetainedArtifactBytesV1 {
     Self::Bytes(Arc::new(bytes))
   }
 
+  pub(crate) fn from_accounted(bytes: Vec<u8>, memory: MemoryReservation) -> Self {
+    Self::Accounted(Arc::new(AccountedRetainedArtifactBytesV1 { bytes, _memory: memory }))
+  }
+
   pub fn bytes(&self) -> &[u8] {
     match self {
       Self::Encoded(artifact) => &artifact.value,
       Self::Bytes(bytes) => bytes,
+      Self::Accounted(retained) => &retained.bytes,
     }
   }
 }
@@ -1064,6 +1082,30 @@ fn clone_path_prefix(path: &[RetainedArtifactBytesV1], length: usize) -> Result<
     .map_err(|error| ArtifactPageCursorErrorV1::Allocation(format!("artifact cursor path clone failed: {error}")))?;
   cloned.extend(path[..length].iter().cloned());
   Ok(cloned)
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+
+  use super::*;
+
+  #[test]
+  fn accounted_retained_bytes_own_their_reservation_until_the_last_clone_drops() {
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(1024, 2048, 1, 256).unwrap());
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(b"artifact");
+    let reservation = memory.reserve(MemoryOwner::Query, bytes.capacity() as u64, AdmissionClass::Workload).unwrap();
+
+    let retained = RetainedArtifactBytesV1::from_accounted(bytes, reservation);
+    let clone = retained.clone();
+    assert_eq!(clone.bytes(), b"artifact");
+    drop(retained);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 8);
+
+    drop(clone);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
 }
 
 fn clone_selected_entries(entries: &[usize]) -> Result<Vec<usize>, ArtifactPageCursorErrorV1> {
