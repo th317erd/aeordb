@@ -289,7 +289,7 @@ pub struct QueryPlanningCoverageGenerationV1 {
 }
 
 impl QueryPlanningCoverageGenerationV1 {
-  fn as_coverage_generation(&self) -> IndexCoverageGenerationV1<'_> {
+  pub(crate) fn as_coverage_generation(&self) -> IndexCoverageGenerationV1<'_> {
     IndexCoverageGenerationV1 {
       generation: self.generation,
       owner_id: &self.owner_id,

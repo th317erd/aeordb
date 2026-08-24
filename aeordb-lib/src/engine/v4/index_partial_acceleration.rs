@@ -70,6 +70,7 @@ pub enum IndexPartialSourceErrorClassV1 {
   ResourceLimit,
   Corrupt,
   Cancelled,
+  Internal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +95,10 @@ impl IndexPartialSourceErrorV1 {
 
   pub fn cancelled(code: &'static str, context: impl Into<String>) -> Self {
     Self { class: IndexPartialSourceErrorClassV1::Cancelled, code, context: context.into() }
+  }
+
+  pub fn internal(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: IndexPartialSourceErrorClassV1::Internal, code, context: context.into() }
   }
 
   pub const fn class(&self) -> IndexPartialSourceErrorClassV1 {
@@ -321,7 +326,7 @@ impl IndexPartialAccelerationErrorV1 {
     &self.context
   }
 
-  fn invalid(code: &'static str, context: impl Into<String>) -> Self {
+  pub(crate) fn invalid(code: &'static str, context: impl Into<String>) -> Self {
     Self { class: IndexPartialAccelerationErrorClassV1::InvalidRequest, code, context: context.into() }
   }
 
@@ -372,27 +377,33 @@ impl IndexMatchedDocumentIdentityV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactIndexComplementProofV1 {
-  generation_manifest_hash: Vec<u8>,
-  source_namespace_root: Vec<u8>,
-  target_namespace_root: Vec<u8>,
+  hash_algorithm: HashAlgorithm,
+  hashes: Vec<u8>,
   coverage_epoch_id: [u8; 16],
   covered_through_publication_sequence: u64,
   target_publication_sequence: u64,
-  changed_document_set_hash: Vec<u8>,
   changed_document_count: u64,
 }
 
 impl ExactIndexComplementProofV1 {
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
+  }
+
   pub fn generation_manifest_hash(&self) -> &[u8] {
-    &self.generation_manifest_hash
+    self.hash(0)
   }
 
   pub fn source_namespace_root(&self) -> &[u8] {
-    &self.source_namespace_root
+    self.hash(1)
   }
 
   pub fn target_namespace_root(&self) -> &[u8] {
-    &self.target_namespace_root
+    self.hash(2)
+  }
+
+  pub fn query_fingerprint(&self) -> &[u8] {
+    self.hash(3)
   }
 
   pub const fn coverage_epoch_id(&self) -> &[u8; 16] {
@@ -408,11 +419,17 @@ impl ExactIndexComplementProofV1 {
   }
 
   pub fn changed_document_set_hash(&self) -> &[u8] {
-    &self.changed_document_set_hash
+    self.hash(4)
   }
 
   pub const fn changed_document_count(&self) -> u64 {
     self.changed_document_count
+  }
+
+  fn hash(&self, slot: usize) -> &[u8] {
+    let width = self.hash_algorithm.hash_length();
+    let start = slot * width;
+    &self.hashes[start..start + width]
   }
 }
 
@@ -746,14 +763,22 @@ fn execute_partial_index_acceleration_inner_v1(
 
   let mut coverage_epoch_id = [0u8; 16];
   coverage_epoch_id.copy_from_slice(generation.coverage_epoch_id);
+  let proof_hashes = copy_proof_hashes(
+    request.hash_algorithm,
+    [
+      generation.manifest_hash,
+      generation.source_namespace_root,
+      target_namespace_root,
+      request.query_fingerprint,
+      &changed_document_set_hash,
+    ],
+  )?;
   let proof = ExactIndexComplementProofV1 {
-    generation_manifest_hash: copy_bytes(generation.manifest_hash, "generation manifest")?,
-    source_namespace_root: copy_bytes(generation.source_namespace_root, "source namespace root")?,
-    target_namespace_root: copy_bytes(target_namespace_root, "target namespace root")?,
+    hash_algorithm: request.hash_algorithm,
+    hashes: proof_hashes,
     coverage_epoch_id,
     covered_through_publication_sequence: generation.coverage_publication_sequence,
     target_publication_sequence,
-    changed_document_set_hash,
     changed_document_count,
   };
 
@@ -1098,6 +1123,9 @@ fn handle_source_error(
   if error.class == IndexPartialSourceErrorClassV1::Cancelled {
     return Err(IndexPartialAccelerationErrorV1::cancelled(error.code, error.context));
   }
+  if error.class == IndexPartialSourceErrorClassV1::Internal {
+    return Err(IndexPartialAccelerationErrorV1::internal(error.code, error.context));
+  }
   let reason = match (stage, error.class) {
     (IndexPartialAccelerationStageV1::CandidateSource, IndexPartialSourceErrorClassV1::Unavailable) => {
       IndexPartialAccelerationFallbackReasonV1::CandidateUnavailable
@@ -1140,6 +1168,7 @@ fn handle_recheck_error(error: IndexPartialSourceErrorV1) -> Result<IndexPartial
     )),
     IndexPartialSourceErrorClassV1::Corrupt => Err(IndexPartialAccelerationErrorV1::corrupt_recheck(error.code, error.context)),
     IndexPartialSourceErrorClassV1::Cancelled => Err(IndexPartialAccelerationErrorV1::cancelled(error.code, error.context)),
+    IndexPartialSourceErrorClassV1::Internal => Err(IndexPartialAccelerationErrorV1::internal(error.code, error.context)),
   }
 }
 
@@ -1227,6 +1256,24 @@ fn copy_bytes(value: &[u8], label: &'static str) -> Result<Vec<u8>, IndexPartial
   })?;
   copy.extend_from_slice(value);
   Ok(copy)
+}
+
+fn copy_proof_hashes(algorithm: HashAlgorithm, values: [&[u8]; 5]) -> Result<Vec<u8>, IndexPartialAccelerationErrorV1> {
+  let length = algorithm
+    .hash_length()
+    .checked_mul(values.len())
+    .ok_or_else(|| IndexPartialAccelerationErrorV1::internal("index_partial_proof_length", "proof hash length overflowed"))?;
+  let mut hashes = Vec::new();
+  hashes.try_reserve_exact(length).map_err(|error| {
+    IndexPartialAccelerationErrorV1::local_resource(
+      "index_partial_allocation",
+      format!("failed to retain exact complement proof hashes: {error}"),
+    )
+  })?;
+  for value in values {
+    hashes.extend_from_slice(value);
+  }
+  Ok(hashes)
 }
 
 fn copy_optional_bytes(value: Option<&[u8]>, label: &'static str) -> Result<Option<Vec<u8>>, IndexPartialAccelerationErrorV1> {

@@ -202,6 +202,10 @@ impl QueryCompleteCandidateLimitsV1 {
       cursor,
     })
   }
+
+  pub const fn maximum_candidate_documents(self) -> u64 {
+    self.maximum_candidate_documents
+  }
 }
 
 #[derive(Clone, Copy)]

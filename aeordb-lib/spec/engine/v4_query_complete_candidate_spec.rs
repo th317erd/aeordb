@@ -17,6 +17,12 @@ use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
   decode_artifact_directory, decode_ordered_page, encode_artifact_directory, encode_ordered_page, encode_posting_record,
 };
+use aeordb::engine::v4::index_partial_acceleration::{
+  IndexChangedDocumentScanReceiptV1, IndexChangedDocumentScanRequestV1, IndexChangedDocumentSourceV1, IndexChangedDocumentV1,
+  IndexChangedDocumentVisitorV1, IndexPartialAccelerationErrorClassV1, IndexPartialAccelerationFallbackReasonV1,
+  IndexPartialAccelerationLimitsV1, IndexPartialAccelerationOutcomeV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOutcomeV1,
+  IndexPartialRecheckRequestV1, IndexPartialScanErrorV1, IndexPartialSourceErrorV1,
+};
 use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, encode_scope_document_record};
 use aeordb::engine::v4::query_complete_candidate::{
   QueryCandidateArtifactRootV1, QueryCandidateRecheckReceiptV1, QueryCandidateRecheckRequestV1, QueryCompleteCandidateErrorClassV1,
@@ -26,6 +32,10 @@ use aeordb::engine::v4::query_complete_candidate::{
   QueryPartialPostingScanRequestV1, QueryScopeOrdinalSelectionV1, execute_complete_candidate_root_query_v1,
   resolve_complete_scope_identities_v1, scan_complete_posting_ordinals_v1, scan_partial_posting_ordinals_v1,
 };
+use aeordb::engine::v4::query_partial_candidate::{
+  QueryPartialCandidateArtifactSourceV1, QueryPartialCandidateExecutionRequestV1, QueryPartialPostingRootReceiptV1,
+  QueryPartialPostingRootRequestV1, QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1, execute_planned_partial_candidate_v1,
+};
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1,
   QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1,
@@ -34,10 +44,10 @@ use aeordb::engine::v4::query_executor::{
   execute_authoritative_root_query_v1,
 };
 use aeordb::engine::v4::query_planner::{
-  CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryCoordinateConstraintV1, QueryExpressionV1, QueryPlanningContextV1,
-  QueryPlanningCoverageGenerationV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1, QueryPlanningRequestV1,
-  QueryPlanDriverV1, QueryPlanningScopeV1, QueryPredicateOperationV1, QueryPredicateV1, RootAwareQueryFieldCatalogV1,
-  default_query_planning_limits_v1, plan_root_aware_query_v1,
+  CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryCoordinateConstraintV1, QueryExpressionV1,
+  QueryPlanningContextV1, QueryPlanningCoverageGenerationV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1,
+  QueryPlanningRequestV1, QueryPlanDriverV1, QueryPlanningScopeV1, QueryPredicateOperationV1, QueryPredicateV1,
+  RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
 };
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
@@ -188,6 +198,17 @@ fn planned_partial_candidate(algorithm: HashAlgorithm) -> PlannedCandidate {
   )
 }
 
+fn planned_partial_size_candidate(algorithm: HashAlgorithm) -> PlannedCandidate {
+  planned_candidate_with_source(
+    algorithm,
+    "@size",
+    "u64_order_v1",
+    5,
+    QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5)),
+    Some((vec![0x55; algorithm.hash_length()], 40)),
+  )
+}
+
 struct PlannedQuery {
   root: Vec<u8>,
   scope_id: Vec<u8>,
@@ -273,6 +294,10 @@ fn planned_query(expression: QueryExpressionV1) -> PlannedQuery {
 }
 
 fn planned_phonetic_union_query(query: &str) -> PlannedQuery {
+  planned_phonetic_union_query_with_source(query, None)
+}
+
+fn planned_phonetic_union_query_with_source(query: &str, generation_source: Option<(Vec<u8>, u64)>) -> PlannedQuery {
   let algorithm = HashAlgorithm::Blake3_256;
   let root = vec![0x33; algorithm.hash_length()];
   let semantic_root = vec![0x44; algorithm.hash_length()];
@@ -282,6 +307,13 @@ fn planned_phonetic_union_query(query: &str) -> PlannedQuery {
   assert_eq!(catalog.scopes[0].value_store_id, alternate.scopes[0].value_store_id);
   catalog.scopes[0].indexes.append(&mut alternate.scopes[0].indexes);
   catalog.scopes[0].indexes.sort_by(|left, right| left.index_id.cmp(&right.index_id));
+  if let Some((source_namespace_root, coverage_publication_sequence)) = generation_source {
+    for index in &mut catalog.scopes[0].indexes {
+      let generation = index.selected_generation.as_mut().unwrap();
+      generation.source_namespace_root = source_namespace_root.clone();
+      generation.coverage_publication_sequence = coverage_publication_sequence;
+    }
+  }
   let expression = QueryExpressionV1::Field(QueryPredicateV1 {
     field_name: "@filename".to_string(),
     operation: QueryPredicateOperationV1::Phonetic(CanonicalConfigValueV1::String(query.to_string())),
@@ -1641,4 +1673,584 @@ fn complete_index_unions_match_authoritative_truth_with_nonempty_and_empty_branc
     1,
     3,
   );
+}
+
+struct PartialArtifactSource {
+  artifacts: Source,
+  posting_root: Option<QueryCandidateArtifactRootV1>,
+  scope_root: Option<QueryCandidateArtifactRootV1>,
+  posting_complete: bool,
+  posting_error: Option<IndexPartialSourceErrorV1>,
+  posting_manifest_override: Option<Vec<u8>>,
+  scope_error: Option<IndexPartialSourceErrorV1>,
+  scope_source_override: Option<Vec<u8>>,
+  scope_resolutions: usize,
+}
+
+impl ArtifactCursorSourceV1 for PartialArtifactSource {
+  fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+    self.artifacts.read_immutable_artifact(key, maximum_bytes)
+  }
+}
+
+impl QueryPartialCandidateArtifactSourceV1 for PartialArtifactSource {
+  fn resolve_partial_posting_root(
+    &mut self,
+    request: QueryPartialPostingRootRequestV1<'_>,
+  ) -> Result<QueryPartialPostingRootReceiptV1, IndexPartialSourceErrorV1> {
+    if let Some(error) = self.posting_error.clone() {
+      return Err(error);
+    }
+    let generation = request.candidate.selected_generation().unwrap();
+    Ok(QueryPartialPostingRootReceiptV1 {
+      target_namespace_root: request.target_namespace_root.to_vec(),
+      target_publication_sequence: request.target_publication_sequence,
+      source_namespace_root: request.source_namespace_root.to_vec(),
+      source_publication_sequence: request.source_publication_sequence,
+      scope_id: request.scope_id.to_vec(),
+      index_id: request.candidate.index_id().to_vec(),
+      generation: generation.generation,
+      generation_manifest_hash: self.posting_manifest_override.clone().unwrap_or_else(|| generation.manifest_hash.clone()),
+      root: self.posting_root.clone(),
+      complete: self.posting_complete,
+    })
+  }
+
+  fn resolve_partial_scope_root(
+    &mut self,
+    request: QueryPartialScopeRootRequestV1<'_>,
+  ) -> Result<QueryPartialScopeRootReceiptV1, IndexPartialSourceErrorV1> {
+    self.scope_resolutions += 1;
+    if let Some(error) = self.scope_error.clone() {
+      return Err(error);
+    }
+    Ok(QueryPartialScopeRootReceiptV1 {
+      source_namespace_root: self.scope_source_override.clone().unwrap_or_else(|| request.source_namespace_root.to_vec()),
+      source_publication_sequence: request.source_publication_sequence,
+      scope_id: request.scope_id.to_vec(),
+      root: self.scope_root.clone(),
+      complete: true,
+    })
+  }
+}
+
+#[derive(Clone)]
+struct PartialChange {
+  file_key: Vec<u8>,
+  basis_revision: Option<Vec<u8>>,
+  target_revision: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct PartialComplement {
+  changes: Vec<PartialChange>,
+  scans: usize,
+}
+
+impl IndexChangedDocumentSourceV1 for PartialComplement {
+  fn scan_changed_documents(
+    &mut self,
+    request: IndexChangedDocumentScanRequestV1<'_>,
+    visitor: &mut dyn IndexChangedDocumentVisitorV1,
+  ) -> Result<IndexChangedDocumentScanReceiptV1, IndexPartialScanErrorV1> {
+    self.scans += 1;
+    for change in &self.changes {
+      visitor
+        .visit(IndexChangedDocumentV1 {
+          file_key: &change.file_key,
+          basis_revision_hash: change.basis_revision.as_deref(),
+          target_revision_hash: change.target_revision.as_deref(),
+        })
+        .map_err(IndexPartialScanErrorV1::Visitor)?;
+    }
+    Ok(IndexChangedDocumentScanReceiptV1 {
+      source_namespace_root: request.source_namespace_root.to_vec(),
+      target_namespace_root: request.target_namespace_root.to_vec(),
+      covered_through_publication_sequence: request.covered_through_publication_sequence,
+      target_publication_sequence: request.target_publication_sequence,
+      changed_document_count: self.changes.len() as u64,
+      complete: true,
+    })
+  }
+}
+
+#[derive(Default)]
+struct PartialRechecker {
+  outcomes: BTreeMap<Vec<u8>, IndexPartialRecheckOutcomeV1>,
+  calls: Vec<Vec<u8>>,
+}
+
+impl IndexPartialCandidateRecheckerV1 for PartialRechecker {
+  fn recheck(&mut self, request: IndexPartialRecheckRequestV1<'_>) -> Result<IndexPartialRecheckOutcomeV1, IndexPartialSourceErrorV1> {
+    self.calls.push(request.file_key.to_vec());
+    self
+      .outcomes
+      .get(request.file_key)
+      .cloned()
+      .ok_or_else(|| IndexPartialSourceErrorV1::corrupt("partial_fixture_recheck", "missing fixture recheck outcome"))
+  }
+}
+
+fn partial_acceleration_limits() -> IndexPartialAccelerationLimitsV1 {
+  IndexPartialAccelerationLimitsV1::new(128, 128, 128, 2 * 1_024 * 1_024).unwrap()
+}
+
+#[test]
+fn planner_partial_artifacts_feed_the_exact_complement_engine_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let planned = planned_partial_size_candidate(algorithm);
+    let generation = planned.candidate.selected_generation().unwrap();
+    let query_posting = &planned.candidate.compiled_literals()[0].compiled().postings[0];
+    let posting_records = [1u64, 2, 3]
+      .into_iter()
+      .map(|document_ordinal| {
+        encode_posting_record(&PostingRecordV1 {
+          tombstone: false,
+          coordinate: query_posting.coordinate,
+          document_ordinal,
+          source_value_ordinal: 0,
+          expansion_ordinal: query_posting.expansion_ordinal,
+          posting_key: &query_posting.posting_key,
+        })
+        .unwrap()
+      })
+      .collect::<Vec<_>>();
+    let posting_page = ordered_page(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, 1, &posting_records);
+    let posting_directory = leaf_directory(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, &[&posting_page]);
+
+    let paths = ["/alpha.json", "/beta.json", "/gamma.json"];
+    let keys = paths.map(|path| digest_parts(algorithm, &[b"file:", path.as_bytes()]));
+    let basis_revisions = [1u64, 2, 3].map(|ordinal| digest_parts(algorithm, &[b"basis:", &ordinal.to_le_bytes()]));
+    let scope_records = paths
+      .iter()
+      .enumerate()
+      .map(|(index, path)| {
+        encode_scope_document_record(
+          &ScopeDocumentRecordV1 {
+            tombstone: false,
+            document_ordinal: index as u64 + 1,
+            file_key: &keys[index],
+            record_revision_hash: &basis_revisions[index],
+            path,
+          },
+          algorithm,
+        )
+        .unwrap()
+      })
+      .collect::<Vec<_>>();
+    let scope_page = ordered_page(algorithm, OrderedIndexRoleV1::ScopeOrdinal, &planned.scope_id, 5, 0, &scope_records);
+    let scope_directory = leaf_directory(algorithm, OrderedIndexRoleV1::ScopeOrdinal, &planned.scope_id, 5, &[&scope_page]);
+
+    let target_beta = digest_parts(algorithm, &[b"target:", b"beta"]);
+    let new_key = digest_parts(algorithm, &[b"file:", b"/delta.json"]);
+    let new_revision = digest_parts(algorithm, &[b"target:", b"delta"]);
+    let mut changes = vec![
+      PartialChange {
+        file_key: keys[1].clone(),
+        basis_revision: Some(basis_revisions[1].clone()),
+        target_revision: Some(target_beta.clone()),
+      },
+      PartialChange { file_key: keys[2].clone(), basis_revision: Some(basis_revisions[2].clone()), target_revision: None },
+      PartialChange { file_key: new_key.clone(), basis_revision: None, target_revision: Some(new_revision.clone()) },
+    ];
+    changes.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+    let mut complement = PartialComplement { changes, scans: 0 };
+    let mut rechecker = PartialRechecker::default();
+    rechecker
+      .outcomes
+      .insert(keys[0].clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: basis_revisions[0].clone(), matches: true });
+    rechecker
+      .outcomes
+      .insert(keys[1].clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: target_beta.clone(), matches: true });
+    rechecker.outcomes.insert(keys[2].clone(), IndexPartialRecheckOutcomeV1::Absent);
+    rechecker
+      .outcomes
+      .insert(new_key.clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: new_revision.clone(), matches: true });
+
+    let encoded_size =
+      encode_canonical_value(&CanonicalConfigValueV1::Unsigned(5), aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE)
+        .unwrap();
+    let mut target_documents = vec![
+      ExecutionDocument {
+        scope_id: planned.scope_id.clone(),
+        ordinal: 1,
+        file_key: keys[0].clone(),
+        revision: basis_revisions[0].clone(),
+        path: paths[0].to_string(),
+        fields: BTreeMap::from([("@size".to_string(), encoded_size.clone())]),
+      },
+      ExecutionDocument {
+        scope_id: planned.scope_id.clone(),
+        ordinal: 2,
+        file_key: keys[1].clone(),
+        revision: target_beta.clone(),
+        path: paths[1].to_string(),
+        fields: BTreeMap::from([("@size".to_string(), encoded_size.clone())]),
+      },
+      ExecutionDocument {
+        scope_id: planned.scope_id.clone(),
+        ordinal: 4,
+        file_key: new_key.clone(),
+        revision: new_revision.clone(),
+        path: "/delta.json".to_string(),
+        fields: BTreeMap::from([("@size".to_string(), encoded_size)]),
+      },
+    ];
+    target_documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+    let authoritative_memory = memory(32 * 1_024 * 1_024);
+    let cancellation = CancellationToken::new();
+    let mut authoritative_source = AuthoritativeExecutionSource {
+      root: planned.root.clone(),
+      publication_sequence: planned.plan.publication_sequence(),
+      documents: target_documents,
+    };
+    let authoritative = execute_authoritative_root_query_v1(RootAwareQueryExecutionRequestV1 {
+      plan: &planned.plan,
+      catalogs: &planned.catalogs,
+      source: &mut authoritative_source,
+      memory: &authoritative_memory,
+      cancellation: &cancellation,
+      limits: execution_limits(),
+    })
+    .unwrap();
+
+    let mut artifacts = Source::default();
+    for artifact in [&posting_page, &posting_directory, &scope_page, &scope_directory] {
+      artifacts.insert(artifact);
+    }
+    let mut source = PartialArtifactSource {
+      artifacts,
+      posting_root: Some(root_authority(algorithm, planned.candidate.index_id(), 7, &posting_directory)),
+      scope_root: Some(root_authority(algorithm, &planned.scope_id, 5, &scope_directory)),
+      posting_complete: true,
+      posting_error: None,
+      posting_manifest_override: None,
+      scope_error: None,
+      scope_source_override: None,
+      scope_resolutions: 0,
+    };
+    let memory = memory(32 * 1_024 * 1_024);
+    let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+      plan: &planned.plan,
+      predicate_index: 0,
+      scope_id: &planned.scope_id,
+      candidate_index: 0,
+      source: &mut source,
+      complement: &mut complement,
+      rechecker: &mut rechecker,
+      memory: &memory,
+      cancellation: &cancellation,
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+    })
+    .unwrap();
+    let IndexPartialAccelerationOutcomeV1::Exact(exact) = outcome else {
+      panic!("planner-selected partial candidate did not produce exact complement proof")
+    };
+    assert_eq!(
+      exact.matches().iter().map(|row| (row.file_key().to_vec(), row.record_revision_hash().to_vec())).collect::<Vec<_>>(),
+      authoritative.matches().iter().map(|row| (row.file_key().to_vec(), row.record_revision().to_vec())).collect::<Vec<_>>()
+    );
+    assert_eq!(exact.proof().generation_manifest_hash(), generation.manifest_hash);
+    assert_eq!(exact.proof().source_namespace_root(), generation.source_namespace_root);
+    assert_eq!(exact.proof().target_namespace_root(), planned.root);
+    assert_eq!(exact.proof().query_fingerprint(), planned.plan.query_fingerprint());
+    assert_eq!(exact.proof().changed_document_count(), 3);
+    assert_eq!(exact.overlap_deduplicated_count(), 2);
+    assert_eq!(complement.scans, 1);
+    assert_eq!(source.scope_resolutions, 1);
+    drop(exact);
+    drop(authoritative);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+    assert_eq!(authoritative_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+    source.scope_source_override = Some(vec![0xee; algorithm.hash_length()]);
+    let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+      plan: &planned.plan,
+      predicate_index: 0,
+      scope_id: &planned.scope_id,
+      candidate_index: 0,
+      source: &mut source,
+      complement: &mut complement,
+      rechecker: &mut rechecker,
+      memory: &memory,
+      cancellation: &cancellation,
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+    })
+    .unwrap();
+    let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+      panic!("foreign source ScopeOrdinal receipt exposed a partial result")
+    };
+    assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateCorrupt);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+    source.scope_source_override = None;
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+      plan: &planned.plan,
+      predicate_index: 0,
+      scope_id: &planned.scope_id,
+      candidate_index: 0,
+      source: &mut source,
+      complement: &mut complement,
+      rechecker: &mut rechecker,
+      memory: &memory,
+      cancellation: &cancelled,
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+    })
+    .unwrap_err();
+    assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Cancelled);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+    let pressured = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(512 * 1_024, 1_024 * 1_024, 1, 128 * 1_024).unwrap()));
+    let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+      plan: &planned.plan,
+      predicate_index: 0,
+      scope_id: &planned.scope_id,
+      candidate_index: 0,
+      source: &mut source,
+      complement: &mut complement,
+      rechecker: &mut rechecker,
+      memory: &pressured,
+      cancellation: &cancellation,
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+    })
+    .unwrap();
+    let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+      panic!("artifact pressure exposed a partial result")
+    };
+    assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateResourceLimit);
+    assert_eq!(pressured.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn malformed_partial_root_receipts_fall_back_but_internal_source_failures_remain_terminal() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_partial_candidate(algorithm);
+  let mut source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    scope_root: None,
+    posting_complete: false,
+    posting_error: None,
+    posting_manifest_override: None,
+    scope_error: None,
+    scope_source_override: None,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+    panic!("incomplete partial root receipt became exact")
+  };
+  assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateCorrupt);
+  assert_eq!(complement.scans, 0);
+  assert_eq!(source.scope_resolutions, 0);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  source.posting_complete = true;
+  source.posting_manifest_override = Some(vec![0xee; algorithm.hash_length()]);
+  let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::AuthoritativeOnly { reason, .. } = outcome else {
+    panic!("substituted generation manifest became exact")
+  };
+  assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateCorrupt);
+  assert_eq!(complement.scans, 0);
+  source.posting_manifest_override = None;
+
+  source.posting_complete = true;
+  source.scope_error = Some(IndexPartialSourceErrorV1::internal("unused_scope_root", "empty Posting result must skip scope resolution"));
+  let outcome = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap();
+  let IndexPartialAccelerationOutcomeV1::Exact(exact) = outcome else {
+    panic!("proven-empty Posting generation did not remain exact")
+  };
+  assert!(exact.matches().is_empty());
+  drop(exact);
+  assert_eq!(source.scope_resolutions, 0);
+
+  source.scope_error = None;
+  source.posting_complete = true;
+  source.posting_error = Some(IndexPartialSourceErrorV1::internal("partial_source_internal", "fixture authority failed"));
+  let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Internal);
+  assert_eq!(error.code(), "partial_source_internal");
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  source.posting_error = None;
+  let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 1,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_partial_candidate_index");
+
+  let complete = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &complete.plan,
+    predicate_index: 0,
+    scope_id: &complete.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_partial_candidate_driver");
+
+  let too_many_candidates = IndexPartialAccelerationLimitsV1::new(128, 129, 128, 2 * 1_024 * 1_024).unwrap();
+  let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: too_many_candidates,
+  })
+  .unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_partial_candidate_limits");
+}
+
+#[test]
+fn one_candidate_partial_adapter_rejects_union_drivers_until_all_branches_are_composed() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_phonetic_union_query_with_source("Schmidt", Some((vec![0x55; algorithm.hash_length()], 40)));
+  assert!(matches!(
+    planned.plan.predicates()[0].scopes()[0].driver(),
+    QueryPlanDriverV1::IndexUnion { coverage: CompiledQueryCoverageV1::PartialExact, .. }
+  ));
+  let mut source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    scope_root: None,
+    posting_complete: false,
+    posting_error: None,
+    posting_manifest_override: None,
+    scope_error: None,
+    scope_source_override: None,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+
+  let error = execute_planned_partial_candidate_v1(QueryPartialCandidateExecutionRequestV1 {
+    plan: &planned.plan,
+    predicate_index: 0,
+    scope_id: &planned.scope_id,
+    candidate_index: 0,
+    source: &mut source,
+    complement: &mut complement,
+    rechecker: &mut rechecker,
+    memory: &memory,
+    cancellation: &cancellation,
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+  })
+  .unwrap_err();
+
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::InvalidRequest);
+  assert_eq!(error.code(), "query_partial_candidate_union");
+  assert_eq!(complement.scans, 0);
+  assert_eq!(source.scope_resolutions, 0);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partial_candidate_adapter_delegates_exactness_without_live_or_duplicate_authority() {
+  let adapter = include_str!("../../src/engine/v4/query_partial_candidate.rs");
+  assert!(adapter.contains("execute_partial_index_acceleration_v1"));
+  for forbidden in [
+    "impl IndexChangedDocumentSourceV1",
+    "impl IndexPartialCandidateRecheckerV1",
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "tokio::spawn",
+    "std::thread::spawn",
+    "server::",
+    "axum::",
+  ] {
+    assert!(!adapter.contains(forbidden), "partial adapter gained forbidden authority: {forbidden}");
+  }
 }

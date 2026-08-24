@@ -304,8 +304,10 @@ fn exact_partial_execution_rechecks_complements_deduplicates_and_retains_memory(
     assert_eq!(exact.overlap_deduplicated_count(), 2);
     assert_eq!(exact.proof().changed_document_count(), 3);
     assert_eq!(exact.proof().generation_manifest_hash(), case.manifest);
+    assert_eq!(exact.proof().hash_algorithm(), algorithm);
     assert_eq!(exact.proof().source_namespace_root(), case.source_root);
     assert_eq!(exact.proof().target_namespace_root(), case.target_root);
+    assert_eq!(exact.proof().query_fingerprint(), case.query);
     assert_eq!(exact.proof().covered_through_publication_sequence(), 11);
     assert_eq!(exact.proof().target_publication_sequence(), 19);
     assert_eq!(exact.proof().changed_document_set_hash().len(), algorithm.hash_length());
@@ -594,6 +596,31 @@ fn changed_set_hash_binds_exact_root_interval_and_document_set() {
 }
 
 #[test]
+fn exact_complement_proof_binds_the_query_even_when_root_and_changed_set_are_identical() {
+  let mut first_case = Case::new(HashAlgorithm::Blake3_256);
+  let (mut candidates, mut changed, mut rechecker) = complete_feeds(first_case.algorithm);
+  let first = exact(
+    first_case
+      .execute(&mut candidates, &mut changed, &mut rechecker, &memory(16 * 1024 * 1024), &CancellationToken::new(), limits())
+      .unwrap(),
+  );
+  let first_changed_set = first.proof().changed_document_set_hash().to_vec();
+  let first_query = first.proof().query_fingerprint().to_vec();
+
+  first_case.query = bytes(0x89, first_case.algorithm.hash_length());
+  let (mut candidates, mut changed, mut rechecker) = complete_feeds(first_case.algorithm);
+  let second = exact(
+    first_case
+      .execute(&mut candidates, &mut changed, &mut rechecker, &memory(16 * 1024 * 1024), &CancellationToken::new(), limits())
+      .unwrap(),
+  );
+
+  assert_eq!(first_changed_set, second.proof().changed_document_set_hash());
+  assert_ne!(first_query, second.proof().query_fingerprint());
+  assert_eq!(second.proof().query_fingerprint(), first_case.query);
+}
+
+#[test]
 fn nvt_is_absent_from_coverage_proof_and_exact_posting_fallback_remains_the_authority() {
   let planner = include_str!("../../src/engine/v4/index_coverage_planner.rs");
   let partial = include_str!("../../src/engine/v4/index_partial_acceleration.rs");
@@ -614,4 +641,33 @@ fn source_contract_errors_keep_their_stage_and_class() {
   assert_eq!(error.class(), IndexPartialSourceErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "bounded");
   assert_eq!(error.context(), "bounded source refusal");
+}
+
+#[test]
+fn internal_source_authority_failures_never_become_authoritative_fallbacks() {
+  let case = Case::new(HashAlgorithm::Blake3_256);
+  let memory = memory(16 * 1024 * 1024);
+  let cancellation = CancellationToken::new();
+
+  let (mut candidates, mut changed, mut rechecker) = complete_feeds(case.algorithm);
+  candidates.source_error = Some(IndexPartialSourceErrorV1::internal("candidate_internal", "candidate authority failed"));
+  let error = case.execute(&mut candidates, &mut changed, &mut rechecker, &memory, &cancellation, limits()).unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Internal);
+  assert_eq!(error.code(), "candidate_internal");
+
+  let (mut candidates, mut changed, mut rechecker) = complete_feeds(case.algorithm);
+  changed.source_error = Some(IndexPartialSourceErrorV1::internal("complement_internal", "complement authority failed"));
+  let error = case.execute(&mut candidates, &mut changed, &mut rechecker, &memory, &cancellation, limits()).unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Internal);
+  assert_eq!(error.code(), "complement_internal");
+
+  let (mut candidates, mut changed, mut rechecker) = complete_feeds(case.algorithm);
+  rechecker.outcomes.insert(
+    bytes(0x92, case.algorithm.hash_length()),
+    Err(IndexPartialSourceErrorV1::internal("recheck_internal", "recheck authority failed")),
+  );
+  let error = case.execute(&mut candidates, &mut changed, &mut rechecker, &memory, &cancellation, limits()).unwrap_err();
+  assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Internal);
+  assert_eq!(error.code(), "recheck_internal");
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
