@@ -65,16 +65,17 @@ use aeordb::engine::v4::query_aggregate_execution::{
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1, QueryPlanningContextV1,
-  QueryPlanningCoverageGenerationV1, QueryPlanningRequestV1, QuerySortDirectionV1, QuerySortFieldV1, RootAwareQueryFieldCatalogV1,
-  default_query_planning_limits_v1, plan_root_aware_query_v1,
+  QueryPlanningCoverageGenerationV1, QueryPlanningRequestV1, QueryPredicateOperationV1, QueryPredicateV1, QuerySortDirectionV1,
+  QuerySortFieldV1, RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
 };
 use aeordb::engine::v4::query_executor::{
-  QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldStateV1,
-  QueryExecutionSourceErrorClassV1,
+  QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1,
+  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1, QueryExecutionSourceErrorClassV1,
 };
 use aeordb::engine::v4::query_native_source::{
   NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
 };
+use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
@@ -1892,6 +1893,7 @@ fn native_partition_many_fixture(
     false,
     semantic_scope_definition(algorithm, "/docs", Some("*.json")),
     &[],
+    None,
   )
 }
 
@@ -1910,6 +1912,27 @@ fn native_auxiliary_size_fixture(
     true,
     semantic_scope_definition(algorithm, "/docs", Some("*.json")),
     &[],
+    None,
+  )
+}
+
+fn native_authoritative_size_fixture(
+  algorithm: HashAlgorithm,
+  names: &[&str],
+  sizes: &[u64],
+  minimum_size: u64,
+) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+  native_partition_many_fixture_configured(
+    algorithm,
+    1,
+    true,
+    names,
+    sizes,
+    "@size",
+    true,
+    semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+    &[],
+    Some(minimum_size),
   )
 }
 
@@ -1925,6 +1948,7 @@ fn native_auxiliary_size_fieldless_fixture(algorithm: HashAlgorithm) -> (NativeP
     true,
     semantic_scope_definition(algorithm, "/", Some("**/*.json")),
     &nearer,
+    None,
   )
 }
 
@@ -1939,6 +1963,7 @@ fn native_partition_many_fixture_configured(
   size_auxiliary: bool,
   primary_scope: Vec<u8>,
   extra_scopes: &[Vec<u8>],
+  predicate_minimum: Option<u64>,
 ) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
   let (directory, _path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
@@ -1979,7 +2004,15 @@ fn native_partition_many_fixture_configured(
   let semantic_catalog = reader.load_planner_catalogs("/docs", &[field_name], default_native_selected_semantic_limits_v1()).unwrap();
   drop(reader);
   let context = QueryPlanningContextV1::from_resolved_view(&view).unwrap();
-  let expression = QueryExpressionV1::And(Vec::new());
+  let expression = predicate_minimum.map_or_else(
+    || QueryExpressionV1::And(Vec::new()),
+    |minimum| {
+      QueryExpressionV1::Field(QueryPredicateV1 {
+        field_name: "@size".to_string(),
+        operation: QueryPredicateOperationV1::Gt(CanonicalConfigValueV1::Unsigned(minimum)),
+      })
+    },
+  );
   let plan = if size_auxiliary {
     let sort_fields = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Ascending }];
     let aggregate_fields = [
@@ -2948,6 +2981,70 @@ fn native_authoritative_partition_reorders_one_document_pages_by_file_key() {
   assert_eq!(receipt.unconfigured_document_count, 0);
   assert_eq!(receipt.document_count, names.len() as u64);
   drop(cursor);
+  fixture.assert_released();
+}
+
+fn native_query_execution_limits() -> QueryExecutionLimitsV1 {
+  QueryExecutionLimitsV1::new(
+    QueryExecutionCountLimitsV1::new(64, 256, 64, 100_000).unwrap(),
+    QueryExecutionByteLimitsV1::new(1024 * 1024, 8 * 1024 * 1024, 8 * 1024 * 1024).unwrap(),
+  )
+}
+
+#[test]
+fn native_authoritative_execution_facade_runs_the_selected_root_truth_path() {
+  let names = ["a.json", "b.json", "c.json", "d.json"];
+  let sizes = [3, 17, 9, 1];
+  let (mut fixture, expected) = native_authoritative_size_fixture(HashAlgorithm::Blake3_256, &names, &sizes, 8);
+  let mut expected = expected.into_iter().zip(sizes).filter_map(|(identity, size)| (size > 8).then_some(identity)).collect::<Vec<_>>();
+  expected.sort_by(|left, right| left.0.cmp(&right.0));
+  let advanced = fixture
+    .backing_source
+    .publisher()
+    .publish_successor_authority(&successor_request(HashAlgorithm::Blake3_256, fixture.selected_root.clone()))
+    .unwrap();
+  assert_ne!(advanced.namespace_root.root_hash, fixture.selected_root);
+
+  let execution =
+    fixture.source.execute_authoritative_query_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits()).unwrap();
+
+  assert_eq!(execution.selected_namespace_root(), fixture.selected_root);
+  assert_eq!(execution.examined_documents(), names.len() as u64);
+  assert_eq!(execution.examined_field_values(), names.len() as u64);
+  assert_eq!(
+    execution
+      .matches()
+      .iter()
+      .map(|matched| (matched.file_key().to_vec(), matched.record_revision().to_vec(), matched.path().to_string()))
+      .collect::<Vec<_>>(),
+    expected
+  );
+  drop(execution);
+
+  let mut auxiliary = fixture
+    .source
+    .open_auxiliary_source(&fixture.plan, NativeAuthoritativeAuxiliaryLimitsV1::new(16, 64, 1024 * 1024, u16::MAX as u64).unwrap())
+    .unwrap();
+  let mut sink = QueryOrderedTopKSinkV1::new(
+    &fixture.plan,
+    &mut auxiliary,
+    fixture.memory.as_ref(),
+    &fixture.cancellation,
+    QueryOrderedTopKLimitsV1::new(1024 * 1024, 8 * 1024 * 1024).unwrap(),
+  )
+  .unwrap();
+  let receipt = fixture
+    .source
+    .execute_authoritative_query_into_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits(), &mut sink)
+    .unwrap();
+  assert_eq!(receipt.match_count(), 2);
+  let ordered = sink.finish().unwrap();
+  assert_eq!(ordered.total_match_count(), 2);
+  assert_eq!(ordered.rows().len(), 2);
+  assert_eq!(ordered.rows()[0].components[0].payload, 9u64.to_le_bytes());
+  assert_eq!(ordered.rows()[1].components[0].payload, 17u64.to_le_bytes());
+  drop(ordered);
+  drop(auxiliary);
   fixture.assert_released();
 }
 

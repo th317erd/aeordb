@@ -23,9 +23,11 @@ use super::query_aggregate_execution::{
   QueryAggregateInputSourceV1, query_aggregate_input_row_allocated_bytes_v1,
 };
 use super::query_executor::{
-  QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionFieldDocumentV1,
-  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldStateV1,
-  QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1,
+  QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionErrorV1, QueryExecutionFieldDocumentV1,
+  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
+  QueryExecutionMatchSinkV1, QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
+  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionV1, execute_authoritative_partitioned_query_into_v1,
+  execute_authoritative_partitioned_query_v1,
 };
 use super::query_native_workspace::{
   NativeQueryOrderingCursorV1, NativeQueryOrderingLookupV1, NativeQueryOrderingWorkspaceBuilderV1,
@@ -269,6 +271,44 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
 
   pub fn workspace_bytes(&self) -> u64 {
     self.inner.workspace.workspace_bytes()
+  }
+
+  pub fn execute_authoritative_query_v1(
+    &mut self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    cancellation: &CancellationToken,
+    limits: QueryExecutionLimitsV1,
+  ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+    let inner = Arc::clone(&self.inner);
+    execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+      plan,
+      catalogs: inner.semantic_catalog.catalogs(),
+      source: self,
+      memory: inner.source.memory_coordinator().as_ref(),
+      cancellation,
+      limits,
+    })
+  }
+
+  pub fn execute_authoritative_query_into_v1(
+    &mut self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    cancellation: &CancellationToken,
+    limits: QueryExecutionLimitsV1,
+    sink: &mut dyn QueryExecutionMatchSinkV1,
+  ) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
+    let inner = Arc::clone(&self.inner);
+    execute_authoritative_partitioned_query_into_v1(
+      RootAwarePartitionedQueryExecutionRequestV1 {
+        plan,
+        catalogs: inner.semantic_catalog.catalogs(),
+        source: self,
+        memory: inner.source.memory_coordinator().as_ref(),
+        cancellation,
+        limits,
+      },
+      sink,
+    )
   }
 
   pub fn open_auxiliary_source<'plan>(
