@@ -26,9 +26,10 @@ use super::query_planner::{
 };
 use super::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeScopeSourceV1, QueryExecutionErrorV1, QueryExecutionLimitsV1,
-  QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorClassV1,
-  QueryExecutionSourceErrorV1, RootAwareQueryExecutionRequestV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1,
-  execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
+  QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1,
+  QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1, RootAwareQueryExecutionRequestV1,
+  RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1, execute_authoritative_root_query_into_v1,
+  execute_authoritative_root_query_v1, execute_authoritative_scope_query_into_v1, execute_authoritative_scope_query_v1,
 };
 
 const MAXIMUM_PAGE_SEEKS_V1: u64 = 1_048_576;
@@ -506,6 +507,49 @@ impl QueryCompleteCandidateExecutionV1 {
   }
 }
 
+pub struct QueryCompleteCandidateStreamExecutionV1 {
+  receipt: QueryExecutionStreamReceiptV1,
+  examined_posting_records: u64,
+  examined_artifact_pages: u64,
+  resolved_candidate_identities: u64,
+  authoritative_rechecks: u64,
+}
+
+impl fmt::Debug for QueryCompleteCandidateStreamExecutionV1 {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("QueryCompleteCandidateStreamExecutionV1")
+      .field("receipt", &self.receipt)
+      .field("examined_posting_records", &self.examined_posting_records)
+      .field("examined_artifact_pages", &self.examined_artifact_pages)
+      .field("resolved_candidate_identities", &self.resolved_candidate_identities)
+      .field("authoritative_rechecks", &self.authoritative_rechecks)
+      .finish()
+  }
+}
+
+impl QueryCompleteCandidateStreamExecutionV1 {
+  pub const fn receipt(&self) -> &QueryExecutionStreamReceiptV1 {
+    &self.receipt
+  }
+
+  pub const fn examined_posting_records(&self) -> u64 {
+    self.examined_posting_records
+  }
+
+  pub const fn examined_artifact_pages(&self) -> u64 {
+    self.examined_artifact_pages
+  }
+
+  pub const fn resolved_candidate_identities(&self) -> u64 {
+    self.resolved_candidate_identities
+  }
+
+  pub const fn authoritative_rechecks(&self) -> u64 {
+    self.authoritative_rechecks
+  }
+}
+
 #[derive(Default)]
 struct QueryCompleteCandidateExecutionStatsV1 {
   examined_posting_records: u64,
@@ -534,6 +578,13 @@ pub fn execute_complete_candidate_root_query_v1(
   execute_complete_candidate_query_v1(request, None)
 }
 
+pub fn execute_complete_candidate_root_query_into_v1(
+  request: QueryCompleteCandidateExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryCompleteCandidateStreamExecutionV1, QueryExecutionErrorV1> {
+  execute_complete_candidate_query_into_v1(request, None, sink)
+}
+
 pub fn execute_complete_candidate_scope_query_v1(
   request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
 ) -> Result<QueryCompleteCandidateExecutionV1, QueryExecutionErrorV1> {
@@ -549,6 +600,26 @@ pub fn execute_complete_candidate_scope_query_v1(
       candidate_limits: request.candidate_limits,
     },
     Some(scope_id),
+  )
+}
+
+pub fn execute_complete_candidate_scope_query_into_v1(
+  request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryCompleteCandidateStreamExecutionV1, QueryExecutionErrorV1> {
+  let scope_id = request.scope_id;
+  execute_complete_candidate_query_into_v1(
+    QueryCompleteCandidateExecutionRequestV1 {
+      plan: request.plan,
+      catalogs: request.catalogs,
+      source: request.source,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      execution_limits: request.execution_limits,
+      candidate_limits: request.candidate_limits,
+    },
+    Some(scope_id),
+    sink,
   )
 }
 
@@ -586,6 +657,54 @@ fn execute_complete_candidate_query_v1(
   };
   Ok(QueryCompleteCandidateExecutionV1 {
     execution,
+    examined_posting_records: adapter.stats.examined_posting_records,
+    examined_artifact_pages: adapter.stats.examined_artifact_pages,
+    resolved_candidate_identities: adapter.stats.resolved_candidate_identities,
+    authoritative_rechecks: adapter.stats.authoritative_rechecks,
+  })
+}
+
+fn execute_complete_candidate_query_into_v1(
+  request: QueryCompleteCandidateExecutionRequestV1<'_>,
+  scope_id: Option<&[u8]>,
+  sink: &mut dyn QueryExecutionMatchSinkV1,
+) -> Result<QueryCompleteCandidateStreamExecutionV1, QueryExecutionErrorV1> {
+  let mut adapter = CompleteCandidateScopeAdapterV1 {
+    plan: request.plan,
+    source: request.source,
+    memory: request.memory,
+    cancellation: request.cancellation,
+    limits: request.candidate_limits,
+    stats: QueryCompleteCandidateExecutionStatsV1::default(),
+  };
+  let receipt = if let Some(scope_id) = scope_id {
+    execute_authoritative_scope_query_into_v1(
+      RootAwareQueryScopeExecutionRequestV1 {
+        plan: request.plan,
+        catalogs: request.catalogs,
+        scope_id,
+        source: &mut adapter,
+        memory: request.memory,
+        cancellation: request.cancellation,
+        limits: request.execution_limits,
+      },
+      sink,
+    )?
+  } else {
+    execute_authoritative_root_query_into_v1(
+      RootAwareQueryExecutionRequestV1 {
+        plan: request.plan,
+        catalogs: request.catalogs,
+        source: &mut adapter,
+        memory: request.memory,
+        cancellation: request.cancellation,
+        limits: request.execution_limits,
+      },
+      sink,
+    )?
+  };
+  Ok(QueryCompleteCandidateStreamExecutionV1 {
+    receipt,
     examined_posting_records: adapter.stats.examined_posting_records,
     examined_artifact_pages: adapter.stats.examined_artifact_pages,
     resolved_candidate_identities: adapter.stats.resolved_candidate_identities,

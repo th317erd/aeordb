@@ -27,8 +27,8 @@ use super::query_complete_candidate::{
   QueryCompleteCandidateSourceV1, execute_complete_candidate_scope_query_v1,
 };
 use super::query_executor::{
-  QueryAuthoritativeScopeSourceV1, QueryExecutionErrorClassV1, QueryExecutionErrorV1, QueryExecutionLimitsV1, QueryExecutionMatchV1,
-  RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1, execute_authoritative_scope_query_v1,
+  QueryAuthoritativeScopeSourceV1, QueryExecutionErrorClassV1, QueryExecutionErrorOriginV1, QueryExecutionErrorV1, QueryExecutionLimitsV1,
+  QueryExecutionMatchV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1, execute_authoritative_scope_query_v1,
 };
 use super::query_partial_candidate::{
   QueryComposedPartialCandidateExecutionRequestV1, QueryPartialCandidateArtifactSourceV1, execute_composed_partial_candidates_v1,
@@ -432,10 +432,11 @@ fn execute_authoritative_scope(
 }
 
 fn complete_failure_can_retry_authoritatively(error: &QueryExecutionErrorV1) -> bool {
-  matches!(
-    error.class(),
-    QueryExecutionErrorClassV1::ResourceLimit
-      | QueryExecutionErrorClassV1::HistoricalViewUnavailable
-      | QueryExecutionErrorClassV1::CorruptSource
-  )
+  error.origin() == QueryExecutionErrorOriginV1::Execution
+    && matches!(
+      error.class(),
+      QueryExecutionErrorClassV1::ResourceLimit
+        | QueryExecutionErrorClassV1::HistoricalViewUnavailable
+        | QueryExecutionErrorClassV1::CorruptSource
+    )
 }
