@@ -506,6 +506,49 @@ pub fn validate_logical_order_component_v1(
   validate_component(CompiledPositionComparatorV1::Payload(comparator), component, field)
 }
 
+pub fn compare_logical_order_components_v1(
+  comparator: PositionComparatorV1,
+  left: &LogicalOrderComponentOwnedV1,
+  right: &LogicalOrderComponentOwnedV1,
+  field: &str,
+) -> PositionOrderResultV1<Ordering> {
+  validate_logical_order_component_v1(comparator, left, field)?;
+  validate_logical_order_component_v1(comparator, right, field)?;
+  compare_components(CompiledPositionComparatorV1::Payload(comparator), left, right)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalNumericValueV1 {
+  U64(u64),
+  I64(i64),
+  FiniteF64Bits(u64),
+}
+
+pub fn decode_logical_numeric_component_v1(
+  comparator: PositionComparatorV1,
+  component: &LogicalOrderComponentOwnedV1,
+  field: &str,
+) -> PositionOrderResultV1<LogicalNumericValueV1> {
+  validate_logical_order_component_v1(comparator, component, field)?;
+  if component.state != PositionComponentStateV1::Present {
+    return Err(PositionOrderErrorV1::corrupt(
+      "position_numeric_presence",
+      format!("field {field:?} numeric decoding requires a present value"),
+    ));
+  }
+  match comparator {
+    PositionComparatorV1::U64 => Ok(LogicalNumericValueV1::U64(decode_u64_payload(&component.payload, field)?)),
+    PositionComparatorV1::I64 => Ok(LogicalNumericValueV1::I64(decode_i64_payload(&component.payload, field)?)),
+    PositionComparatorV1::FiniteF64 => {
+      let value = decode_f64_payload(&component.payload, field)?;
+      Ok(LogicalNumericValueV1::FiniteF64Bits(value.to_bits()))
+    }
+    _ => {
+      Err(PositionOrderErrorV1::corrupt("position_numeric_comparator", format!("field {field:?} comparator {comparator:?} is not numeric")))
+    }
+  }
+}
+
 fn validate_present_payload(comparator: PositionComparatorV1, payload: &[u8], field: &str) -> PositionOrderResultV1<()> {
   match comparator {
     PositionComparatorV1::BytesBinary => {}

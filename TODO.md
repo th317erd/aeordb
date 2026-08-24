@@ -1292,7 +1292,7 @@
               - [x] P7-3d4c3: prove differential ordering, multi-value/presence/numeric boundaries, malformed or stale lookup receipts, cancellation, pressure, both hash widths, deterministic ties, and exact reservation release.
             - [ ] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
               - [x] P7-3d4d1: freeze and validate one plural selected-root aggregate-input lookup contract over compiler-owned auxiliary field semantics, immutable match identities, cancellation, and explicit row/value/byte bounds.
-              - [ ] P7-3d4d2: implement transactional ungrouped document count plus per-field count/sum/average/minimum/maximum reducers without retaining the matched-document result set.
+              - [x] P7-3d4d2: implement transactional ungrouped document count plus per-field count/sum/average/minimum/maximum reducers without retaining the matched-document result set.
               - [ ] P7-3d4d3: implement bounded canonical multi-field group tuples, incremental per-group reducers, and aggregate-group top-K through the permanent logical-order comparator.
               - [ ] P7-3d4d4: prove independent aggregate/group equivalence, every presence/multi-value/numeric boundary, malformed lookup/receipt closure, cancellation, pressure, both hash widths, and exact reservation release.
             - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.
