@@ -354,17 +354,11 @@ fn validate_position_sort_comparator(comparator: &str) -> FormatResult<()> {
 }
 
 fn compiled_position_sort_comparator(comparator: &str) -> FormatResult<CompiledPositionComparatorV1> {
-  match comparator {
-    "bytes_binary_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::BytesBinary)),
-    "utf8_binary_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::Utf8Binary)),
-    "u64_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::U64)),
-    "i64_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::I64)),
-    "f64_finite_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::FiniteF64)),
-    "timestamp_ms_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::TimestampMs)),
-    "bool_order_v1" => Ok(CompiledPositionComparatorV1::Payload(PositionComparatorV1::Boolean)),
-    "null" => Ok(CompiledPositionComparatorV1::FixtureNull),
-    "missing" => Ok(CompiledPositionComparatorV1::FixtureMissing),
-    _ => Err(order_error(format!("unknown position sort comparator {comparator:?}"))),
+  match PositionComparatorV1::from_name(comparator) {
+    Some(comparator) => Ok(CompiledPositionComparatorV1::Payload(comparator)),
+    None if comparator == "null" => Ok(CompiledPositionComparatorV1::FixtureNull),
+    None if comparator == "missing" => Ok(CompiledPositionComparatorV1::FixtureMissing),
+    None => Err(order_error(format!("unknown position sort comparator {comparator:?}"))),
   }
 }
 
@@ -387,6 +381,19 @@ pub enum PositionComparatorV1 {
 }
 
 impl PositionComparatorV1 {
+  pub fn from_name(name: &str) -> Option<Self> {
+    match name {
+      "bytes_binary_order_v1" => Some(Self::BytesBinary),
+      "utf8_binary_order_v1" => Some(Self::Utf8Binary),
+      "u64_order_v1" => Some(Self::U64),
+      "i64_order_v1" => Some(Self::I64),
+      "f64_finite_order_v1" => Some(Self::FiniteF64),
+      "timestamp_ms_order_v1" => Some(Self::TimestampMs),
+      "bool_order_v1" => Some(Self::Boolean),
+      _ => None,
+    }
+  }
+
   const fn tag(self) -> u16 {
     match self {
       Self::BytesBinary => 2,

@@ -11,6 +11,7 @@ use aeordb::engine::v4::query_planner::{
   QuerySortFieldV1, QueryValueMatchV1, RootAwareQueryFieldCatalogV1, authorization_safe_query_explain_v1, default_query_planning_limits_v1,
   plan_root_aware_query_v1,
 };
+use aeordb::engine::v4::position::{PositionComparatorV1, PositionRouteV1};
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 
@@ -36,9 +37,12 @@ fn field_fixture(name: &str) -> Vec<u8> {
 }
 
 fn definitions(field_name: &str, converter: &str) -> (Vec<u8>, Vec<u8>) {
+  definitions_for_scope(field_name, converter, &scope_fixture())
+}
+
+fn definitions_for_scope(field_name: &str, converter: &str, encoded_scope: &[u8]) -> (Vec<u8>, Vec<u8>) {
   let mut value_store = value_store_fixture("avst-blake3-256-metadata-hash-corrected-valid");
-  let encoded_scope = scope_fixture();
-  let scope = decode_scope_definition(&encoded_scope, HashAlgorithm::Blake3_256).unwrap();
+  let scope = decode_scope_definition(encoded_scope, HashAlgorithm::Blake3_256).unwrap();
   value_store[32..64].copy_from_slice(&scope.scope_id);
   let metadata_id = match field_name {
     "@filename" => 2u16,
@@ -111,7 +115,15 @@ fn candidate(
 }
 
 fn scope(value_store: Vec<u8>, indexes: Vec<QueryPlanningIndexCandidateV1>, authoritative_document_count: u64) -> QueryPlanningScopeV1 {
-  let encoded_scope_definition = scope_fixture();
+  scope_for_definition(scope_fixture(), value_store, indexes, authoritative_document_count)
+}
+
+fn scope_for_definition(
+  encoded_scope_definition: Vec<u8>,
+  value_store: Vec<u8>,
+  indexes: Vec<QueryPlanningIndexCandidateV1>,
+  authoritative_document_count: u64,
+) -> QueryPlanningScopeV1 {
   let scope_definition = decode_scope_definition(&encoded_scope_definition, HashAlgorithm::Blake3_256).unwrap();
   let value_store_id = decode_value_store_definition(&value_store, HashAlgorithm::Blake3_256).unwrap().value_store_id;
   QueryPlanningScopeV1 {
@@ -123,6 +135,81 @@ fn scope(value_store: Vec<u8>, indexes: Vec<QueryPlanningIndexCandidateV1>, auth
     authoritative_document_count,
     indexes,
   }
+}
+
+#[test]
+fn query_order_is_compiled_from_selected_root_auxiliary_semantics() {
+  let planning_context = context();
+  let empty_expression = QueryExpressionV1::And(Vec::new());
+  let default_plan =
+    plan_root_aware_query_v1(&request(&planning_context, &empty_expression, &[], default_query_planning_limits_v1(), &|| false)).unwrap();
+  assert_eq!(default_plan.query_order().route(), PositionRouteV1::Query);
+  assert_eq!(default_plan.query_order().component_count(), 1);
+
+  let encoded_scope = scope_fixture();
+  let (value_store, field) = definitions("@size", "u64_order_v1");
+  let generation = generation(&encoded_scope, &value_store, &field, &ROOT, 41);
+  let query_scope =
+    scope(value_store, vec![candidate(field, Some(generation), QueryPlanningIndexEstimatesV1::new(1, 10, 10, 2, 0).unwrap())], 10);
+  let catalogs = [catalog("@size", vec![query_scope])];
+  let sort_fields = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Descending }];
+  let mut ordered_request = request(&planning_context, &empty_expression, &catalogs, default_query_planning_limits_v1(), &|| false);
+  ordered_request.sort_fields = &sort_fields;
+  let ordered = plan_root_aware_query_v1(&ordered_request).unwrap();
+  let semantics = ordered.auxiliary_fields()[0].order_semantics();
+  assert_eq!(semantics.comparator(), PositionComparatorV1::U64);
+  assert_eq!(semantics.comparison_semantics(), 0x0004);
+  assert_eq!(semantics.collation_semantics(), 0);
+  assert!(semantics.behavior_fingerprint().iter().any(|byte| *byte != 0));
+  assert_eq!(ordered.query_order().route(), PositionRouteV1::Query);
+  assert_eq!(ordered.query_order().component_count(), 2);
+  assert_ne!(ordered.query_order().fingerprint(), default_plan.query_order().fingerprint());
+}
+
+#[test]
+fn ambiguous_or_cross_scope_auxiliary_comparators_are_rejected_before_execution() {
+  let planning_context = context();
+  let expression = QueryExpressionV1::And(Vec::new());
+  let sort_fields = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Ascending }];
+  let estimates = QueryPlanningIndexEstimatesV1::new(1, 1, 1, 1, 0).unwrap();
+
+  let (value_store, u64_field) = definitions("@size", "u64_order_v1");
+  let (_, i64_field) = definitions("@size", "i64_order_v1");
+  let one_scope = scope(value_store, vec![candidate(u64_field, None, estimates), candidate(i64_field, None, estimates)], 1);
+  let one_scope_catalogs = [catalog("@size", vec![one_scope])];
+  let mut ambiguous_request = request(&planning_context, &expression, &one_scope_catalogs, default_query_planning_limits_v1(), &|| false);
+  ambiguous_request.sort_fields = &sort_fields;
+  let error = plan_root_aware_query_v1(&ambiguous_request).unwrap_err();
+  assert_eq!(error.class(), QueryPlanningErrorClassV1::HistoricalViewUnavailable);
+  assert_eq!(error.code(), "query_auxiliary_semantics_incompatible");
+
+  let root_scope = scope_fixture();
+  let glob_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let (root_value_store, root_field) = definitions_for_scope("@size", "u64_order_v1", &root_scope);
+  let (compatible_glob_value_store, compatible_glob_field) = definitions_for_scope("@size", "u64_order_v1", &glob_scope);
+  let mut compatible_scopes = vec![
+    scope_for_definition(root_scope.clone(), root_value_store.clone(), vec![candidate(root_field.clone(), None, estimates)], 1),
+    scope_for_definition(glob_scope.clone(), compatible_glob_value_store, vec![candidate(compatible_glob_field, None, estimates)], 1),
+  ];
+  compatible_scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let compatible_catalogs = [catalog("@size", compatible_scopes)];
+  let mut compatible_request = request(&planning_context, &expression, &compatible_catalogs, default_query_planning_limits_v1(), &|| false);
+  compatible_request.sort_fields = &sort_fields;
+  assert_eq!(plan_root_aware_query_v1(&compatible_request).unwrap().query_order().component_count(), 2);
+
+  let (glob_value_store, glob_field) = definitions_for_scope("@size", "i64_order_v1", &glob_scope);
+  let mut scopes = vec![
+    scope_for_definition(root_scope, root_value_store, vec![candidate(root_field, None, estimates)], 1),
+    scope_for_definition(glob_scope, glob_value_store, vec![candidate(glob_field, None, estimates)], 1),
+  ];
+  scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let cross_scope_catalogs = [catalog("@size", scopes)];
+  let mut cross_scope_request =
+    request(&planning_context, &expression, &cross_scope_catalogs, default_query_planning_limits_v1(), &|| false);
+  cross_scope_request.sort_fields = &sort_fields;
+  let error = plan_root_aware_query_v1(&cross_scope_request).unwrap_err();
+  assert_eq!(error.class(), QueryPlanningErrorClassV1::HistoricalViewUnavailable);
+  assert_eq!(error.code(), "query_auxiliary_semantics_incompatible");
 }
 
 fn catalog(field_name: &str, scopes: Vec<QueryPlanningScopeV1>) -> RootAwareQueryFieldCatalogV1 {

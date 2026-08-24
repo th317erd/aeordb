@@ -24,7 +24,10 @@ use super::index_semantic_registry::{
   OPERATION_AGGREGATE, OPERATION_BETWEEN, OPERATION_CONTAINS, OPERATION_EQ, OPERATION_FUZZY, OPERATION_GT, OPERATION_IN, OPERATION_LT,
   OPERATION_MATCH, OPERATION_PHONETIC, OPERATION_SIMILAR, OPERATION_SORT,
 };
+use super::position::{CompiledRouteOrderV1, PositionComparatorV1, PositionSortDirectionV1};
+use super::position_order::{PositionOrderFieldV1, compile_query_order_v1};
 use super::read_view::ResolvedReadViewV1;
+use super::reader::MalformedInputClass;
 use super::scope::decode_scope_definition;
 use super::value_store::decode_value_store_definition;
 
@@ -600,7 +603,34 @@ impl CompiledQueryAuxiliaryScopePlanV1 {
 pub struct CompiledQueryAuxiliaryFieldPlanV1 {
   field_name: String,
   operation: CompiledQueryAuxiliaryOperationV1,
+  order_semantics: CompiledQueryAuxiliaryOrderSemanticsV1,
   scopes: Vec<CompiledQueryAuxiliaryScopePlanV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledQueryAuxiliaryOrderSemanticsV1 {
+  comparator: PositionComparatorV1,
+  comparison_semantics: u16,
+  collation_semantics: u16,
+  behavior_fingerprint: [u8; 32],
+}
+
+impl CompiledQueryAuxiliaryOrderSemanticsV1 {
+  pub const fn comparator(&self) -> PositionComparatorV1 {
+    self.comparator
+  }
+
+  pub const fn comparison_semantics(&self) -> u16 {
+    self.comparison_semantics
+  }
+
+  pub const fn collation_semantics(&self) -> u16 {
+    self.collation_semantics
+  }
+
+  pub const fn behavior_fingerprint(&self) -> &[u8; 32] {
+    &self.behavior_fingerprint
+  }
 }
 
 impl CompiledQueryAuxiliaryFieldPlanV1 {
@@ -610,6 +640,10 @@ impl CompiledQueryAuxiliaryFieldPlanV1 {
 
   pub const fn operation(&self) -> CompiledQueryAuxiliaryOperationV1 {
     self.operation
+  }
+
+  pub const fn order_semantics(&self) -> &CompiledQueryAuxiliaryOrderSemanticsV1 {
+    &self.order_semantics
   }
 
   pub fn scopes(&self) -> &[CompiledQueryAuxiliaryScopePlanV1] {
@@ -633,6 +667,7 @@ pub struct CompiledRootAwareQueryPlanV1 {
   total_literal_bytes: u64,
   estimated_work: u64,
   query_fingerprint: Vec<u8>,
+  query_order: CompiledRouteOrderV1,
 }
 
 impl CompiledRootAwareQueryPlanV1 {
@@ -686,6 +721,10 @@ impl CompiledRootAwareQueryPlanV1 {
 
   pub fn query_fingerprint(&self) -> &[u8] {
     &self.query_fingerprint
+  }
+
+  pub const fn query_order(&self) -> &CompiledRouteOrderV1 {
+    &self.query_order
   }
 
   pub fn selected_namespace_root(&self) -> &[u8] {
@@ -827,6 +866,7 @@ pub fn plan_root_aware_query_v1(request: &QueryPlanningRequestV1<'_>) -> QueryPl
 
   let mut auxiliary_fields = Vec::new();
   compile_auxiliary_fields(request, &catalogs, &mut auxiliary_fields)?;
+  let query_order = compile_planned_query_order(request.context.hash_algorithm(), &auxiliary_fields)?;
   check_cancelled(request.is_cancelled)?;
 
   let mut estimated_work = 0u64;
@@ -857,6 +897,7 @@ pub fn plan_root_aware_query_v1(request: &QueryPlanningRequestV1<'_>) -> QueryPl
     total_literal_bytes: admission.total_literal_bytes,
     estimated_work,
     query_fingerprint,
+    query_order,
   })
 }
 
@@ -1608,6 +1649,7 @@ fn compile_auxiliary_field(
     invalid_request("query_definition_catalog_missing", format!("selected semantic root has no definition catalog for {field_name}"))
   })?;
   let mut scopes = Vec::new();
+  let mut compatible_semantics = None;
   scopes
     .try_reserve_exact(catalog.scopes.len())
     .map_err(|source| resource_error("query_auxiliary_scope_reserve", format!("cannot reserve auxiliary scopes: {source}")))?;
@@ -1631,6 +1673,8 @@ fn compile_auxiliary_field(
       if runtime.field_definition().operations & operation_bit == 0 {
         continue;
       }
+      let candidate_semantics = compile_auxiliary_order_semantics(&runtime)?;
+      require_compatible_auxiliary_semantics(&mut compatible_semantics, &candidate_semantics, field_name)?;
       let coverage = compile_coverage(scope, index, &runtime, request)?;
       let estimated_work =
         if coverage == CompiledQueryCoverageV1::AuthoritativeOnly { u64::MAX } else { index_work(index.estimates, coverage) };
@@ -1658,7 +1702,95 @@ fn compile_auxiliary_field(
       driver: selected,
     });
   }
-  Ok(CompiledQueryAuxiliaryFieldPlanV1 { field_name: clone_string(field_name, "auxiliary field")?, operation, scopes })
+  let order_semantics = compatible_semantics.ok_or_else(|| {
+    planning_error(
+      QueryPlanningErrorClassV1::HistoricalViewUnavailable,
+      "query_auxiliary_semantics_unavailable",
+      format!("selected root has no reproducible ordered semantics for {field_name}"),
+    )
+  })?;
+  Ok(CompiledQueryAuxiliaryFieldPlanV1 { field_name: clone_string(field_name, "auxiliary field")?, operation, order_semantics, scopes })
+}
+
+fn compile_auxiliary_order_semantics(
+  runtime: &IndexDefinitionRuntimeV1<'_, '_>,
+) -> QueryPlanningResultV1<CompiledQueryAuxiliaryOrderSemanticsV1> {
+  let converter = &runtime.field_definition().converter;
+  let registry = runtime.converter().registry();
+  if !converter.corrected || !registry.corrected || !registry.order_preserving {
+    return Err(planning_error(
+      QueryPlanningErrorClassV1::HistoricalViewUnavailable,
+      "query_auxiliary_semantics_unavailable",
+      format!("converter {} cannot reproduce the permanent logical order", converter.name),
+    ));
+  }
+  let comparator = PositionComparatorV1::from_name(converter.name).ok_or_else(|| {
+    planning_error(
+      QueryPlanningErrorClassV1::HistoricalViewUnavailable,
+      "query_auxiliary_semantics_unavailable",
+      format!("corrected converter {} has no permanent logical comparator", converter.name),
+    )
+  })?;
+  Ok(CompiledQueryAuxiliaryOrderSemanticsV1 {
+    comparator,
+    comparison_semantics: converter.comparison_semantics,
+    collation_semantics: converter.collation_semantics,
+    behavior_fingerprint: registry.behavior_fingerprint,
+  })
+}
+
+fn require_compatible_auxiliary_semantics(
+  compatible: &mut Option<CompiledQueryAuxiliaryOrderSemanticsV1>,
+  candidate: &CompiledQueryAuxiliaryOrderSemanticsV1,
+  field_name: &str,
+) -> QueryPlanningResultV1<()> {
+  if compatible.as_ref().is_some_and(|expected| {
+    expected.comparator != candidate.comparator
+      || expected.comparison_semantics != candidate.comparison_semantics
+      || expected.collation_semantics != candidate.collation_semantics
+      || expected.behavior_fingerprint != candidate.behavior_fingerprint
+  }) {
+    return Err(planning_error(
+      QueryPlanningErrorClassV1::HistoricalViewUnavailable,
+      "query_auxiliary_semantics_incompatible",
+      format!("selected definitions for {field_name} disagree on comparator or collation semantics"),
+    ));
+  }
+  if compatible.is_none() {
+    *compatible = Some(candidate.clone());
+  }
+  Ok(())
+}
+
+fn compile_planned_query_order(
+  hash_algorithm: HashAlgorithm,
+  auxiliary_fields: &[CompiledQueryAuxiliaryFieldPlanV1],
+) -> QueryPlanningResultV1<CompiledRouteOrderV1> {
+  let sort_count =
+    auxiliary_fields.iter().take_while(|field| matches!(field.operation, CompiledQueryAuxiliaryOperationV1::Sort(_))).count();
+  let mut fields = Vec::new();
+  fields
+    .try_reserve_exact(sort_count)
+    .map_err(|source| resource_error("query_order_reserve", format!("cannot reserve query order fields: {source}")))?;
+  for field in auxiliary_fields.iter().take(sort_count) {
+    let direction = match field.operation {
+      CompiledQueryAuxiliaryOperationV1::Sort(QuerySortDirectionV1::Ascending) => PositionSortDirectionV1::Ascending,
+      CompiledQueryAuxiliaryOperationV1::Sort(QuerySortDirectionV1::Descending) => PositionSortDirectionV1::Descending,
+      CompiledQueryAuxiliaryOperationV1::Aggregate(_) | CompiledQueryAuxiliaryOperationV1::Group => {
+        return Err(corrupt_source(
+          "query_order_operation_mismatch",
+          format!("non-sort auxiliary field {} entered the query sort prefix", field.field_name),
+        ));
+      }
+    };
+    fields.push(PositionOrderFieldV1 { field: &field.field_name, direction, comparator: field.order_semantics.comparator });
+  }
+  compile_query_order_v1(hash_algorithm, &fields).map_err(|source| match source.class() {
+    MalformedInputClass::LengthCountOrArithmeticOverflow | MalformedInputClass::AllocationAmplification => {
+      resource_error("query_order_resource", format!("{}: {}", source.code(), source.context()))
+    }
+    _ => corrupt_source("query_order_invalid", format!("{}: {}", source.code(), source.context())),
+  })
 }
 
 fn retained_selected_generation(

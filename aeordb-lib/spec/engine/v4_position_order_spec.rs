@@ -167,6 +167,7 @@ fn comparator_covers_every_permanent_type_presence_state_and_identity_tie() {
   ];
 
   for (comparator, low, high) in cases {
+    assert_eq!(PositionComparatorV1::from_name(comparator.name()), Some(comparator));
     for direction in [PositionSortDirectionV1::Ascending, PositionSortDirectionV1::Descending] {
       let fields = [PositionOrderFieldV1 { field: "value", direction, comparator }];
       let order = compile_query_order_v1(HashAlgorithm::Blake3_256, &fields).unwrap();
