@@ -11026,7 +11026,7 @@
     {
       "id": "esq-v1-6d3b318d817309953354-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 649,
+      "line": 637,
       "column": 8,
       "enclosing_item": "impl PositionComponentIter < 'a >::next",
       "kind": "result_status_probe",
@@ -11036,7 +11036,7 @@
     {
       "id": "esq-v1-85f3359512a3147b5366-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 720,
+      "line": 708,
       "column": 6,
       "enclosing_item": "decode_logical_position",
       "kind": "error_conversion",
@@ -11046,7 +11046,7 @@
     {
       "id": "esq-v1-b64d32ac5903a4d288a1-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 759,
+      "line": 747,
       "column": 5,
       "enclosing_item": "decode_logical_position",
       "kind": "error_conversion",
@@ -11056,7 +11056,7 @@
     {
       "id": "esq-v1-846fa8d23f612513bad9-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 845,
+      "line": 833,
       "column": 24,
       "enclosing_item": "decode_component",
       "kind": "error_conversion",
@@ -11066,7 +11066,7 @@
     {
       "id": "esq-v1-be89c8a7b24299a74bfb-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 878,
+      "line": 866,
       "column": 38,
       "enclosing_item": "validate_present_component",
       "kind": "panic_method",
@@ -11076,7 +11076,7 @@
     {
       "id": "esq-v1-f911334174e136beefdc-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 905,
+      "line": 893,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11086,7 +11086,7 @@
     {
       "id": "esq-v1-9d7902a1eeb5afc2af8c-00",
       "file": "aeordb-lib/src/engine/v4/position.rs",
-      "line": 912,
+      "line": 900,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",

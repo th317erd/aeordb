@@ -490,8 +490,7 @@ pub fn encode_logical_position(request: &LogicalPositionWriteV1<'_>) -> FormatRe
   let mut tuple_length = 0usize;
   for component in request.components {
     tuple_length = tuple_length
-      .checked_add(8)
-      .and_then(|length| length.checked_add(component.payload.len()))
+      .checked_add(logical_position_component_encoded_length_v1(*component)?)
       .ok_or_else(|| length_error("position tuple length overflow"))?;
     let total = FIXED_WITHOUT_HASHES
       .checked_add(4 * hash_width)
@@ -504,7 +503,6 @@ pub fn encode_logical_position(request: &LogicalPositionWriteV1<'_>) -> FormatRe
         format!("decoded position exceeds {MAX_DECODED_LENGTH} bytes"),
       ));
     }
-    validate_write_component(component)?;
   }
 
   let total_length = FIXED_WITHOUT_HASHES + 4 * hash_width + tuple_length;
@@ -529,17 +527,7 @@ pub fn encode_logical_position(request: &LogicalPositionWriteV1<'_>) -> FormatRe
   decoded.extend_from_slice(request.file_key_tie);
   decoded.extend_from_slice(request.record_revision_tie);
   for component in request.components {
-    let tag = component.comparator.map_or(0, PositionComparatorV1::tag);
-    let state = match component.state {
-      PositionComponentStateV1::Present => 0,
-      PositionComponentStateV1::TypedNull => 1,
-      PositionComponentStateV1::Missing => 2,
-    };
-    decoded.extend_from_slice(&tag.to_le_bytes());
-    decoded.push(state);
-    decoded.push(0);
-    decoded.extend_from_slice(&(component.payload.len() as u32).to_le_bytes());
-    decoded.extend_from_slice(component.payload);
+    append_logical_position_component_v1(&mut decoded, *component)?;
   }
   let checksum = crc32fast::hash(&decoded);
   decoded.extend_from_slice(&checksum.to_le_bytes());
@@ -926,4 +914,37 @@ fn order_error(context: impl Into<String>) -> FormatError {
 
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
+}
+
+pub fn logical_position_component_encoded_length_v1(component: PositionComponentWriteV1<'_>) -> FormatResult<usize> {
+  validate_write_component(&component)?;
+  let _payload_length = u32::try_from(component.payload.len())
+    .map_err(|source| length_error(format!("position component payload length conversion: {source}")))?;
+  8usize.checked_add(component.payload.len()).ok_or_else(|| length_error("position component encoded length overflow"))
+}
+
+pub fn append_logical_position_component_v1(output: &mut Vec<u8>, component: PositionComponentWriteV1<'_>) -> FormatResult<()> {
+  let encoded_length = logical_position_component_encoded_length_v1(component)?;
+  let payload_length = u32::try_from(component.payload.len())
+    .map_err(|source| length_error(format!("position component payload length conversion: {source}")))?;
+  let tag = component.comparator.map_or(0, PositionComparatorV1::tag);
+  let state = match component.state {
+    PositionComponentStateV1::Present => 0,
+    PositionComponentStateV1::TypedNull => 1,
+    PositionComponentStateV1::Missing => 2,
+  };
+  let before = output.len();
+  output.extend_from_slice(&tag.to_le_bytes());
+  output.push(state);
+  output.push(0);
+  output.extend_from_slice(&payload_length.to_le_bytes());
+  output.extend_from_slice(component.payload);
+  if output.len().checked_sub(before) != Some(encoded_length) {
+    return Err(error(
+      MalformedInputClass::CrossRecordClosureMismatch,
+      "invalid_position_cursor",
+      "position component preflight and encoder disagree",
+    ));
+  }
+  Ok(())
 }
