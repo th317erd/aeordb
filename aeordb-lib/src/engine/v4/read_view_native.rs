@@ -21,11 +21,14 @@ use super::first_authority::{
   FirstAuthorityPublicationErrorV1, LoadedImmutableEntityV1, RootLifecyclePointReadErrorV1, V4FirstAuthorityPublisher,
 };
 use super::hash::digest_parts;
-use super::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
+use super::index_artifact_cursor::{
+  ArtifactCursorReadErrorV1, ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1, RetainedArtifactBytesV1,
+};
 use super::index_artifact_native::{
   NativeSelectedArtifactCursorErrorClassV1, NativeSelectedArtifactCursorErrorV1, NativeSelectedArtifactLoadRequestV1,
   NativeSelectedArtifactPageCursorV1, NativeSelectedArtifactRootLoadRequestV1, NativeSelectedPostingSeekLoadRequestV1,
-  load_native_selected_artifact_page_cursor_v1, load_native_selected_artifact_root_v1, load_native_selected_posting_seek_v1,
+  load_native_selected_artifact_bytes_v1, load_native_selected_artifact_page_cursor_v1, load_native_selected_artifact_root_v1,
+  load_native_selected_posting_seek_v1,
 };
 pub use super::index_artifact_native::{
   NativeSelectedArtifactRootV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNvtFallbackV1, NativeSelectedPostingPageV1,
@@ -1437,6 +1440,24 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       cancellation: self.view.cancellation(),
     })
     .map_err(map_selected_artifact_cursor_error)
+  }
+
+  pub(crate) fn read_index_artifact_bytes(
+    &self,
+    key: &[u8],
+    maximum_bytes: usize,
+  ) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+    if self.view.cancellation().is_cancelled() {
+      return Err(ArtifactCursorReadErrorV1::Cancelled);
+    }
+    load_native_selected_artifact_bytes_v1(
+      self.source.publisher.as_ref(),
+      self.source.memory.as_ref(),
+      self.view.captured_header(),
+      key,
+      maximum_bytes,
+      self.view.cancellation(),
+    )
   }
 
   pub fn seek_posting_page(

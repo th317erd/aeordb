@@ -1317,12 +1317,15 @@
               - [x] P7-3d5c4: prove real-file sort/group/aggregate behavior, both hash widths, fieldless scopes, stale identities, cancellation, pressure, corruption, and exact resource release before landing.
             - [ ] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
               - [x] P7-3d5d1: add one native authoritative execution facade over the captured selected-root partition source and existing transactional sink path.
-              - [ ] P7-3d5d2: bind the exact coverage-registry snapshot into selected semantic planner catalogs and implement one captured native immutable-artifact source for complete/partial roots.
+              - [x] P7-3d5d2: bind the exact coverage-registry snapshot into selected semantic planner catalogs and implement one captured native immutable-artifact source for complete/partial roots.
                 - [x] P7-3d5d2a: bind matching real registry generations and NVT availability into selected planner catalogs with atomic query-memory accounting.
                 - [x] P7-3d5d2b: expose one captured-header immutable artifact byte/root adapter shared by complete and partial query candidates.
                   - [x] P7-3d5d2b1: make every retained captured artifact byte clone own the exact shared Query-memory reservation and remove side-vector lifetime accounting.
                   - [x] P7-3d5d2b2: resolve validated Posting and dependent ScopeOrdinal roots through the existing captured manifest-chain decoder without mutable-pointer rereads.
-                - [ ] P7-3d5d2c: prove complete/partial root closure, pointer/HEAD races, authority substitution, cancellation, pressure, corruption, and exact release.
+                - [x] P7-3d5d2c: prove complete/partial root closure, pointer/HEAD races, authority substitution, cancellation, pressure, corruption, and exact release.
+                  - [x] P7-3d5d2c1: expose the sole captured-header accounted artifact-byte loader to the native query source without adding a parser, cache, or pointer read.
+                  - [x] P7-3d5d2c2: adapt exact planner-selected generations into complete and partial Posting/ScopeOrdinal root receipts, requiring all matching scope dependencies to agree.
+                  - [x] P7-3d5d2c3: close current/historical HEAD and pointer races, substitution, disagreement, cancellation, pressure, corruption, and retained-memory release with real first-authority fixtures.
               - [ ] P7-3d5d3: compose per-scope complete/partial/authoritative execution into one bounded root transaction without duplicate identities or partial sink visibility.
               - [ ] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.
             - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.

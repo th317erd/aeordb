@@ -26,7 +26,8 @@ use aeordb::engine::v4::index_artifact::{
   decode_index_manifest, encode_index_manifest,
 };
 use aeordb::engine::v4::index_artifact_cursor::{
-  ArtifactDirectoryRootSummaryV1, ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1,
+  ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, ArtifactDirectoryRootSummaryV1, ArtifactPageCursorLimitsV1,
+  ArtifactPageNeighborModeV1, ArtifactPageSeekV1,
 };
 use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
 use aeordb::engine::v4::index_coverage_registry::{
@@ -35,6 +36,7 @@ use aeordb::engine::v4::index_coverage_registry::{
   field_definition_fingerprint, field_dependency_fingerprint,
 };
 use aeordb::engine::v4::index_manifest::FieldNvtManifestBodyV1;
+use aeordb::engine::v4::index_partial_acceleration::IndexPartialSourceErrorClassV1;
 use aeordb::engine::v4::index_nvt::{
   NvtBasisStatusV1, NvtEntryWriteV1, NvtTileWriteV1, encode_nvt_tile, pin_field_index_v1, validate_field_nvt_basis_v1,
 };
@@ -71,6 +73,10 @@ use aeordb::engine::v4::position_resolver::{
 use aeordb::engine::v4::query_aggregate_execution::{
   CompiledQueryAggregateInputV1, QueryAggregateInputLimitsV1, QueryAggregateInputLookupRequestV1, QueryAggregateInputLookupResultV1,
   QueryAggregateInputSourceV1, resolve_query_aggregate_input_v1,
+};
+use aeordb::engine::v4::query_complete_candidate::{QueryCompletePostingRootRequestV1, QueryCompleteScopeRootRequestV1};
+use aeordb::engine::v4::query_partial_candidate::{
+  QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootRequestV1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1, QueryPlanningContextV1,
@@ -2027,6 +2033,202 @@ impl NativePartitionFixture {
     drop(backing_source);
     assert_eq!(pins.active_pin_count().unwrap(), 0);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+struct NativeCandidateArtifactFixture {
+  _directory: tempfile::TempDir,
+  path: PathBuf,
+  source: NativeAuthoritativeFieldPartitionSourceV1,
+  backing_source: Arc<NativeReadViewSourceV1>,
+  memory: Arc<MemoryCoordinator>,
+  pins: RootReadPinCoordinatorV1,
+  cancellation: CancellationToken,
+  plan: CompiledRootAwareQueryPlanV1,
+  scope_id: Vec<u8>,
+  generation: QueryPlanningCoverageGenerationV1,
+  semantic_state_root: Vec<u8>,
+  posting_page: EncodedImmutableIndexArtifactV1,
+  posting_root: EncodedImmutableIndexArtifactV1,
+  scope_ordinal_root: EncodedImmutableIndexArtifactV1,
+}
+
+impl NativeCandidateArtifactFixture {
+  fn candidate(&self) -> &aeordb::engine::v4::query_planner::CompiledQueryIndexCandidateV1 {
+    self.plan.predicates()[0].scopes()[0]
+      .candidates()
+      .iter()
+      .find(|candidate| candidate.selected_generation().is_some())
+      .expect("candidate artifact fixture has one planner-selected generation")
+  }
+
+  fn advance_mutable_authority(&self) {
+    let namespace_tree = serialize_child_entries(
+      &[ChildEntry {
+        entry_type: EntryTypeV4::DirectoryIndex.to_u8(),
+        hash: digest_parts(self.plan.hash_algorithm(), &[b"dirc:"]),
+        total_size: 0,
+        created_at: 1_700_000_000_710,
+        updated_at: 1_700_000_000_710,
+        name: "candidate-race".to_owned(),
+        content_type: None,
+        virtual_time: 1,
+        node_id: 1,
+      }],
+      self.plan.hash_algorithm().hash_length(),
+    )
+    .unwrap();
+    let namespace_tree_root = digest_parts(self.plan.hash_algorithm(), &[b"dirc:", &namespace_tree]);
+    let semantic_state = self.backing_source.publisher().load_semantic_object(0x0001, &self.semantic_state_root).unwrap().unwrap();
+    let successor = self
+      .backing_source
+      .publisher()
+      .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+        database_id: [0x31; 16],
+        transaction_id: [0x67; 16],
+        created_at_ms: 1_700_000_000_710,
+        expected_head_hash: self.plan.selected_namespace_root().to_vec(),
+        namespace_tree: PreparedNamespaceTreeV0 { root_hash: namespace_tree_root, stored_value: namespace_tree },
+        semantic_state: EncodedSemanticObjectV1 { object_id: self.semantic_state_root.clone(), value: semantic_state },
+        required_capabilities: [0; 32],
+        typed_closure_digest: digest_parts(self.plan.hash_algorithm(), &[b"candidate mutable authority advance"]),
+        authority_identity: b"HEAD".to_vec(),
+      })
+      .unwrap();
+    assert_ne!(successor.namespace_root.root_hash, self.plan.selected_namespace_root());
+    let pointer = encode_active_pointer(&ActivePointerWriteV1 {
+      kind: ActivePointerKindV1::FieldIndex,
+      hash_algorithm: self.plan.hash_algorithm(),
+      generation: self.generation.generation,
+      owner_id: &self.generation.owner_id,
+      slot: 1,
+      sequence: 2,
+      target_manifest_hash: &self.generation.manifest_hash,
+    })
+    .unwrap();
+    let mut retirement = RetirementJournalOwnerV1::new_chain(
+      self.plan.hash_algorithm(),
+      [0x31; 16],
+      1,
+      903,
+      RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+      &self.cancellation,
+      &self.memory,
+    )
+    .unwrap();
+    self
+      .backing_source
+      .publisher()
+      .publish_index_active_pointer(
+        IndexActivePointerPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          pointer: &pointer,
+          publication_timestamp_ms: 1_700_000_000_720,
+          monotonic_now_ms: 1_700_000_000_720,
+        },
+        &mut retirement,
+      )
+      .unwrap();
+  }
+
+  fn corrupt_artifact_checksum(&self, key: &[u8]) {
+    let locator = self.backing_source.publisher().locator(key).unwrap().unwrap();
+    let checksum_offset = locator.offset + u64::from(locator.total_length) - 1;
+    let mut file = OpenOptions::new().read(true).write(true).open(&self.path).unwrap();
+    file.seek(SeekFrom::Start(checksum_offset)).unwrap();
+    let mut byte = [0; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0xff;
+    file.seek(SeekFrom::Start(checksum_offset)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+  }
+
+  fn assert_released(self) {
+    let Self { source, backing_source, memory, pins, .. } = self;
+    drop(source);
+    drop(backing_source);
+    assert_eq!(pins.active_pin_count().unwrap(), 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+fn native_candidate_artifact_fixture(algorithm: HashAlgorithm, partial: bool) -> NativeCandidateArtifactFixture {
+  let fixture = if partial { selected_partial_artifact_fixture(algorithm) } else { selected_artifact_fixture(algorithm) };
+  let snapshot = selected_artifact_coverage_snapshot(&fixture);
+  let reader = fixture.reader();
+  let mut semantic_catalog = reader.load_planner_catalogs("/", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+  reader.bind_planner_coverage(&mut semantic_catalog, &snapshot).unwrap();
+  drop(reader);
+  drop(snapshot);
+  let context = QueryPlanningContextV1::from_resolved_view(&fixture.view).unwrap();
+  let expression = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@hash".to_string(),
+    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("ab".repeat(algorithm.hash_length()))),
+  });
+  let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: "/",
+    expression: &expression,
+    catalogs: semantic_catalog.catalogs(),
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 20,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
+  let semantic_state_root = fixture.view.authority().root.semantic_state_root.clone();
+  let SelectedArtifactFixture {
+    _directory,
+    path,
+    source: backing_source,
+    memory,
+    pins,
+    cancellation,
+    view,
+    scope_id,
+    generation,
+    posting_page,
+    posting_root,
+    scope_ordinal_root,
+    ..
+  } = fixture;
+  let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
+    NativeSelectedNamespaceLimitsV1::new(16, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
+    8,
+    64 * 1024 * 1024,
+    8 * 1024 * 1024,
+    2,
+    2,
+  )
+  .unwrap();
+  let source = NativeAuthoritativeFieldPartitionSourceV1::build(
+    backing_source.as_ref().clone(),
+    view,
+    semantic_catalog,
+    "/",
+    _directory.path(),
+    limits,
+    &cancellation,
+  )
+  .unwrap();
+  NativeCandidateArtifactFixture {
+    _directory,
+    path,
+    source,
+    backing_source,
+    memory,
+    pins,
+    cancellation,
+    plan,
+    scope_id,
+    generation,
+    semantic_state_root,
+    posting_page,
+    posting_root,
+    scope_ordinal_root,
   }
 }
 
@@ -4506,6 +4708,177 @@ fn selected_artifact_root_adapter_fails_closed_and_releases_memory_on_every_boun
   drop(reader);
   drop(blocker);
   pressured.assert_released();
+}
+
+#[test]
+fn native_candidate_artifact_source_resolves_complete_and_partial_roots_through_captured_bytes() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let complete = native_candidate_artifact_fixture(algorithm, false);
+    let mut source = complete.source.open_candidate_artifact_source();
+    complete.advance_mutable_authority();
+    let posting = source
+      .resolve_complete_posting_root_v1(QueryCompletePostingRootRequestV1 {
+        selected_namespace_root: complete.plan.selected_namespace_root(),
+        publication_sequence: complete.plan.publication_sequence(),
+        scope_id: &complete.scope_id,
+        candidate: complete.candidate(),
+        cancellation: &complete.cancellation,
+      })
+      .unwrap();
+    assert!(posting.complete);
+    assert_eq!(posting.root.as_ref().unwrap().root_key(), complete.posting_root.key);
+    let scope = source
+      .resolve_complete_scope_root_v1(QueryCompleteScopeRootRequestV1 {
+        selected_namespace_root: complete.plan.selected_namespace_root(),
+        publication_sequence: complete.plan.publication_sequence(),
+        scope_id: &complete.scope_id,
+        cancellation: &complete.cancellation,
+      })
+      .unwrap();
+    assert!(scope.complete);
+    assert_eq!(scope.root.as_ref().unwrap().root_key(), complete.scope_ordinal_root.key);
+    let page = source.read_immutable_artifact(&complete.posting_page.key, 1024 * 1024).unwrap();
+    assert_eq!(decode_ordered_page(page.bytes(), algorithm).unwrap().role, OrderedIndexRoleV1::Posting);
+    drop(page);
+    drop(source);
+    complete.assert_released();
+
+    let partial = native_candidate_artifact_fixture(algorithm, true);
+    assert_ne!(partial.plan.selected_namespace_root(), partial.generation.source_namespace_root);
+    let mut source = partial.source.open_candidate_artifact_source();
+    let posting = source
+      .resolve_partial_posting_root(QueryPartialPostingRootRequestV1 {
+        target_namespace_root: partial.plan.selected_namespace_root(),
+        target_publication_sequence: partial.plan.publication_sequence(),
+        source_namespace_root: &partial.generation.source_namespace_root,
+        source_publication_sequence: partial.generation.coverage_publication_sequence,
+        scope_id: &partial.scope_id,
+        candidate: partial.candidate(),
+        cancellation: &partial.cancellation,
+      })
+      .unwrap();
+    assert!(posting.complete);
+    assert_eq!(posting.root.as_ref().unwrap().root_key(), partial.posting_root.key);
+    let scope = source
+      .resolve_partial_scope_root(QueryPartialScopeRootRequestV1 {
+        source_namespace_root: &partial.generation.source_namespace_root,
+        source_publication_sequence: partial.generation.coverage_publication_sequence,
+        scope_id: &partial.scope_id,
+        cancellation: &partial.cancellation,
+      })
+      .unwrap();
+    assert!(scope.complete);
+    assert_eq!(scope.root.as_ref().unwrap().root_key(), partial.scope_ordinal_root.key);
+    drop(source);
+    partial.assert_released();
+  }
+}
+
+#[test]
+fn native_candidate_artifact_source_fails_closed_and_retains_exact_byte_memory() {
+  let substituted = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, false);
+  let foreign = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, true);
+  let mut source = substituted.source.open_candidate_artifact_source();
+  let error = source
+    .resolve_complete_posting_root_v1(QueryCompletePostingRootRequestV1 {
+      selected_namespace_root: substituted.plan.selected_namespace_root(),
+      publication_sequence: substituted.plan.publication_sequence(),
+      scope_id: &substituted.scope_id,
+      candidate: foreign.candidate(),
+      cancellation: &substituted.cancellation,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "native_candidate_generation_interval");
+  drop(source);
+  substituted.assert_released();
+  foreign.assert_released();
+
+  let unavailable = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, true);
+  let mut source = unavailable.source.open_candidate_artifact_source();
+  let missing_root = vec![0x55; unavailable.plan.hash_algorithm().hash_length()];
+  let error = source
+    .resolve_partial_scope_root(QueryPartialScopeRootRequestV1 {
+      source_namespace_root: &missing_root,
+      source_publication_sequence: unavailable.generation.coverage_publication_sequence,
+      scope_id: &unavailable.scope_id,
+      cancellation: &unavailable.cancellation,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), IndexPartialSourceErrorClassV1::Unavailable);
+  assert_eq!(error.code(), "native_candidate_scope_generation_missing");
+  drop(source);
+  unavailable.assert_released();
+
+  let corrupt = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, false);
+  corrupt.corrupt_artifact_checksum(&corrupt.posting_root.key);
+  let mut source = corrupt.source.open_candidate_artifact_source();
+  let error = source
+    .resolve_complete_posting_root_v1(QueryCompletePostingRootRequestV1 {
+      selected_namespace_root: corrupt.plan.selected_namespace_root(),
+      publication_sequence: corrupt.plan.publication_sequence(),
+      scope_id: &corrupt.scope_id,
+      candidate: corrupt.candidate(),
+      cancellation: &corrupt.cancellation,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+  drop(source);
+  corrupt.assert_released();
+
+  let pressured = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, false);
+  let snapshot = pressured.memory.snapshot().unwrap();
+  let blocker_bytes = 511 * 1024 * 1024 - snapshot.accounted_bytes - 512 * 1024;
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+  let mut source = pressured.source.open_candidate_artifact_source();
+  let error = source
+    .resolve_complete_posting_root_v1(QueryCompletePostingRootRequestV1 {
+      selected_namespace_root: pressured.plan.selected_namespace_root(),
+      publication_sequence: pressured.plan.publication_sequence(),
+      scope_id: &pressured.scope_id,
+      candidate: pressured.candidate(),
+      cancellation: &pressured.cancellation,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::ResourceLimit);
+  drop(source);
+  drop(blocker);
+  pressured.assert_released();
+
+  let cancelled = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, false);
+  let mut source = cancelled.source.open_candidate_artifact_source();
+  cancelled.cancellation.cancel();
+  let error = source
+    .resolve_complete_scope_root_v1(QueryCompleteScopeRootRequestV1 {
+      selected_namespace_root: cancelled.plan.selected_namespace_root(),
+      publication_sequence: cancelled.plan.publication_sequence(),
+      scope_id: &cancelled.scope_id,
+      cancellation: &cancelled.cancellation,
+    })
+    .unwrap_err();
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Cancelled);
+  assert!(matches!(
+    source.read_immutable_artifact(&cancelled.posting_page.key, 1024 * 1024).unwrap_err(),
+    ArtifactCursorReadErrorV1::Cancelled
+  ));
+  drop(source);
+  cancelled.assert_released();
+
+  let retained = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, false);
+  let mut source = retained.source.open_candidate_artifact_source();
+  let bytes = source.read_immutable_artifact(&retained.posting_page.key, 1024 * 1024).unwrap();
+  assert!(matches!(
+    source.read_immutable_artifact(&retained.posting_page.key, 1).unwrap_err(),
+    ArtifactCursorReadErrorV1::ResourcePressure(_)
+  ));
+  drop(source);
+  let NativeCandidateArtifactFixture { source, backing_source, memory, pins, .. } = retained;
+  drop(source);
+  drop(backing_source);
+  assert_eq!(pins.active_pin_count().unwrap(), 0);
+  assert!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > 0);
+  drop(bytes);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
 }
 
 #[test]

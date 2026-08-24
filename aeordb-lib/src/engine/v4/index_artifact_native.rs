@@ -127,6 +127,10 @@ impl NativeSelectedArtifactRootV1 {
   pub const fn summary(&self) -> ArtifactDirectoryRootSummaryV1 {
     self.summary
   }
+
+  pub fn into_parts(self) -> (Vec<u8>, Vec<u8>, u64, ArtifactDirectoryRootSummaryV1) {
+    (self.root_key, self.owner_id, self.generation, self.summary)
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,11 +269,22 @@ struct CapturedNativeArtifactCursorSourceV1<'a> {
 
 impl ArtifactCursorSourceV1 for CapturedNativeArtifactCursorSourceV1<'_> {
   fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
-    match load_accounted_artifact(self.publisher, self.captured, key, maximum_bytes, self.cancellation, self.memory) {
-      Ok(Some(loaded)) => Ok(loaded),
-      Ok(None) => Err(ArtifactCursorReadErrorV1::Missing),
-      Err(error) => Err(map_native_source_error(error)),
-    }
+    load_native_selected_artifact_bytes_v1(self.publisher, self.memory, self.captured, key, maximum_bytes, self.cancellation)
+  }
+}
+
+pub(crate) fn load_native_selected_artifact_bytes_v1(
+  publisher: &V4FirstAuthorityPublisher,
+  memory: &MemoryCoordinator,
+  captured: &SelectedDatabaseHeaderV4,
+  key: &[u8],
+  maximum_bytes: usize,
+  cancellation: &CancellationToken,
+) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+  match load_accounted_artifact(publisher, captured, key, maximum_bytes, cancellation, memory) {
+    Ok(Some(loaded)) => Ok(loaded),
+    Ok(None) => Err(ArtifactCursorReadErrorV1::Missing),
+    Err(error) => Err(map_native_source_error(error)),
   }
 }
 

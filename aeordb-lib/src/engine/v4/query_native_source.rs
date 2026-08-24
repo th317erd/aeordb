@@ -10,7 +10,10 @@ use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner, MemoryReservation};
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value};
+use super::index_artifact_cursor::{ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, RetainedArtifactBytesV1};
 use super::index_definition_runtime::{IndexDefinitionErrorClassV1, IndexDefinitionRuntimeV1};
+use super::index_page::OrderedIndexRoleV1;
+use super::index_partial_acceleration::IndexPartialSourceErrorV1;
 use super::position::{CompiledPositionComparatorV1, PositionRouteV1, PositionSortDirectionV1};
 use super::position_order::{
   LogicalOrderComponentOwnedV1, LogicalOrderRowOwnedV1, compare_logical_order_components_v1, logical_order_row_allocated_bytes_v1,
@@ -21,6 +24,10 @@ use super::position_resolver::{
 use super::query_aggregate_execution::{
   QueryAggregateInputFieldV1, QueryAggregateInputLookupRequestV1, QueryAggregateInputLookupResultV1, QueryAggregateInputRowV1,
   QueryAggregateInputSourceV1, query_aggregate_input_row_allocated_bytes_v1,
+};
+use super::query_complete_candidate::{
+  QueryCandidateArtifactRootV1, QueryCompleteCandidateErrorClassV1, QueryCompleteCandidateErrorV1, QueryCompletePostingRootReceiptV1,
+  QueryCompletePostingRootRequestV1, QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
 };
 use super::query_executor::{
   QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionErrorV1, QueryExecutionFieldDocumentV1,
@@ -34,12 +41,20 @@ use super::query_native_workspace::{
   NativeQueryOrderingWorkspaceErrorClassV1, NativeQueryOrderingWorkspaceErrorV1, NativeQueryOrderingWorkspaceLimitsV1,
   NativeQueryOrderingWorkspaceV1,
 };
-use super::query_planner::{CompiledRootAwareQueryPlanV1, RootAwareQueryFieldCatalogV1};
+use super::query_partial_candidate::{
+  QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootReceiptV1, QueryPartialPostingRootRequestV1,
+  QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1,
+};
+use super::query_planner::{
+  CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryPlanningCoverageGenerationV1,
+  RootAwareQueryFieldCatalogV1,
+};
 use super::read_view::ResolvedReadViewV1;
 use super::read_view_authorization::ResolvedPathAuthorizationV1;
 use super::read_view_native::{
-  NativeReadViewSourceV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
-  NativeSelectedSemanticCatalogV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
+  NativeReadViewSourceV1, NativeSelectedArtifactRootRequestV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1,
+  NativeSelectedNamespaceReadErrorV1, NativeSelectedSemanticCatalogV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1,
+  NativeSelectedSourceParserV1,
 };
 use super::scope::{EffectiveScopeCandidateV1, EffectiveScopeResolverV1, is_internal_index_path_v1, validate_canonical_absolute_path};
 
@@ -114,6 +129,10 @@ struct NativeAuthoritativeFieldPartitionInnerV1 {
 }
 
 pub struct NativeAuthoritativeFieldPartitionSourceV1 {
+  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+}
+
+pub struct NativeQueryCandidateArtifactSourceV1 {
   inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
 }
 
@@ -333,6 +352,241 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
       fields,
       maximum_path_bytes: limits.maximum_path_bytes,
       _memory: memory,
+    })
+  }
+
+  pub fn open_candidate_artifact_source(&self) -> NativeQueryCandidateArtifactSourceV1 {
+    NativeQueryCandidateArtifactSourceV1 { inner: Arc::clone(&self.inner) }
+  }
+}
+
+impl ArtifactCursorSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+  fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+    let reader =
+      self.inner.source.selected_namespace_reader(&self.inner.view, self.inner.namespace_limits).map_err(map_native_artifact_error)?;
+    reader.read_index_artifact_bytes(key, maximum_bytes)
+  }
+}
+
+impl NativeQueryCandidateArtifactSourceV1 {
+  pub fn resolve_complete_posting_root_v1(
+    &mut self,
+    request: QueryCompletePostingRootRequestV1<'_>,
+  ) -> Result<QueryCompletePostingRootReceiptV1, QueryExecutionSourceErrorV1> {
+    self.validate_target_request(request.selected_namespace_root, request.publication_sequence, request.scope_id, request.cancellation)?;
+    let generation =
+      validate_candidate_interval(request.candidate, CompiledQueryCoverageV1::Complete, request.selected_namespace_root, None)?;
+    let catalog = self.candidate_catalog(request.scope_id, request.candidate, generation)?;
+    let root = self.load_root(catalog, request.scope_id, generation, OrderedIndexRoleV1::Posting)?;
+    Ok(QueryCompletePostingRootReceiptV1 {
+      selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "complete selected NamespaceRoot")?,
+      publication_sequence: request.publication_sequence,
+      scope_id: try_clone_bytes(request.scope_id, "complete ScopeId")?,
+      index_id: try_clone_bytes(request.candidate.index_id(), "complete IndexId")?,
+      generation: generation.generation,
+      generation_manifest_hash: try_clone_bytes(&generation.manifest_hash, "complete generation manifest")?,
+      coverage_source_root: try_clone_bytes(&generation.source_namespace_root, "complete coverage NamespaceRoot")?,
+      root,
+      complete: true,
+    })
+  }
+
+  pub fn resolve_complete_scope_root_v1(
+    &mut self,
+    request: QueryCompleteScopeRootRequestV1<'_>,
+  ) -> Result<QueryCompleteScopeRootReceiptV1, QueryExecutionSourceErrorV1> {
+    self.validate_target_request(request.selected_namespace_root, request.publication_sequence, request.scope_id, request.cancellation)?;
+    let root = self.resolve_scope_root(request.scope_id, request.selected_namespace_root, None)?;
+    Ok(QueryCompleteScopeRootReceiptV1 {
+      selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "complete selected NamespaceRoot")?,
+      publication_sequence: request.publication_sequence,
+      scope_id: try_clone_bytes(request.scope_id, "complete ScopeId")?,
+      root,
+      complete: true,
+    })
+  }
+
+  fn validate_target_request(
+    &self,
+    selected_namespace_root: &[u8],
+    publication_sequence: u64,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+  ) -> Result<(), QueryExecutionSourceErrorV1> {
+    require_not_cancelled(cancellation)?;
+    require_not_cancelled(self.inner.view.cancellation())?;
+    validate_identity(scope_id, self.inner.view.hash_algorithm(), "candidate ScopeId")?;
+    if selected_namespace_root != self.inner.view.root_metadata().hash
+      || publication_sequence != self.inner.view.authority().admission.publication_sequence
+    {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_target_authority",
+        "candidate artifact request does not bind the captured selected root and publication",
+      ));
+    }
+    Ok(())
+  }
+
+  fn candidate_catalog<'a>(
+    &'a self,
+    scope_id: &[u8],
+    candidate: &CompiledQueryIndexCandidateV1,
+    generation: &QueryPlanningCoverageGenerationV1,
+  ) -> Result<&'a RootAwareQueryFieldCatalogV1, QueryExecutionSourceErrorV1> {
+    let mut selected = None;
+    for catalog in self.inner.semantic_catalog.catalogs() {
+      let position = catalog.scopes.partition_point(|scope| scope.scope_id.as_slice() < scope_id);
+      let Some(scope) = catalog.scopes.get(position).filter(|scope| scope.scope_id == scope_id) else {
+        continue;
+      };
+      let matches = scope
+        .indexes
+        .iter()
+        .filter(|index| index.index_id == candidate.index_id() && index.selected_generation.as_ref() == Some(generation))
+        .count();
+      if matches > 1 || matches == 1 && selected.replace(catalog).is_some() {
+        return Err(source_error(
+          QueryExecutionSourceErrorClassV1::Corrupt,
+          "native_candidate_catalog_ambiguous",
+          "planner-selected generation has multiple semantic catalog authorities",
+        ));
+      }
+    }
+    selected.ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_catalog_missing",
+        "planner-selected generation is absent from the captured semantic catalog",
+      )
+    })
+  }
+
+  fn load_root(
+    &self,
+    catalog: &RootAwareQueryFieldCatalogV1,
+    scope_id: &[u8],
+    generation: &QueryPlanningCoverageGenerationV1,
+    role: OrderedIndexRoleV1,
+  ) -> Result<Option<QueryCandidateArtifactRootV1>, QueryExecutionSourceErrorV1> {
+    let reader = self.inner.source.selected_namespace_reader(&self.inner.view, self.inner.namespace_limits).map_err(map_native_error)?;
+    reader
+      .load_index_artifact_root(&NativeSelectedArtifactRootRequestV1 { catalog, scope_id, selected_generation: generation, role })
+      .map_err(map_native_error)?
+      .map(candidate_artifact_root)
+      .transpose()
+  }
+
+  fn resolve_scope_root(
+    &self,
+    scope_id: &[u8],
+    source_namespace_root: &[u8],
+    source_publication_sequence: Option<u64>,
+  ) -> Result<Option<QueryCandidateArtifactRootV1>, QueryExecutionSourceErrorV1> {
+    validate_identity(source_namespace_root, self.inner.view.hash_algorithm(), "coverage NamespaceRoot")?;
+    let mut resolved: Option<Option<QueryCandidateArtifactRootV1>> = None;
+    let mut matched = false;
+    for catalog in self.inner.semantic_catalog.catalogs() {
+      let position = catalog.scopes.partition_point(|scope| scope.scope_id.as_slice() < scope_id);
+      let Some(scope) = catalog.scopes.get(position).filter(|scope| scope.scope_id == scope_id) else {
+        continue;
+      };
+      for candidate in &scope.indexes {
+        let Some(generation) = candidate.selected_generation.as_ref() else {
+          continue;
+        };
+        if generation.source_namespace_root != source_namespace_root
+          || source_publication_sequence.is_some_and(|sequence| generation.coverage_publication_sequence != sequence)
+        {
+          continue;
+        }
+        matched = true;
+        let root = self.load_root(catalog, scope_id, generation, OrderedIndexRoleV1::ScopeOrdinal)?;
+        merge_candidate_scope_root(&mut resolved, root)?;
+      }
+    }
+    if !matched {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::Unavailable,
+        "native_candidate_scope_generation_missing",
+        "captured semantic catalog has no selected generation for the requested scope interval",
+      ));
+    }
+    resolved.ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_candidate_scope_resolution",
+        "matched scope generations produced no root resolution outcome",
+      )
+    })
+  }
+}
+
+fn merge_candidate_scope_root(
+  resolved: &mut Option<Option<QueryCandidateArtifactRootV1>>,
+  root: Option<QueryCandidateArtifactRootV1>,
+) -> Result<(), QueryExecutionSourceErrorV1> {
+  match resolved.as_ref() {
+    None => *resolved = Some(root),
+    Some(previous) if previous == &root => {}
+    Some(_) => {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_scope_root_disagreement",
+        "matching planner-selected generations disagree on their dependent ScopeOrdinal root",
+      ));
+    }
+  }
+  Ok(())
+}
+
+impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+  fn resolve_partial_posting_root(
+    &mut self,
+    request: QueryPartialPostingRootRequestV1<'_>,
+  ) -> Result<QueryPartialPostingRootReceiptV1, IndexPartialSourceErrorV1> {
+    self
+      .validate_target_request(request.target_namespace_root, request.target_publication_sequence, request.scope_id, request.cancellation)
+      .map_err(map_execution_partial_error)?;
+    let generation = validate_candidate_interval(
+      request.candidate,
+      CompiledQueryCoverageV1::PartialExact,
+      request.source_namespace_root,
+      Some(request.source_publication_sequence),
+    )
+    .map_err(map_execution_partial_error)?;
+    let catalog = self.candidate_catalog(request.scope_id, request.candidate, generation).map_err(map_execution_partial_error)?;
+    let root = self.load_root(catalog, request.scope_id, generation, OrderedIndexRoleV1::Posting).map_err(map_execution_partial_error)?;
+    Ok(QueryPartialPostingRootReceiptV1 {
+      target_namespace_root: clone_partial_bytes(request.target_namespace_root, "partial target NamespaceRoot")?,
+      target_publication_sequence: request.target_publication_sequence,
+      source_namespace_root: clone_partial_bytes(request.source_namespace_root, "partial source NamespaceRoot")?,
+      source_publication_sequence: request.source_publication_sequence,
+      scope_id: clone_partial_bytes(request.scope_id, "partial ScopeId")?,
+      index_id: clone_partial_bytes(request.candidate.index_id(), "partial IndexId")?,
+      generation: generation.generation,
+      generation_manifest_hash: clone_partial_bytes(&generation.manifest_hash, "partial generation manifest")?,
+      root,
+      complete: true,
+    })
+  }
+
+  fn resolve_partial_scope_root(
+    &mut self,
+    request: QueryPartialScopeRootRequestV1<'_>,
+  ) -> Result<QueryPartialScopeRootReceiptV1, IndexPartialSourceErrorV1> {
+    require_not_cancelled(request.cancellation).map_err(map_execution_partial_error)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
+    validate_identity(request.scope_id, self.inner.view.hash_algorithm(), "partial ScopeId").map_err(map_execution_partial_error)?;
+    let root = self
+      .resolve_scope_root(request.scope_id, request.source_namespace_root, Some(request.source_publication_sequence))
+      .map_err(map_execution_partial_error)?;
+    Ok(QueryPartialScopeRootReceiptV1 {
+      source_namespace_root: clone_partial_bytes(request.source_namespace_root, "partial source NamespaceRoot")?,
+      source_publication_sequence: request.source_publication_sequence,
+      scope_id: clone_partial_bytes(request.scope_id, "partial ScopeId")?,
+      root,
+      complete: true,
     })
   }
 }
@@ -1272,6 +1526,78 @@ fn map_index_definition_error(error: super::index_definition_runtime::IndexDefin
   source_error(class, error.code(), error.context())
 }
 
+fn validate_candidate_interval<'a>(
+  candidate: &'a CompiledQueryIndexCandidateV1,
+  expected_coverage: CompiledQueryCoverageV1,
+  source_namespace_root: &[u8],
+  source_publication_sequence: Option<u64>,
+) -> Result<&'a QueryPlanningCoverageGenerationV1, QueryExecutionSourceErrorV1> {
+  let generation = candidate.selected_generation().ok_or_else(|| {
+    source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_candidate_generation_missing",
+      "candidate artifact request has no planner-selected generation",
+    )
+  })?;
+  if candidate.coverage() != expected_coverage
+    || !candidate.proven_candidate_superset()
+    || generation.source_namespace_root != source_namespace_root
+    || source_publication_sequence.is_some_and(|sequence| generation.coverage_publication_sequence != sequence)
+  {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_candidate_generation_interval",
+      "candidate artifact request disagrees with its planner-selected coverage interval",
+    ));
+  }
+  Ok(generation)
+}
+
+fn candidate_artifact_root(
+  root: super::read_view_native::NativeSelectedArtifactRootV1,
+) -> Result<QueryCandidateArtifactRootV1, QueryExecutionSourceErrorV1> {
+  let (root_key, owner_id, generation, summary) = root.into_parts();
+  QueryCandidateArtifactRootV1::new(root_key, owner_id, generation, summary).map_err(map_candidate_root_error)
+}
+
+fn map_candidate_root_error(error: QueryCompleteCandidateErrorV1) -> QueryExecutionSourceErrorV1 {
+  let class = match error.class() {
+    QueryCompleteCandidateErrorClassV1::InvalidRequest | QueryCompleteCandidateErrorClassV1::CorruptSource => {
+      QueryExecutionSourceErrorClassV1::Corrupt
+    }
+    QueryCompleteCandidateErrorClassV1::ResourceLimit => QueryExecutionSourceErrorClassV1::ResourceLimit,
+    QueryCompleteCandidateErrorClassV1::HistoricalViewUnavailable => QueryExecutionSourceErrorClassV1::Unavailable,
+    QueryCompleteCandidateErrorClassV1::Cancelled => QueryExecutionSourceErrorClassV1::Cancelled,
+    QueryCompleteCandidateErrorClassV1::Internal => QueryExecutionSourceErrorClassV1::Internal,
+  };
+  source_error(class, error.code(), error.context())
+}
+
+fn map_execution_partial_error(error: QueryExecutionSourceErrorV1) -> IndexPartialSourceErrorV1 {
+  match error.class() {
+    QueryExecutionSourceErrorClassV1::Unavailable => IndexPartialSourceErrorV1::unavailable(error.code(), error.context()),
+    QueryExecutionSourceErrorClassV1::ResourceLimit => IndexPartialSourceErrorV1::resource_limit(error.code(), error.context()),
+    QueryExecutionSourceErrorClassV1::Corrupt => IndexPartialSourceErrorV1::corrupt(error.code(), error.context()),
+    QueryExecutionSourceErrorClassV1::Cancelled => IndexPartialSourceErrorV1::cancelled(error.code(), error.context()),
+    QueryExecutionSourceErrorClassV1::Internal => IndexPartialSourceErrorV1::internal(error.code(), error.context()),
+  }
+}
+
+fn clone_partial_bytes(value: &[u8], role: &'static str) -> Result<Vec<u8>, IndexPartialSourceErrorV1> {
+  try_clone_bytes(value, role).map_err(map_execution_partial_error)
+}
+
+fn map_native_artifact_error(error: NativeSelectedNamespaceReadErrorV1) -> ArtifactCursorReadErrorV1 {
+  match error.class() {
+    NativeSelectedNamespaceReadErrorClassV1::InvalidRequest | NativeSelectedNamespaceReadErrorClassV1::Corrupt => {
+      ArtifactCursorReadErrorV1::Corrupt(error.to_string())
+    }
+    NativeSelectedNamespaceReadErrorClassV1::ResourceLimit => ArtifactCursorReadErrorV1::ResourcePressure(error.to_string()),
+    NativeSelectedNamespaceReadErrorClassV1::Unavailable => ArtifactCursorReadErrorV1::Operational(error.to_string()),
+    NativeSelectedNamespaceReadErrorClassV1::Cancelled => ArtifactCursorReadErrorV1::Cancelled,
+  }
+}
+
 fn map_position_source_error(error: QueryExecutionSourceErrorV1) -> PositionUniverseSourceErrorV1 {
   match error.class() {
     QueryExecutionSourceErrorClassV1::Unavailable => PositionUniverseSourceErrorV1::unavailable(error.to_string()),
@@ -1535,4 +1861,47 @@ fn map_native_error(error: NativeSelectedNamespaceReadErrorV1) -> QueryExecution
 
 fn source_error(class: QueryExecutionSourceErrorClassV1, code: &'static str, context: impl Into<String>) -> QueryExecutionSourceErrorV1 {
   QueryExecutionSourceErrorV1::new(class, code, context)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine::v4::index_artifact_cursor::ArtifactDirectoryRootSummaryV1;
+
+  fn root(byte: u8) -> QueryCandidateArtifactRootV1 {
+    QueryCandidateArtifactRootV1::new(
+      vec![byte; 32],
+      vec![0x22; 32],
+      7,
+      ArtifactDirectoryRootSummaryV1 {
+        live_count: 1,
+        tombstone_count: 0,
+        page_count: 1,
+        logical_bytes: 8,
+        minimum_page_id: 0,
+        maximum_page_id: 0,
+      },
+    )
+    .unwrap()
+  }
+
+  #[test]
+  fn candidate_scope_root_merge_accepts_exact_agreement_and_rejects_absence_or_identity_disagreement() {
+    let mut absent = None;
+    merge_candidate_scope_root(&mut absent, None).unwrap();
+    merge_candidate_scope_root(&mut absent, None).unwrap();
+    assert_eq!(absent, Some(None));
+
+    let expected = root(0x31);
+    let mut present = None;
+    merge_candidate_scope_root(&mut present, Some(expected.clone())).unwrap();
+    merge_candidate_scope_root(&mut present, Some(expected)).unwrap();
+    let error = merge_candidate_scope_root(&mut present, Some(root(0x32))).unwrap_err();
+    assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_candidate_scope_root_disagreement");
+
+    let error = merge_candidate_scope_root(&mut absent, Some(root(0x33))).unwrap_err();
+    assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+    assert_eq!(error.code(), "native_candidate_scope_root_disagreement");
+  }
 }
