@@ -1288,7 +1288,7 @@
                 - [x] Differentially compare direct and retained exact-partial results while proving only the retained adapter keeps query memory after return.
             - [ ] P7-3d4c: compile compatible cross-scope comparator/collation authority, read exact auxiliary values at the selected root, and retain only bounded logical top-K rows with canonical path/FileKey/revision ties.
               - [x] P7-3d4c1: compile one permanent query order from selected-root auxiliary definitions and reject incompatible corrected comparator/collation semantics within or across effective scopes.
-              - [ ] P7-3d4c2: resolve every exact match to canonical path and auxiliary values at the selected root, then transactionally retain only the bounded logical top-K through the existing order comparator.
+              - [x] P7-3d4c2: resolve every exact match to canonical path and auxiliary values at the selected root, then transactionally retain only the bounded logical top-K through the existing order comparator.
               - [ ] P7-3d4c3: prove differential ordering, multi-value/presence/numeric boundaries, malformed or stale lookup receipts, cancellation, pressure, both hash widths, deterministic ties, and exact reservation release.
             - [ ] P7-3d4d: incrementally compute count/sum/average/minimum/maximum and bounded canonical group tuples, then order aggregate groups through the existing logical-order contract without whole-result materialization.
             - [ ] P7-3d4e: prove shared/nonidentical partitions, both hash widths, all presence/multi-value/numeric boundaries, malformed receipts, duplicate/missing identities, cancellation, pressure, deterministic differential equivalence, and exact reservation release.

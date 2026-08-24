@@ -316,6 +316,8 @@ pub struct QueryExecutionSinkBatchReceiptV1<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryExecutionSinkErrorClassV1 {
   ResourceLimit,
+  HistoricalViewUnavailable,
+  CorruptSource,
   Cancelled,
   Internal,
 }
@@ -452,6 +454,8 @@ impl QueryExecutionErrorV1 {
   fn sink(error: QueryExecutionSinkErrorV1) -> Self {
     let class = match error.class {
       QueryExecutionSinkErrorClassV1::ResourceLimit => QueryExecutionErrorClassV1::ResourceLimit,
+      QueryExecutionSinkErrorClassV1::HistoricalViewUnavailable => QueryExecutionErrorClassV1::HistoricalViewUnavailable,
+      QueryExecutionSinkErrorClassV1::CorruptSource => QueryExecutionErrorClassV1::CorruptSource,
       QueryExecutionSinkErrorClassV1::Cancelled => QueryExecutionErrorClassV1::Cancelled,
       QueryExecutionSinkErrorClassV1::Internal => QueryExecutionErrorClassV1::Internal,
     };
@@ -953,11 +957,10 @@ impl QueryExecutionMatchSinkV1 for QueryResultCollectorV1 {
 fn map_collector_error(error: QueryExecutionErrorV1) -> QueryExecutionSinkErrorV1 {
   let class = match error.class {
     QueryExecutionErrorClassV1::ResourceLimit => QueryExecutionSinkErrorClassV1::ResourceLimit,
+    QueryExecutionErrorClassV1::HistoricalViewUnavailable => QueryExecutionSinkErrorClassV1::HistoricalViewUnavailable,
+    QueryExecutionErrorClassV1::CorruptSource => QueryExecutionSinkErrorClassV1::CorruptSource,
     QueryExecutionErrorClassV1::Cancelled => QueryExecutionSinkErrorClassV1::Cancelled,
-    QueryExecutionErrorClassV1::InvalidRequest
-    | QueryExecutionErrorClassV1::HistoricalViewUnavailable
-    | QueryExecutionErrorClassV1::CorruptSource
-    | QueryExecutionErrorClassV1::Internal => QueryExecutionSinkErrorClassV1::Internal,
+    QueryExecutionErrorClassV1::InvalidRequest | QueryExecutionErrorClassV1::Internal => QueryExecutionSinkErrorClassV1::Internal,
   };
   QueryExecutionSinkErrorV1 { class, code: error.code, context: error.context }
 }

@@ -1075,6 +1075,8 @@ fn authoritative_streaming_sink_rolls_back_staged_rows_on_cancellation_and_match
 fn authoritative_streaming_sink_preserves_every_sink_error_class() {
   let (plan, catalogs) = plan(CoverageFixture::Authoritative);
   for (sink_class, expected) in [
+    (QueryExecutionSinkErrorClassV1::HistoricalViewUnavailable, QueryExecutionErrorClassV1::HistoricalViewUnavailable),
+    (QueryExecutionSinkErrorClassV1::CorruptSource, QueryExecutionErrorClassV1::CorruptSource),
     (QueryExecutionSinkErrorClassV1::Cancelled, QueryExecutionErrorClassV1::Cancelled),
     (QueryExecutionSinkErrorClassV1::Internal, QueryExecutionErrorClassV1::Internal),
   ] {

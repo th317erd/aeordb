@@ -8,7 +8,7 @@ use super::position::{
   CompiledRouteOrderV1, LogicalPositionV1, PositionComparatorV1, PositionComponentStateV1, PositionComponentV1, PositionRouteV1,
   decode_logical_position,
 };
-use super::position_order::{LogicalOrderRowOwnedV1, logical_order_row_retained_bytes_v1, validate_logical_order_row_v1};
+use super::position_order::{LogicalOrderRowOwnedV1, logical_order_row_allocated_bytes_v1, validate_logical_order_row_v1};
 use super::read_view::ResolvedReadViewV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,18 @@ pub struct PositionUniverseLookupRequestV1<'a> {
 }
 
 impl<'a> PositionUniverseLookupRequestV1<'a> {
+  pub const fn new(
+    database_id: [u8; 16],
+    physical_instance_id: [u8; 16],
+    selected_root: &'a [u8],
+    order: &'a CompiledRouteOrderV1,
+    file_key_tie: &'a [u8],
+    record_revision_tie: &'a [u8],
+    maximum_row_bytes: u64,
+  ) -> Self {
+    Self { database_id, physical_instance_id, selected_root, order, file_key_tie, record_revision_tie, maximum_row_bytes }
+  }
+
   pub const fn database_id(self) -> [u8; 16] {
     self.database_id
   }
@@ -96,6 +108,57 @@ pub trait PositionUniverseSourceV1 {
     request: PositionUniverseLookupRequestV1<'_>,
     cancellation: &CancellationToken,
   ) -> Result<PositionUniverseLookupResultV1, PositionUniverseSourceErrorV1>;
+}
+
+pub fn resolve_position_universe_row_v1(
+  request: PositionUniverseLookupRequestV1<'_>,
+  source: &mut dyn PositionUniverseSourceV1,
+  cancellation: &CancellationToken,
+) -> Result<PositionUniverseLookupResultV1, PositionUniverseSourceErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(PositionUniverseSourceErrorV1::Cancelled);
+  }
+  let hash_width = request.order.hash_algorithm().hash_length();
+  if request.maximum_row_bytes == 0
+    || request.selected_root.len() != hash_width
+    || request.file_key_tie.len() != hash_width
+    || request.record_revision_tie.len() != hash_width
+  {
+    return Err(PositionUniverseSourceErrorV1::Corrupt(
+      "selected-root position lookup carries an invalid bound or identity width".to_string(),
+    ));
+  }
+  let lookup = source.resolve_position(request, cancellation)?;
+  if cancellation.is_cancelled() {
+    return Err(PositionUniverseSourceErrorV1::Cancelled);
+  }
+  let PositionUniverseLookupResultV1::Found(row) = lookup else {
+    return Ok(PositionUniverseLookupResultV1::Absent);
+  };
+  validate_logical_order_row_v1(request.order, row.as_borrowed())
+    .map_err(|error| PositionUniverseSourceErrorV1::Corrupt(format!("position universe returned a malformed row: {error}")))?;
+  let retained_bytes = logical_order_row_allocated_bytes_v1(&row)
+    .map_err(|error| PositionUniverseSourceErrorV1::ResourceLimit(format!("cannot account recomputed position row: {error}")))?;
+  if retained_bytes > request.maximum_row_bytes {
+    return Err(PositionUniverseSourceErrorV1::ResourceLimit(format!(
+      "recomputed position row requires {retained_bytes} bytes, cap is {}",
+      request.maximum_row_bytes
+    )));
+  }
+  if row.file_key_tie.as_slice() != request.file_key_tie || row.record_revision_tie.as_slice() != request.record_revision_tie {
+    return Err(PositionUniverseSourceErrorV1::Corrupt(
+      "position universe returned an identity other than the requested immutable ties".to_string(),
+    ));
+  }
+  if !recomputed_identity_is_valid(&row, request.selected_root, request.order) {
+    return Err(PositionUniverseSourceErrorV1::Corrupt(
+      "position universe returned invalid canonical path/group identity ties".to_string(),
+    ));
+  }
+  if cancellation.is_cancelled() {
+    return Err(PositionUniverseSourceErrorV1::Cancelled);
+  }
+  Ok(PositionUniverseLookupResultV1::Found(row))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,16 +266,16 @@ pub fn resolve_position_bound_v1<A>(
   validate_token_identity(&position, view.root_metadata().hash.as_slice(), order)?;
   check_cancelled(view.cancellation())?;
 
-  let request = PositionUniverseLookupRequestV1 {
-    database_id: view.database_id(),
-    physical_instance_id: view.physical_instance_id(),
-    selected_root: &view.root_metadata().hash,
+  let request = PositionUniverseLookupRequestV1::new(
+    view.database_id(),
+    view.physical_instance_id(),
+    &view.root_metadata().hash,
     order,
-    file_key_tie: position.file_key_tie(),
-    record_revision_tie: position.record_revision_tie(),
-    maximum_row_bytes: limits.maximum_row_bytes,
-  };
-  let lookup = match source.resolve_position(request, view.cancellation()) {
+    position.file_key_tie(),
+    position.record_revision_tie(),
+    limits.maximum_row_bytes,
+  );
+  let lookup = match resolve_position_universe_row_v1(request, source, view.cancellation()) {
     Ok(result) => result,
     Err(PositionUniverseSourceErrorV1::Unavailable(context)) => {
       return Err(PositionResolutionErrorV1::unavailable("historical_view_unavailable", context));
@@ -238,31 +301,6 @@ pub fn resolve_position_bound_v1<A>(
     }
   };
 
-  if let Err(source) = validate_logical_order_row_v1(order, row.as_borrowed()) {
-    return Err(PositionResolutionErrorV1::corrupt("database_corruption", format!("position universe returned a malformed row: {source}")));
-  }
-  let retained_bytes = match logical_order_row_retained_bytes_v1(row.as_borrowed()) {
-    Ok(bytes) => bytes,
-    Err(source) => {
-      return Err(PositionResolutionErrorV1::resource(
-        "position_resolution_resource",
-        format!("cannot account recomputed position row: {source}"),
-      ));
-    }
-  };
-  if retained_bytes > limits.maximum_row_bytes {
-    return Err(PositionResolutionErrorV1::resource(
-      "position_resolution_resource",
-      format!("recomputed position row requires {retained_bytes} bytes, cap is {}", limits.maximum_row_bytes),
-    ));
-  }
-  if row.file_key_tie.as_slice() != position.file_key_tie() || row.record_revision_tie.as_slice() != position.record_revision_tie() {
-    return Err(PositionResolutionErrorV1::corrupt(
-      "database_corruption",
-      "position universe returned an identity other than the requested immutable ties",
-    ));
-  }
-  validate_recomputed_identity(&row, view.root_metadata().hash.as_slice(), order)?;
   validate_recomputed_components(&position, &row)?;
   check_cancelled(view.cancellation())?;
   Ok(ResolvedPositionBoundV1 { row })
@@ -316,29 +354,18 @@ fn final_position_component(position: &LogicalPositionV1) -> PositionResolutionR
   }
 }
 
-fn validate_recomputed_identity(
-  row: &LogicalOrderRowOwnedV1,
-  selected_root: &[u8],
-  order: &CompiledRouteOrderV1,
-) -> PositionResolutionResultV1<()> {
+fn recomputed_identity_is_valid(row: &LogicalOrderRowOwnedV1, selected_root: &[u8], order: &CompiledRouteOrderV1) -> bool {
   let Some(final_component) = row.components.last() else {
-    return Err(PositionResolutionErrorV1::corrupt("database_corruption", "recomputed position row has no canonical path/group component"));
+    return false;
   };
-  let valid = match row.route {
+  match row.route {
     PositionRouteV1::AggregateGroups => {
       digest_parts(order.hash_algorithm(), &[&final_component.payload]) == row.file_key_tie && row.record_revision_tie == selected_root
     }
     PositionRouteV1::DirectoryListing | PositionRouteV1::Query | PositionRouteV1::GlobalSearch => {
       digest_parts(order.hash_algorithm(), &[b"file:", &final_component.payload]) == row.file_key_tie
     }
-  };
-  if !valid {
-    return Err(PositionResolutionErrorV1::corrupt(
-      "database_corruption",
-      "position universe returned invalid canonical path/group identity ties",
-    ));
   }
-  Ok(())
 }
 
 fn validate_recomputed_components(position: &LogicalPositionV1, row: &LogicalOrderRowOwnedV1) -> PositionResolutionResultV1<()> {

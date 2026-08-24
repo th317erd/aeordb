@@ -883,6 +883,22 @@ pub fn logical_order_row_retained_bytes_v1(row: LogicalOrderRowV1<'_>) -> Positi
   u64::try_from(total).map_err(|source| PositionOrderErrorV1::resource("position_window_buffer", source.to_string()))
 }
 
+pub fn logical_order_row_allocated_bytes_v1(row: &LogicalOrderRowOwnedV1) -> PositionOrderResultV1<u64> {
+  let mut total = size_of::<LogicalOrderRowOwnedV1>()
+    .checked_add(ALLOCATION_OVERHEAD * 3)
+    .and_then(|value| value.checked_add(row.file_key_tie.capacity()))
+    .and_then(|value| value.checked_add(row.record_revision_tie.capacity()))
+    .and_then(|value| value.checked_add(row.components.capacity().checked_mul(size_of::<LogicalOrderComponentOwnedV1>())?))
+    .ok_or_else(|| PositionOrderErrorV1::resource("position_window_buffer", "owned position-row allocation accounting overflow"))?;
+  for component in &row.components {
+    total = total
+      .checked_add(ALLOCATION_OVERHEAD)
+      .and_then(|value| value.checked_add(component.payload.capacity()))
+      .ok_or_else(|| PositionOrderErrorV1::resource("position_window_buffer", "owned position-component allocation accounting overflow"))?;
+  }
+  u64::try_from(total).map_err(|source| PositionOrderErrorV1::resource("position_window_buffer", source.to_string()))
+}
+
 fn clone_row(row: LogicalOrderRowV1<'_>) -> PositionOrderResultV1<LogicalOrderRowOwnedV1> {
   let mut components = Vec::new();
   components
