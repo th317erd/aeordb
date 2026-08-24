@@ -1305,6 +1305,11 @@
               - [x] Prove duplicate/missing identities, dishonest receipts, cancellation, and overlapping executor/sink memory pressure roll back atomically and release every reservation.
               - [x] Run affected, common, suppression, static, documentation, and contract gates, then record the adversarial architecture review.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
+            - [x] P7-3d5a: freeze one shared effective-scope winner resolver and correct every producer/native-query consumer to use the ratified one-config-per-file rule.
+            - [ ] P7-3d5b: implement one page-bounded native authoritative field-partition source over the captured selected-root reader and shared source evaluator.
+            - [ ] P7-3d5c: implement native selected-root position-universe and aggregate-input sources without adding another parser, converter, or document-identity authority.
+            - [ ] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
+            - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.

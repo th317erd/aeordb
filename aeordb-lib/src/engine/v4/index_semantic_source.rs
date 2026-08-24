@@ -14,7 +14,10 @@ use super::index_producer_source::{
 };
 use super::field_definition::decode_field_index_definition;
 use super::namespace::{SemanticAvailabilityV1, SemanticCatalogRecordV1, SemanticObjectKind, decode_semantic_object};
-use super::scope::{decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path, validate_canonical_absolute_path};
+use super::scope::{
+  EffectiveScopeCandidateV1, EffectiveScopeResolverV1, decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path,
+  validate_canonical_absolute_path,
+};
 use super::semantic_catalog::{
   SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1,
   SemanticCatalogTraversalBoundsV1, SemanticCatalogWalkStatsV1 as CatalogWalkStatsV1, validate_semantic_definition_identity_v1,
@@ -332,6 +335,58 @@ struct ApplicableScopeV1 {
   after_in_scope: bool,
 }
 
+fn apply_effective_scope_winners(
+  hash_algorithm: HashAlgorithm,
+  transition: &ResolvedIndexDocumentTransitionV1,
+  scopes: &mut Vec<ApplicableScopeV1>,
+) -> Result<(), IndexSemanticScopeReadErrorV1> {
+  let mut candidates = Vec::new();
+  candidates.try_reserve_exact(scopes.len()).map_err(|error| {
+    IndexSemanticScopeReadErrorV1::retryable(
+      "semantic_scope_winner_allocation",
+      format!("effective-scope candidate allocation failed: {error}"),
+    )
+  })?;
+  candidates.extend(
+    scopes
+      .iter()
+      .map(|scope| EffectiveScopeCandidateV1 { scope_id: &scope.scope.scope_id, encoded_definition: &scope.scope.encoded_definition }),
+  );
+  let resolver = EffectiveScopeResolverV1::from_encoded(hash_algorithm, &candidates).map_err(map_scope_winner_error)?;
+
+  let before_winner = transition
+    .before
+    .as_ref()
+    .map(|document| resolver.resolve(&document.file_record.path))
+    .transpose()
+    .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?
+    .flatten();
+  let after_winner = transition
+    .after
+    .as_ref()
+    .map(|document| resolver.resolve(&document.file_record.path))
+    .transpose()
+    .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?
+    .flatten();
+  drop(resolver);
+  drop(candidates);
+
+  for (index, scope) in scopes.iter_mut().enumerate() {
+    scope.before_in_scope = before_winner == Some(index);
+    scope.after_in_scope = after_winner == Some(index);
+  }
+  scopes.retain(|scope| scope.before_in_scope || scope.after_in_scope);
+  Ok(())
+}
+
+fn map_scope_winner_error(error: super::reader::FormatError) -> IndexSemanticScopeReadErrorV1 {
+  if error.class() == super::reader::MalformedInputClass::AllocationAmplification {
+    IndexSemanticScopeReadErrorV1::retryable(error.code(), error.context())
+  } else {
+    IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context())
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CatalogExpectedCountsV1 {
   records: u64,
@@ -393,6 +448,8 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
       })
     })?;
     validate_walk_counts(scope_stats, expected)?;
+
+    apply_effective_scope_winners(self.hash_algorithm, request.transition, &mut scopes)?;
 
     let mut value_store_count = 0usize;
     let value_stats = self.walk_catalog(catalog_root, expected, request.is_cancelled, |record| {

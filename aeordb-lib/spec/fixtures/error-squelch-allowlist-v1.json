@@ -11296,7 +11296,7 @@
     {
       "id": "esq-v1-45a4074dea57878152a3-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 54,
+      "line": 64,
       "column": 22,
       "enclosing_item": "decode_scope_definition",
       "kind": "error_conversion",
@@ -11306,7 +11306,7 @@
     {
       "id": "esq-v1-b00048294e1070ef26da-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 55,
+      "line": 65,
       "column": 21,
       "enclosing_item": "decode_scope_definition",
       "kind": "error_conversion",
@@ -11316,7 +11316,7 @@
     {
       "id": "esq-v1-7ba929f92119dd14b803-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 65,
+      "line": 75,
       "column": 83,
       "enclosing_item": "decode_scope_definition",
       "kind": "result_to_option",
@@ -11326,7 +11326,7 @@
     {
       "id": "esq-v1-c3d2081fb4a1ab6aa899-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 179,
+      "line": 268,
       "column": 25,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -11336,7 +11336,7 @@
     {
       "id": "esq-v1-a73691e70be7a8d57627-00",
       "file": "aeordb-lib/src/engine/v4/scope.rs",
-      "line": 186,
+      "line": 275,
       "column": 25,
       "enclosing_item": "u32_at",
       "kind": "panic_method",

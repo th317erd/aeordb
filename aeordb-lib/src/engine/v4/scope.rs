@@ -22,6 +22,16 @@ pub struct ScopeDefinitionV1<'a> {
   pub glob: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveScopeCandidateV1<'a> {
+  pub scope_id: &'a [u8],
+  pub encoded_definition: &'a [u8],
+}
+
+pub struct EffectiveScopeResolverV1<'definition> {
+  scopes: Vec<(usize, ScopeDefinitionV1<'definition>)>,
+}
+
 pub fn decode_scope_definition(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<ScopeDefinitionV1<'_>> {
   if value.len() > SCOPE_MAX_LENGTH {
     return Err(error(
@@ -127,8 +137,87 @@ pub fn scope_owner_overlaps_query_path(scope: &ScopeDefinitionV1<'_>, query_path
   Ok(canonical_path_contains(scope.owner_path, query_path) || canonical_path_contains(query_path, scope.owner_path))
 }
 
+/// Resolve the sole effective index-configuration scope for one regular file.
+///
+/// Direct-child and relative-glob membership is defined by each canonical
+/// ScopeDefinition. When multiple definitions match, the nearest owner wins.
+/// Two matching definitions at the same owner violate the frozen one-config-
+/// per-directory invariant and are corruption rather than an order-dependent
+/// tie. Engine-owned index paths never belong to an effective scope.
+impl<'definition> EffectiveScopeResolverV1<'definition> {
+  pub fn from_encoded(hash_algorithm: HashAlgorithm, candidates: &[EffectiveScopeCandidateV1<'definition>]) -> FormatResult<Self> {
+    let mut scopes = Vec::new();
+    scopes.try_reserve_exact(candidates.len()).map_err(|source| {
+      error(
+        MalformedInputClass::AllocationAmplification,
+        "scope_resolver_allocation",
+        format!("cannot prepare {} effective-scope candidates: {source}", candidates.len()),
+      )
+    })?;
+    for (index, candidate) in candidates.iter().enumerate() {
+      let scope = decode_scope_definition(candidate.encoded_definition, hash_algorithm)?;
+      if scope.scope_id != candidate.scope_id {
+        return Err(error(
+          MalformedInputClass::IdentityKeyOrGenerationMismatch,
+          "scope_candidate_identity",
+          "effective-scope candidate identity does not match its canonical definition",
+        ));
+      }
+      scopes.push((index, scope));
+    }
+    Ok(Self { scopes })
+  }
+
+  pub fn resolve(&self, path: &str) -> FormatResult<Option<usize>> {
+    validate_canonical_absolute_path(path)?;
+    if path == "/" {
+      return Err(error(
+        MalformedInputClass::InvalidUtf8PathGlobOrNativePath,
+        "scope_file_path_root",
+        "an effective scope can only be resolved for a regular-file path",
+      ));
+    }
+    if is_internal_index_path_v1(path) {
+      return Ok(None);
+    }
+
+    let mut winner: Option<(usize, usize, &str)> = None;
+    for (index, scope) in &self.scopes {
+      if !scope_matches_path(scope, path)? {
+        continue;
+      }
+      let owner_depth = canonical_path_depth(scope.owner_path);
+      match winner {
+        None => winner = Some((*index, owner_depth, scope.owner_path)),
+        Some((_, depth, _)) if owner_depth > depth => winner = Some((*index, owner_depth, scope.owner_path)),
+        Some((_, depth, prior_owner)) if owner_depth == depth => {
+          let context = if prior_owner == scope.owner_path {
+            format!("selected semantic catalog contains multiple matching scopes owned by {}", scope.owner_path)
+          } else {
+            format!("matching scope owners {prior_owner:?} and {:?} have the same canonical depth", scope.owner_path)
+          };
+          return Err(error(MalformedInputClass::NoncanonicalOrderOrDuplicate, "scope_winner_owner_duplicate", context));
+        }
+        Some(_) => {}
+      }
+    }
+
+    Ok(winner.map(|(index, _, _)| index))
+  }
+}
+
+pub fn is_internal_index_path_v1(path: &str) -> bool {
+  path.split('/').filter(|segment| !segment.is_empty()).enumerate().any(|(index, segment)| {
+    (index == 0 && segment == ".aeordb-system") || matches!(segment, ".aeordb-config" | ".aeordb-indexes" | ".aeordb-logs")
+  })
+}
+
 fn canonical_path_contains(parent: &str, child: &str) -> bool {
   parent == "/" || parent == child || child.strip_prefix(parent).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn canonical_path_depth(path: &str) -> usize {
+  path.split('/').filter(|segment| !segment.is_empty()).count()
 }
 
 pub(crate) fn validate_canonical_absolute_path(path: &str) -> FormatResult<()> {

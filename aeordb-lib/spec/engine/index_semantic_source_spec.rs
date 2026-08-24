@@ -16,7 +16,7 @@ use aeordb::engine::v4::index_semantic_source::{
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, decode_semantic_object, encode_semantic_state_object};
-use aeordb::engine::v4::scope::decode_scope_definition;
+use aeordb::engine::v4::scope::{EffectiveScopeCandidateV1, EffectiveScopeResolverV1, decode_scope_definition};
 use aeordb::engine::v4::semantic_store::V4SemanticObjectStore;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
 use aeordb::engine::{HashAlgorithm, StorageEngine};
@@ -62,6 +62,10 @@ fn semantic_definition(class: u16, semantic_id: &[u8], definition: &[u8]) -> Vec
 }
 
 fn scope_definition(owner_path: &str, glob: Option<&str>) -> Vec<u8> {
+  scope_definition_for(ALGORITHM, owner_path, glob)
+}
+
+fn scope_definition_for(algorithm: HashAlgorithm, owner_path: &str, glob: Option<&str>) -> Vec<u8> {
   let glob = glob.unwrap_or("");
   let mut bytes = vec![0; 64 + owner_path.len() + glob.len()];
   let total_length = u32::try_from(bytes.len()).unwrap();
@@ -79,7 +83,7 @@ fn scope_definition(owner_path: &str, glob: Option<&str>) -> Vec<u8> {
   let owner_end = 64 + owner_path.len();
   bytes[64..owner_end].copy_from_slice(owner_path.as_bytes());
   bytes[owner_end..].copy_from_slice(glob.as_bytes());
-  decode_scope_definition(&bytes, ALGORITHM).unwrap();
+  decode_scope_definition(&bytes, algorithm).unwrap();
   bytes
 }
 
@@ -243,23 +247,23 @@ fn build_complete_graph(
 }
 
 fn aggregate_limit_graph() -> (CompleteGraph, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
-  let scope_one = scope_definition("/", None);
+  let scope_one = scope_definition("/", Some("**/*.json"));
   let scope_one_id = decode_scope_definition(&scope_one, ALGORITHM).unwrap().scope_id;
-  let scope_two = scope_definition("/", Some("*.json"));
+  let scope_two = scope_definition("/docs", None);
   let scope_two_id = decode_scope_definition(&scope_two, ALGORITHM).unwrap().scope_id;
 
   let mut value_one = definition_fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid.bin");
   value_one[32..64].copy_from_slice(&scope_one_id);
   let value_one_id = decode_value_store_definition(&value_one, ALGORITHM).unwrap().value_store_id;
   let mut value_two = definition_fixture("value-store-definition-v1", "avst-blake3-256-json-corrected-valid.bin");
-  value_two[32..64].copy_from_slice(&scope_one_id);
+  value_two[32..64].copy_from_slice(&scope_two_id);
   let value_two_id = decode_value_store_definition(&value_two, ALGORITHM).unwrap().value_store_id;
 
   let mut field_one = definition_fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
   field_one[32..64].copy_from_slice(&value_one_id);
   let field_one_id = decode_field_index_definition(&field_one, ALGORITHM).unwrap().index_id;
   let mut field_two = definition_fixture("field-index-definition-v1", "afix-blake3-256-bool_order_v1-valid.bin");
-  field_two[32..64].copy_from_slice(&value_one_id);
+  field_two[32..64].copy_from_slice(&value_two_id);
   let field_two_id = decode_field_index_definition(&field_two, ALGORITHM).unwrap().index_id;
 
   let definitions = vec![
@@ -323,6 +327,12 @@ fn transition_at(path: &str) -> ResolvedIndexDocumentTransitionV1 {
   }
 }
 
+fn transition_move(before_path: &str, after_path: &str) -> ResolvedIndexDocumentTransitionV1 {
+  let before = transition_at(before_path).after;
+  let after = transition_at(after_path).after;
+  ResolvedIndexDocumentTransitionV1 { before, after }
+}
+
 fn ordinal_request<'request>(
   transition: &'request ResolvedIndexDocumentTransitionV1,
   before_in_scope: bool,
@@ -338,6 +348,81 @@ fn ordinal_request<'request>(
     before_in_scope,
     after_in_scope,
     is_cancelled,
+  }
+}
+
+fn resolve_scope_fixture(
+  algorithm: HashAlgorithm,
+  path: &str,
+  definitions: &[Vec<u8>],
+) -> Result<Option<usize>, aeordb::engine::v4::reader::FormatError> {
+  let identities =
+    definitions.iter().map(|definition| decode_scope_definition(definition, algorithm).unwrap().scope_id).collect::<Vec<_>>();
+  let candidates = definitions
+    .iter()
+    .zip(&identities)
+    .map(|(definition, identity)| EffectiveScopeCandidateV1 { scope_id: identity, encoded_definition: definition })
+    .collect::<Vec<_>>();
+  EffectiveScopeResolverV1::from_encoded(algorithm, &candidates)?.resolve(path)
+}
+
+#[test]
+fn effective_scope_winner_is_nearest_order_independent_and_hash_width_exact() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let root = scope_definition_for(algorithm, "/", Some("**/*.json"));
+    let docs = scope_definition_for(algorithm, "/docs", None);
+    let docs_glob = scope_definition_for(algorithm, "/docs", Some("*.json"));
+    let nested_direct = scope_definition_for(algorithm, "/docs/nested", None);
+
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/file.json", &[root.clone(), docs.clone()]).unwrap(), Some(1));
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/file.json", &[docs.clone(), root.clone()]).unwrap(), Some(0));
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/file.json", &[root.clone(), docs_glob]).unwrap(), Some(1));
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/nested/file.json", &[root.clone(), docs]).unwrap(), Some(0));
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/nested/file.json", &[root.clone(), nested_direct]).unwrap(), Some(1));
+    assert_eq!(resolve_scope_fixture(algorithm, "/plain.txt", &[root]).unwrap(), None);
+    assert_eq!(resolve_scope_fixture(algorithm, "/plain.txt", &[]).unwrap(), None);
+  }
+}
+
+#[test]
+fn effective_scope_winner_rejects_ambiguous_or_malformed_authority_and_excludes_internal_paths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let all = scope_definition_for(algorithm, "/", Some("**"));
+    let duplicate_owner = scope_definition_for(algorithm, "/", Some("**/*.json"));
+    let error = resolve_scope_fixture(algorithm, "/docs/file.json", &[all.clone(), duplicate_owner.clone()]).unwrap_err();
+    assert_eq!(error.code(), "scope_winner_owner_duplicate");
+
+    let identity = decode_scope_definition(&all, algorithm).unwrap().scope_id;
+    let foreign_identity = vec![0x55; algorithm.hash_length()];
+    let mismatch = [EffectiveScopeCandidateV1 { scope_id: &foreign_identity, encoded_definition: &all }];
+    let error = EffectiveScopeResolverV1::from_encoded(algorithm, &mismatch).err().expect("foreign identity must fail");
+    assert_eq!(error.code(), "scope_candidate_identity");
+    assert_ne!(identity, foreign_identity);
+
+    let mut malformed = all.clone();
+    malformed[56] = 1;
+    let malformed_candidate = [EffectiveScopeCandidateV1 { scope_id: &identity, encoded_definition: &malformed }];
+    assert_eq!(
+      EffectiveScopeResolverV1::from_encoded(algorithm, &malformed_candidate).err().expect("malformed definition must fail").code(),
+      "scope_reserved"
+    );
+    assert_eq!(resolve_scope_fixture(algorithm, "/", &[all.clone()]).unwrap_err().code(), "scope_file_path_root");
+    assert_eq!(resolve_scope_fixture(algorithm, "docs/file.json", &[all.clone()]).unwrap_err().code(), "scope_owner_noncanonical");
+
+    for path in [
+      "/.aeordb-system/users/a.json",
+      "/docs/.aeordb-config/indexes.json",
+      "/docs/.aeordb-indexes/field/page",
+      "/docs/.aeordb-logs/index.log",
+    ] {
+      assert_eq!(resolve_scope_fixture(algorithm, path, &[all.clone()]).unwrap(), None, "internal path {path} entered a scope");
+    }
+    assert_eq!(
+      resolve_scope_fixture(algorithm, "/docs/.aeordb-indexes/page.json", &[all.clone(), duplicate_owner]).unwrap(),
+      None,
+      "internal-path exclusion must precede ambiguous scope inspection"
+    );
+    assert_eq!(resolve_scope_fixture(algorithm, "/docs/.aeordb-permissions", &[all]).unwrap(), Some(0));
   }
 }
 
@@ -921,12 +1006,12 @@ fn definition_byte_limit_accepts_exact_fit_and_rejects_one_byte_less() {
 }
 
 #[test]
-fn overlapping_scopes_resolve_independent_ordinals_and_exact_aggregate_limits() {
+fn moved_documents_resolve_independent_old_and_new_winning_scopes() {
   let (graph, scope_ids, value_store_ids, field_index_ids) = aggregate_limit_graph();
   let expected_ordinals = BTreeMap::from([(scope_ids[0].clone(), 81), (scope_ids[1].clone(), 82)]);
   let ordinals = MappedOrdinals { ordinals: expected_ordinals.clone(), calls: Mutex::new(Vec::new()) };
   let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory(16 * 1_024 * 1_024), &graph.objects, &ordinals);
-  let transition = transition();
+  let transition = transition_move("/legacy.json", "/docs/doc.json");
 
   let read = source
     .resolve_scopes(IndexSemanticScopeReadRequestV1 {
@@ -959,6 +1044,33 @@ fn overlapping_scopes_resolve_independent_ordinals_and_exact_aggregate_limits() 
 }
 
 #[test]
+fn immediate_parent_scope_is_the_only_winner_over_a_matching_ancestor_glob() {
+  let (graph, scope_ids, _, _) = aggregate_limit_graph();
+  let expected_ordinals = BTreeMap::from([(scope_ids[0].clone(), 81), (scope_ids[1].clone(), 82)]);
+  let ordinals = MappedOrdinals { ordinals: expected_ordinals, calls: Mutex::new(Vec::new()) };
+  let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory(16 * 1_024 * 1_024), &graph.objects, &ordinals);
+  let transition = transition_at("/docs/doc.json");
+
+  let read = source
+    .resolve_scopes(IndexSemanticScopeReadRequestV1 {
+      operation_id: [0x4e; 16],
+      source_publication_sequence: 7,
+      semantic_state_root: &graph.state_root,
+      transition: &transition,
+      limits: IndexSemanticScopeLimitsV1::new(2, 2, 2, graph.definition_bytes).unwrap(),
+      is_cancelled: &|| false,
+    })
+    .unwrap();
+  let IndexSemanticScopeResolutionV1::Complete { scope_work, .. } = read.resolution() else {
+    panic!("winner graph resolved as content-only")
+  };
+
+  assert_eq!(scope_work.len(), 1);
+  assert_eq!(scope_work[0].scope.scope_id, scope_ids[1]);
+  assert_eq!(ordinals.calls.lock().unwrap().as_slice(), &[scope_ids[1].clone()]);
+}
+
+#[test]
 fn concrete_catalog_enforces_scope_value_store_and_field_index_limits_independently() {
   for (max_scopes, max_value_stores, max_field_indexes, expected_resource) in
     [(1, 2, 2, "scopes"), (2, 1, 2, "value stores"), (2, 2, 1, "field indexes")]
@@ -967,7 +1079,7 @@ fn concrete_catalog_enforces_scope_value_store_and_field_index_limits_independen
     let ordinals =
       MappedOrdinals { ordinals: BTreeMap::from([(scope_ids[0].clone(), 81), (scope_ids[1].clone(), 82)]), calls: Mutex::new(Vec::new()) };
     let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, memory(16 * 1_024 * 1_024), &graph.objects, &ordinals);
-    let transition = transition();
+    let transition = transition_move("/legacy.json", "/docs/doc.json");
 
     let error = source
       .resolve_scopes(IndexSemanticScopeReadRequestV1 {
