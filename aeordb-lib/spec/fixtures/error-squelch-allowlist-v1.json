@@ -11096,7 +11096,7 @@
     {
       "id": "esq-v1-c5b88f8b202e46d7f394-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 127,
+      "line": 149,
       "column": 14,
       "enclosing_item": "create_platform_private_directory",
       "kind": "error_conversion",
@@ -11106,7 +11106,7 @@
     {
       "id": "esq-v1-a0530b4116e361ad3211-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 293,
+      "line": 315,
       "column": 32,
       "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
       "kind": "error_conversion",
@@ -11116,7 +11116,7 @@
     {
       "id": "esq-v1-445946dba0f6ed3bdfaf-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 305,
+      "line": 327,
       "column": 27,
       "enclosing_item": "impl WindowsFileSecurityDescriptor::read",
       "kind": "error_conversion",
@@ -11126,7 +11126,7 @@
     {
       "id": "esq-v1-6b45de7ab935cbed79d5-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 352,
+      "line": 374,
       "column": 24,
       "enclosing_item": "windows_security_descriptor_sddl",
       "kind": "error_conversion",
@@ -11136,7 +11136,7 @@
     {
       "id": "esq-v1-7ea1f5df7810154f80a9-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 361,
+      "line": 383,
       "column": 14,
       "enclosing_item": "windows_security_descriptor_sddl",
       "kind": "error_conversion",
@@ -11146,7 +11146,7 @@
     {
       "id": "esq-v1-b13cda4b1379ecd882d1-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 390,
+      "line": 412,
       "column": 29,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",
@@ -11156,7 +11156,7 @@
     {
       "id": "esq-v1-4257c9a923d8b34a4448-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 396,
+      "line": 418,
       "column": 5,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",
@@ -11166,7 +11166,7 @@
     {
       "id": "esq-v1-e07c5a0ee4b92331b1cc-00",
       "file": "aeordb-lib/src/engine/v4/private_workspace.rs",
-      "line": 426,
+      "line": 448,
       "column": 13,
       "enclosing_item": "windows_current_user_sid",
       "kind": "error_conversion",

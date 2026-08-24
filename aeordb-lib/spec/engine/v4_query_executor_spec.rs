@@ -84,6 +84,7 @@ struct SquelchingScopeFeed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PartitionFeedFault {
   None,
+  FieldlessFirstFilenameDocument,
   OmitSecondSizeDocument,
   DuplicateFirstFilenameDocument,
   ReverseFilenameDocuments,
@@ -219,11 +220,20 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionFeed {
       if self.fault == PartitionFeedFault::OmitSecondSizeDocument && request.field_name == "@size" && document_index == 1 {
         continue;
       }
-      let mut scope_id = scope_id.clone();
-      if self.fault == PartitionFeedFault::WrongFilenameScope && request.field_name == "@filename" && document_index == 0 {
-        scope_id = vec![0x99; scope_id.len()];
+      let mut scope_id = Some(scope_id.clone());
+      let mut fieldless = false;
+      if self.fault == PartitionFeedFault::FieldlessFirstFilenameDocument && request.field_name == "@filename" && document_index == 0 {
+        scope_id = None;
+        fieldless = true;
       }
-      let (state, canonical_values) = match document.fields.get(request.field_name).cloned().unwrap_or(FieldFixture::Missing) {
+      if self.fault == PartitionFeedFault::WrongFilenameScope && request.field_name == "@filename" && document_index == 0 {
+        scope_id = Some(vec![0x99; self.root.len()]);
+      }
+      let (state, canonical_values) = match if fieldless {
+        FieldFixture::Missing
+      } else {
+        document.fields.get(request.field_name).cloned().unwrap_or(FieldFixture::Missing)
+      } {
         FieldFixture::Missing => (QueryExecutionFieldStateV1::Missing, Vec::new()),
         FieldFixture::Values(values)
         | FieldFixture::SquelchedValues(values)
@@ -280,8 +290,9 @@ impl QueryAuthoritativeFieldPartitionCursorV1 for PartitionCursor {
     let mut scope_document_counts = self
       .requested_scope_ids
       .iter()
-      .map(|scope_id| self.rows.iter().filter(|row| row.scope_id == *scope_id).count() as u64)
+      .map(|scope_id| self.rows.iter().filter(|row| row.scope_id.as_ref() == Some(scope_id)).count() as u64)
       .collect::<Vec<_>>();
+    let unconfigured_document_count = self.rows.iter().filter(|row| row.scope_id.is_none()).count() as u64;
     if self.dishonest_receipt {
       scope_document_counts[0] = scope_document_counts[0].saturating_add(1);
     }
@@ -291,6 +302,7 @@ impl QueryAuthoritativeFieldPartitionCursorV1 for PartitionCursor {
       field_name: self.field_name.clone(),
       scope_ids: self.requested_scope_ids.clone(),
       scope_document_counts,
+      unconfigured_document_count,
       document_count: self.rows.len() as u64,
       complete: true,
     })
@@ -1170,6 +1182,33 @@ fn partitioned_authoritative_execution_joins_nonidentical_field_scopes_by_file_k
   .unwrap();
 
   assert_eq!(execution.matches().iter().map(|row| row.file_key().to_vec()).collect::<Vec<_>>(), expected);
+  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn partitioned_authoritative_execution_retains_documents_whose_effective_scope_omits_one_field() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, catalog("@size", "u64_order_v1", CoverageFixture::Authoritative)]);
+  let mut source = partition_feed(documents(), &direct_scope_id, &alternate_scope_id, PartitionFeedFault::FieldlessFirstFilenameDocument);
+  let memory = memory(64 << 20);
+
+  let execution = execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    source: &mut source,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    limits: limits(),
+  })
+  .unwrap();
+
   assert_eq!(source.opened_fields, ["@filename", "@size"]);
   drop(execution);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);

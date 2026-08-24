@@ -185,7 +185,9 @@ pub trait QueryAuthoritativeScopeSourceV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryExecutionFieldDocumentV1 {
-  pub scope_id: Vec<u8>,
+  /// The effective scope only when it defines this field. `None` retains a
+  /// document whose effective configuration omits the field as `Missing`.
+  pub scope_id: Option<Vec<u8>>,
   pub file_key: Vec<u8>,
   pub record_revision: Vec<u8>,
   pub path: String,
@@ -214,6 +216,7 @@ pub struct QueryExecutionFieldPartitionReceiptV1 {
   pub field_name: String,
   pub scope_ids: Vec<Vec<u8>>,
   pub scope_document_counts: Vec<u64>,
+  pub unconfigured_document_count: u64,
   pub document_count: u64,
   pub complete: bool,
 }
@@ -692,6 +695,7 @@ struct OpenPartitionCursorV1<'prepared, 'plan, 'value, 'field> {
   head: Option<QueryExecutionFieldDocumentV1>,
   prior_file_key: Option<Vec<u8>>,
   observed_scope_counts: Vec<u64>,
+  observed_unconfigured_documents: u64,
   observed_documents: u64,
   exhausted: bool,
 }
@@ -1136,6 +1140,7 @@ pub fn execute_authoritative_partitioned_query_into_v1(
       head: None,
       prior_file_key: None,
       observed_scope_counts,
+      observed_unconfigured_documents: 0,
       observed_documents: 0,
       exhausted: false,
     });
@@ -1217,32 +1222,43 @@ pub fn execute_authoritative_partitioned_query_into_v1(
         active.prior_file_key.as_deref(),
       )?;
       validate_partition_head_memory(request.plan.hash_algorithm(), document, request.limits)?;
-      work.charge(binary_search_work_bound(active.prepared.scopes.len())?)?;
-      let scope_index = match active.prepared.scopes.binary_search_by(|scope| scope.scope_id.as_slice().cmp(&document.scope_id)) {
-        Ok(index) => index,
-        Err(insertion_index) => {
-          return Err(QueryExecutionErrorV1::corrupt(
-            "query_execution_partition_scope",
-            format!("authoritative field row names a scope outside its compiled field partition at insertion index {insertion_index}"),
-          ));
-        }
-      };
       active.observed_documents = active
         .observed_documents
         .checked_add(1)
         .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_document_count", "field document count overflowed"))?;
-      active.observed_scope_counts[scope_index] = active.observed_scope_counts[scope_index]
-        .checked_add(1)
-        .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_document_count", "field scope count overflowed"))?;
-      evaluate_partition_field_document(
-        &active.prepared.scopes[scope_index].field,
-        document,
-        &mut predicate_matches,
-        request.limits,
-        semantic_dynamic_bytes,
-        &mut examined_field_values,
-        &mut work,
-      )?;
+      if let Some(scope_id) = document.scope_id.as_deref() {
+        work.charge(binary_search_work_bound(active.prepared.scopes.len())?)?;
+        let scope_index = match active.prepared.scopes.binary_search_by(|scope| scope.scope_id.as_slice().cmp(scope_id)) {
+          Ok(index) => index,
+          Err(insertion_index) => {
+            return Err(QueryExecutionErrorV1::corrupt(
+              "query_execution_partition_scope",
+              format!("authoritative field row names a scope outside its compiled field partition at insertion index {insertion_index}"),
+            ));
+          }
+        };
+        active.observed_scope_counts[scope_index] = active.observed_scope_counts[scope_index]
+          .checked_add(1)
+          .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_document_count", "field scope count overflowed"))?;
+        evaluate_partition_field_document(
+          &active.prepared.scopes[scope_index].field,
+          document,
+          &mut predicate_matches,
+          request.limits,
+          semantic_dynamic_bytes,
+          &mut examined_field_values,
+          &mut work,
+        )?;
+      } else if document.state == QueryExecutionFieldStateV1::Missing && document.canonical_values.is_empty() {
+        active.observed_unconfigured_documents = active.observed_unconfigured_documents.checked_add(1).ok_or_else(|| {
+          QueryExecutionErrorV1::resource("query_execution_document_count", "unconfigured field document count overflowed")
+        })?;
+      } else {
+        return Err(QueryExecutionErrorV1::corrupt(
+          "query_execution_partition_unconfigured_state",
+          "a document without a field-specific scope must report the field as Missing",
+        ));
+      }
     }
 
     if evaluate_expression(request.plan.expression(), &predicate_matches)? {
@@ -2708,7 +2724,7 @@ fn validate_partition_head_memory(
   limits: QueryExecutionLimitsV1,
 ) -> Result<(), QueryExecutionErrorV1> {
   let hash_width = hash_algorithm.hash_length();
-  if document.scope_id.len() != hash_width || document.scope_id.iter().all(|byte| *byte == 0) {
+  if document.scope_id.as_ref().is_some_and(|scope_id| scope_id.len() != hash_width || scope_id.iter().all(|byte| *byte == 0)) {
     return Err(QueryExecutionErrorV1::corrupt("query_execution_partition_scope", "authoritative field row has an invalid ScopeId"));
   }
   let maximum_values = usize::try_from(limits.counts.maximum_field_values)
@@ -2731,7 +2747,7 @@ fn validate_partition_head_memory(
     ));
   }
   let retained_bytes = (size_of::<QueryExecutionFieldDocumentV1>() as u64)
-    .checked_add(document.scope_id.capacity() as u64)
+    .checked_add(document.scope_id.as_ref().map_or(0, |scope_id| scope_id.capacity()) as u64)
     .and_then(|bytes| bytes.checked_add(document.file_key.capacity() as u64))
     .and_then(|bytes| bytes.checked_add(document.record_revision.capacity() as u64))
     .and_then(|bytes| bytes.checked_add(document.path.capacity() as u64))
@@ -2817,6 +2833,7 @@ fn validate_partition_receipt(
     || receipt.field_name != cursor.prepared.field_name
     || !scope_ids_match
     || receipt.scope_document_counts != cursor.observed_scope_counts
+    || receipt.unconfigured_document_count != cursor.observed_unconfigured_documents
     || receipt.document_count != cursor.observed_documents
   {
     return Err(QueryExecutionErrorV1::corrupt(

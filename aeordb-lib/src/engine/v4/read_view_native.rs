@@ -13,7 +13,7 @@ use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, Memor
 use crate::engine::permission_resolver::{evaluate_ordered_path_permissions, normalize_permission_path};
 use crate::engine::permissions::{PathPermissions, PermissionLink};
 use crate::engine::path_utils::normalize_path;
-use crate::engine::{CompressionAlgorithm, EntryType};
+use crate::engine::{CompressionAlgorithm, EntryType, HashAlgorithm};
 
 use super::database_header::SelectedDatabaseHeaderV4;
 use super::entity::EntryTypeV4;
@@ -370,6 +370,10 @@ impl NativeSelectedSourceEvaluationV1 {
   pub const fn outcome(&self) -> &NativeSelectedSourceOutcomeV1 {
     &self.outcome
   }
+
+  pub(crate) fn into_outcome(self) -> NativeSelectedSourceOutcomeV1 {
+    self.outcome
+  }
 }
 
 pub struct NativeSelectedSourceEvaluatorV1<'reader, 'view, 'definition> {
@@ -463,6 +467,7 @@ impl From<ReadViewAuthorizationFailureV1> for NativeSelectedNamespaceReadErrorV1
 pub struct NativeSelectedNamespaceFileRowV1 {
   file_key: Vec<u8>,
   record_revision: Vec<u8>,
+  entity_version: u8,
   file_record: FileRecord,
   authority_binding: [u8; 32],
 }
@@ -474,6 +479,10 @@ impl NativeSelectedNamespaceFileRowV1 {
 
   pub fn record_revision(&self) -> &[u8] {
     &self.record_revision
+  }
+
+  pub const fn entity_version(&self) -> u8 {
+    self.entity_version
   }
 
   pub fn path(&self) -> &str {
@@ -901,6 +910,53 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     }
     self.check_cancelled()?;
     self.build_identity_result(state.found, result_memory)
+  }
+
+  pub(crate) fn restore_ordered_file_row(
+    &self,
+    file_key: &[u8],
+    record_revision: &[u8],
+    entity_version: u8,
+    encoded_file_record: &[u8],
+  ) -> Result<NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    self.validate_identity(file_key, "FileKey")?;
+    self.validate_identity(record_revision, "RecordRevision")?;
+    if !matches!(entity_version, 0 | 1) {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_ordered_file_version",
+        "ordered query workspace contains an unreadable FileRecord version",
+      ));
+    }
+    if encoded_file_record.len() > MAX_FILE_RECORD_ENTITY_BYTES {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_namespace_ordered_file_bytes",
+        "ordered query workspace FileRecord exceeds the native entity bound",
+      ));
+    }
+    if digest_parts(self.view.hash_algorithm(), &[b"filec:", encoded_file_record]) != record_revision {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_ordered_revision",
+        "ordered query workspace FileRecord does not match its RecordRevision",
+      ));
+    }
+    let file_record = deserialize_file_record_v0_v1(encoded_file_record, self.view.hash_algorithm(), entity_version)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_ordered_file_record", error))?;
+    self.validate_path(&file_record.path, false)?;
+    self.validate_authorized_scope(&file_record.path)?;
+    if digest_parts(self.view.hash_algorithm(), &[b"file:", file_record.path.as_bytes()]) != file_key {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_ordered_file_key",
+        "ordered query workspace FileRecord path does not match its FileKey",
+      ));
+    }
+    Ok(NativeSelectedNamespaceFileRowV1 {
+      file_key: try_clone_selected_bytes(file_key, "ordered FileKey")?,
+      record_revision: try_clone_selected_bytes(record_revision, "ordered RecordRevision")?,
+      entity_version,
+      file_record,
+      authority_binding: self.authority_binding(),
+    })
   }
 
   pub fn load_planner_catalogs(
@@ -1553,6 +1609,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     Ok(NativeSelectedNamespaceFileRowV1 {
       file_key,
       record_revision: try_clone_selected_bytes(&reference.hash, "record revision")?,
+      entity_version: loaded.entity_version,
       file_record: loaded.record,
       authority_binding: self.authority_binding(),
     })
@@ -2412,7 +2469,7 @@ impl NativeReadViewSourceV1 {
     {
       return Err(selected_corrupt(expected_path, "selected FileRecord representation or identity is invalid"));
     }
-    let record = FileRecord::deserialize(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
+    let record = deserialize_file_record_v0_v1(&entity.stored_value, header.header.hash_algorithm, entity.entity_version)
       .map_err(|error| selected_corrupt(expected_path, error))?;
     if record.path != expected_path
       || record.total_size != entry.total_size
@@ -2957,6 +3014,10 @@ fn next_segment_below<'a>(parent: &str, target: &'a str) -> Option<&'a str> {
   }
   let remainder = &suffix[1..];
   (!remainder.is_empty()).then(|| remainder.split('/').next()).flatten()
+}
+
+fn deserialize_file_record_v0_v1(encoded: &[u8], hash_algorithm: HashAlgorithm, entity_version: u8) -> Result<FileRecord, String> {
+  FileRecord::deserialize(encoded, hash_algorithm.hash_length(), entity_version).map_err(|error| error.to_string())
 }
 
 fn ensure_selected_not_cancelled(cancellation: &CancellationToken) -> Result<(), ReadViewAuthorizationFailureV1> {

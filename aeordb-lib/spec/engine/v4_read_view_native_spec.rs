@@ -55,6 +55,11 @@ use aeordb::engine::v4::read_view_authorization::{
   ResolvedPathAuthorizationV1,
 };
 use aeordb::engine::v4::query_planner::{QueryPlanningCoverageGenerationV1, RootAwareQueryFieldCatalogV1};
+use aeordb::engine::v4::query_executor::{
+  QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldStateV1,
+  QueryExecutionSourceErrorClassV1,
+};
+use aeordb::engine::v4::query_native_source::{NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
@@ -1685,6 +1690,171 @@ fn selected_source_fixture_with_scopes(
   SelectedSourceFixture { _directory: directory, path, source, memory, pins, cancellation, view, graph, field_name, chunk_offset }
 }
 
+struct NativePartitionFixture {
+  _directory: tempfile::TempDir,
+  source: NativeAuthoritativeFieldPartitionSourceV1,
+  backing_source: Arc<NativeReadViewSourceV1>,
+  memory: Arc<MemoryCoordinator>,
+  pins: RootReadPinCoordinatorV1,
+  cancellation: CancellationToken,
+  selected_root: Vec<u8>,
+  publication_sequence: u64,
+  scope_id: Vec<u8>,
+  field_name: String,
+  maximum_documents: u64,
+}
+
+impl NativePartitionFixture {
+  fn open_cursor(
+    &mut self,
+    maximum_path_bytes: u64,
+  ) -> Box<dyn aeordb::engine::v4::query_executor::QueryAuthoritativeFieldPartitionCursorV1> {
+    let scope_ids = [self.scope_id.as_slice()];
+    self
+      .source
+      .open_field_partition(QueryExecutionFieldPartitionOpenRequestV1 {
+        selected_namespace_root: &self.selected_root,
+        publication_sequence: self.publication_sequence,
+        query_path: "/docs",
+        field_name: &self.field_name,
+        scope_ids: &scope_ids,
+        maximum_documents: self.maximum_documents,
+        maximum_values_per_document: 16,
+        maximum_canonical_value_bytes_per_document: 1024 * 1024,
+        maximum_path_bytes,
+        cancellation: &self.cancellation,
+      })
+      .unwrap()
+  }
+
+  fn assert_released(self) {
+    let Self { source, backing_source, memory, pins, .. } = self;
+    drop(source);
+    drop(backing_source);
+    assert_eq!(pins.active_pin_count().unwrap(), 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+fn native_partition_fixture(
+  value_store_fixture: &str,
+  primary_scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+  body: &[u8],
+) -> NativePartitionFixture {
+  let fixture = selected_source_fixture_with_scopes(value_store_fixture, primary_scope, extra_scopes, body, true);
+  let reader = fixture.reader();
+  let semantic_catalog =
+    reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
+  drop(reader);
+  let SelectedSourceFixture { _directory, source: backing_source, memory, pins, cancellation, view, graph, field_name, .. } = fixture;
+  let selected_root = view.root_metadata().hash.clone();
+  let publication_sequence = view.authority().admission.publication_sequence;
+  let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
+    NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
+    8,
+    64 * 1024 * 1024,
+    8 * 1024 * 1024,
+    2,
+    2,
+  )
+  .unwrap();
+  let source = NativeAuthoritativeFieldPartitionSourceV1::build(
+    backing_source.as_ref().clone(),
+    view,
+    semantic_catalog,
+    "/docs",
+    _directory.path(),
+    limits,
+    &cancellation,
+  )
+  .unwrap();
+  NativePartitionFixture {
+    _directory,
+    source,
+    backing_source,
+    memory,
+    pins,
+    cancellation,
+    selected_root,
+    publication_sequence,
+    scope_id: graph.scope_id,
+    field_name,
+    maximum_documents: 8,
+  }
+}
+
+fn native_partition_many_fixture(
+  algorithm: HashAlgorithm,
+  file_record_version: u8,
+  btree: bool,
+  names: &[&str],
+) -> (NativePartitionFixture, Vec<(Vec<u8>, String)>) {
+  let (directory, _path, publisher) = publisher(algorithm);
+  let first = publisher.publish(&first_request(algorithm)).unwrap();
+  let (content_root, identities) =
+    publish_file_tree(&publisher, algorithm, first.namespace_root.root_hash, file_record_version, btree, names, FileTreeCorruption::None);
+  let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
+  let graph = complete_semantic_graph_with_scope(algorithm, semantic_scope_definition(algorithm, "/docs", Some("*.json")));
+  let selected_root = publish_complete_semantic_root(&publisher, algorithm, &content_root_value, content_root, &graph);
+  let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(256 * 1024 * 1024, 512 * 1024 * 1024, 1, 1024 * 1024).unwrap()));
+  let backing_source = Arc::new(NativeReadViewSourceV1::new(Arc::new(publisher), Arc::clone(&memory), 86_400_000));
+  let pins = RootReadPinCoordinatorV1::new(Arc::clone(&memory), algorithm, 8, 16).unwrap();
+  let current = CurrentReadAuthorizationV1::new(
+    CurrentPathAuthorizationV1::for_root("/docs/", CrudlifyOp::List),
+    ReadViewCredentialKindV1::Ordinary,
+    ReadViewConcealmentV1::Conceal,
+  );
+  let authorizer =
+    ReadViewPermissionAuthorizerV1::new(CapturedCurrentPathAuthorizationSourceV1::new(Ok(current)), backing_source.as_ref().clone());
+  let resolver = ReadViewResolverV1::new(Arc::clone(&backing_source), pins.clone(), all_capabilities_profile());
+  let cancellation = CancellationToken::new();
+  let view = resolver.resolve(ReadViewSelectorV1::ExplicitRoot(&selected_root), &authorizer, &cancellation).unwrap();
+  let publication_sequence = view.authority().admission.publication_sequence;
+  let reader = backing_source
+    .selected_namespace_reader(&view, NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap())
+    .unwrap();
+  let semantic_catalog = reader.load_planner_catalogs("/docs", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+  drop(reader);
+  let maximum_documents = u64::try_from(names.len()).unwrap();
+  let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
+    NativeSelectedNamespaceLimitsV1::new(1, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
+    maximum_documents,
+    64 * 1024 * 1024,
+    8 * 1024 * 1024,
+    2,
+    2,
+  )
+  .unwrap();
+  let source = NativeAuthoritativeFieldPartitionSourceV1::build(
+    backing_source.as_ref().clone(),
+    view,
+    semantic_catalog,
+    "/docs",
+    directory.path(),
+    limits,
+    &cancellation,
+  )
+  .unwrap();
+  let expected = identities.into_iter().map(|(path, _)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), path)).collect::<Vec<_>>();
+  (
+    NativePartitionFixture {
+      _directory: directory,
+      source,
+      backing_source,
+      memory,
+      pins,
+      cancellation,
+      selected_root,
+      publication_sequence,
+      scope_id: graph.scope_id,
+      field_name: "@hash".to_string(),
+      maximum_documents,
+    },
+    expected,
+  )
+}
+
 struct ParsedNullParser;
 
 impl IndexParserExecutorV1 for ParsedNullParser {
@@ -2525,6 +2695,98 @@ fn selected_semantic_catalog_retains_fieldless_nearer_scopes_for_effective_resol
 
   drop(selected);
   drop(reader);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_authoritative_partition_streams_selected_root_values_and_exact_receipts() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let scope = semantic_scope_definition(algorithm, "/docs", Some("*.json"));
+  let mut fixture = native_partition_fixture("json-corrected", scope, &[], br#"{"messages":[{"user":"selected"}]}"#);
+  assert_eq!(fixture.source.document_count(), 1);
+  assert!(fixture.source.workspace_bytes() > 0);
+
+  let mut cursor = fixture.open_cursor(u16::MAX as u64);
+  let document = cursor.next_document(&fixture.cancellation).unwrap().unwrap();
+  assert_eq!(document.scope_id.as_deref(), Some(fixture.scope_id.as_slice()));
+  assert_eq!(document.path, "/docs/messages.json");
+  assert_eq!(document.state, QueryExecutionFieldStateV1::Values);
+  assert_eq!(document.canonical_values.len(), 1);
+  assert!(cursor.next_document(&fixture.cancellation).unwrap().is_none());
+  let receipt = cursor.finish().unwrap();
+  assert_eq!(receipt.selected_namespace_root, fixture.selected_root);
+  assert_eq!(receipt.publication_sequence, fixture.publication_sequence);
+  assert_eq!(receipt.field_name, fixture.field_name);
+  assert_eq!(receipt.scope_ids, vec![fixture.scope_id.clone()]);
+  assert_eq!(receipt.scope_document_counts, vec![1]);
+  assert_eq!(receipt.unconfigured_document_count, 0);
+  assert_eq!(receipt.document_count, 1);
+  assert!(receipt.complete);
+  drop(cursor);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_authoritative_partition_reorders_one_document_pages_by_file_key() {
+  let names = ["a.json", "b.json", "c.json", "d.json", "e.json", "f.json", "g.json"];
+  let (mut fixture, mut expected) = native_partition_many_fixture(HashAlgorithm::Blake3_256, 1, true, &names);
+  let path_page_order = expected.iter().map(|(file_key, _)| file_key.clone()).collect::<Vec<_>>();
+  expected.sort_by(|left, right| left.0.cmp(&right.0));
+  assert_ne!(path_page_order, expected.iter().map(|(file_key, _)| file_key.clone()).collect::<Vec<_>>());
+
+  let mut cursor = fixture.open_cursor(u16::MAX as u64);
+  let mut observed = Vec::new();
+  while let Some(document) = cursor.next_document(&fixture.cancellation).unwrap() {
+    observed.push((document.file_key, document.path));
+  }
+  assert_eq!(observed, expected);
+  let receipt = cursor.finish().unwrap();
+  assert_eq!(receipt.scope_document_counts, vec![names.len() as u64]);
+  assert_eq!(receipt.unconfigured_document_count, 0);
+  assert_eq!(receipt.document_count, names.len() as u64);
+  drop(cursor);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_authoritative_partition_retains_fieldless_effective_scope_as_missing() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let primary = semantic_scope_definition(algorithm, "/", Some("**/*.json"));
+  let nearer = semantic_scope_definition(algorithm, "/docs", None);
+  let mut fixture = native_partition_fixture("metadata-hash-corrected", primary, &[nearer], b"{}");
+
+  let mut cursor = fixture.open_cursor(u16::MAX as u64);
+  let document = cursor.next_document(&fixture.cancellation).unwrap().unwrap();
+  assert_eq!(document.scope_id, None);
+  assert_eq!(document.path, "/docs/messages.json");
+  assert_eq!(document.state, QueryExecutionFieldStateV1::Missing);
+  assert!(document.canonical_values.is_empty());
+  assert!(cursor.next_document(&fixture.cancellation).unwrap().is_none());
+  let receipt = cursor.finish().unwrap();
+  assert_eq!(receipt.scope_document_counts, vec![0]);
+  assert_eq!(receipt.unconfigured_document_count, 1);
+  assert_eq!(receipt.document_count, 1);
+  drop(cursor);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_authoritative_partition_poisoned_after_post_advance_failure() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let scope = semantic_scope_definition(algorithm, "/docs", Some("*.json"));
+  let mut fixture = native_partition_fixture("metadata-hash-corrected", scope, &[], b"{}");
+
+  let mut cursor = fixture.open_cursor(1);
+  let first = cursor.next_document(&fixture.cancellation).unwrap_err();
+  assert_eq!(first.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+  assert_eq!(first.code(), "native_partition_document_path");
+  let retry = cursor.next_document(&fixture.cancellation).unwrap_err();
+  assert_eq!(retry.class(), QueryExecutionSourceErrorClassV1::Internal);
+  assert_eq!(retry.code(), "native_partition_cursor_failed");
+  let finish = cursor.finish().unwrap_err();
+  assert_eq!(finish.class(), QueryExecutionSourceErrorClassV1::Internal);
+  assert_eq!(finish.code(), "native_partition_cursor_failed");
+  drop(cursor);
   fixture.assert_released();
 }
 

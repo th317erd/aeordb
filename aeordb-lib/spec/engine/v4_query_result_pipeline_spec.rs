@@ -396,7 +396,7 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionSource {
           other => panic!("unexpected partition field {other}"),
         };
         QueryExecutionFieldDocumentV1 {
-          scope_id: scope_id.clone(),
+          scope_id: Some(scope_id.clone()),
           file_key: document.file_key.clone(),
           record_revision: document.revision.clone(),
           path: document.path.clone(),
@@ -453,7 +453,7 @@ impl QueryAuthoritativeFieldPartitionCursorV1 for PartitionCursor {
     let mut scope_document_counts = self
       .requested_scope_ids
       .iter()
-      .map(|scope_id| self.rows.iter().filter(|row| row.scope_id == *scope_id).count() as u64)
+      .map(|scope_id| self.rows.iter().filter(|row| row.scope_id.as_ref() == Some(scope_id)).count() as u64)
       .collect::<Vec<_>>();
     if self.dishonest_receipt {
       scope_document_counts[0] += 1;
@@ -464,6 +464,7 @@ impl QueryAuthoritativeFieldPartitionCursorV1 for PartitionCursor {
       field_name: self.field_name.clone(),
       scope_ids: self.requested_scope_ids.clone(),
       scope_document_counts,
+      unconfigured_document_count: self.rows.iter().filter(|row| row.scope_id.is_none()).count() as u64,
       document_count: self.rows.len() as u64,
       complete: true,
     })

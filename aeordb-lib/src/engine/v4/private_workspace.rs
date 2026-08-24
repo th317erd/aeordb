@@ -5,6 +5,8 @@ use std::path::Path;
 
 #[cfg(windows)]
 use std::mem::size_of;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use thiserror::Error;
 
@@ -81,6 +83,26 @@ pub(crate) fn create_private_directory_synced(path: &Path, parent: &Path) -> Res
   create_platform_private_directory(path)?;
   validate_private_directory(path, "owned workspace directory")?;
   sync_directory_native(parent).map_err(|error| PrivateWorkspaceErrorV1::Durability(Box::new(error)))
+}
+
+pub(crate) fn secure_platform_private_directory(path: &Path) -> Result<(), PrivateWorkspaceErrorV1> {
+  #[cfg(unix)]
+  fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    .map_err(|source| PrivateWorkspaceErrorV1::Io { operation: "private directory permissions", source })?;
+  #[cfg(windows)]
+  set_windows_private_security(path, WindowsPrivateObjectKind::Directory, "private directory security")?;
+  validate_private_directory(path, "secured private directory")
+}
+
+pub(crate) fn create_private_regular_file(path: &Path, role: &str) -> Result<fs::File, PrivateWorkspaceErrorV1> {
+  let mut options = fs::OpenOptions::new();
+  options.create_new(true).read(true).write(true);
+  #[cfg(unix)]
+  options.mode(0o600);
+  let file = options.open(path).map_err(|source| PrivateWorkspaceErrorV1::Io { operation: "private regular-file creation", source })?;
+  secure_platform_private_regular_file(path)?;
+  validate_private_regular_file(path, &file, role)?;
+  Ok(file)
 }
 
 pub(crate) fn validate_private_directory(path: &Path, role: &str) -> Result<(), PrivateWorkspaceErrorV1> {

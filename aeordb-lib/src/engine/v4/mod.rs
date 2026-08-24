@@ -127,6 +127,8 @@ pub mod query_aggregate_execution;
 pub mod query_candidate_composition;
 pub mod query_complete_candidate;
 pub mod query_executor;
+pub mod query_native_source;
+pub(crate) mod query_native_workspace;
 pub mod query_order_execution;
 pub mod query_partial_candidate;
 pub mod query_planner;
