@@ -328,9 +328,10 @@ fn compile_corrected_tokens(converter_id: u16, text: &str, maximum_values: usize
   let folded = if converter_id == 0x0009 { fold_characters(text).map_err(text_fold_error)? } else { Vec::new() };
   let mut postings = Vec::new();
   let estimated_postings = folded.len().saturating_mul(3).saturating_add(1);
-  postings.try_reserve(maximum_values.min(estimated_postings)).map_err(token_reserve_error)?;
+  let initial_capacity = maximum_values.min(estimated_postings);
+  postings.try_reserve(initial_capacity).map_err(token_reserve_error)?;
   let mut seen = HashSet::new();
-  seen.try_reserve(maximum_values).map_err(token_reserve_error)?;
+  seen.try_reserve(initial_capacity).map_err(token_reserve_error)?;
 
   match converter_id {
     0x0009 => {
@@ -466,6 +467,9 @@ fn push_corrected_token(
   }
   if postings.len() == postings.capacity() {
     postings.try_reserve(1).map_err(token_reserve_error)?;
+  }
+  if seen.len() == seen.capacity() {
+    seen.try_reserve(1).map_err(token_reserve_error)?;
   }
   let mut seen_key = Vec::new();
   seen_key.try_reserve_exact(posting_key.len()).map_err(token_reserve_error)?;

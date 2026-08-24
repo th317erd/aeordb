@@ -615,6 +615,7 @@ impl CompiledQueryAuxiliaryFieldPlanV1 {
 pub struct CompiledRootAwareQueryPlanV1 {
   database_id: [u8; 16],
   physical_instance_id: [u8; 16],
+  hash_algorithm: HashAlgorithm,
   selected_namespace_root: Vec<u8>,
   semantic_state_root: Vec<u8>,
   publication_sequence: u64,
@@ -634,6 +635,10 @@ impl CompiledRootAwareQueryPlanV1 {
 
   pub const fn physical_instance_id(&self) -> [u8; 16] {
     self.physical_instance_id
+  }
+
+  pub const fn hash_algorithm(&self) -> HashAlgorithm {
+    self.hash_algorithm
   }
 
   pub fn semantic_state_root(&self) -> &[u8] {
@@ -828,6 +833,7 @@ pub fn plan_root_aware_query_v1(request: &QueryPlanningRequestV1<'_>) -> QueryPl
   Ok(CompiledRootAwareQueryPlanV1 {
     database_id: request.context.database_id(),
     physical_instance_id: request.context.physical_instance_id(),
+    hash_algorithm: request.context.hash_algorithm(),
     selected_namespace_root: clone_bytes(request.context.selected_namespace_root(), "selected root")?,
     semantic_state_root: clone_bytes(request.context.semantic_state_root(), "semantic root")?,
     publication_sequence: request.context.publication_sequence(),

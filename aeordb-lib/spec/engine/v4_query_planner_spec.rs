@@ -567,6 +567,7 @@ fn sha512_hash_literals_compile_to_full_width_bytes() {
   });
   let plan =
     plan_root_aware_query_v1(&request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false)).unwrap();
+  assert_eq!(plan.hash_algorithm(), algorithm);
   let canonical = plan.predicates()[0].scopes()[0].candidates()[0].compiled_literals()[0].canonical_value();
   assert_eq!(&canonical[..5], &[0x08, 64, 0, 0, 0]);
   assert_eq!(&canonical[5..], &[0xab; 64]);

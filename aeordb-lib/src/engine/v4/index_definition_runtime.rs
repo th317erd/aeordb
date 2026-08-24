@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::mem::size_of;
 
 use crate::engine::HashAlgorithm;
 
@@ -9,6 +10,12 @@ use super::index_converter::{CompiledPostingKeyV1, ConverterRuntimeV1, IndexSema
 use super::index_semantic_registry::{StrategyRegistryEntryV1, strategy_registry_entry};
 use super::index_source::ValueStoreRuntimeV1;
 use super::value_store::{ValueStoreDefinitionV1, ValueStoreSemanticFamily, decode_value_store_definition};
+
+const INDEX_RUNTIME_ACCOUNTING_FIXED_BYTES: u64 = 64 * 1_024;
+const INDEX_COMPILE_ACCOUNTING_FIXED_BYTES: u64 = 16 * 1_024;
+const INDEX_COMPILE_CANONICAL_BYTE_MULTIPLIER: u64 = 64;
+const INDEX_COMPILE_POSTING_BYTE_MULTIPLIER: u64 = 4;
+const INDEX_COMPILE_POSTING_ENTRY_BYTES: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexDefinitionErrorClassV1 {
@@ -79,20 +86,21 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
     field_definition_value: &'field [u8],
     hash_algorithm: HashAlgorithm,
   ) -> IndexDefinitionResultV1<Self> {
-    let value_store_definition = decode_value_store_definition(value_store_value, hash_algorithm).map_err(|source| {
-      error(
-        IndexDefinitionErrorClassV1::UnsupportedDefinition,
-        "index_value_store_definition_invalid",
-        format!("{}: {}", source.code(), source.context()),
-      )
-    })?;
-    let field_definition = decode_field_index_definition(field_definition_value, hash_algorithm).map_err(|source| {
-      error(
-        IndexDefinitionErrorClassV1::UnsupportedDefinition,
-        "index_field_definition_invalid",
-        format!("{}: {}", source.code(), source.context()),
-      )
-    })?;
+    let (value_store_definition, field_definition) = decode_definitions(value_store_value, field_definition_value, hash_algorithm)?;
+    Self::from_definitions(value_store_definition, field_definition, hash_algorithm.hash_length())
+  }
+
+  pub(crate) fn from_encoded_bounded(
+    value_store_value: &'value [u8],
+    field_definition_value: &'field [u8],
+    hash_algorithm: HashAlgorithm,
+    maximum_retained_bytes: u64,
+  ) -> IndexDefinitionResultV1<Self> {
+    let (value_store_definition, field_definition) = decode_definitions(value_store_value, field_definition_value, hash_algorithm)?;
+    let retained_bytes = Self::maximum_retained_bytes_for_definitions(&value_store_definition, &field_definition)?;
+    if retained_bytes > maximum_retained_bytes {
+      return Err(accounting_error("compiled index runtime exceeds its remaining admitted memory"));
+    }
     Self::from_definitions(value_store_definition, field_definition, hash_algorithm.hash_length())
   }
 
@@ -176,6 +184,58 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
 
   pub fn supports_operation(&self, bit: u8) -> bool {
     bit < 64 && self.strategy.operations & (1u64 << bit) != 0
+  }
+
+  /// Conservative retained-memory bound for one compiled definition runtime.
+  pub(crate) fn maximum_retained_bytes(&self) -> IndexDefinitionResultV1<u64> {
+    Self::maximum_retained_bytes_for_definitions(self.value_store.definition(), &self.field_definition)
+  }
+
+  fn maximum_retained_bytes_for_definitions(
+    value_store: &ValueStoreDefinitionV1<'_>,
+    field_definition: &FieldIndexDefinitionV1<'_>,
+  ) -> IndexDefinitionResultV1<u64> {
+    let value_store_bytes =
+      ValueStoreRuntimeV1::maximum_retained_bytes_for_definition(value_store).map_err(|source| accounting_error(source.to_string()))?;
+    value_store_bytes
+      .checked_add(INDEX_RUNTIME_ACCOUNTING_FIXED_BYTES)
+      .and_then(|bytes| bytes.checked_add(size_of::<Self>() as u64))
+      .and_then(|bytes| bytes.checked_add(field_definition.index_id.capacity() as u64))
+      .and_then(|bytes| bytes.checked_add(field_definition.converter.converter_fingerprint.capacity() as u64))
+      .ok_or_else(|| accounting_error("compiled index runtime retained-byte bound overflowed"))
+  }
+
+  /// Conservative peak workspace for compiling one canonical source value.
+  ///
+  /// The bound covers canonical decode/copies, token folding, fallibly-grown
+  /// posting/deduplication tables, and the returned compiled document while it
+  /// is inspected by the query executor.
+  pub(crate) fn maximum_compile_source_value_bytes(&self, canonical_value_bytes: u64) -> IndexDefinitionResultV1<u64> {
+    let converter = self.converter.definition();
+    let maximum_postings = if self.converter.registry().tokenizing {
+      canonical_value_bytes.saturating_mul(3).saturating_add(1).min(u64::from(converter.max_output_values))
+    } else {
+      1
+    }
+    .min(u64::from(self.field_definition.max_terms_per_document))
+    .min(u64::from(self.field_definition.max_postings_per_document));
+    let maximum_posting_key_bytes =
+      canonical_value_bytes.saturating_mul(4).saturating_add(64).min(u64::from(converter.max_output_value_bytes));
+    let maximum_posting_bytes = converter
+      .max_total_output_bytes
+      .min(self.field_definition.max_canonical_posting_bytes_per_document)
+      .min(maximum_postings.saturating_mul(maximum_posting_key_bytes));
+
+    INDEX_COMPILE_ACCOUNTING_FIXED_BYTES
+      .checked_add(
+        canonical_value_bytes
+          .checked_mul(INDEX_COMPILE_CANONICAL_BYTE_MULTIPLIER)
+          .ok_or_else(|| accounting_error("canonical source-value workspace bound overflowed"))?,
+      )
+      .and_then(|bytes| bytes.checked_add(maximum_postings.checked_mul(INDEX_COMPILE_POSTING_ENTRY_BYTES)?))
+      .and_then(|bytes| bytes.checked_add(maximum_posting_bytes.checked_mul(INDEX_COMPILE_POSTING_BYTE_MULTIPLIER)?))
+      .and_then(|bytes| bytes.checked_add(size_of::<CompiledIndexDocumentV1>() as u64))
+      .ok_or_else(|| accounting_error("compiled source-value workspace bound overflowed"))
   }
 
   pub fn compile_source_values(&self, canonical_values: &[Vec<u8>]) -> IndexDefinitionResultV1<CompiledIndexDocumentV1> {
@@ -280,4 +340,30 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
 
 fn error(class: IndexDefinitionErrorClassV1, code: &'static str, context: impl Into<String>) -> IndexDefinitionErrorV1 {
   IndexDefinitionErrorV1 { class, code, context: context.into() }
+}
+
+fn decode_definitions<'value, 'field>(
+  value_store_value: &'value [u8],
+  field_definition_value: &'field [u8],
+  hash_algorithm: HashAlgorithm,
+) -> IndexDefinitionResultV1<(ValueStoreDefinitionV1<'value>, FieldIndexDefinitionV1<'field>)> {
+  let value_store_definition = decode_value_store_definition(value_store_value, hash_algorithm).map_err(|source| {
+    error(
+      IndexDefinitionErrorClassV1::UnsupportedDefinition,
+      "index_value_store_definition_invalid",
+      format!("{}: {}", source.code(), source.context()),
+    )
+  })?;
+  let field_definition = decode_field_index_definition(field_definition_value, hash_algorithm).map_err(|source| {
+    error(
+      IndexDefinitionErrorClassV1::UnsupportedDefinition,
+      "index_field_definition_invalid",
+      format!("{}: {}", source.code(), source.context()),
+    )
+  })?;
+  Ok((value_store_definition, field_definition))
+}
+
+fn accounting_error(context: impl Into<String>) -> IndexDefinitionErrorV1 {
+  error(IndexDefinitionErrorClassV1::ResourceLimit, "index_runtime_memory_accounting", context)
 }

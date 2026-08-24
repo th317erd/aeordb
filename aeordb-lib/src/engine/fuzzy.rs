@@ -172,6 +172,18 @@ where
 /// Returns a value in [0.0, 1.0] where 1.0 means identical strings.
 /// Applies the Winkler prefix bonus (up to 4 characters, scaling factor 0.1).
 pub fn jaro_winkler(a: &str, b: &str) -> f64 {
+  match jaro_winkler_controlled(a, b, || Ok::<(), std::convert::Infallible>(())) {
+    Ok(value) => value,
+    Err(never) => match never {},
+  }
+}
+
+/// Compute Jaro-Winkler similarity while allowing callers to interrupt
+/// bounded character-comparison work.
+pub(crate) fn jaro_winkler_controlled<E, F>(a: &str, b: &str, mut check: F) -> Result<f64, E>
+where
+  F: FnMut() -> Result<(), E>,
+{
   let a_chars: Vec<char> = a.chars().collect();
   let b_chars: Vec<char> = b.chars().collect();
   let a_len = a_chars.len();
@@ -179,11 +191,11 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
 
   // Both empty
   if a_len == 0 && b_len == 0 {
-    return 1.0;
+    return Ok(1.0);
   }
   // One empty
   if a_len == 0 || b_len == 0 {
-    return 0.0;
+    return Ok(0.0);
   }
 
   let match_window = (a_len.max(b_len) / 2).saturating_sub(1);
@@ -199,6 +211,7 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
     let end = (i + match_window + 1).min(b_len);
 
     for j in start..end {
+      check()?;
       if !b_matched[j] && a_chars[i] == b_chars[j] {
         a_matched[i] = true;
         b_matched[j] = true;
@@ -209,17 +222,19 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
   }
 
   if matches == 0 {
-    return 0.0;
+    return Ok(0.0);
   }
 
   // Count transpositions among matched characters
   let mut transpositions = 0usize;
   let mut k = 0usize;
   for i in 0..a_len {
+    check()?;
     if !a_matched[i] {
       continue;
     }
     while !b_matched[k] {
+      check()?;
       k += 1;
     }
     if a_chars[i] != b_chars[k] {
@@ -232,8 +247,15 @@ pub fn jaro_winkler(a: &str, b: &str) -> f64 {
   let jaro = (m / a_len as f64 + m / b_len as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0;
 
   // Winkler prefix bonus
-  let prefix_len = a_chars.iter().zip(b_chars.iter()).take(4).take_while(|(a, b)| a == b).count();
+  let mut prefix_len = 0usize;
+  for (left, right) in a_chars.iter().zip(b_chars.iter()).take(4) {
+    check()?;
+    if left != right {
+      break;
+    }
+    prefix_len += 1;
+  }
 
   let p = 0.1;
-  jaro + prefix_len as f64 * p * (1.0 - jaro)
+  Ok(jaro + prefix_len as f64 * p * (1.0 - jaro))
 }
