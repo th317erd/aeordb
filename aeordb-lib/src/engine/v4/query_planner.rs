@@ -12,6 +12,7 @@ use crate::engine::path_utils::normalize_path;
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
 use super::field_definition::decode_field_index_definition;
+use super::hash::IncrementalDigestV1;
 use super::index_converter::{CompiledSourceValueV1, IndexSemanticErrorClassV1};
 use super::index_coverage_planner::{
   IndexCoverageGenerationHealthV1, IndexCoverageGenerationV1, IndexCoveragePlanV1, IndexCoveragePlanningRequestV1,
@@ -47,6 +48,7 @@ const PAGE_WORK_WEIGHT: u64 = 16;
 const POSTING_WORK_WEIGHT: u64 = 2;
 const CARDINALITY_WORK_WEIGHT: u64 = 1;
 const AUTHORITATIVE_WORK_WEIGHT: u64 = 4;
+const QUERY_FINGERPRINT_DOMAIN_V1: &[u8] = b"aeordb.query-plan.v1\0";
 
 #[derive(Clone, Copy, Debug)]
 pub struct QueryPlanningContextV1<'a> {
@@ -630,6 +632,7 @@ pub struct CompiledRootAwareQueryPlanV1 {
   auxiliary_fields: Vec<CompiledQueryAuxiliaryFieldPlanV1>,
   total_literal_bytes: u64,
   estimated_work: u64,
+  query_fingerprint: Vec<u8>,
 }
 
 impl CompiledRootAwareQueryPlanV1 {
@@ -679,6 +682,10 @@ impl CompiledRootAwareQueryPlanV1 {
 
   pub const fn estimated_work(&self) -> u64 {
     self.estimated_work
+  }
+
+  pub fn query_fingerprint(&self) -> &[u8] {
+    &self.query_fingerprint
   }
 
   pub fn selected_namespace_root(&self) -> &[u8] {
@@ -833,6 +840,7 @@ pub fn plan_root_aware_query_v1(request: &QueryPlanningRequestV1<'_>) -> QueryPl
       estimated_work = estimated_work.saturating_add(scope.driver.estimated_work());
     }
   }
+  let query_fingerprint = query_fingerprint(request)?;
 
   Ok(CompiledRootAwareQueryPlanV1 {
     database_id: request.context.database_id(),
@@ -848,7 +856,149 @@ pub fn plan_root_aware_query_v1(request: &QueryPlanningRequestV1<'_>) -> QueryPl
     auxiliary_fields,
     total_literal_bytes: admission.total_literal_bytes,
     estimated_work,
+    query_fingerprint,
   })
+}
+
+fn query_fingerprint(request: &QueryPlanningRequestV1<'_>) -> QueryPlanningResultV1<Vec<u8>> {
+  let algorithm = request.context.hash_algorithm();
+  let mut digest = IncrementalDigestV1::new(algorithm);
+  digest.update(QUERY_FINGERPRINT_DOMAIN_V1);
+  digest.update(&algorithm.to_u16().to_le_bytes());
+  digest.update(&request.context.database_id());
+  digest.update(&request.context.physical_instance_id());
+  fingerprint_framed(&mut digest, request.context.selected_namespace_root())?;
+  fingerprint_framed(&mut digest, request.context.semantic_state_root())?;
+  digest.update(&request.context.publication_sequence().to_le_bytes());
+  fingerprint_framed(&mut digest, request.query_path.as_bytes())?;
+  digest.update(&fingerprint_count(request.result_limit)?.to_le_bytes());
+  fingerprint_expression(&mut digest, request.expression, algorithm)?;
+
+  digest.update(&fingerprint_count(request.sort_fields.len())?.to_le_bytes());
+  for field in request.sort_fields {
+    fingerprint_framed(&mut digest, canonical_field_name(&field.field_name)?.as_bytes())?;
+    digest.update(&[match field.direction {
+      QuerySortDirectionV1::Ascending => 0,
+      QuerySortDirectionV1::Descending => 1,
+    }]);
+  }
+  digest.update(&fingerprint_count(request.aggregate_fields.len())?.to_le_bytes());
+  for field in request.aggregate_fields {
+    fingerprint_framed(&mut digest, canonical_field_name(&field.field_name)?.as_bytes())?;
+    digest.update(&[match field.kind {
+      QueryAggregateKindV1::Sum => 0,
+      QueryAggregateKindV1::Average => 1,
+      QueryAggregateKindV1::Minimum => 2,
+      QueryAggregateKindV1::Maximum => 3,
+      QueryAggregateKindV1::Count => 4,
+    }]);
+  }
+  digest.update(&fingerprint_count(request.group_fields.len())?.to_le_bytes());
+  for field in request.group_fields {
+    fingerprint_framed(&mut digest, canonical_field_name(field)?.as_bytes())?;
+  }
+  Ok(digest.finalize())
+}
+
+fn fingerprint_expression(
+  digest: &mut IncrementalDigestV1,
+  expression: &QueryExpressionV1,
+  algorithm: HashAlgorithm,
+) -> QueryPlanningResultV1<()> {
+  match expression {
+    QueryExpressionV1::Field(predicate) => {
+      digest.update(&[0]);
+      let field_name = canonical_field_name(&predicate.field_name)?;
+      fingerprint_framed(digest, field_name.as_bytes())?;
+      fingerprint_operation(digest, field_name, &predicate.operation, algorithm)
+    }
+    QueryExpressionV1::And(children) | QueryExpressionV1::Or(children) => {
+      digest.update(&[if matches!(expression, QueryExpressionV1::And(_)) { 1 } else { 2 }]);
+      digest.update(&fingerprint_count(children.len())?.to_le_bytes());
+      for child in children {
+        fingerprint_expression(digest, child, algorithm)?;
+      }
+      Ok(())
+    }
+    QueryExpressionV1::Not(child) => {
+      digest.update(&[3]);
+      fingerprint_expression(digest, child, algorithm)
+    }
+  }
+}
+
+fn fingerprint_operation(
+  digest: &mut IncrementalDigestV1,
+  field_name: &str,
+  operation: &QueryPredicateOperationV1,
+  algorithm: HashAlgorithm,
+) -> QueryPlanningResultV1<()> {
+  digest.update(&[match operation {
+    QueryPredicateOperationV1::Eq(_) => 0,
+    QueryPredicateOperationV1::In(_) => 1,
+    QueryPredicateOperationV1::Gt(_) => 2,
+    QueryPredicateOperationV1::Lt(_) => 3,
+    QueryPredicateOperationV1::Between(_, _) => 4,
+    QueryPredicateOperationV1::Contains(_) => 5,
+    QueryPredicateOperationV1::Similar { .. } => 6,
+    QueryPredicateOperationV1::Phonetic(_) => 7,
+    QueryPredicateOperationV1::Fuzzy { .. } => 8,
+    QueryPredicateOperationV1::Match(_) => 9,
+  }]);
+  match operation {
+    QueryPredicateOperationV1::In(values) => {
+      digest.update(&fingerprint_count(values.len())?.to_le_bytes());
+      for value in values {
+        fingerprint_literal(digest, field_name, value, algorithm)?;
+      }
+    }
+    QueryPredicateOperationV1::Between(left, right) => {
+      fingerprint_literal(digest, field_name, left, algorithm)?;
+      fingerprint_literal(digest, field_name, right, algorithm)?;
+    }
+    QueryPredicateOperationV1::Similar { value, threshold } => {
+      fingerprint_literal(digest, field_name, value, algorithm)?;
+      digest.update(&threshold.to_bits().to_le_bytes());
+    }
+    QueryPredicateOperationV1::Fuzzy { value, algorithm: fuzzy_algorithm, edits } => {
+      fingerprint_literal(digest, field_name, value, algorithm)?;
+      digest.update(&[match fuzzy_algorithm {
+        QueryFuzzyAlgorithmV1::DamerauLevenshtein => 0,
+        QueryFuzzyAlgorithmV1::JaroWinkler => 1,
+      }]);
+      match edits {
+        Some(edits) => digest.update(&[1, *edits]),
+        None => digest.update(&[0]),
+      }
+    }
+    QueryPredicateOperationV1::Eq(value)
+    | QueryPredicateOperationV1::Gt(value)
+    | QueryPredicateOperationV1::Lt(value)
+    | QueryPredicateOperationV1::Contains(value)
+    | QueryPredicateOperationV1::Phonetic(value)
+    | QueryPredicateOperationV1::Match(value) => fingerprint_literal(digest, field_name, value, algorithm)?,
+  }
+  Ok(())
+}
+
+fn fingerprint_literal(
+  digest: &mut IncrementalDigestV1,
+  field_name: &str,
+  value: &CanonicalConfigValueV1,
+  algorithm: HashAlgorithm,
+) -> QueryPlanningResultV1<()> {
+  let encoded = encode_query_literal(field_name, value, algorithm)?;
+  fingerprint_framed(digest, &encoded)
+}
+
+fn fingerprint_framed(digest: &mut IncrementalDigestV1, value: &[u8]) -> QueryPlanningResultV1<()> {
+  digest.update(&fingerprint_count(value.len())?.to_le_bytes());
+  digest.update(value);
+  Ok(())
+}
+
+fn fingerprint_count(value: usize) -> QueryPlanningResultV1<u64> {
+  u64::try_from(value).map_err(|source| resource_error("query_fingerprint_count", format!("query fingerprint length overflowed: {source}")))
 }
 
 struct AdmissionStateV1 {
@@ -962,6 +1112,18 @@ fn preflight_literal(
   admission: &mut AdmissionStateV1,
   hash_algorithm: HashAlgorithm,
 ) -> QueryPlanningResultV1<()> {
+  let encoded = encode_query_literal(field_name, value, hash_algorithm)?;
+  admission.total_literal_bytes = admission
+    .total_literal_bytes
+    .checked_add(encoded.len() as u64)
+    .ok_or_else(|| resource_error("query_literal_total_overflow", "query literal bytes overflow"))?;
+  if admission.total_literal_bytes > QUERY_MAXIMUM_TOTAL_LITERAL_BYTES_V1 as u64 {
+    return Err(resource_error("query_literal_total_limit", "query literal bytes exceed 8 MiB"));
+  }
+  Ok(())
+}
+
+fn encode_query_literal(field_name: &str, value: &CanonicalConfigValueV1, hash_algorithm: HashAlgorithm) -> QueryPlanningResultV1<Vec<u8>> {
   if matches!(value, CanonicalConfigValueV1::String(value) if value.len() > QUERY_MAXIMUM_LITERAL_BYTES_V1)
     || matches!(value, CanonicalConfigValueV1::Bytes(value) if value.len() > QUERY_MAXIMUM_LITERAL_BYTES_V1)
   {
@@ -979,14 +1141,7 @@ fn preflight_literal(
   if encoded.len() > QUERY_MAXIMUM_LITERAL_BYTES_V1 {
     return Err(resource_error("query_literal_size_limit", "one query literal exceeds 1 MiB"));
   }
-  admission.total_literal_bytes = admission
-    .total_literal_bytes
-    .checked_add(encoded.len() as u64)
-    .ok_or_else(|| resource_error("query_literal_total_overflow", "query literal bytes overflow"))?;
-  if admission.total_literal_bytes > QUERY_MAXIMUM_TOTAL_LITERAL_BYTES_V1 as u64 {
-    return Err(resource_error("query_literal_total_limit", "query literal bytes exceed 8 MiB"));
-  }
-  Ok(())
+  Ok(encoded)
 }
 
 fn validate_catalogs<'a>(

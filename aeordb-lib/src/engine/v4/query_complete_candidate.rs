@@ -216,6 +216,18 @@ pub struct QueryCompletePostingScanRequestV1<'a> {
   pub limits: QueryCompleteCandidateLimitsV1,
 }
 
+#[derive(Clone, Copy)]
+pub struct QueryPartialPostingScanRequestV1<'a> {
+  pub hash_algorithm: HashAlgorithm,
+  pub source_namespace_root: &'a [u8],
+  pub scope_id: &'a [u8],
+  pub candidate: &'a CompiledQueryIndexCandidateV1,
+  pub posting_root: Option<&'a QueryCandidateArtifactRootV1>,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub limits: QueryCompleteCandidateLimitsV1,
+}
+
 pub struct QueryCompletePostingCandidatesV1 {
   document_ordinals: Vec<u64>,
   examined_posting_records: u64,
@@ -1086,12 +1098,65 @@ pub fn scan_complete_posting_ordinals_v1(
   request: QueryCompletePostingScanRequestV1<'_>,
   source: &mut dyn ArtifactCursorSourceV1,
 ) -> Result<QueryCompletePostingCandidatesV1, QueryCompleteCandidateErrorV1> {
+  scan_posting_ordinals_v1(
+    QueryPostingScanRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      coverage_namespace_root: request.selected_namespace_root,
+      scope_id: request.scope_id,
+      candidate: request.candidate,
+      posting_root: request.posting_root,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      limits: request.limits,
+      required_coverage: CompiledQueryCoverageV1::Complete,
+    },
+    source,
+  )
+}
+
+pub fn scan_partial_posting_ordinals_v1(
+  request: QueryPartialPostingScanRequestV1<'_>,
+  source: &mut dyn ArtifactCursorSourceV1,
+) -> Result<QueryCompletePostingCandidatesV1, QueryCompleteCandidateErrorV1> {
+  scan_posting_ordinals_v1(
+    QueryPostingScanRequestV1 {
+      hash_algorithm: request.hash_algorithm,
+      coverage_namespace_root: request.source_namespace_root,
+      scope_id: request.scope_id,
+      candidate: request.candidate,
+      posting_root: request.posting_root,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      limits: request.limits,
+      required_coverage: CompiledQueryCoverageV1::PartialExact,
+    },
+    source,
+  )
+}
+
+#[derive(Clone, Copy)]
+struct QueryPostingScanRequestV1<'a> {
+  hash_algorithm: HashAlgorithm,
+  coverage_namespace_root: &'a [u8],
+  scope_id: &'a [u8],
+  candidate: &'a CompiledQueryIndexCandidateV1,
+  posting_root: Option<&'a QueryCandidateArtifactRootV1>,
+  memory: &'a MemoryCoordinator,
+  cancellation: &'a CancellationToken,
+  limits: QueryCompleteCandidateLimitsV1,
+  required_coverage: CompiledQueryCoverageV1,
+}
+
+fn scan_posting_ordinals_v1(
+  request: QueryPostingScanRequestV1<'_>,
+  source: &mut dyn ArtifactCursorSourceV1,
+) -> Result<QueryCompletePostingCandidatesV1, QueryCompleteCandidateErrorV1> {
   require_not_cancelled(request.cancellation)?;
-  validate_identity(request.hash_algorithm, request.selected_namespace_root, "selected NamespaceRoot")?;
+  validate_identity(request.hash_algorithm, request.coverage_namespace_root, "coverage NamespaceRoot")?;
   validate_identity(request.hash_algorithm, request.scope_id, "ScopeId")?;
-  validate_complete_candidate(request.selected_namespace_root, request.candidate)?;
+  validate_candidate_coverage(request.coverage_namespace_root, request.candidate, request.required_coverage)?;
   let generation = request.candidate.selected_generation().ok_or_else(|| {
-    QueryCompleteCandidateErrorV1::invalid("query_candidate_generation", "complete candidate scan requires a planner-selected generation")
+    QueryCompleteCandidateErrorV1::invalid("query_candidate_generation", "candidate scan requires a planner-selected generation")
   })?;
   validate_posting_workspace(request.limits)?;
   let mut memory = reserve_query_memory(request.memory, request.limits.maximum_retained_bytes)?;
@@ -1201,23 +1266,25 @@ pub fn resolve_complete_scope_identities_v1(
   })
 }
 
-fn validate_complete_candidate(
-  selected_namespace_root: &[u8],
+fn validate_candidate_coverage(
+  coverage_namespace_root: &[u8],
   candidate: &CompiledQueryIndexCandidateV1,
+  required_coverage: CompiledQueryCoverageV1,
 ) -> Result<(), QueryCompleteCandidateErrorV1> {
   let Some(generation) = candidate.selected_generation() else {
     return Err(QueryCompleteCandidateErrorV1::invalid(
       "query_candidate_generation",
-      "complete candidate scan requires a planner-selected generation",
+      "candidate scan requires a planner-selected generation",
     ));
   };
-  if candidate.coverage() != CompiledQueryCoverageV1::Complete
+  if candidate.coverage() != required_coverage
+    || !matches!(required_coverage, CompiledQueryCoverageV1::Complete | CompiledQueryCoverageV1::PartialExact)
     || !candidate.proven_candidate_superset()
-    || generation.source_namespace_root != selected_namespace_root
+    || generation.source_namespace_root != coverage_namespace_root
   {
     return Err(QueryCompleteCandidateErrorV1::invalid(
       "query_candidate_coverage",
-      "candidate is not a planner-proven complete superset for the selected root",
+      "candidate does not provide the required planner-proven superset for the exact coverage root",
     ));
   }
   if matches!(candidate.value_match(), QueryValueMatchV1::AuthoritativeRecheck)

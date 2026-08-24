@@ -273,6 +273,85 @@ fn measured_work_chooses_an_exact_driver_without_promoting_partial_coverage() {
 }
 
 #[test]
+fn compiler_owned_query_fingerprint_binds_roots_expression_path_limit_and_auxiliary_policy() {
+  let planning_context = context();
+  let encoded_scope = scope_fixture();
+  let (value_store, field) = definitions("@size", "u64_order_v1");
+  let selected_generation = generation(&encoded_scope, &value_store, &field, &ROOT, 41);
+  let query_scope = scope(
+    value_store,
+    vec![candidate(field, Some(selected_generation), QueryPlanningIndexEstimatesV1::new(1, 10, 10, 2, 0).unwrap())],
+    100,
+  );
+  let catalogs = [catalog("@size", vec![query_scope])];
+  let expression = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@size".to_string(),
+    operation: QueryPredicateOperationV1::Gt(CanonicalConfigValueV1::Unsigned(5)),
+  });
+  let base =
+    plan_root_aware_query_v1(&request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false)).unwrap();
+  let repeated =
+    plan_root_aware_query_v1(&request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false)).unwrap();
+  assert_eq!(base.query_fingerprint(), repeated.query_fingerprint());
+  assert_eq!(base.query_fingerprint().len(), HashAlgorithm::Blake3_256.hash_length());
+  assert!(base.query_fingerprint().iter().any(|byte| *byte != 0));
+
+  let changed_value = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@size".to_string(),
+    operation: QueryPredicateOperationV1::Gt(CanonicalConfigValueV1::Unsigned(6)),
+  });
+  let changed_operator = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@size".to_string(),
+    operation: QueryPredicateOperationV1::Lt(CanonicalConfigValueV1::Unsigned(5)),
+  });
+  let changed_shape = QueryExpressionV1::Not(Box::new(expression.clone()));
+  for changed in [&changed_value, &changed_operator, &changed_shape] {
+    let plan =
+      plan_root_aware_query_v1(&request(&planning_context, changed, &catalogs, default_query_planning_limits_v1(), &|| false)).unwrap();
+    assert_ne!(base.query_fingerprint(), plan.query_fingerprint());
+  }
+
+  let mut changed_request = request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false);
+  changed_request.query_path = "/docs";
+  let changed_path = plan_root_aware_query_v1(&changed_request).unwrap();
+  assert_ne!(base.query_fingerprint(), changed_path.query_fingerprint());
+  changed_request.query_path = "/";
+  changed_request.result_limit = 21;
+  let changed_limit = plan_root_aware_query_v1(&changed_request).unwrap();
+  assert_ne!(base.query_fingerprint(), changed_limit.query_fingerprint());
+
+  let ascending = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Ascending }];
+  let descending = [QuerySortFieldV1 { field_name: "@size".to_string(), direction: QuerySortDirectionV1::Descending }];
+  changed_request.result_limit = 20;
+  changed_request.sort_fields = &ascending;
+  let ascending_plan = plan_root_aware_query_v1(&changed_request).unwrap();
+  changed_request.sort_fields = &descending;
+  let descending_plan = plan_root_aware_query_v1(&changed_request).unwrap();
+  assert_ne!(base.query_fingerprint(), ascending_plan.query_fingerprint());
+  assert_ne!(ascending_plan.query_fingerprint(), descending_plan.query_fingerprint());
+
+  let alternate_root = [0x55; 32];
+  let alternate_semantic_root = [0x66; 32];
+  let alternate_context = QueryPlanningContextV1::new(
+    DATABASE_ID,
+    PHYSICAL_INSTANCE_ID,
+    HashAlgorithm::Blake3_256,
+    &alternate_root,
+    &alternate_semantic_root,
+    42,
+  )
+  .unwrap();
+  let mut alternate_catalogs = catalogs.clone();
+  alternate_catalogs[0].selected_namespace_root = alternate_root.to_vec();
+  alternate_catalogs[0].semantic_state_root = alternate_semantic_root.to_vec();
+  alternate_catalogs[0].publication_sequence = 42;
+  let alternate_plan =
+    plan_root_aware_query_v1(&request(&alternate_context, &expression, &alternate_catalogs, default_query_planning_limits_v1(), &|| false))
+      .unwrap();
+  assert_ne!(base.query_fingerprint(), alternate_plan.query_fingerprint());
+}
+
+#[test]
 fn request_admission_rejects_malformed_literals_operations_and_all_protocol_bounds() {
   let planning_context = context();
   let encoded_scope = scope_fixture();
@@ -568,6 +647,7 @@ fn sha512_hash_literals_compile_to_full_width_bytes() {
   let plan =
     plan_root_aware_query_v1(&request(&planning_context, &expression, &catalogs, default_query_planning_limits_v1(), &|| false)).unwrap();
   assert_eq!(plan.hash_algorithm(), algorithm);
+  assert_eq!(plan.query_fingerprint().len(), algorithm.hash_length());
   let canonical = plan.predicates()[0].scopes()[0].candidates()[0].compiled_literals()[0].canonical_value();
   assert_eq!(&canonical[..5], &[0x08, 64, 0, 0, 0]);
   assert_eq!(&canonical[5..], &[0xab; 64]);

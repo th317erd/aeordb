@@ -22,8 +22,9 @@ use aeordb::engine::v4::query_complete_candidate::{
   QueryCandidateArtifactRootV1, QueryCandidateRecheckReceiptV1, QueryCandidateRecheckRequestV1, QueryCompleteCandidateErrorClassV1,
   QueryCompleteCandidateExecutionRequestV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateSourceV1,
   QueryCompletePostingRootReceiptV1, QueryCompletePostingRootRequestV1, QueryCompletePostingScanRequestV1,
-  QueryCompleteScopeResolutionRequestV1, QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1, QueryScopeOrdinalSelectionV1,
-  execute_complete_candidate_root_query_v1, resolve_complete_scope_identities_v1, scan_complete_posting_ordinals_v1,
+  QueryCompleteScopeResolutionRequestV1, QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
+  QueryPartialPostingScanRequestV1, QueryScopeOrdinalSelectionV1, execute_complete_candidate_root_query_v1,
+  resolve_complete_scope_identities_v1, scan_complete_posting_ordinals_v1, scan_partial_posting_ordinals_v1,
 };
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1,
@@ -100,6 +101,17 @@ fn planned_candidate_with(
   metadata_id: u16,
   operation: QueryPredicateOperationV1,
 ) -> PlannedCandidate {
+  planned_candidate_with_source(algorithm, field_name, converter, metadata_id, operation, None)
+}
+
+fn planned_candidate_with_source(
+  algorithm: HashAlgorithm,
+  field_name: &str,
+  converter: &str,
+  metadata_id: u16,
+  operation: QueryPredicateOperationV1,
+  generation_source: Option<(Vec<u8>, u64)>,
+) -> PlannedCandidate {
   let (scope, value_store, field) = definitions(algorithm, field_name, converter, metadata_id);
   let scope_definition = decode_scope_definition(&scope, algorithm).unwrap();
   let value_definition = decode_value_store_definition(&value_store, algorithm).unwrap();
@@ -109,13 +121,14 @@ fn planned_candidate_with(
   let index_id = field_definition.index_id.clone();
   let root = vec![0x33; algorithm.hash_length()];
   let semantic_root = vec![0x44; algorithm.hash_length()];
+  let (source_namespace_root, coverage_publication_sequence) = generation_source.unwrap_or_else(|| (root.clone(), 41));
   let generation = QueryPlanningCoverageGenerationV1 {
     generation: 7,
     owner_id: index_id.clone(),
     manifest_hash: vec![0x71; algorithm.hash_length()],
-    source_namespace_root: root.clone(),
+    source_namespace_root,
     coverage_epoch_id: [0x72; 16],
-    coverage_publication_sequence: 41,
+    coverage_publication_sequence,
     definition_fingerprint: field_definition_fingerprint(algorithm, &field),
     dependency_fingerprint: field_dependency_fingerprint(algorithm, &scope_id, &value_store_id),
     health: IndexCoverageGenerationHealthV1::Healthy,
@@ -162,6 +175,17 @@ fn planned_candidate_with(
   .unwrap();
   let candidate = plan.predicates()[0].scopes()[0].candidates()[0].clone();
   PlannedCandidate { root, scope_id, candidate, plan, catalogs }
+}
+
+fn planned_partial_candidate(algorithm: HashAlgorithm) -> PlannedCandidate {
+  planned_candidate_with_source(
+    algorithm,
+    "@filename",
+    "typed_exact_blake3_v1",
+    2,
+    QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+    Some((vec![0x55; algorithm.hash_length()], 40)),
+  )
 }
 
 struct PlannedQuery {
@@ -500,6 +524,145 @@ fn complete_postings_resolve_live_scope_identities_at_both_hash_widths() {
     drop(identities);
     drop(postings);
     assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  }
+}
+
+#[test]
+fn partial_posting_scan_requires_the_exact_planner_proven_older_generation() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let planned = planned_partial_candidate(algorithm);
+    assert_eq!(planned.candidate.coverage(), aeordb::engine::v4::query_planner::CompiledQueryCoverageV1::PartialExact);
+    let generation = planned.candidate.selected_generation().unwrap();
+    let query_posting = &planned.candidate.compiled_literals()[0].compiled().postings[0];
+    let posting_records = [1u64, 2]
+      .into_iter()
+      .map(|document_ordinal| {
+        encode_posting_record(&PostingRecordV1 {
+          tombstone: false,
+          coordinate: query_posting.coordinate,
+          document_ordinal,
+          source_value_ordinal: 0,
+          expansion_ordinal: query_posting.expansion_ordinal,
+          posting_key: &query_posting.posting_key,
+        })
+        .unwrap()
+      })
+      .collect::<Vec<_>>();
+    let posting_page = ordered_page(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, 1, &posting_records);
+    let posting_root = leaf_directory(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, &[&posting_page]);
+    let authority = root_authority(algorithm, planned.candidate.index_id(), 7, &posting_root);
+    let mut source = Source::default();
+    source.insert(&posting_page);
+    source.insert(&posting_root);
+    let memory = memory(16 * 1_024 * 1_024);
+    let cancellation = CancellationToken::new();
+    let scanned = scan_partial_posting_ordinals_v1(
+      QueryPartialPostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        source_namespace_root: &generation.source_namespace_root,
+        scope_id: &planned.scope_id,
+        candidate: &planned.candidate,
+        posting_root: Some(&authority),
+        memory: &memory,
+        cancellation: &cancellation,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap();
+    assert_eq!(scanned.document_ordinals(), &[1, 2]);
+    drop(scanned);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+    let error = scan_complete_posting_ordinals_v1(
+      QueryCompletePostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        selected_namespace_root: &planned.root,
+        scope_id: &planned.scope_id,
+        candidate: &planned.candidate,
+        posting_root: Some(&authority),
+        memory: &memory,
+        cancellation: &cancellation,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), QueryCompleteCandidateErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "query_candidate_coverage");
+
+    let complete = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+    let complete_generation = complete.candidate.selected_generation().unwrap();
+    let error = scan_partial_posting_ordinals_v1(
+      QueryPartialPostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        source_namespace_root: &complete_generation.source_namespace_root,
+        scope_id: &complete.scope_id,
+        candidate: &complete.candidate,
+        posting_root: Some(&authority),
+        memory: &memory,
+        cancellation: &cancellation,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), QueryCompleteCandidateErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "query_candidate_coverage");
+
+    let error = scan_partial_posting_ordinals_v1(
+      QueryPartialPostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        source_namespace_root: &planned.root,
+        scope_id: &planned.scope_id,
+        candidate: &planned.candidate,
+        posting_root: Some(&authority),
+        memory: &memory,
+        cancellation: &cancellation,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), QueryCompleteCandidateErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "query_candidate_coverage");
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = scan_partial_posting_ordinals_v1(
+      QueryPartialPostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        source_namespace_root: &generation.source_namespace_root,
+        scope_id: &planned.scope_id,
+        candidate: &planned.candidate,
+        posting_root: Some(&authority),
+        memory: &memory,
+        cancellation: &cancelled,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), QueryCompleteCandidateErrorClassV1::Cancelled);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+    let tiny = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(512, 1_024, 1, 128).unwrap()));
+    let error = scan_partial_posting_ordinals_v1(
+      QueryPartialPostingScanRequestV1 {
+        hash_algorithm: algorithm,
+        source_namespace_root: &generation.source_namespace_root,
+        scope_id: &planned.scope_id,
+        candidate: &planned.candidate,
+        posting_root: Some(&authority),
+        memory: &tiny,
+        cancellation: &cancellation,
+        limits: limits(),
+      },
+      &mut source,
+    )
+    .unwrap_err();
+    assert_eq!(error.class(), QueryCompleteCandidateErrorClassV1::ResourceLimit);
+    assert_eq!(tiny.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
   }
 }
 
