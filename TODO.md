@@ -1319,9 +1319,9 @@
               - [x] P7-3d5d1: add one native authoritative execution facade over the captured selected-root partition source and existing transactional sink path.
               - [ ] P7-3d5d2: bind the exact coverage-registry snapshot into selected semantic planner catalogs and implement one captured native immutable-artifact source for complete/partial roots.
                 - [x] P7-3d5d2a: bind matching real registry generations and NVT availability into selected planner catalogs with atomic query-memory accounting.
-                - [ ] P7-3d5d2b: expose one captured-header immutable artifact byte/root adapter shared by complete and partial query candidates.
+                - [x] P7-3d5d2b: expose one captured-header immutable artifact byte/root adapter shared by complete and partial query candidates.
                   - [x] P7-3d5d2b1: make every retained captured artifact byte clone own the exact shared Query-memory reservation and remove side-vector lifetime accounting.
-                  - [ ] P7-3d5d2b2: resolve validated Posting and dependent ScopeOrdinal roots through the existing captured manifest-chain decoder without mutable-pointer rereads.
+                  - [x] P7-3d5d2b2: resolve validated Posting and dependent ScopeOrdinal roots through the existing captured manifest-chain decoder without mutable-pointer rereads.
                 - [ ] P7-3d5d2c: prove complete/partial root closure, pointer/HEAD races, authority substitution, cancellation, pressure, corruption, and exact release.
               - [ ] P7-3d5d3: compose per-scope complete/partial/authoritative execution into one bounded root transaction without duplicate identities or partial sink visibility.
               - [ ] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.

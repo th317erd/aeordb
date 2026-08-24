@@ -14,9 +14,9 @@ use super::entity::checked_whole_entity_encoded_length;
 use super::first_authority::{FirstAuthorityPublicationErrorV1, V4FirstAuthorityPublisher};
 use super::index_artifact::{ImmutableIndexArtifactKindV1, IndexManifestV1, decode_index_manifest, validate_correctness_manifest_chain};
 use super::index_artifact_cursor::{
-  ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, ArtifactPageCursorErrorV1, ArtifactPageCursorLimitsV1, ArtifactPageCursorRequestV1,
-  ArtifactPageCursorRootV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1, LoadedArtifactLeafCursorV1, LoadedArtifactPageCursorV1,
-  RetainedArtifactBytesV1, load_artifact_leaf_cursor_v1, load_artifact_page_cursor_v1,
+  ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, ArtifactDirectoryRootSummaryV1, ArtifactPageCursorErrorV1, ArtifactPageCursorLimitsV1,
+  ArtifactPageCursorRequestV1, ArtifactPageCursorRootV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1, LoadedArtifactLeafCursorV1,
+  LoadedArtifactPageCursorV1, RetainedArtifactBytesV1, load_artifact_leaf_cursor_v1, load_artifact_page_cursor_v1,
 };
 use super::index_coverage_registry::{
   IndexCoverageNvtDescriptorV1, field_definition_fingerprint, field_dependency_fingerprint, scope_definition_fingerprint,
@@ -96,6 +96,37 @@ pub struct NativeSelectedArtifactPageCursorV1 {
   role: OrderedIndexRoleV1,
   cursor: LoadedArtifactPageCursorV1,
   _workspace_memory: MemoryReservation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSelectedArtifactRootV1 {
+  root_key: Vec<u8>,
+  owner_id: Vec<u8>,
+  generation: u64,
+  role: OrderedIndexRoleV1,
+  summary: ArtifactDirectoryRootSummaryV1,
+}
+
+impl NativeSelectedArtifactRootV1 {
+  pub fn root_key(&self) -> &[u8] {
+    &self.root_key
+  }
+
+  pub fn owner_id(&self) -> &[u8] {
+    &self.owner_id
+  }
+
+  pub const fn generation(&self) -> u64 {
+    self.generation
+  }
+
+  pub const fn role(&self) -> OrderedIndexRoleV1 {
+    self.role
+  }
+
+  pub const fn summary(&self) -> ArtifactDirectoryRootSummaryV1 {
+    self.summary
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,6 +289,18 @@ pub(crate) struct NativeSelectedArtifactLoadRequestV1<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct NativeSelectedArtifactRootLoadRequestV1<'a> {
+  pub publisher: &'a V4FirstAuthorityPublisher,
+  pub memory: &'a MemoryCoordinator,
+  pub captured: &'a SelectedDatabaseHeaderV4,
+  pub supported_reader_capabilities: CapabilitySetV1,
+  pub selected_root: &'a [u8],
+  pub selected_generation: &'a QueryPlanningCoverageGenerationV1,
+  pub role: OrderedIndexRoleV1,
+  pub cancellation: &'a CancellationToken,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct NativeSelectedPostingSeekLoadRequestV1<'a> {
   pub publisher: &'a V4FirstAuthorityPublisher,
   pub memory: &'a MemoryCoordinator,
@@ -311,6 +354,52 @@ pub(crate) fn load_native_selected_artifact_page_cursor_v1(
     &closure,
     workspace_memory,
   )
+}
+
+pub(crate) fn load_native_selected_artifact_root_v1(
+  request: NativeSelectedArtifactRootLoadRequestV1<'_>,
+) -> Result<Option<NativeSelectedArtifactRootV1>, NativeSelectedArtifactCursorErrorV1> {
+  require_not_cancelled(request.cancellation)?;
+  validate_selected_generation_envelope(request.captured.header.hash_algorithm, request.selected_root, request.selected_generation)?;
+  let Some(closure) = load_selected_directory_closure(
+    request.publisher,
+    request.memory,
+    request.captured,
+    request.supported_reader_capabilities,
+    request.selected_generation,
+    request.role,
+    request.cancellation,
+  )?
+  else {
+    return Ok(None);
+  };
+  let maximum_root_bytes = ImmutableIndexArtifactKindV1::ArtifactDirectoryNode.maximum_encoded_length();
+  let root_bytes = load_accounted_artifact(
+    request.publisher,
+    request.captured,
+    &closure.root_key,
+    maximum_root_bytes,
+    request.cancellation,
+    request.memory,
+  )?
+  .ok_or_else(|| {
+    NativeSelectedArtifactCursorErrorV1::corrupt(
+      "selected_artifact_root_missing",
+      "selected manifest references a missing ArtifactDirectory root",
+    )
+  })?;
+  let root = decode_artifact_directory(root_bytes.bytes(), request.captured.header.hash_algorithm)
+    .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_root_decode", error.to_string()))?;
+  validate_manifest_directory_closure(request.role, &closure, &root)?;
+  let summary = ArtifactDirectoryRootSummaryV1::from_directory(&root);
+  require_not_cancelled(request.cancellation)?;
+  Ok(Some(NativeSelectedArtifactRootV1 {
+    root_key: closure.root_key,
+    owner_id: closure.owner_id,
+    generation: closure.generation,
+    role: request.role,
+    summary,
+  }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -665,29 +754,12 @@ fn load_selected_directory_closure(
       let definition_fingerprint = scope_definition_fingerprint(captured.header.hash_algorithm, body.scope_definition);
       let dependency_fingerprint = scope_dependency_fingerprint(captured.header.hash_algorithm);
       validate_selected_fingerprints(selected_generation, &definition_fingerprint, &dependency_fingerprint)?;
-      let (root_key, tombstone_count, page_count) = if role == OrderedIndexRoleV1::ScopeOrdinal {
-        (body.ordinal_directory_root, body.retained_tombstone_count, body.ordinal_page_count)
-      } else {
-        (body.reverse_directory_root, 0, body.reverse_page_count)
-      };
-      root_key
-        .map(|root_key| {
-          Ok(SelectedDirectoryClosureV1 {
-            root_key: copy_bytes(root_key, "scope directory root")?,
-            owner_id: copy_bytes(selected.owner_id, "scope manifest owner")?,
-            generation: selected.generation,
-            expected_live_count: body.live_document_count,
-            expected_tombstone_count: tombstone_count,
-            expected_page_count: page_count,
-            expected_logical_bytes: None,
-            expected_first_page_id: None,
-            expected_last_page_id: None,
-            expected_next_page_id: None,
-          })
-        })
-        .transpose()
+      selected_scope_directory_closure(&selected, body, role)
     }
-    (IndexManifestBodyV1::FieldIndex(field_body), OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState) => {
+    (
+      IndexManifestBodyV1::FieldIndex(field_body),
+      OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState | OrderedIndexRoleV1::ScopeOrdinal,
+    ) => {
       let value_bytes = load_required_manifest(
         publisher,
         memory,
@@ -721,6 +793,15 @@ fn load_selected_directory_closure(
       let definition_fingerprint = field_definition_fingerprint(captured.header.hash_algorithm, field_body.field_index_definition);
       let dependency_fingerprint = field_dependency_fingerprint(captured.header.hash_algorithm, scope.owner_id, value.owner_id);
       validate_selected_fingerprints(selected_generation, &definition_fingerprint, &dependency_fingerprint)?;
+      if role == OrderedIndexRoleV1::ScopeOrdinal {
+        let IndexManifestBodyV1::ScopeCatalog(scope_body) = &scope.details else {
+          return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
+            "selected_artifact_scope_manifest_kind",
+            "selected FieldIndex dependency is not a ScopeCatalog manifest",
+          ));
+        };
+        return selected_scope_directory_closure(&scope, scope_body, role);
+      }
       let (root_key, live_count, tombstone_count, page_count, logical_bytes, first_page_id, last_page_id, next_page_id) =
         if role == OrderedIndexRoleV1::Posting {
           (
@@ -767,6 +848,39 @@ fn load_selected_directory_closure(
       "selected generation manifest does not own the requested ordered role",
     )),
   }
+}
+
+fn selected_scope_directory_closure(
+  manifest: &IndexManifestV1<'_>,
+  body: &super::index_manifest::ScopeCatalogManifestBodyV1<'_>,
+  role: OrderedIndexRoleV1,
+) -> Result<Option<SelectedDirectoryClosureV1>, NativeSelectedArtifactCursorErrorV1> {
+  let (root_key, tombstone_count, page_count) = if role == OrderedIndexRoleV1::ScopeOrdinal {
+    (body.ordinal_directory_root, body.retained_tombstone_count, body.ordinal_page_count)
+  } else if role == OrderedIndexRoleV1::ScopeReverse {
+    (body.reverse_directory_root, 0, body.reverse_page_count)
+  } else {
+    return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
+      "selected_artifact_scope_role",
+      "ScopeCatalog manifest was requested for a non-scope ordered role",
+    ));
+  };
+  root_key
+    .map(|root_key| {
+      Ok(SelectedDirectoryClosureV1 {
+        root_key: copy_bytes(root_key, "scope directory root")?,
+        owner_id: copy_bytes(manifest.owner_id, "scope manifest owner")?,
+        generation: manifest.generation,
+        expected_live_count: body.live_document_count,
+        expected_tombstone_count: tombstone_count,
+        expected_page_count: page_count,
+        expected_logical_bytes: None,
+        expected_first_page_id: None,
+        expected_last_page_id: None,
+        expected_next_page_id: None,
+      })
+    })
+    .transpose()
 }
 
 fn validate_selected_generation_envelope(
@@ -870,6 +984,27 @@ fn validate_manifest_root_closure(
   })?;
   let root = decode_artifact_directory(root, hash_algorithm)
     .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_root_decode", error.to_string()))?;
+  validate_manifest_directory_closure(role, closure, &root)?;
+  if role == OrderedIndexRoleV1::Posting {
+    let page = decode_ordered_page(cursor.page(), hash_algorithm)
+      .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_page_decode", error.to_string()))?;
+    if cursor.page_ordinal() == 0 && Some(page.page_id) != closure.expected_first_page_id
+      || cursor.page_ordinal().checked_add(1) == Some(cursor.root_page_count()) && Some(page.page_id) != closure.expected_last_page_id
+    {
+      return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
+        "selected_artifact_page_endpoint",
+        "selected Posting page endpoint disagrees with its captured FieldIndex manifest",
+      ));
+    }
+  }
+  Ok(())
+}
+
+fn validate_manifest_directory_closure(
+  role: OrderedIndexRoleV1,
+  closure: &SelectedDirectoryClosureV1,
+  root: &super::index_page::ArtifactDirectoryNodeV1<'_>,
+) -> Result<(), NativeSelectedArtifactCursorErrorV1> {
   if root.key != closure.root_key
     || root.owner_id != closure.owner_id
     || root.role != role
@@ -883,18 +1018,6 @@ fn validate_manifest_root_closure(
       "selected_artifact_root_manifest_closure",
       "selected ArtifactDirectory root disagrees with its captured manifest summary",
     ));
-  }
-  if role == OrderedIndexRoleV1::Posting {
-    let page = decode_ordered_page(cursor.page(), hash_algorithm)
-      .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_page_decode", error.to_string()))?;
-    if cursor.page_ordinal() == 0 && Some(page.page_id) != closure.expected_first_page_id
-      || cursor.page_ordinal().checked_add(1) == Some(cursor.root_page_count()) && Some(page.page_id) != closure.expected_last_page_id
-    {
-      return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
-        "selected_artifact_page_endpoint",
-        "selected Posting page endpoint disagrees with its captured FieldIndex manifest",
-      ));
-    }
   }
   Ok(())
 }

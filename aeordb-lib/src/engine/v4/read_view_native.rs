@@ -24,11 +24,12 @@ use super::hash::digest_parts;
 use super::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
 use super::index_artifact_native::{
   NativeSelectedArtifactCursorErrorClassV1, NativeSelectedArtifactCursorErrorV1, NativeSelectedArtifactLoadRequestV1,
-  NativeSelectedArtifactPageCursorV1, NativeSelectedPostingSeekLoadRequestV1, load_native_selected_artifact_page_cursor_v1,
-  load_native_selected_posting_seek_v1,
+  NativeSelectedArtifactPageCursorV1, NativeSelectedArtifactRootLoadRequestV1, NativeSelectedPostingSeekLoadRequestV1,
+  load_native_selected_artifact_page_cursor_v1, load_native_selected_artifact_root_v1, load_native_selected_posting_seek_v1,
 };
 pub use super::index_artifact_native::{
-  NativeSelectedNvtFallbackReasonV1, NativeSelectedNvtFallbackV1, NativeSelectedPostingPageV1, NativeSelectedPostingSeekSourceV1,
+  NativeSelectedArtifactRootV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNvtFallbackV1, NativeSelectedPostingPageV1,
+  NativeSelectedPostingSeekSourceV1,
 };
 use super::index_coverage_planner::IndexCoverageGenerationHealthV1;
 use super::index_coverage_registry::{
@@ -272,6 +273,14 @@ pub struct NativeSelectedArtifactCursorRequestV1<'a> {
   pub seek: ArtifactPageSeekV1<'a>,
   pub neighbors: ArtifactPageNeighborModeV1,
   pub limits: ArtifactPageCursorLimitsV1,
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSelectedArtifactRootRequestV1<'a> {
+  pub catalog: &'a RootAwareQueryFieldCatalogV1,
+  pub scope_id: &'a [u8],
+  pub selected_generation: &'a QueryPlanningCoverageGenerationV1,
+  pub role: OrderedIndexRoleV1,
 }
 
 #[derive(Clone, Copy)]
@@ -1411,6 +1420,25 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     .map_err(map_selected_artifact_cursor_error)
   }
 
+  pub fn load_index_artifact_root(
+    &self,
+    request: &NativeSelectedArtifactRootRequestV1<'_>,
+  ) -> Result<Option<NativeSelectedArtifactRootV1>, NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    self.validate_selected_artifact_catalog(request.catalog, request.scope_id, request.selected_generation, request.role)?;
+    load_native_selected_artifact_root_v1(NativeSelectedArtifactRootLoadRequestV1 {
+      publisher: self.source.publisher.as_ref(),
+      memory: self.source.memory.as_ref(),
+      captured: self.view.captured_header(),
+      supported_reader_capabilities: self.view.supported_reader_capabilities(),
+      selected_root: &self.view.root_metadata().hash,
+      selected_generation: request.selected_generation,
+      role: request.role,
+      cancellation: self.view.cancellation(),
+    })
+    .map_err(map_selected_artifact_cursor_error)
+  }
+
   pub fn seek_posting_page(
     &self,
     request: &NativeSelectedPostingSeekRequestV1<'_>,
@@ -1537,10 +1565,10 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         "artifact catalog does not bind the exact complete selected semantic authority",
       ));
     }
-    if !matches!(role, OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState) {
+    if !matches!(role, OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState | OrderedIndexRoleV1::ScopeOrdinal) {
       return Err(NativeSelectedNamespaceReadErrorV1::invalid(
         "selected_artifact_catalog_role",
-        "field-index artifact catalogs admit only Posting or IndexDocumentState roles",
+        "field-index artifact catalogs admit only Posting, IndexDocumentState, or their dependent ScopeOrdinal role",
       ));
     }
     let coverage_is_partial = selected_generation.source_namespace_root != catalog.selected_namespace_root;

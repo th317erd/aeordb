@@ -25,7 +25,9 @@ use aeordb::engine::v4::index_artifact::{
   IndexManifestBodyV1, IndexManifestWriteV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1, encode_active_pointer,
   decode_index_manifest, encode_index_manifest,
 };
-use aeordb::engine::v4::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
+use aeordb::engine::v4::index_artifact_cursor::{
+  ArtifactDirectoryRootSummaryV1, ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1,
+};
 use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
 use aeordb::engine::v4::index_coverage_registry::{
   FirstAuthorityIndexCoverageRegistrySourceV1, IndexCoverageNvtDescriptorV1, IndexCoverageRegistryOptionsV1,
@@ -38,9 +40,10 @@ use aeordb::engine::v4::index_nvt::{
 };
 use aeordb::engine::v4::index_page::{
   ArtifactDirectoryEntryWriteV1, ArtifactDirectoryWriteV1, OrderedIndexRoleV1, OrderedPageWriteV1, PhysicalHintV1, PostingRecordV1,
-  decode_artifact_directory, decode_ordered_page, decode_ordered_record, encode_artifact_directory, encode_ordered_page,
-  encode_posting_record, ordered_record_order_key,
+  compare_order_keys, decode_artifact_directory, decode_ordered_page, decode_ordered_record, encode_artifact_directory,
+  encode_ordered_page, encode_posting_record, ordered_record_order_key,
 };
+use aeordb::engine::v4::index_record::{ScopeDocumentRecordV1, ScopeReverseRecordV1, encode_scope_document_record, encode_scope_reverse_record};
 use aeordb::engine::v4::index_producer_collector::{
   IndexParserDeterministicFailureV1, IndexParserExecutionErrorV1, IndexParserExecutionRequestV1, IndexParserExecutorV1,
   IndexParserOutcomeV1,
@@ -84,11 +87,11 @@ use aeordb::engine::v4::query_native_source::{
 use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
-  NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1, NativeSelectedNamespaceReadErrorV1,
-  NativeSelectedNamespaceReaderV1, NativeSelectedPostingSeekRequestV1, NativeSelectedPostingSeekSourceV1,
-  NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1, NativeSelectedSemanticLimitsV1,
-  NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
-  default_native_selected_semantic_limits_v1,
+  NativeSelectedArtifactRootRequestV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1,
+  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedPostingSeekRequestV1,
+  NativeSelectedPostingSeekSourceV1, NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1,
+  NativeSelectedSemanticLimitsV1, NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1,
+  NativeSelectedSourceParserV1, default_native_selected_semantic_limits_v1,
 };
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
@@ -1035,6 +1038,7 @@ struct SelectedArtifactFixture {
   generation: QueryPlanningCoverageGenerationV1,
   posting_page: EncodedImmutableIndexArtifactV1,
   posting_root: EncodedImmutableIndexArtifactV1,
+  scope_ordinal_root: EncodedImmutableIndexArtifactV1,
   nvt_descriptor: Option<IndexCoverageNvtDescriptorV1>,
   nvt_tile: Option<EncodedImmutableIndexArtifactV1>,
   nvt_manifest: Option<EncodedImmutableIndexArtifactV1>,
@@ -1108,6 +1112,18 @@ fn selected_artifact_cursor_request<'a>(
     seek: ArtifactPageSeekV1::PageOrdinal(0),
     neighbors,
     limits,
+  }
+}
+
+fn selected_artifact_root_request<'a>(
+  fixture: &'a SelectedArtifactFixture,
+  role: OrderedIndexRoleV1,
+) -> NativeSelectedArtifactRootRequestV1<'a> {
+  NativeSelectedArtifactRootRequestV1 {
+    catalog: &fixture.catalog,
+    scope_id: &fixture.scope_id,
+    selected_generation: &fixture.generation,
+    role,
   }
 }
 
@@ -1372,6 +1388,114 @@ fn selected_artifact_fixture_with_options(
   let posting_page = posting_pages[0].clone();
   let decoded_page = &decoded_pages[0];
   let decoded_root = decode_artifact_directory(&posting_root.value, algorithm).unwrap();
+  let scope_identities = posting_coordinates
+    .iter()
+    .enumerate()
+    .map(|(index, _)| {
+      let document_ordinal = u64::try_from(index).unwrap() + 1;
+      let path = format!("/docs/{document_ordinal}.json");
+      let file_key = digest_parts(algorithm, &[b"file:", path.as_bytes()]);
+      let record_revision_hash = digest_parts(algorithm, &[b"revision:", path.as_bytes()]);
+      (document_ordinal, path, file_key, record_revision_hash)
+    })
+    .collect::<Vec<_>>();
+  let scope_records = scope_identities
+    .iter()
+    .map(|(document_ordinal, path, file_key, record_revision_hash)| {
+      encode_scope_document_record(
+        &ScopeDocumentRecordV1 { tombstone: false, document_ordinal: *document_ordinal, file_key, record_revision_hash, path },
+        algorithm,
+      )
+      .unwrap()
+    })
+    .collect::<Vec<_>>();
+  let scope_record_refs = scope_records.iter().map(Vec::as_slice).collect::<Vec<_>>();
+  let scope_ordinal_page = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: algorithm,
+    role: OrderedIndexRoleV1::ScopeOrdinal,
+    owner_id: &graph.scope_id,
+    generation: 7,
+    page_id: 0,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &scope_record_refs,
+  })
+  .unwrap();
+  let decoded_scope_page = decode_ordered_page(&scope_ordinal_page.value, algorithm).unwrap();
+  let scope_ordinal_root = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: OrderedIndexRoleV1::ScopeOrdinal,
+    owner_id: &graph.scope_id,
+    generation: 7,
+    level: 0,
+    entries: &[ArtifactDirectoryEntryWriteV1 {
+      lower_fence: decoded_scope_page.lower_fence,
+      upper_fence: decoded_scope_page.upper_fence,
+      child_hash: &scope_ordinal_page.key,
+      child_generation: decoded_scope_page.generation,
+      live_count: u64::from(decoded_scope_page.live_count),
+      tombstone_count: u64::from(decoded_scope_page.tombstone_count),
+      page_count: 1,
+      logical_bytes: decoded_scope_page.logical_live_bytes,
+      minimum_page_id: 0,
+      maximum_page_id: 0,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let decoded_scope_root = decode_artifact_directory(&scope_ordinal_root.value, algorithm).unwrap();
+  let mut scope_reverse_records = scope_identities
+    .iter()
+    .map(|(document_ordinal, _, file_key, _)| {
+      encode_scope_reverse_record(&ScopeReverseRecordV1 { document_ordinal: *document_ordinal, file_key }, algorithm).unwrap()
+    })
+    .collect::<Vec<_>>();
+  scope_reverse_records.sort_by(|left, right| {
+    let left = decode_ordered_record(left, algorithm, OrderedIndexRoleV1::ScopeReverse).unwrap();
+    let right = decode_ordered_record(right, algorithm, OrderedIndexRoleV1::ScopeReverse).unwrap();
+    compare_order_keys(
+      algorithm,
+      OrderedIndexRoleV1::ScopeReverse,
+      &ordered_record_order_key(&left).unwrap(),
+      &ordered_record_order_key(&right).unwrap(),
+    )
+    .unwrap()
+  });
+  let scope_reverse_record_refs = scope_reverse_records.iter().map(Vec::as_slice).collect::<Vec<_>>();
+  let scope_reverse_page = encode_ordered_page(&OrderedPageWriteV1 {
+    hash_algorithm: algorithm,
+    role: OrderedIndexRoleV1::ScopeReverse,
+    owner_id: &graph.scope_id,
+    generation: 7,
+    page_id: 0,
+    previous_page_id: 0,
+    next_page_id: 0,
+    records: &scope_reverse_record_refs,
+  })
+  .unwrap();
+  let decoded_reverse_page = decode_ordered_page(&scope_reverse_page.value, algorithm).unwrap();
+  let scope_reverse_root = encode_artifact_directory(&ArtifactDirectoryWriteV1 {
+    hash_algorithm: algorithm,
+    role: OrderedIndexRoleV1::ScopeReverse,
+    owner_id: &graph.scope_id,
+    generation: 7,
+    level: 0,
+    entries: &[ArtifactDirectoryEntryWriteV1 {
+      lower_fence: decoded_reverse_page.lower_fence,
+      upper_fence: decoded_reverse_page.upper_fence,
+      child_hash: &scope_reverse_page.key,
+      child_generation: decoded_reverse_page.generation,
+      live_count: u64::from(decoded_reverse_page.live_count),
+      tombstone_count: u64::from(decoded_reverse_page.tombstone_count),
+      page_count: 1,
+      logical_bytes: decoded_reverse_page.logical_live_bytes,
+      minimum_page_id: 0,
+      maximum_page_id: 0,
+      physical_hint: PhysicalHintV1 { wal_offset: 0, total_length: 0, write_sequence: 0 },
+    }],
+  })
+  .unwrap();
+  let decoded_reverse_root = decode_artifact_directory(&scope_reverse_root.value, algorithm).unwrap();
   let coverage_epoch_id = [0x41; 16];
   let coverage =
     CoverageVersionV1 { source_namespace_root: &selected_root, coverage_epoch_id: &coverage_epoch_id, coverage_publication_sequence: 7 };
@@ -1382,13 +1506,13 @@ fn selected_artifact_fixture_with_options(
     body: IndexManifestBodyV1::ScopeCatalog(ScopeCatalogManifestBodyV1 {
       required_reader_capabilities: [0; 32],
       coverage: coverage.clone(),
-      next_document_ordinal: 2,
-      ordinal_directory_root: None,
-      reverse_directory_root: None,
-      live_document_count: 0,
+      next_document_ordinal: u64::try_from(scope_records.len()).unwrap() + 1,
+      ordinal_directory_root: Some(&scope_ordinal_root.key),
+      reverse_directory_root: Some(&scope_reverse_root.key),
+      live_document_count: decoded_scope_root.live_count,
       retained_tombstone_count: 0,
-      ordinal_page_count: 0,
-      reverse_page_count: 0,
+      ordinal_page_count: decoded_scope_root.page_count,
+      reverse_page_count: decoded_reverse_root.page_count,
       scope_definition: &graph.scope_definition,
     }),
   })
@@ -1594,7 +1718,16 @@ fn selected_artifact_fixture_with_options(
     let decoded = decode_ordered_record(&target, algorithm, OrderedIndexRoleV1::Posting).unwrap();
     ordered_record_order_key(&decoded).unwrap()
   });
-  let mut artifacts = vec![&scope_manifest, &value_manifest, &field_manifest, &posting_root];
+  let mut artifacts = vec![
+    &scope_manifest,
+    &value_manifest,
+    &field_manifest,
+    &posting_root,
+    &scope_ordinal_root,
+    &scope_ordinal_page,
+    &scope_reverse_root,
+    &scope_reverse_page,
+  ];
   artifacts.extend(posting_children.iter());
   if publish_posting_page {
     artifacts.extend(posting_pages.iter());
@@ -1709,6 +1842,7 @@ fn selected_artifact_fixture_with_options(
     generation,
     posting_page,
     posting_root,
+    scope_ordinal_root,
     nvt_descriptor,
     nvt_tile,
     nvt_manifest,
@@ -4259,6 +4393,119 @@ fn selected_artifact_cursor_uses_captured_authority_and_retains_query_memory_at_
   drop(selected);
   drop(reader);
   partial.assert_released();
+}
+
+#[test]
+fn selected_artifact_root_adapter_resolves_posting_and_exact_dependent_scope_roots_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = selected_artifact_fixture(algorithm);
+    let reader = fixture.reader();
+    let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+
+    let posting = reader.load_index_artifact_root(&selected_artifact_root_request(&fixture, OrderedIndexRoleV1::Posting)).unwrap().unwrap();
+    assert_eq!(posting.root_key(), fixture.posting_root.key);
+    assert_eq!(posting.owner_id(), fixture.generation.owner_id);
+    assert_eq!(posting.generation(), fixture.generation.generation);
+    assert_eq!(posting.role(), OrderedIndexRoleV1::Posting);
+    assert_eq!(
+      posting.summary(),
+      ArtifactDirectoryRootSummaryV1::from_directory(&decode_artifact_directory(&fixture.posting_root.value, algorithm).unwrap())
+    );
+
+    let scope =
+      reader.load_index_artifact_root(&selected_artifact_root_request(&fixture, OrderedIndexRoleV1::ScopeOrdinal)).unwrap().unwrap();
+    assert_eq!(scope.root_key(), fixture.scope_ordinal_root.key);
+    assert_eq!(scope.owner_id(), fixture.scope_id);
+    assert_eq!(scope.generation(), 7);
+    assert_eq!(scope.role(), OrderedIndexRoleV1::ScopeOrdinal);
+    assert_eq!(
+      scope.summary(),
+      ArtifactDirectoryRootSummaryV1::from_directory(&decode_artifact_directory(&fixture.scope_ordinal_root.value, algorithm).unwrap())
+    );
+
+    drop(posting);
+    drop(scope);
+    assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+    drop(reader);
+    fixture.assert_released();
+  }
+
+  let partial = selected_partial_artifact_fixture(HashAlgorithm::Blake3_256);
+  assert_ne!(partial.generation.source_namespace_root, partial.view.root_metadata().hash);
+  let reader = partial.reader();
+  let scope =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&partial, OrderedIndexRoleV1::ScopeOrdinal)).unwrap().unwrap();
+  assert_eq!(scope.root_key(), partial.scope_ordinal_root.key);
+  assert_eq!(scope.owner_id(), partial.scope_id);
+  drop(scope);
+  drop(reader);
+  partial.assert_released();
+}
+
+#[test]
+fn selected_artifact_root_adapter_fails_closed_and_releases_memory_on_every_boundary() {
+  let empty = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  let reader = empty.reader();
+  assert!(reader
+    .load_index_artifact_root(&selected_artifact_root_request(&empty, OrderedIndexRoleV1::IndexDocumentState))
+    .unwrap()
+    .is_none());
+  let role_error = reader.load_index_artifact_root(&selected_artifact_root_request(&empty, OrderedIndexRoleV1::Value)).unwrap_err();
+  assert_eq!(role_error.class(), NativeSelectedNamespaceReadErrorClassV1::InvalidRequest);
+  assert_eq!(role_error.code(), "selected_artifact_catalog_role");
+  drop(reader);
+  empty.assert_released();
+
+  let mismatched = selected_artifact_fixture_with_manifest_live_delta(HashAlgorithm::Blake3_256, 1);
+  let reader = mismatched.reader();
+  let mismatch_error =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&mismatched, OrderedIndexRoleV1::Posting)).unwrap_err();
+  assert_eq!(mismatch_error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(mismatch_error.code(), "selected_artifact_root_manifest_closure");
+  drop(reader);
+  mismatched.assert_released();
+
+  let corrupt = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  corrupt_artifact_checksum(&corrupt, &corrupt.posting_root.key);
+  let reader = corrupt.reader();
+  let corrupt_error = reader.load_index_artifact_root(&selected_artifact_root_request(&corrupt, OrderedIndexRoleV1::Posting)).unwrap_err();
+  assert_eq!(corrupt_error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  drop(reader);
+  corrupt.assert_released();
+
+  let truncated = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  truncate_artifact_source(&truncated, &truncated.posting_root.key);
+  let reader = truncated.reader();
+  let truncated_error =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&truncated, OrderedIndexRoleV1::Posting)).unwrap_err();
+  assert_eq!(truncated_error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  drop(reader);
+  truncated.assert_released();
+
+  let cancelled = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  cancelled.cancellation.cancel();
+  let reader = cancelled.reader();
+  let cancelled_error =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&cancelled, OrderedIndexRoleV1::Posting)).unwrap_err();
+  assert_eq!(cancelled_error.class(), NativeSelectedNamespaceReadErrorClassV1::Cancelled);
+  drop(reader);
+  cancelled.assert_released();
+
+  let pressured = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  let baseline_query = pressured.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let snapshot = pressured.memory.snapshot().unwrap();
+  let ordinary_limit = 511 * 1024 * 1024;
+  let blocker_bytes = ordinary_limit - snapshot.accounted_bytes - 512 * 1024;
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+  let reader = pressured.reader();
+  let pressure_error =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&pressured, OrderedIndexRoleV1::Posting)).unwrap_err();
+  assert_eq!(pressure_error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(pressure_error.code(), "selected_artifact_read_memory");
+  assert_eq!(pressured.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline_query);
+  drop(reader);
+  drop(blocker);
+  pressured.assert_released();
 }
 
 #[test]
