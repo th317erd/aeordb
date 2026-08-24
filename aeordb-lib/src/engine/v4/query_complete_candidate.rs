@@ -27,7 +27,8 @@ use super::query_planner::{
 use super::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeScopeSourceV1, QueryExecutionErrorV1, QueryExecutionLimitsV1,
   QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorClassV1,
-  QueryExecutionSourceErrorV1, RootAwareQueryExecutionRequestV1, RootAwareQueryExecutionV1, execute_authoritative_root_query_v1,
+  QueryExecutionSourceErrorV1, RootAwareQueryExecutionRequestV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1,
+  execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
 };
 
 const MAXIMUM_PAGE_SEEKS_V1: u64 = 1_048_576;
@@ -451,6 +452,17 @@ pub struct QueryCompleteCandidateExecutionRequestV1<'a> {
   pub candidate_limits: QueryCompleteCandidateLimitsV1,
 }
 
+pub struct QueryCompleteCandidateScopeExecutionRequestV1<'a> {
+  pub plan: &'a CompiledRootAwareQueryPlanV1,
+  pub catalogs: &'a [RootAwareQueryFieldCatalogV1],
+  pub scope_id: &'a [u8],
+  pub source: &'a mut dyn QueryCompleteCandidateSourceV1,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub execution_limits: QueryExecutionLimitsV1,
+  pub candidate_limits: QueryCompleteCandidateLimitsV1,
+}
+
 pub struct QueryCompleteCandidateExecutionV1 {
   execution: RootAwareQueryExecutionV1,
   examined_posting_records: u64,
@@ -519,6 +531,31 @@ enum ExpressionCandidateSetV1 {
 pub fn execute_complete_candidate_root_query_v1(
   request: QueryCompleteCandidateExecutionRequestV1<'_>,
 ) -> Result<QueryCompleteCandidateExecutionV1, QueryExecutionErrorV1> {
+  execute_complete_candidate_query_v1(request, None)
+}
+
+pub fn execute_complete_candidate_scope_query_v1(
+  request: QueryCompleteCandidateScopeExecutionRequestV1<'_>,
+) -> Result<QueryCompleteCandidateExecutionV1, QueryExecutionErrorV1> {
+  let scope_id = request.scope_id;
+  execute_complete_candidate_query_v1(
+    QueryCompleteCandidateExecutionRequestV1 {
+      plan: request.plan,
+      catalogs: request.catalogs,
+      source: request.source,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      execution_limits: request.execution_limits,
+      candidate_limits: request.candidate_limits,
+    },
+    Some(scope_id),
+  )
+}
+
+fn execute_complete_candidate_query_v1(
+  request: QueryCompleteCandidateExecutionRequestV1<'_>,
+  scope_id: Option<&[u8]>,
+) -> Result<QueryCompleteCandidateExecutionV1, QueryExecutionErrorV1> {
   let mut adapter = CompleteCandidateScopeAdapterV1 {
     plan: request.plan,
     source: request.source,
@@ -527,14 +564,26 @@ pub fn execute_complete_candidate_root_query_v1(
     limits: request.candidate_limits,
     stats: QueryCompleteCandidateExecutionStatsV1::default(),
   };
-  let execution = execute_authoritative_root_query_v1(RootAwareQueryExecutionRequestV1 {
-    plan: request.plan,
-    catalogs: request.catalogs,
-    source: &mut adapter,
-    memory: request.memory,
-    cancellation: request.cancellation,
-    limits: request.execution_limits,
-  })?;
+  let execution = if let Some(scope_id) = scope_id {
+    execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
+      plan: request.plan,
+      catalogs: request.catalogs,
+      scope_id,
+      source: &mut adapter,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      limits: request.execution_limits,
+    })?
+  } else {
+    execute_authoritative_root_query_v1(RootAwareQueryExecutionRequestV1 {
+      plan: request.plan,
+      catalogs: request.catalogs,
+      source: &mut adapter,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      limits: request.execution_limits,
+    })?
+  };
   Ok(QueryCompleteCandidateExecutionV1 {
     execution,
     examined_posting_records: adapter.stats.examined_posting_records,
@@ -981,7 +1030,7 @@ fn reserve_execution_workspace(memory: &MemoryCoordinator, bytes: u64) -> Result
     | MemoryCoordinatorError::SoftPressureDeferred { .. } => {
       source_scan_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "query_candidate_expression_memory", error.to_string())
     }
-    _ => source_scan_error(QueryExecutionSourceErrorClassV1::Corrupt, "query_candidate_memory_authority", error.to_string()),
+    _ => source_scan_error(QueryExecutionSourceErrorClassV1::Internal, "query_candidate_memory_authority", error.to_string()),
   })
 }
 
@@ -999,7 +1048,7 @@ fn map_candidate_scan_error(error: QueryCompleteCandidateErrorV1) -> QueryExecut
     QueryCompleteCandidateErrorClassV1::ResourceLimit => QueryExecutionSourceErrorClassV1::ResourceLimit,
     QueryCompleteCandidateErrorClassV1::HistoricalViewUnavailable => QueryExecutionSourceErrorClassV1::Unavailable,
     QueryCompleteCandidateErrorClassV1::Cancelled => QueryExecutionSourceErrorClassV1::Cancelled,
-    QueryCompleteCandidateErrorClassV1::Internal => QueryExecutionSourceErrorClassV1::Corrupt,
+    QueryCompleteCandidateErrorClassV1::Internal => QueryExecutionSourceErrorClassV1::Internal,
   };
   source_scan_error(class, error.code, error.context)
 }

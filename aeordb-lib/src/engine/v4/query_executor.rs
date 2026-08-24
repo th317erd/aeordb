@@ -185,6 +185,7 @@ pub enum QueryExecutionSourceErrorClassV1 {
   ResourceLimit,
   Corrupt,
   Cancelled,
+  Internal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -367,6 +368,16 @@ pub struct RootAwareQueryExecutionRequestV1<'a> {
   pub limits: QueryExecutionLimitsV1,
 }
 
+pub struct RootAwareQueryScopeExecutionRequestV1<'a> {
+  pub plan: &'a CompiledRootAwareQueryPlanV1,
+  pub catalogs: &'a [RootAwareQueryFieldCatalogV1],
+  pub scope_id: &'a [u8],
+  pub source: &'a mut dyn QueryAuthoritativeScopeSourceV1,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub limits: QueryExecutionLimitsV1,
+}
+
 struct PreparedCandidateV1<'value, 'field> {
   runtime: IndexDefinitionRuntimeV1<'value, 'field>,
 }
@@ -440,8 +451,33 @@ impl WorkBudgetV1<'_> {
 pub fn execute_authoritative_root_query_v1(
   request: RootAwareQueryExecutionRequestV1<'_>,
 ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+  execute_authoritative_query_v1(request, None)
+}
+
+pub fn execute_authoritative_scope_query_v1(
+  request: RootAwareQueryScopeExecutionRequestV1<'_>,
+) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+  let scope_id = request.scope_id;
+  execute_authoritative_query_v1(
+    RootAwareQueryExecutionRequestV1 {
+      plan: request.plan,
+      catalogs: request.catalogs,
+      source: request.source,
+      memory: request.memory,
+      cancellation: request.cancellation,
+      limits: request.limits,
+    },
+    Some(scope_id),
+  )
+}
+
+fn execute_authoritative_query_v1(
+  request: RootAwareQueryExecutionRequestV1<'_>,
+  scope_id: Option<&[u8]>,
+) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
   require_not_cancelled(request.cancellation)?;
   validate_execution_request(&request)?;
+  validate_scope_selection(request.plan, scope_id)?;
   let mut result_memory =
     reserve_query_memory(request.memory, request.limits.bytes.maximum_retained_bytes, "query_execution_result_memory")?;
   let _workspace =
@@ -453,6 +489,7 @@ pub fn execute_authoritative_root_query_v1(
     request.plan.hash_algorithm(),
     request.limits.bytes.maximum_semantic_scratch_bytes,
     &mut work,
+    scope_id,
   )?;
   let semantic_dynamic_bytes = request
     .limits
@@ -1178,6 +1215,7 @@ fn prepare_scopes<'plan, 'catalog>(
   hash_algorithm: HashAlgorithm,
   maximum_semantic_bytes: u64,
   work: &mut WorkBudgetV1<'_>,
+  selected_scope_id: Option<&[u8]>,
 ) -> Result<PreparedExecutionV1<'plan, 'catalog, 'catalog>, QueryExecutionErrorV1> {
   work.charge(1)?;
   let first = plan
@@ -1185,7 +1223,7 @@ fn prepare_scopes<'plan, 'catalog>(
     .first()
     .ok_or_else(|| QueryExecutionErrorV1::invalid("query_execution_predicates", "compiled query has no predicates"))?;
   validate_shared_scope_partition(plan, first, work)?;
-  let structural_bytes = prepared_structural_bound(plan)?;
+  let structural_bytes = prepared_structural_bound(plan, selected_scope_id)?;
   ensure_semantic_scratch(
     structural_bytes
       .checked_add(EXECUTION_PER_DOCUMENT_SEMANTIC_BYTES)
@@ -1195,7 +1233,8 @@ fn prepare_scopes<'plan, 'catalog>(
     "prepared query structures exceed the admitted semantic workspace",
   )?;
   let mut scopes = Vec::new();
-  scopes.try_reserve_exact(first.scopes().len()).map_err(|source| {
+  let scope_capacity = if selected_scope_id.is_some() { 1 } else { first.scopes().len() };
+  scopes.try_reserve_exact(scope_capacity).map_err(|source| {
     QueryExecutionErrorV1::resource("query_execution_scope_allocation", format!("cannot reserve prepared scopes: {source}"))
   })?;
   let mut definition_bytes = 0u64;
@@ -1203,6 +1242,9 @@ fn prepare_scopes<'plan, 'catalog>(
 
   for first_scope in first.scopes() {
     work.charge(1)?;
+    if selected_scope_id.is_some_and(|scope_id| scope_id != first_scope.scope_id()) {
+      continue;
+    }
     let mut fields = Vec::new();
     fields.try_reserve_exact(plan.predicates().len()).map_err(|source| {
       QueryExecutionErrorV1::resource("query_execution_field_allocation", format!("cannot reserve prepared fields: {source}"))
@@ -1323,10 +1365,11 @@ fn prepare_scopes<'plan, 'catalog>(
     scopes.push(PreparedScopeV1 { scope_id: try_clone_bytes(first_scope.scope_id(), "prepared ScopeId")?, fields });
   }
   if scopes.is_empty() {
-    return Err(QueryExecutionErrorV1::unavailable(
-      "query_execution_scopes_unavailable",
-      "compiled query has no effective selected-root scopes",
-    ));
+    return if selected_scope_id.is_some() {
+      Err(QueryExecutionErrorV1::invalid("query_execution_scope_unknown", "requested scope is absent from the compiled query"))
+    } else {
+      Err(QueryExecutionErrorV1::unavailable("query_execution_scopes_unavailable", "compiled query has no effective selected-root scopes"))
+    };
   }
   let retained_bytes = prepared_retained_bytes(&scopes, definition_bytes)?;
   ensure_semantic_scratch(
@@ -1366,14 +1409,15 @@ fn validate_shared_scope_partition(
   Ok(())
 }
 
-fn prepared_structural_bound(plan: &CompiledRootAwareQueryPlanV1) -> Result<u64, QueryExecutionErrorV1> {
+fn prepared_structural_bound(plan: &CompiledRootAwareQueryPlanV1, selected_scope_id: Option<&[u8]>) -> Result<u64, QueryExecutionErrorV1> {
   let first = plan
     .predicates()
     .first()
     .ok_or_else(|| QueryExecutionErrorV1::invalid("query_execution_predicates", "compiled query has no predicates"))?;
   let mut bytes = EXECUTION_FIXED_SEMANTIC_BYTES;
-  bytes = checked_structure_array::<PreparedScopeV1<'_, '_, '_>>(bytes, first.scopes().len(), "prepared scopes")?;
-  for first_scope in first.scopes() {
+  let scope_count = first.scopes().iter().filter(|scope| selected_scope_id.is_none_or(|scope_id| scope.scope_id() == scope_id)).count();
+  bytes = checked_structure_array::<PreparedScopeV1<'_, '_, '_>>(bytes, scope_count, "prepared scopes")?;
+  for first_scope in first.scopes().iter().filter(|scope| selected_scope_id.is_none_or(|scope_id| scope.scope_id() == scope_id)) {
     bytes = bytes
       .checked_add(first_scope.scope_id().len() as u64)
       .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_semantic_memory", "prepared ScopeId bound overflowed"))?;
@@ -1496,6 +1540,16 @@ fn validate_execution_request(request: &RootAwareQueryExecutionRequestV1<'_>) ->
   }
   if !path_is_canonical(request.plan.query_path()) {
     return Err(QueryExecutionErrorV1::invalid("query_execution_path", "compiled query path is not canonical"));
+  }
+  Ok(())
+}
+
+fn validate_scope_selection(plan: &CompiledRootAwareQueryPlanV1, scope_id: Option<&[u8]>) -> Result<(), QueryExecutionErrorV1> {
+  let Some(scope_id) = scope_id else {
+    return Ok(());
+  };
+  if scope_id.len() != plan.hash_algorithm().hash_length() || scope_id.iter().all(|byte| *byte == 0) {
+    return Err(QueryExecutionErrorV1::invalid("query_execution_scope_identity", "requested scope is not one nonzero database hash"));
   }
   Ok(())
 }
@@ -1668,6 +1722,7 @@ fn map_scan_error(error: QueryExecutionScanErrorV1) -> QueryExecutionErrorV1 {
       QueryExecutionSourceErrorClassV1::ResourceLimit => QueryExecutionErrorV1::resource(error.code, error.context),
       QueryExecutionSourceErrorClassV1::Corrupt => QueryExecutionErrorV1::corrupt(error.code, error.context),
       QueryExecutionSourceErrorClassV1::Cancelled => QueryExecutionErrorV1::cancelled(),
+      QueryExecutionSourceErrorClassV1::Internal => QueryExecutionErrorV1::internal(error.code, error.context),
     },
   }
 }

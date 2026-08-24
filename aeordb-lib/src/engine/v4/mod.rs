@@ -128,6 +128,7 @@ pub mod query_complete_candidate;
 pub mod query_executor;
 pub mod query_partial_candidate;
 pub mod query_planner;
+pub mod query_scope_execution;
 pub mod read_view;
 pub mod read_view_authorization;
 pub mod read_view_native;

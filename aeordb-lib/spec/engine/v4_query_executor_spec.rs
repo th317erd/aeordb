@@ -12,7 +12,8 @@ use aeordb::engine::v4::query_executor::{
   QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1,
   QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
   QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorV1,
-  QueryExecutionSourceErrorClassV1, RootAwareQueryExecutionRequestV1, execute_authoritative_root_query_v1,
+  QueryExecutionSourceErrorClassV1, RootAwareQueryExecutionRequestV1, RootAwareQueryScopeExecutionRequestV1,
+  execute_authoritative_root_query_v1, execute_authoritative_scope_query_v1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryExpressionV1, QueryFuzzyAlgorithmV1, QueryPlanDriverV1, QueryPlanningContextV1,
@@ -426,6 +427,53 @@ fn execute_with_limits(
   Ok(result.matches().iter().map(|row| row.file_key().to_vec()).collect())
 }
 
+fn minimum_scope_semantic_bytes(
+  plan: &CompiledRootAwareQueryPlanV1,
+  catalogs: &[RootAwareQueryFieldCatalogV1],
+  scope_id: &[u8],
+  documents: &[DocumentFixture],
+) -> u64 {
+  let succeeds = |semantic_bytes: u64| {
+    let memory = memory(64 << 20);
+    let mut feed = ScopeFeed {
+      root: ROOT.to_vec(),
+      publication_sequence: 41,
+      documents: documents.to_vec(),
+      complete: true,
+      receipt_count_delta: 0,
+      source_error: None,
+      cancel_after_documents: None,
+      field_reads: Cell::new(0),
+    };
+    let limits = QueryExecutionLimitsV1::new(
+      QueryExecutionCountLimitsV1::new(100, 100, 100, 1_000_000).unwrap(),
+      QueryExecutionByteLimitsV1::new(1 << 20, 8 << 20, semantic_bytes).unwrap(),
+    );
+    execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
+      plan,
+      catalogs,
+      scope_id,
+      source: &mut feed,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      limits,
+    })
+    .is_ok()
+  };
+  let mut low = 1u64;
+  let mut high = 1 << 20;
+  assert!(succeeds(high));
+  while low < high {
+    let middle = low + (high - low) / 2;
+    if succeeds(middle) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  low
+}
+
 #[test]
 fn authoritative_truth_is_identical_for_authoritative_complete_and_partial_plans() {
   let source_documents = documents();
@@ -485,6 +533,88 @@ fn nonidentical_cross_field_scope_partitions_never_silently_omit_a_valid_scope()
   assert_eq!(error.code(), "query_execution_scope_partition_unavailable");
   assert_eq!(feed.field_reads.get(), 0, "partition refusal must precede authoritative source work");
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn scope_execution_reads_only_the_requested_member_of_a_shared_partition() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope.clone()));
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let mut size = catalog("@size", "u64_order_v1", CoverageFixture::Authoritative);
+  size.scopes.push(catalog_scope("@size", "u64_order_v1", CoverageFixture::Authoritative, alternate_scope));
+  size.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (plan, catalogs) = plan_with_catalogs(vec![filename, size]);
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut direct = documents().remove(0);
+  let mut alternate = direct.clone();
+  direct.file_key = vec![0x10; 32];
+  alternate.scope_id = alternate_scope_id;
+  alternate.file_key = vec![0x20; 32];
+  alternate.revision = vec![0x21; 32];
+  alternate.path = "/alternate".to_string();
+  let memory = memory(64 << 20);
+  let mut feed = ScopeFeed {
+    root: ROOT.to_vec(),
+    publication_sequence: 41,
+    documents: vec![direct, alternate],
+    complete: true,
+    receipt_count_delta: 0,
+    source_error: None,
+    cancel_after_documents: None,
+    field_reads: Cell::new(0),
+  };
+
+  let execution = execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
+    plan: &plan,
+    catalogs: &catalogs,
+    scope_id: &direct_scope_id,
+    source: &mut feed,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    limits: limits(),
+  })
+  .unwrap();
+  assert_eq!(execution.matches().len(), 1);
+  assert_eq!(execution.matches()[0].file_key(), &[0x10; 32]);
+  assert_eq!(feed.field_reads.get(), 2, "scope execution must not inspect a sibling effective scope");
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn scope_execution_admits_only_the_requested_member_of_a_shared_partition() {
+  let alternate_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+  let alternate_scope_id = decode_scope_definition(&alternate_scope, HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut filename = catalog("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative);
+  filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, alternate_scope.clone()));
+  let mut size = catalog("@size", "u64_order_v1", CoverageFixture::Authoritative);
+  size.scopes.push(catalog_scope("@size", "u64_order_v1", CoverageFixture::Authoritative, alternate_scope));
+  for suffix in 0..64u8 {
+    let mut sibling_scope = fixture("scope-definition-v1/ascp-blake3-256-normalized-glob-valid.bin");
+    let length = sibling_scope.len();
+    sibling_scope[length - 2] = b'a' + suffix / 26;
+    sibling_scope[length - 1] = b'a' + suffix % 26;
+    filename.scopes.push(catalog_scope("@filename", "typed_exact_blake3_v1", CoverageFixture::Authoritative, sibling_scope.clone()));
+    size.scopes.push(catalog_scope("@size", "u64_order_v1", CoverageFixture::Authoritative, sibling_scope));
+  }
+  filename.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  size.scopes.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+  let (shared_plan, catalogs) = plan_with_catalogs(vec![filename, size]);
+  let direct_scope_id = decode_scope_definition(&scope_fixture(), HashAlgorithm::Blake3_256).unwrap().scope_id;
+  let mut direct = documents().remove(0);
+  let mut alternate = direct.clone();
+  direct.file_key = vec![0x10; 32];
+  alternate.scope_id = alternate_scope_id;
+  alternate.file_key = vec![0x20; 32];
+  alternate.revision = vec![0x21; 32];
+  alternate.path = "/alternate".to_string();
+  let documents = vec![direct, alternate];
+  let shared_minimum = minimum_scope_semantic_bytes(&shared_plan, &catalogs, &direct_scope_id, &documents);
+  let (single_plan, single_catalogs) = plan(CoverageFixture::Authoritative);
+  let single_minimum = minimum_scope_semantic_bytes(&single_plan, &single_catalogs, &direct_scope_id, &documents[..1]);
+  assert_eq!(shared_minimum, single_minimum, "sibling scopes must not consume selected-scope admission budget");
 }
 
 #[test]
@@ -676,6 +806,7 @@ fn typed_source_failures_preserve_operational_direction() {
     (QueryExecutionSourceErrorClassV1::ResourceLimit, QueryExecutionErrorClassV1::ResourceLimit),
     (QueryExecutionSourceErrorClassV1::Corrupt, QueryExecutionErrorClassV1::CorruptSource),
     (QueryExecutionSourceErrorClassV1::Cancelled, QueryExecutionErrorClassV1::Cancelled),
+    (QueryExecutionSourceErrorClassV1::Internal, QueryExecutionErrorClassV1::Internal),
   ] {
     let mut feed = ScopeFeed {
       root: ROOT.to_vec(),

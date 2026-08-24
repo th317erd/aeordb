@@ -45,14 +45,18 @@ use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1,
   QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1, QueryExecutionErrorClassV1,
   QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
-  QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, RootAwareQueryExecutionRequestV1,
-  execute_authoritative_root_query_v1,
+  QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorClassV1,
+  QueryExecutionSourceErrorV1, RootAwareQueryExecutionRequestV1, execute_authoritative_root_query_v1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryCoordinateConstraintV1, QueryExpressionV1,
   QueryPlanningContextV1, QueryPlanningCoverageGenerationV1, QueryPlanningIndexCandidateV1, QueryPlanningIndexEstimatesV1,
   QueryPlanningRequestV1, QueryPlanDriverV1, QueryPlanningScopeV1, QueryPredicateOperationV1, QueryPredicateV1,
   RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
+};
+use aeordb::engine::v4::query_scope_execution::{
+  QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1, QueryExactScopeExecutionRequestV1, QueryExactScopeFallbackDiagnosticV1,
+  execute_exact_query_scope_v1,
 };
 use aeordb::engine::v4::scope::decode_scope_definition;
 use aeordb::engine::v4::value_store::decode_value_store_definition;
@@ -1170,6 +1174,156 @@ fn execution_limits() -> QueryExecutionLimitsV1 {
     QueryExecutionCountLimitsV1::new(128, 1_024, 128, 1_000_000).unwrap(),
     QueryExecutionByteLimitsV1::new(1_024 * 1_024, 2 * 1_024 * 1_024, 4 * 1_024 * 1_024).unwrap(),
   )
+}
+
+fn filename_execution_documents(algorithm: HashAlgorithm, scope_id: &[u8], paths: &[&str]) -> Vec<ExecutionDocument> {
+  let mut documents = paths
+    .iter()
+    .enumerate()
+    .map(|(index, path)| {
+      let ordinal = u64::try_from(index).unwrap() + 1;
+      ExecutionDocument {
+        scope_id: scope_id.to_vec(),
+        ordinal,
+        file_key: digest_parts(algorithm, &[b"file:", path.as_bytes()]),
+        revision: digest_parts(algorithm, &[b"revision:", &ordinal.to_le_bytes()]),
+        path: (*path).to_string(),
+        fields: BTreeMap::from([(
+          "@filename".to_string(),
+          encode_canonical_value(
+            &CanonicalConfigValueV1::String(path.trim_start_matches('/').to_string()),
+            aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+          )
+          .unwrap(),
+        )]),
+      }
+    })
+    .collect::<Vec<_>>();
+  documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+  documents
+}
+
+fn single_complete_candidate_source(
+  algorithm: HashAlgorithm,
+  planned: &PlannedCandidate,
+  documents: Vec<ExecutionDocument>,
+  candidate_ordinals: &[u64],
+) -> CandidateExecutionSource {
+  let query_posting = &planned.candidate.compiled_literals()[0].compiled().postings[0];
+  let mut posting_rows = candidate_ordinals
+    .iter()
+    .map(|document_ordinal| PostingFixtureRow {
+      coordinate: query_posting.coordinate,
+      key: query_posting.posting_key.clone(),
+      document_ordinal: *document_ordinal,
+      tombstone: false,
+    })
+    .collect::<Vec<_>>();
+  let posting_records = posting_fixture_records(&mut posting_rows);
+  let posting_page = ordered_page(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, 1, &posting_records);
+  let posting_root = leaf_directory(algorithm, OrderedIndexRoleV1::Posting, planned.candidate.index_id(), 7, &[&posting_page]);
+  let mut by_ordinal = documents.iter().collect::<Vec<_>>();
+  by_ordinal.sort_unstable_by_key(|document| document.ordinal);
+  let scope_records = by_ordinal
+    .iter()
+    .map(|document| {
+      encode_scope_document_record(
+        &ScopeDocumentRecordV1 {
+          tombstone: false,
+          document_ordinal: document.ordinal,
+          file_key: &document.file_key,
+          record_revision_hash: &document.revision,
+          path: &document.path,
+        },
+        algorithm,
+      )
+      .unwrap()
+    })
+    .collect::<Vec<_>>();
+  let scope_page = ordered_page(algorithm, OrderedIndexRoleV1::ScopeOrdinal, &planned.scope_id, 5, 0, &scope_records);
+  let scope_root = leaf_directory(algorithm, OrderedIndexRoleV1::ScopeOrdinal, &planned.scope_id, 5, &[&scope_page]);
+  let mut artifacts = Source::default();
+  for artifact in [&posting_page, &posting_root, &scope_page, &scope_root] {
+    artifacts.insert(artifact);
+  }
+  CandidateExecutionSource {
+    artifacts,
+    posting_roots: BTreeMap::from([(
+      planned.candidate.index_id().to_vec(),
+      root_authority(algorithm, planned.candidate.index_id(), 7, &posting_root),
+    )]),
+    scope_root: root_authority(algorithm, &planned.scope_id, 5, &scope_root),
+    documents,
+    rechecks: 0,
+    posting_root_reads: 0,
+    posting_receipt_complete: true,
+    scope_receipt_complete: true,
+    recheck_visitor_calls: 1,
+    squelch_recheck_visitor_error: false,
+  }
+}
+
+struct PanicAuthoritativeSource;
+
+impl QueryAuthoritativeScopeSourceV1 for PanicAuthoritativeSource {
+  fn scan_scope(
+    &mut self,
+    _request: QueryExecutionScopeScanRequestV1<'_>,
+    _visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryExecutionScopeScanReceiptV1, QueryExecutionScanErrorV1> {
+    panic!("terminal accelerator failure incorrectly entered authoritative fallback")
+  }
+}
+
+struct CorruptAuthoritativeSource;
+
+impl QueryAuthoritativeScopeSourceV1 for CorruptAuthoritativeSource {
+  fn scan_scope(
+    &mut self,
+    _request: QueryExecutionScopeScanRequestV1<'_>,
+    _visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryExecutionScopeScanReceiptV1, QueryExecutionScanErrorV1> {
+    Err(QueryExecutionScanErrorV1::Source(QueryExecutionSourceErrorV1::new(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "fixture_authoritative_corrupt",
+      "authoritative namespace walk failed closure validation",
+    )))
+  }
+}
+
+struct FailingCompleteSource {
+  class: QueryExecutionSourceErrorClassV1,
+  code: &'static str,
+}
+
+impl ArtifactCursorSourceV1 for FailingCompleteSource {
+  fn read_immutable_artifact(&mut self, _key: &[u8], _maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
+    panic!("internal complete-source failure unexpectedly read an artifact")
+  }
+}
+
+impl QueryCompleteCandidateSourceV1 for FailingCompleteSource {
+  fn resolve_complete_posting_root(
+    &mut self,
+    _request: QueryCompletePostingRootRequestV1<'_>,
+  ) -> Result<QueryCompletePostingRootReceiptV1, QueryExecutionSourceErrorV1> {
+    Err(QueryExecutionSourceErrorV1::new(self.class, self.code, "fixture complete source failed"))
+  }
+
+  fn resolve_complete_scope_root(
+    &mut self,
+    _request: QueryCompleteScopeRootRequestV1<'_>,
+  ) -> Result<QueryCompleteScopeRootReceiptV1, QueryExecutionSourceErrorV1> {
+    panic!("internal complete-source failure unexpectedly resolved ScopeOrdinal")
+  }
+
+  fn recheck_complete_candidate(
+    &mut self,
+    _request: QueryCandidateRecheckRequestV1<'_>,
+    _visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryCandidateRecheckReceiptV1, QueryExecutionScanErrorV1> {
+    panic!("internal complete-source failure unexpectedly rechecked a candidate")
+  }
 }
 
 #[test]
@@ -2389,6 +2543,32 @@ fn partial_candidate_adapter_delegates_exactness_without_live_or_duplicate_autho
   }
 }
 
+#[test]
+fn exact_scope_orchestrator_delegates_every_correctness_authority() {
+  let source = include_str!("../../src/engine/v4/query_scope_execution.rs");
+  for required in [
+    "compose_boolean_candidate_plan_v1",
+    "execute_authoritative_scope_query_v1",
+    "execute_complete_candidate_scope_query_v1",
+    "execute_composed_partial_candidates_v1",
+  ] {
+    assert!(source.contains(required), "scope orchestrator stopped delegating to {required}");
+  }
+  for forbidden in [
+    "StorageEngine",
+    "impl QueryAuthoritativeScopeSourceV1",
+    "impl IndexChangedDocumentSourceV1",
+    "impl IndexPartialCandidateRecheckerV1",
+    "evaluate_operation",
+    "tokio::spawn",
+    "std::thread::spawn",
+    "server::",
+    "axum::",
+  ] {
+    assert!(!source.contains(forbidden), "scope orchestrator gained forbidden correctness or runtime authority: {forbidden}");
+  }
+}
+
 fn composition_limits() -> QueryCandidateCompositionLimitsV1 {
   QueryCandidateCompositionLimitsV1::new(128, 256 * 1_024).unwrap()
 }
@@ -2861,4 +3041,871 @@ fn composed_partial_index_union_streams_every_planner_selected_branch() {
   assert_eq!(complement.scans, 1);
   drop(exact);
   assert_eq!(execution_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn disposable_partial_refusal_reruns_authoritative_scope_truth_without_exposing_candidates() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_partial_candidate(algorithm);
+  let paths = ["/alpha.json", "/beta.json"];
+  let mut documents = paths
+    .into_iter()
+    .enumerate()
+    .map(|(index, path)| {
+      let ordinal = u64::try_from(index).unwrap() + 1;
+      ExecutionDocument {
+        scope_id: planned.scope_id.clone(),
+        ordinal,
+        file_key: digest_parts(algorithm, &[b"file:", path.as_bytes()]),
+        revision: digest_parts(algorithm, &[b"revision:", &ordinal.to_le_bytes()]),
+        path: path.to_string(),
+        fields: BTreeMap::from([(
+          "@filename".to_string(),
+          encode_canonical_value(
+            &CanonicalConfigValueV1::String(path.trim_start_matches('/').to_string()),
+            aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+          )
+          .unwrap(),
+        )]),
+      }
+    })
+    .collect::<Vec<_>>();
+  documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+  let expected = documents
+    .iter()
+    .filter(|document| document.path == "/alpha.json")
+    .map(|document| (document.file_key.clone(), document.revision.clone()))
+    .collect::<Vec<_>>();
+  let mut authoritative_source =
+    AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+  let mut partial_source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    posting_roots: BTreeMap::new(),
+    scope_root: None,
+    posting_complete: false,
+    posting_error: Some(IndexPartialSourceErrorV1::unavailable("fixture_candidate_missing", "derived Posting was evicted")),
+    posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
+    scope_error: None,
+    scope_source_override: None,
+    posting_resolutions: 0,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+
+  let execution = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut authoritative_source,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: Some(&mut complement),
+    rechecker: Some(&mut rechecker),
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+
+  assert_eq!(execution.path(), QueryExactScopeExecutionPathV1::PartialFallback);
+  assert_eq!(
+    execution.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  match execution.fallback_diagnostic().unwrap() {
+    QueryExactScopeFallbackDiagnosticV1::Partial { reason, diagnostic } => {
+      assert_eq!(*reason, IndexPartialAccelerationFallbackReasonV1::CandidateUnavailable);
+      assert_eq!(diagnostic.code, "fixture_candidate_missing");
+    }
+    diagnostic => panic!("unexpected fallback diagnostic: {diagnostic:?}"),
+  }
+  assert_eq!(partial_source.posting_resolutions, 1);
+  assert_eq!(complement.scans, 0, "candidate refusal must not enter exact complement work");
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn exact_scope_dispatches_authoritative_complete_and_exact_partial_paths() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let paths = ["/alpha.json", "/beta.json"];
+  let cancellation = CancellationToken::new();
+
+  let authoritative_plan = planned_query_with_generation_sources(
+    predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+    None,
+    None,
+  );
+  let authoritative_documents = filename_execution_documents(algorithm, &authoritative_plan.scope_id, &paths);
+  let expected = authoritative_documents
+    .iter()
+    .filter(|document| document.path == "/alpha.json")
+    .map(|document| (document.file_key.clone(), document.revision.clone()))
+    .collect::<Vec<_>>();
+  let mut authoritative_source = AuthoritativeExecutionSource {
+    root: authoritative_plan.root.clone(),
+    publication_sequence: authoritative_plan.plan.publication_sequence(),
+    documents: authoritative_documents,
+  };
+  let authoritative_memory = memory(32 * 1_024 * 1_024);
+  let authoritative = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &authoritative_plan.plan,
+    catalogs: &authoritative_plan.catalogs,
+    scope_id: &authoritative_plan.scope_id,
+    authoritative_source: &mut authoritative_source,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &authoritative_memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  assert_eq!(authoritative.path(), QueryExactScopeExecutionPathV1::Authoritative);
+  assert_eq!(authoritative.scope_id(), authoritative_plan.scope_id);
+  assert_eq!(authoritative.selected_namespace_root(), authoritative_plan.root);
+  assert!(authoritative.retained_bytes() > 0);
+  assert_eq!(
+    authoritative.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  drop(authoritative);
+  assert_eq!(authoritative_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let complete_plan = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let complete_documents = filename_execution_documents(algorithm, &complete_plan.scope_id, &paths);
+  let mut complete_source = single_complete_candidate_source(algorithm, &complete_plan, complete_documents, &[1]);
+  let mut unused_authority = PanicAuthoritativeSource;
+  let complete_memory = memory(32 * 1_024 * 1_024);
+  let complete = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &complete_plan.plan,
+    catalogs: &complete_plan.catalogs,
+    scope_id: &complete_plan.scope_id,
+    authoritative_source: &mut unused_authority,
+    complete_source: Some(&mut complete_source),
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &complete_memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  assert_eq!(complete.path(), QueryExactScopeExecutionPathV1::Complete);
+  assert_eq!(complete.scope_id(), complete_plan.scope_id);
+  assert_eq!(complete.selected_namespace_root(), complete_plan.root);
+  assert!(complete.retained_bytes() > 0);
+  assert_eq!(
+    complete.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  drop(complete);
+  assert_eq!(complete_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let partial_plan = planned_partial_candidate(algorithm);
+  let partial_documents = filename_execution_documents(algorithm, &partial_plan.scope_id, &paths);
+  let alpha = partial_documents.iter().find(|document| document.ordinal == 1).unwrap();
+  let candidate_rows = [(&partial_plan.candidate, 1u64)];
+  let mut by_ordinal = partial_documents.iter().collect::<Vec<_>>();
+  by_ordinal.sort_unstable_by_key(|document| document.ordinal);
+  let scope_rows = by_ordinal
+    .iter()
+    .map(|document| (document.ordinal, document.file_key.as_slice(), document.revision.as_slice(), document.path.as_str()))
+    .collect::<Vec<_>>();
+  let mut partial_source = partial_artifact_source(algorithm, &partial_plan.scope_id, &candidate_rows, &scope_rows);
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  rechecker
+    .outcomes
+    .insert(alpha.file_key.clone(), IndexPartialRecheckOutcomeV1::Present { record_revision_hash: alpha.revision.clone(), matches: true });
+  let mut unused_authority = PanicAuthoritativeSource;
+  let partial_memory = memory(32 * 1_024 * 1_024);
+  let partial = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial_plan.plan,
+    catalogs: &partial_plan.catalogs,
+    scope_id: &partial_plan.scope_id,
+    authoritative_source: &mut unused_authority,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: Some(&mut complement),
+    rechecker: Some(&mut rechecker),
+    memory: &partial_memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  assert_eq!(partial.path(), QueryExactScopeExecutionPathV1::Partial);
+  assert_eq!(partial.scope_id(), partial_plan.scope_id);
+  assert_eq!(partial.selected_namespace_root(), partial_plan.root);
+  assert!(partial.retained_bytes() > 0);
+  assert_eq!(
+    partial.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  drop(partial);
+  assert_eq!(partial_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn exact_scope_retains_sha512_scope_and_root_identities_without_heap_duplication() {
+  let algorithm = HashAlgorithm::Sha512;
+  let planned = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let documents = filename_execution_documents(algorithm, &planned.scope_id, &["/alpha.json", "/beta.json"]);
+  let mut source = single_complete_candidate_source(algorithm, &planned, documents, &[1]);
+  let mut unused_authority = PanicAuthoritativeSource;
+  let memory = memory(32 * 1_024 * 1_024);
+  let execution = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut unused_authority,
+    complete_source: Some(&mut source),
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  assert_eq!(execution.path(), QueryExactScopeExecutionPathV1::Complete);
+  assert_eq!(execution.scope_id(), planned.scope_id);
+  assert_eq!(execution.scope_id().len(), 64);
+  assert_eq!(execution.selected_namespace_root(), planned.root);
+  assert_eq!(execution.selected_namespace_root().len(), 64);
+  assert_eq!(execution.match_count(), 1);
+  assert!(execution.retained_bytes() > 0);
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn complete_disposable_failures_retry_truth_but_internal_failures_remain_terminal() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_candidate(algorithm, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let documents = filename_execution_documents(algorithm, &planned.scope_id, &["/alpha.json", "/beta.json"]);
+  let expected = documents
+    .iter()
+    .filter(|document| document.path == "/alpha.json")
+    .map(|document| (document.file_key.clone(), document.revision.clone()))
+    .collect::<Vec<_>>();
+  let mut complete_source = single_complete_candidate_source(algorithm, &planned, documents.clone(), &[1]);
+  complete_source.posting_receipt_complete = false;
+  let mut authoritative_source =
+    AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let fallback = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut authoritative_source,
+    complete_source: Some(&mut complete_source),
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  assert_eq!(fallback.path(), QueryExactScopeExecutionPathV1::CompleteFallback);
+  assert_eq!(
+    fallback.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  match fallback.fallback_diagnostic().unwrap() {
+    QueryExactScopeFallbackDiagnosticV1::Complete(error) => {
+      assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource);
+      assert_eq!(error.code(), "query_candidate_posting_root_receipt");
+    }
+    diagnostic => panic!("unexpected fallback diagnostic: {diagnostic:?}"),
+  }
+  drop(fallback);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  for (source_class, expected_class) in [
+    (QueryExecutionSourceErrorClassV1::ResourceLimit, QueryExecutionErrorClassV1::ResourceLimit),
+    (QueryExecutionSourceErrorClassV1::Unavailable, QueryExecutionErrorClassV1::HistoricalViewUnavailable),
+  ] {
+    let documents = filename_execution_documents(algorithm, &planned.scope_id, &["/alpha.json", "/beta.json"]);
+    let mut complete_source = FailingCompleteSource { class: source_class, code: "fixture_complete_disposable" };
+    let mut authoritative_source =
+      AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+    let fallback = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+      plan: &planned.plan,
+      catalogs: &planned.catalogs,
+      scope_id: &planned.scope_id,
+      authoritative_source: &mut authoritative_source,
+      complete_source: Some(&mut complete_source),
+      partial_source: None,
+      complement: None,
+      rechecker: None,
+      memory: &memory,
+      cancellation: &cancellation,
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    })
+    .unwrap();
+    assert_eq!(fallback.path(), QueryExactScopeExecutionPathV1::CompleteFallback);
+    match fallback.fallback_diagnostic().unwrap() {
+      QueryExactScopeFallbackDiagnosticV1::Complete(error) => {
+        assert_eq!(error.class(), expected_class);
+        assert_eq!(error.code(), "fixture_complete_disposable");
+      }
+      diagnostic => panic!("unexpected complete fallback diagnostic: {diagnostic:?}"),
+    }
+    drop(fallback);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+
+  let mut panic_authority = PanicAuthoritativeSource;
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_complete_source"),
+    error => panic!("unexpected missing complete-source error: {error:?}"),
+  }
+
+  let mut internal_source = FailingCompleteSource { class: QueryExecutionSourceErrorClassV1::Internal, code: "fixture_complete_internal" };
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: Some(&mut internal_source),
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::Execution(error) => {
+      assert_eq!(error.class(), QueryExecutionErrorClassV1::Internal);
+      assert_eq!(error.code(), "fixture_complete_internal");
+    }
+    error => panic!("unexpected terminal complete-source error: {error:?}"),
+  }
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn scope_fallback_preserves_both_failures_and_never_retries_terminal_partial_errors() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let planned = planned_partial_candidate(algorithm);
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let mut partial_source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    posting_roots: BTreeMap::new(),
+    scope_root: None,
+    posting_complete: false,
+    posting_error: Some(IndexPartialSourceErrorV1::unavailable("fixture_candidate_missing", "derived Posting was evicted")),
+    posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
+    scope_error: None,
+    scope_source_override: None,
+    posting_resolutions: 0,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let mut corrupt_authority = CorruptAuthoritativeSource;
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut corrupt_authority,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: Some(&mut complement),
+    rechecker: Some(&mut rechecker),
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  assert!(std::error::Error::source(&error).unwrap().to_string().contains("fixture_authoritative_corrupt"));
+  match error {
+    QueryExactScopeExecutionErrorV1::AuthoritativeFallbackFailed { diagnostic, authoritative } => {
+      match diagnostic {
+        QueryExactScopeFallbackDiagnosticV1::Partial { reason, diagnostic } => {
+          assert_eq!(reason, IndexPartialAccelerationFallbackReasonV1::CandidateUnavailable);
+          assert_eq!(diagnostic.code, "fixture_candidate_missing");
+        }
+        diagnostic => panic!("unexpected retained accelerator diagnostic: {diagnostic:?}"),
+      }
+      assert_eq!(authoritative.class(), QueryExecutionErrorClassV1::CorruptSource);
+      assert_eq!(authoritative.code(), "fixture_authoritative_corrupt");
+    }
+    error => panic!("unexpected fallback failure: {error:?}"),
+  }
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  partial_source.posting_error = Some(IndexPartialSourceErrorV1::internal("fixture_partial_internal", "partial source invariant failed"));
+  let mut panic_authority = PanicAuthoritativeSource;
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: Some(&mut complement),
+    rechecker: Some(&mut rechecker),
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::Partial(error) => {
+      assert_eq!(error.class(), IndexPartialAccelerationErrorClassV1::Internal);
+      assert_eq!(error.code(), "fixture_partial_internal");
+    }
+    error => panic!("unexpected terminal partial-source error: {error:?}"),
+  }
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn scope_orchestrator_falls_back_on_composition_pressure_but_not_cancellation_or_missing_sources() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let expression = QueryExpressionV1::Or(vec![
+    predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+    predicate("@size", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5))),
+  ]);
+  let planned = planned_query_with_generation_sources(expression, Some((source_root.clone(), 40)), Some((source_root, 40)));
+  let encoded_alpha = encode_canonical_value(
+    &CanonicalConfigValueV1::String("alpha.json".to_string()),
+    aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+  )
+  .unwrap();
+  let encoded_beta = encode_canonical_value(
+    &CanonicalConfigValueV1::String("beta.json".to_string()),
+    aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+  )
+  .unwrap();
+  let encoded_one =
+    encode_canonical_value(&CanonicalConfigValueV1::Unsigned(1), aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE)
+      .unwrap();
+  let encoded_five =
+    encode_canonical_value(&CanonicalConfigValueV1::Unsigned(5), aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE)
+      .unwrap();
+  let mut documents = vec![
+    ExecutionDocument {
+      scope_id: planned.scope_id.clone(),
+      ordinal: 1,
+      file_key: digest_parts(algorithm, &[b"file:", b"/alpha.json"]),
+      revision: digest_parts(algorithm, &[b"revision:", &1u64.to_le_bytes()]),
+      path: "/alpha.json".to_string(),
+      fields: BTreeMap::from([("@filename".to_string(), encoded_alpha), ("@size".to_string(), encoded_one)]),
+    },
+    ExecutionDocument {
+      scope_id: planned.scope_id.clone(),
+      ordinal: 2,
+      file_key: digest_parts(algorithm, &[b"file:", b"/beta.json"]),
+      revision: digest_parts(algorithm, &[b"revision:", &2u64.to_le_bytes()]),
+      path: "/beta.json".to_string(),
+      fields: BTreeMap::from([("@filename".to_string(), encoded_beta), ("@size".to_string(), encoded_five)]),
+    },
+  ];
+  documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+  let expected = documents.iter().map(|document| (document.file_key.clone(), document.revision.clone())).collect::<Vec<_>>();
+  let mut authoritative_source =
+    AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+  let memory = memory(32 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let fallback = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut authoritative_source,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &cancellation,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: QueryCandidateCompositionLimitsV1::new(1, 256 * 1_024).unwrap(),
+  })
+  .unwrap();
+  assert_eq!(fallback.path(), QueryExactScopeExecutionPathV1::CompositionFallback);
+  assert_eq!(fallback.scope_id(), planned.scope_id);
+  assert_eq!(fallback.selected_namespace_root(), planned.root);
+  assert!(fallback.retained_bytes() > 0);
+  assert_eq!(
+    fallback.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>(),
+    expected
+  );
+  match fallback.fallback_diagnostic().unwrap() {
+    QueryExactScopeFallbackDiagnosticV1::Composition(error) => {
+      assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::ResourceLimit);
+    }
+    diagnostic => panic!("unexpected composition fallback diagnostic: {diagnostic:?}"),
+  }
+  drop(fallback);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let partial = planned_partial_candidate(algorithm);
+  let cancelled = CancellationToken::new();
+  cancelled.cancel();
+  let mut panic_authority = PanicAuthoritativeSource;
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial.plan,
+    catalogs: &partial.catalogs,
+    scope_id: &partial.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &cancelled,
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::Composition(error) => {
+      assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::Cancelled);
+    }
+    error => panic!("unexpected cancellation error: {error:?}"),
+  }
+
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial.plan,
+    catalogs: &partial.catalogs,
+    scope_id: &partial.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_partial_source"),
+    error => panic!("unexpected missing-source error: {error:?}"),
+  }
+
+  let mut partial_source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    posting_roots: BTreeMap::new(),
+    scope_root: None,
+    posting_complete: false,
+    posting_error: None,
+    posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
+    scope_error: None,
+    scope_source_override: None,
+    posting_resolutions: 0,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial.plan,
+    catalogs: &partial.catalogs,
+    scope_id: &partial.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: None,
+    rechecker: Some(&mut rechecker),
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_complement_source"),
+    error => panic!("unexpected missing-complement error: {error:?}"),
+  }
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial.plan,
+    catalogs: &partial.catalogs,
+    scope_id: &partial.scope_id,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: Some(&mut partial_source),
+    complement: Some(&mut complement),
+    rechecker: None,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_partial_rechecker"),
+    error => panic!("unexpected missing-rechecker error: {error:?}"),
+  }
+  assert_eq!(partial_source.posting_resolutions, 0);
+  assert_eq!(partial_source.scope_resolutions, 0);
+  assert_eq!(complement.scans, 0);
+
+  for invalid_scope in [vec![0; algorithm.hash_length()], vec![1; algorithm.hash_length() - 1]] {
+    let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+      plan: &partial.plan,
+      catalogs: &partial.catalogs,
+      scope_id: &invalid_scope,
+      authoritative_source: &mut panic_authority,
+      complete_source: None,
+      partial_source: None,
+      complement: None,
+      rechecker: None,
+      memory: &memory,
+      cancellation: &CancellationToken::new(),
+      execution_limits: execution_limits(),
+      candidate_limits: limits(),
+      acceleration_limits: partial_acceleration_limits(),
+      composition_limits: composition_limits(),
+    })
+    .unwrap_err();
+    match error {
+      QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_identity"),
+      error => panic!("unexpected invalid-scope error: {error:?}"),
+    }
+  }
+  let unknown_scope = vec![0x99; algorithm.hash_length()];
+  let error = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &partial.plan,
+    catalogs: &partial.catalogs,
+    scope_id: &unknown_scope,
+    authoritative_source: &mut panic_authority,
+    complete_source: None,
+    partial_source: None,
+    complement: None,
+    rechecker: None,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap_err();
+  match error {
+    QueryExactScopeExecutionErrorV1::InvalidRequest { code, .. } => assert_eq!(code, "query_scope_unknown"),
+    error => panic!("unexpected unknown-scope error: {error:?}"),
+  }
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[derive(Clone, Copy)]
+enum BooleanFixtureCoverage {
+  Authoritative,
+  Complete,
+  Partial,
+}
+
+fn execute_boolean_scope_fixture(
+  expression: QueryExpressionV1,
+  coverage: BooleanFixtureCoverage,
+) -> (QueryExactScopeExecutionPathV1, Vec<String>) {
+  let source_root = vec![0x55; HashAlgorithm::Blake3_256.hash_length()];
+  let planned = match coverage {
+    BooleanFixtureCoverage::Authoritative => planned_query_with_generation_sources(expression, None, None),
+    BooleanFixtureCoverage::Complete => planned_query(expression),
+    BooleanFixtureCoverage::Partial => {
+      planned_query_with_generation_sources(expression, Some((source_root.clone(), 40)), Some((source_root, 40)))
+    }
+  };
+  let algorithm = planned.plan.hash_algorithm();
+  let rows = [(1u64, "/alpha.json", 20u64), (2u64, "/beta.json", 5u64), (3u64, "/gamma.json", 30u64)];
+  let mut documents = rows
+    .iter()
+    .map(|(ordinal, path, size)| ExecutionDocument {
+      scope_id: planned.scope_id.clone(),
+      ordinal: *ordinal,
+      file_key: digest_parts(algorithm, &[b"file:", path.as_bytes()]),
+      revision: digest_parts(algorithm, &[b"revision:", &ordinal.to_le_bytes()]),
+      path: (*path).to_string(),
+      fields: BTreeMap::from([
+        (
+          "@filename".to_string(),
+          encode_canonical_value(
+            &CanonicalConfigValueV1::String(path.trim_start_matches('/').to_string()),
+            aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+          )
+          .unwrap(),
+        ),
+        (
+          "@size".to_string(),
+          encode_canonical_value(
+            &CanonicalConfigValueV1::Unsigned(*size),
+            aeordb::engine::v4::config_value::CanonicalValueBounds::SOURCE_VALUE,
+          )
+          .unwrap(),
+        ),
+      ]),
+    })
+    .collect::<Vec<_>>();
+  documents.sort_unstable_by(|left, right| left.file_key.cmp(&right.file_key));
+  let path_by_key = documents.iter().map(|document| (document.file_key.clone(), document.path.clone())).collect::<BTreeMap<_, _>>();
+  let mut authoritative_source =
+    AuthoritativeExecutionSource { root: planned.root.clone(), publication_sequence: planned.plan.publication_sequence(), documents };
+  let mut complete_source = FailingCompleteSource { class: QueryExecutionSourceErrorClassV1::Corrupt, code: "fixture_complete_disposable" };
+  let mut partial_source = PartialArtifactSource {
+    artifacts: Source::default(),
+    posting_root: None,
+    posting_roots: BTreeMap::new(),
+    scope_root: None,
+    posting_complete: false,
+    posting_error: Some(IndexPartialSourceErrorV1::unavailable("fixture_partial_disposable", "partial fixture is unavailable")),
+    posting_manifest_override: None,
+    posting_manifest_overrides: BTreeMap::new(),
+    scope_error: None,
+    scope_source_override: None,
+    posting_resolutions: 0,
+    scope_resolutions: 0,
+  };
+  let mut complement = PartialComplement::default();
+  let mut rechecker = PartialRechecker::default();
+  let complete_source =
+    matches!(coverage, BooleanFixtureCoverage::Complete).then_some(&mut complete_source as &mut dyn QueryCompleteCandidateSourceV1);
+  let partial_source =
+    matches!(coverage, BooleanFixtureCoverage::Partial).then_some(&mut partial_source as &mut dyn QueryPartialCandidateArtifactSourceV1);
+  let complement = matches!(coverage, BooleanFixtureCoverage::Partial).then_some(&mut complement as &mut dyn IndexChangedDocumentSourceV1);
+  let rechecker =
+    matches!(coverage, BooleanFixtureCoverage::Partial).then_some(&mut rechecker as &mut dyn IndexPartialCandidateRecheckerV1);
+  let memory = memory(32 * 1_024 * 1_024);
+  let execution = execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+    plan: &planned.plan,
+    catalogs: &planned.catalogs,
+    scope_id: &planned.scope_id,
+    authoritative_source: &mut authoritative_source,
+    complete_source,
+    partial_source,
+    complement,
+    rechecker,
+    memory: &memory,
+    cancellation: &CancellationToken::new(),
+    execution_limits: execution_limits(),
+    candidate_limits: limits(),
+    acceleration_limits: partial_acceleration_limits(),
+    composition_limits: composition_limits(),
+  })
+  .unwrap();
+  let path = execution.path();
+  let paths = execution.identities().map(|identity| path_by_key.get(identity.file_key()).unwrap().clone()).collect::<Vec<_>>();
+  drop(execution);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  (path, paths)
+}
+
+#[test]
+fn authoritative_complete_and_partial_plans_are_boolean_equivalent_through_the_scope_orchestrator() {
+  let cases = [
+    (
+      QueryExpressionV1::And(vec![
+        predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+        predicate("@size", QueryPredicateOperationV1::Gt(CanonicalConfigValueV1::Unsigned(10))),
+      ]),
+      vec!["/alpha.json"],
+    ),
+    (
+      QueryExpressionV1::Or(vec![
+        predicate("@filename", QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string()))),
+        predicate("@size", QueryPredicateOperationV1::Gt(CanonicalConfigValueV1::Unsigned(10))),
+      ]),
+      vec!["/alpha.json", "/gamma.json"],
+    ),
+    (
+      QueryExpressionV1::Not(Box::new(predicate(
+        "@filename",
+        QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+      ))),
+      vec!["/beta.json", "/gamma.json"],
+    ),
+  ];
+
+  for (expression, mut expected) in cases {
+    expected.sort_unstable();
+    for coverage in [BooleanFixtureCoverage::Authoritative, BooleanFixtureCoverage::Complete, BooleanFixtureCoverage::Partial] {
+      let (path, mut actual) = execute_boolean_scope_fixture(expression.clone(), coverage);
+      actual.sort_unstable();
+      assert_eq!(actual, expected);
+      if matches!(expression, QueryExpressionV1::Not(_)) || matches!(coverage, BooleanFixtureCoverage::Authoritative) {
+        assert_eq!(path, QueryExactScopeExecutionPathV1::Authoritative);
+      } else if matches!(coverage, BooleanFixtureCoverage::Complete) {
+        assert_eq!(path, QueryExactScopeExecutionPathV1::CompleteFallback);
+      } else {
+        assert_eq!(path, QueryExactScopeExecutionPathV1::PartialFallback);
+      }
+    }
+  }
 }
