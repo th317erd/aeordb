@@ -31,7 +31,10 @@ pub use super::index_artifact_native::{
   NativeSelectedNvtFallbackReasonV1, NativeSelectedNvtFallbackV1, NativeSelectedPostingPageV1, NativeSelectedPostingSeekSourceV1,
 };
 use super::index_coverage_planner::IndexCoverageGenerationHealthV1;
-use super::index_coverage_registry::{IndexCoverageNvtDescriptorV1, field_definition_fingerprint, field_dependency_fingerprint};
+use super::index_coverage_registry::{
+  IndexCoverageNvtDescriptorV1, IndexCoverageNvtStatusV1, IndexCoverageRegistryOwnerKindV1, IndexCoverageRegistrySelectionV1,
+  IndexCoverageRegistryGenerationV1, IndexCoverageRegistrySnapshotV1, field_definition_fingerprint, field_dependency_fingerprint,
+};
 use super::index_native_parser::{
   NativeIndexParserBodySourceV1, NativeIndexParserBodyV1, NativeIndexParserExecutorV1, native_parser_body_reservation_bytes_v1,
 };
@@ -609,7 +612,17 @@ pub struct NativeSelectedSemanticCatalogV1 {
   semantic_state_root: Vec<u8>,
   catalogs: Vec<RootAwareQueryFieldCatalogV1>,
   scope_definitions: Vec<NativeSelectedScopeDefinitionV1>,
+  coverage_bound: bool,
+  _coverage_memory: Option<MemoryReservation>,
   _memory: MemoryReservation,
+}
+
+struct NativePlannerCoverageBindingV1 {
+  catalog_index: usize,
+  scope_index: usize,
+  candidate_index: usize,
+  selected_generation: Option<QueryPlanningCoverageGenerationV1>,
+  nvt_hint_available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1257,7 +1270,123 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         )
       })?)
       .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_semantic_result_accounting", error.to_string()))?;
-    Ok(NativeSelectedSemanticCatalogV1 { selected_root, semantic_state_root, catalogs, scope_definitions, _memory: result_memory })
+    Ok(NativeSelectedSemanticCatalogV1 {
+      selected_root,
+      semantic_state_root,
+      catalogs,
+      scope_definitions,
+      coverage_bound: false,
+      _coverage_memory: None,
+      _memory: result_memory,
+    })
+  }
+
+  pub fn bind_planner_coverage(
+    &self,
+    selected: &mut NativeSelectedSemanticCatalogV1,
+    snapshot: &IndexCoverageRegistrySnapshotV1,
+  ) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    if selected.selected_root != self.view.root_metadata().hash
+      || selected.semantic_state_root != self.view.authority().semantic_state.object_id
+      || snapshot.hash_algorithm() != self.view.hash_algorithm()
+      || snapshot.database_id() != self.view.database_id()
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_coverage_authority",
+        "selected planner catalog or coverage snapshot belongs to another read authority",
+      ));
+    }
+    if selected.coverage_bound
+      || selected
+        .catalogs
+        .iter()
+        .flat_map(|catalog| &catalog.scopes)
+        .flat_map(|scope| &scope.indexes)
+        .any(|candidate| candidate.selected_generation.is_some() || candidate.nvt_hint_available)
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_coverage_rebind",
+        "selected planner coverage may be bound exactly once",
+      ));
+    }
+
+    let mut selected_generation_count = 0usize;
+    for catalog in &selected.catalogs {
+      for scope in &catalog.scopes {
+        for candidate in &scope.indexes {
+          self.check_cancelled()?;
+          if selected_planner_coverage(snapshot, candidate)?.is_some() {
+            selected_generation_count = selected_generation_count.checked_add(1).ok_or_else(|| {
+              NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_count", "selected planner generation count overflowed")
+            })?;
+          }
+        }
+      }
+    }
+    self.check_cancelled()?;
+    if selected_generation_count == 0 {
+      selected.coverage_bound = true;
+      return Ok(());
+    }
+
+    let transient_bytes = selected_coverage_binding_bound(selected_generation_count, self.view.hash_algorithm())?;
+    let mut coverage_memory = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, transient_bytes, AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_memory", error.to_string()))?;
+    let mut bindings = Vec::new();
+    bindings.try_reserve_exact(selected_generation_count).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_allocation", format!("coverage binding allocation failed: {error}"))
+    })?;
+    let mut retained_bytes = 0u64;
+    for (catalog_index, catalog) in selected.catalogs.iter().enumerate() {
+      for (scope_index, scope) in catalog.scopes.iter().enumerate() {
+        for (candidate_index, candidate) in scope.indexes.iter().enumerate() {
+          self.check_cancelled()?;
+          let Some((generation, nvt_hint_available)) = selected_planner_coverage(snapshot, candidate)? else {
+            continue;
+          };
+          let generation = try_clone_planning_generation(generation)?;
+          retained_bytes = retained_bytes
+            .checked_add(planning_generation_retained_bytes(&generation)?)
+            .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_retained", "coverage bytes overflowed"))?;
+          bindings.push(NativePlannerCoverageBindingV1 {
+            catalog_index,
+            scope_index,
+            candidate_index,
+            selected_generation: Some(generation),
+            nvt_hint_available,
+          });
+        }
+      }
+    }
+    self.check_cancelled()?;
+    let coverage_memory = if retained_bytes == 0 {
+      drop(coverage_memory);
+      None
+    } else {
+      let release_bytes = coverage_memory.bytes().checked_sub(retained_bytes).ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_coverage_accounting",
+          "retained planner generations exceed their coverage reservation",
+        )
+      })?;
+      coverage_memory
+        .shrink(release_bytes)
+        .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_coverage_accounting", error.to_string()))?;
+      Some(coverage_memory)
+    };
+    for binding in &mut bindings {
+      let candidate = &mut selected.catalogs[binding.catalog_index].scopes[binding.scope_index].indexes[binding.candidate_index];
+      candidate.selected_generation = binding.selected_generation.take();
+      candidate.nvt_hint_available = binding.nvt_hint_available;
+    }
+    drop(bindings);
+    selected._coverage_memory = coverage_memory;
+    selected.coverage_bound = true;
+    Ok(())
   }
 
   pub fn load_index_artifact_page_cursor(
@@ -2198,6 +2327,88 @@ fn selected_semantic_catalog_retained_bytes(
       "selected_semantic_retained_bytes",
       format!("planner catalog retained bytes exceed u64: {error}"),
     )
+  })
+}
+
+fn selected_coverage_binding_bound(
+  selected_generation_count: usize,
+  hash_algorithm: HashAlgorithm,
+) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  const GENERATION_HEAP_VECTORS: usize = 5;
+  const ALLOCATION_ALLOWANCE: usize = 16;
+  let generation_heap = hash_algorithm
+    .hash_length()
+    .checked_add(ALLOCATION_ALLOWANCE)
+    .and_then(|value| value.checked_mul(GENERATION_HEAP_VECTORS))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_bound", "generation heap bound overflowed"))?;
+  let per_generation = size_of::<NativePlannerCoverageBindingV1>()
+    .checked_add(generation_heap)
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_bound", "per-generation coverage bound overflowed"))?;
+  let bytes = selected_generation_count
+    .checked_mul(per_generation)
+    .and_then(|value| value.checked_add(size_of::<Vec<NativePlannerCoverageBindingV1>>()))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_bound", "coverage binding bound overflowed"))?;
+  u64::try_from(bytes).map_err(|error| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_bound", format!("coverage bound exceeds u64: {error}"))
+  })
+}
+
+fn selected_planner_coverage<'snapshot>(
+  snapshot: &'snapshot IndexCoverageRegistrySnapshotV1,
+  candidate: &QueryPlanningIndexCandidateV1,
+) -> Result<Option<(&'snapshot IndexCoverageRegistryGenerationV1, bool)>, NativeSelectedNamespaceReadErrorV1> {
+  let Some(entry) = snapshot.entry(IndexCoverageRegistryOwnerKindV1::FieldIndex, &candidate.index_id) else {
+    return Ok(None);
+  };
+  match entry.selection() {
+    IndexCoverageRegistrySelectionV1::Unavailable(_) => {
+      if matches!(entry.nvt_status(), IndexCoverageNvtStatusV1::Usable(_)) {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_coverage_nvt_without_generation",
+          "coverage registry exposed a usable NVT without a selected FieldIndex generation",
+        ));
+      }
+      Ok(None)
+    }
+    IndexCoverageRegistrySelectionV1::Selected(generation) => {
+      if generation.owner_id() != candidate.index_id {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_coverage_owner",
+          "coverage registry generation owner disagrees with its planner candidate",
+        ));
+      }
+      Ok(Some((generation, matches!(entry.nvt_status(), IndexCoverageNvtStatusV1::Usable(_)))))
+    }
+  }
+}
+
+fn try_clone_planning_generation(
+  generation: &IndexCoverageRegistryGenerationV1,
+) -> Result<QueryPlanningCoverageGenerationV1, NativeSelectedNamespaceReadErrorV1> {
+  Ok(QueryPlanningCoverageGenerationV1 {
+    generation: generation.generation(),
+    owner_id: try_clone_selected_bytes(generation.owner_id(), "coverage owner identity")?,
+    manifest_hash: try_clone_selected_bytes(generation.manifest_hash(), "coverage manifest identity")?,
+    source_namespace_root: try_clone_selected_bytes(generation.source_namespace_root(), "coverage source root")?,
+    coverage_epoch_id: *generation.coverage_epoch_id(),
+    coverage_publication_sequence: generation.coverage_publication_sequence(),
+    definition_fingerprint: try_clone_selected_bytes(generation.definition_fingerprint(), "coverage definition fingerprint")?,
+    dependency_fingerprint: try_clone_selected_bytes(generation.dependency_fingerprint(), "coverage dependency fingerprint")?,
+    health: generation.health(),
+  })
+}
+
+fn planning_generation_retained_bytes(generation: &QueryPlanningCoverageGenerationV1) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+  let bytes = generation
+    .owner_id
+    .capacity()
+    .checked_add(generation.manifest_hash.capacity())
+    .and_then(|value| value.checked_add(generation.source_namespace_root.capacity()))
+    .and_then(|value| value.checked_add(generation.definition_fingerprint.capacity()))
+    .and_then(|value| value.checked_add(generation.dependency_fingerprint.capacity()))
+    .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_retained", "generation bytes overflowed"))?;
+  u64::try_from(bytes).map_err(|error| {
+    NativeSelectedNamespaceReadErrorV1::resource("selected_coverage_retained", format!("generation bytes exceed u64: {error}"))
   })
 }
 

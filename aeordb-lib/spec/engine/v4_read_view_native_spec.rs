@@ -14,18 +14,24 @@ use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBou
 use aeordb::engine::v4::entity::EntryTypeV4;
 use aeordb::engine::v4::first_authority::{
   FirstAuthorityPublicationRequestV1, ImmutableEntityBatchPublicationRequestV1, ImmutableEntityWriteV1,
-  ImmutableSemanticObjectBatchPublicationRequestV1, IndexArtifactBatchPublicationRequestV1, PreparedNamespaceTreeV0,
-  SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
+  ImmutableSemanticObjectBatchPublicationRequestV1, IndexActivePointerPublicationRequestV1, IndexArtifactBatchPublicationRequestV1,
+  PreparedNamespaceTreeV0, SuccessorAuthorityPublicationRequestV1, V4FirstAuthorityPublisher,
 };
+use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::field_definition::decode_field_index_definition;
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::index_artifact::{
-  CoverageVersionV1, EncodedImmutableIndexArtifactV1, FieldIndexManifestBodyV1, IndexManifestBodyV1, IndexManifestWriteV1,
-  ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1, encode_index_manifest,
+  ActivePointerKindV1, ActivePointerWriteV1, CoverageVersionV1, EncodedImmutableIndexArtifactV1, FieldIndexManifestBodyV1,
+  IndexManifestBodyV1, IndexManifestWriteV1, ScopeCatalogManifestBodyV1, ValueStoreManifestBodyV1, encode_active_pointer,
+  decode_index_manifest, encode_index_manifest,
 };
 use aeordb::engine::v4::index_artifact_cursor::{ArtifactPageCursorLimitsV1, ArtifactPageNeighborModeV1, ArtifactPageSeekV1};
 use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
-use aeordb::engine::v4::index_coverage_registry::{IndexCoverageNvtDescriptorV1, field_definition_fingerprint, field_dependency_fingerprint};
+use aeordb::engine::v4::index_coverage_registry::{
+  FirstAuthorityIndexCoverageRegistrySourceV1, IndexCoverageNvtDescriptorV1, IndexCoverageRegistryOptionsV1,
+  IndexCoverageRegistryOwnerKindV1, IndexCoverageRegistryOwnerRequestV1, IndexCoverageRegistrySnapshotV1, IndexCoverageRegistryV1,
+  field_definition_fingerprint, field_dependency_fingerprint,
+};
 use aeordb::engine::v4::index_manifest::FieldNvtManifestBodyV1;
 use aeordb::engine::v4::index_nvt::{
   NvtBasisStatusV1, NvtEntryWriteV1, NvtTileWriteV1, encode_nvt_tile, pin_field_index_v1, validate_field_nvt_basis_v1,
@@ -1183,6 +1189,50 @@ fn selected_artifact_fixture_with_unadmitted_capability(algorithm: HashAlgorithm
   )
 }
 
+fn publish_selected_artifact_pointers(
+  publisher: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  manifests: &[(ActivePointerKindV1, &EncodedImmutableIndexArtifactV1)],
+) {
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let cancellation = CancellationToken::new();
+  let mut retirement = RetirementJournalOwnerV1::new_chain(
+    algorithm,
+    [0x31; 16],
+    1,
+    902,
+    RetirementJournalBufferOptionsV1::new(1, 1024 * 1024, 30_000),
+    &cancellation,
+    &memory,
+  )
+  .unwrap();
+  for (index, (kind, manifest)) in manifests.iter().enumerate() {
+    let decoded = decode_index_manifest(&manifest.value, algorithm).unwrap();
+    let pointer = encode_active_pointer(&ActivePointerWriteV1 {
+      kind: *kind,
+      hash_algorithm: algorithm,
+      generation: decoded.generation,
+      owner_id: decoded.owner_id,
+      slot: 0,
+      sequence: 1,
+      target_manifest_hash: &manifest.key,
+    })
+    .unwrap();
+    let timestamp = 1_700_000_000_350 + u64::try_from(index).unwrap();
+    publisher
+      .publish_index_active_pointer(
+        IndexActivePointerPublicationRequestV1 {
+          database_id: &[0x31; 16],
+          pointer: &pointer,
+          publication_timestamp_ms: timestamp,
+          monotonic_now_ms: timestamp,
+        },
+        &mut retirement,
+      )
+      .unwrap();
+  }
+}
+
 fn selected_artifact_fixture_with_options(
   algorithm: HashAlgorithm,
   manifest_live_delta: u64,
@@ -1563,6 +1613,12 @@ fn selected_artifact_fixture_with_options(
       publication_timestamp_ms: 1_700_000_000_300,
     })
     .unwrap();
+  let mut pointer_manifests =
+    vec![(ActivePointerKindV1::ScopeCatalog, &scope_manifest), (ActivePointerKindV1::FieldIndex, &field_manifest)];
+  if let Some(nvt_manifest) = nvt_manifest.as_ref() {
+    pointer_manifests.push((ActivePointerKindV1::FieldNvt, nvt_manifest));
+  }
+  publish_selected_artifact_pointers(&publisher, algorithm, &pointer_manifests);
   let target_root = if advance_target_root {
     let timestamp = 1_700_000_000_450;
     let namespace_tree = serialize_child_entries(
@@ -1672,6 +1728,33 @@ fn corrupt_artifact_checksum(fixture: &SelectedArtifactFixture, key: &[u8]) {
   file.seek(SeekFrom::Start(checksum_offset)).unwrap();
   file.write_all(&checksum_byte).unwrap();
   file.sync_all().unwrap();
+}
+
+fn selected_artifact_coverage_snapshot(fixture: &SelectedArtifactFixture) -> Arc<IndexCoverageRegistrySnapshotV1> {
+  let registry = IndexCoverageRegistryV1::new(
+    fixture.view.hash_algorithm(),
+    fixture.view.database_id(),
+    CapabilitySetV1::from_bits(0..24).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(8, 8 * 1024 * 1024).unwrap(),
+    Arc::clone(&fixture.memory),
+  )
+  .unwrap();
+  let requests = [
+    IndexCoverageRegistryOwnerRequestV1::new(
+      IndexCoverageRegistryOwnerKindV1::ScopeCatalog,
+      fixture.scope_id.clone(),
+      IndexCoverageGenerationHealthV1::Healthy,
+    )
+    .unwrap(),
+    IndexCoverageRegistryOwnerRequestV1::new(
+      IndexCoverageRegistryOwnerKindV1::FieldIndex,
+      fixture.generation.owner_id.clone(),
+      IndexCoverageGenerationHealthV1::Healthy,
+    )
+    .unwrap(),
+  ];
+  let mut source = FirstAuthorityIndexCoverageRegistrySourceV1::new(Arc::clone(fixture.source.publisher())).unwrap();
+  registry.refresh(&mut source, &requests, &fixture.cancellation).unwrap()
 }
 
 fn truncate_artifact_source(fixture: &SelectedArtifactFixture, key: &[u8]) {
@@ -3378,6 +3461,100 @@ fn assert_selected_semantic_catalog_uses_historical_root(algorithm: HashAlgorith
   drop(view);
   assert_eq!(pins.active_pin_count().unwrap(), 0);
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn selected_semantic_catalog_binds_the_exact_real_registry_generation() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    for (fixture, expected_nvt) in [(selected_artifact_fixture(algorithm), false), (selected_valid_nvt_artifact_fixture(algorithm), true)] {
+      let snapshot = selected_artifact_coverage_snapshot(&fixture);
+      let reader = fixture.reader();
+      let before_selected = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+      let mut selected = reader.load_planner_catalogs("/", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+      assert!(selected.catalogs()[0].scopes[0].indexes[0].selected_generation.is_none());
+      let before_binding = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+
+      reader.bind_planner_coverage(&mut selected, snapshot.as_ref()).unwrap();
+
+      assert!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > before_binding);
+      let candidate =
+        selected.catalogs()[0].scopes[0].indexes.iter().find(|candidate| candidate.index_id == fixture.generation.owner_id).unwrap();
+      assert_eq!(candidate.selected_generation.as_ref(), Some(&fixture.generation));
+      assert_eq!(candidate.nvt_hint_available, expected_nvt);
+      let rebind = reader.bind_planner_coverage(&mut selected, snapshot.as_ref()).unwrap_err();
+      assert_eq!(rebind.class(), NativeSelectedNamespaceReadErrorClassV1::InvalidRequest);
+      assert_eq!(selected.catalogs()[0].scopes[0].indexes[0].selected_generation.as_ref(), Some(&fixture.generation));
+      drop(selected);
+      assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before_selected);
+      drop(reader);
+      drop(snapshot);
+      fixture.assert_released();
+    }
+  }
+}
+
+#[test]
+fn selected_semantic_catalog_coverage_binding_is_atomic_and_absence_is_authoritative() {
+  let fixture = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  let reader = fixture.reader();
+  let mut selected = reader.load_planner_catalogs("/", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+  let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let foreign_memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap()));
+  let foreign_registry = IndexCoverageRegistryV1::new(
+    fixture.view.hash_algorithm(),
+    [0x99; 16],
+    CapabilitySetV1::from_bits(0..24).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(1, 1024 * 1024).unwrap(),
+    Arc::clone(&foreign_memory),
+  )
+  .unwrap();
+  let foreign = foreign_registry.snapshot().unwrap();
+  let error = reader.bind_planner_coverage(&mut selected, foreign.as_ref()).unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert!(selected.catalogs()[0].scopes[0].indexes[0].selected_generation.is_none());
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  let snapshot = selected_artifact_coverage_snapshot(&fixture);
+  fixture.cancellation.cancel();
+  let error = reader.bind_planner_coverage(&mut selected, snapshot.as_ref()).unwrap_err();
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Cancelled);
+  assert!(selected.catalogs()[0].scopes[0].indexes[0].selected_generation.is_none());
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  drop(snapshot);
+  drop(foreign);
+  drop(foreign_registry);
+  assert_eq!(foreign_memory.snapshot().unwrap().reserved_bytes, 0);
+  drop(selected);
+  drop(reader);
+  fixture.assert_released();
+
+  let fixture = selected_artifact_fixture(HashAlgorithm::Blake3_256);
+  let empty_registry = IndexCoverageRegistryV1::new(
+    fixture.view.hash_algorithm(),
+    fixture.view.database_id(),
+    CapabilitySetV1::from_bits(0..24).unwrap(),
+    IndexCoverageRegistryOptionsV1::new(1, 1024 * 1024).unwrap(),
+    Arc::clone(&fixture.memory),
+  )
+  .unwrap();
+  let empty = empty_registry.snapshot().unwrap();
+  let reader = fixture.reader();
+  let mut selected = reader.load_planner_catalogs("/", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
+  let before = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let ordinary_limit = 511 * 1024 * 1024;
+  let memory_snapshot = fixture.memory.snapshot().unwrap();
+  let blocker_bytes = ordinary_limit - memory_snapshot.accounted_bytes - 64;
+  let blocker = fixture.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+  reader.bind_planner_coverage(&mut selected, empty.as_ref()).unwrap();
+  let candidate = &selected.catalogs()[0].scopes[0].indexes[0];
+  assert!(candidate.selected_generation.is_none());
+  assert!(!candidate.nvt_hint_available);
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+  drop(blocker);
+  drop(selected);
+  drop(reader);
+  drop(empty);
+  drop(empty_registry);
+  fixture.assert_released();
 }
 
 #[test]
