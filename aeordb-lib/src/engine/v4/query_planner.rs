@@ -458,6 +458,10 @@ impl CompiledQueryIndexCandidateV1 {
   pub const fn estimated_work(&self) -> u64 {
     self.estimated_work
   }
+
+  pub const fn proven_candidate_superset(&self) -> bool {
+    self.proven_candidate_superset
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -123,6 +123,7 @@ pub mod position;
 pub mod position_order;
 pub mod position_resolver;
 pub(crate) mod private_workspace;
+pub mod query_complete_candidate;
 pub mod query_executor;
 pub mod query_planner;
 pub mod read_view;

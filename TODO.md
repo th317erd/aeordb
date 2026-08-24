@@ -1261,7 +1261,9 @@
           - [x] P7-3d1: freeze one storage-neutral authoritative truth executor for effective-scope document streams, exact canonical predicate semantics, boolean composition, selected-root identity, cancellation, and retained-result memory.
             - [x] Reject nonidentical cross-field ScopeId partitions as typed unavailable until P7-3d4 performs the required FileKey merge; never silently omit a valid scope.
             - [x] Latch field/document visitor failures so a buggy source cannot squelch executor errors and return partial success behind a complete receipt.
-          - [ ] P7-3d2: adapt complete Posting candidates and ScopeOrdinal identities through the shared artifact cursor, then prove candidate execution is exactly equivalent to the authoritative truth executor.
+          - [x] P7-3d2: adapt complete Posting candidates and ScopeOrdinal identities through the shared artifact cursor, then prove candidate execution is exactly equivalent to the authoritative truth executor.
+            - [x] P7-3d2a: implement one storage-neutral, bounded shared-cursor scanner that derives candidate document ordinals from complete Posting constraints and resolves live ScopeOrdinal identities without granting either artifact result authority.
+            - [x] P7-3d2b: adapt the scanner into the authoritative scope-source contract, require exact selected-root FileKey/revision/path recheck, and prove `AND`/`OR`/`NOT` equivalence plus malformed, stale, cancellation, and pressure closure.
           - [ ] P7-3d3: compose partial candidates with the exact changed-document complement and selected-root recheck; every unavailable nonauthority accelerator path must fall back without presenting partial results as complete.
           - [ ] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
