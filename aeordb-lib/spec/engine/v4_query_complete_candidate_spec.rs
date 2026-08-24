@@ -32,6 +32,10 @@ use aeordb::engine::v4::query_complete_candidate::{
   QueryPartialPostingScanRequestV1, QueryScopeOrdinalSelectionV1, execute_complete_candidate_root_query_v1,
   resolve_complete_scope_identities_v1, scan_complete_posting_ordinals_v1, scan_partial_posting_ordinals_v1,
 };
+use aeordb::engine::v4::query_candidate_composition::{
+  QueryBooleanCandidatePlanKindV1, QueryCandidateCompositionErrorClassV1, QueryCandidateCompositionLimitsV1,
+  compose_boolean_candidate_plan_v1,
+};
 use aeordb::engine::v4::query_partial_candidate::{
   QueryPartialCandidateArtifactSourceV1, QueryPartialCandidateExecutionRequestV1, QueryPartialPostingRootReceiptV1,
   QueryPartialPostingRootRequestV1, QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1, execute_planned_partial_candidate_v1,
@@ -273,6 +277,53 @@ fn planned_query(expression: QueryExpressionV1) -> PlannedQuery {
   let mut catalogs = vec![query_catalog(algorithm, &root, &semantic_root, "@filename", "typed_exact_blake3_v1", 2, 0x71)];
   if expression_uses_field(&expression, "@size") {
     catalogs.push(query_catalog(algorithm, &root, &semantic_root, "@size", "u64_order_v1", 5, 0x73));
+  }
+  let scope_id = catalogs[0].scopes[0].scope_id.clone();
+  assert!(catalogs.iter().all(|catalog| catalog.scopes[0].scope_id == scope_id));
+  let context = QueryPlanningContextV1::new(DATABASE_ID, PHYSICAL_INSTANCE_ID, algorithm, &root, &semantic_root, 41).unwrap();
+  let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: "/",
+    expression: &expression,
+    catalogs: &catalogs,
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 16,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
+  PlannedQuery { root, scope_id, plan, catalogs }
+}
+
+fn planned_query_with_generation_sources(
+  expression: QueryExpressionV1,
+  filename_source: Option<(Vec<u8>, u64)>,
+  size_source: Option<(Vec<u8>, u64)>,
+) -> PlannedQuery {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let root = vec![0x33; algorithm.hash_length()];
+  let semantic_root = vec![0x44; algorithm.hash_length()];
+  let mut catalogs = vec![query_catalog(algorithm, &root, &semantic_root, "@filename", "typed_exact_blake3_v1", 2, 0x71)];
+  if expression_uses_field(&expression, "@size") {
+    catalogs.push(query_catalog(algorithm, &root, &semantic_root, "@size", "u64_order_v1", 5, 0x73));
+  }
+  for catalog in &mut catalogs {
+    let source = match catalog.field_name.as_str() {
+      "@filename" => filename_source.clone(),
+      "@size" => size_source.clone(),
+      field => panic!("unexpected fixture field {field}"),
+    };
+    let generation = &mut catalog.scopes[0].indexes[0].selected_generation;
+    match source {
+      Some((source_namespace_root, coverage_publication_sequence)) => {
+        let generation = generation.as_mut().unwrap();
+        generation.source_namespace_root = source_namespace_root;
+        generation.coverage_publication_sequence = coverage_publication_sequence;
+      }
+      None => *generation = None,
+    }
   }
   let scope_id = catalogs[0].scopes[0].scope_id.clone();
   assert!(catalogs.iter().all(|catalog| catalog.scopes[0].scope_id == scope_id));
@@ -2252,5 +2303,248 @@ fn partial_candidate_adapter_delegates_exactness_without_live_or_duplicate_autho
     "axum::",
   ] {
     assert!(!adapter.contains(forbidden), "partial adapter gained forbidden authority: {forbidden}");
+  }
+}
+
+fn composition_limits() -> QueryCandidateCompositionLimitsV1 {
+  QueryCandidateCompositionLimitsV1::new(128, 256 * 1_024).unwrap()
+}
+
+#[test]
+fn boolean_candidate_composition_obeys_and_or_not_superset_algebra() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let partial_and_authoritative = QueryExpressionV1::And(vec![
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@filename".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+    }),
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@size".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5)),
+    }),
+  ]);
+  let planned = planned_query_with_generation_sources(partial_and_authoritative.clone(), Some((source_root.clone(), 40)), None);
+  let memory = memory(16 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let composed = compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.source_namespace_root(), Some(source_root.as_slice()));
+  assert_eq!(composed.covered_through_publication_sequence(), Some(40));
+  assert_eq!(composed.selections().len(), 1);
+  drop(composed);
+
+  let nested = QueryExpressionV1::And(vec![
+    QueryExpressionV1::Or(match partial_and_authoritative.clone() {
+      QueryExpressionV1::And(children) => children,
+      _ => unreachable!(),
+    }),
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@filename".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+    }),
+  ]);
+  let nested = planned_query_with_generation_sources(nested, Some((source_root.clone(), 40)), None);
+  let composed = compose_boolean_candidate_plan_v1(&nested.plan, &nested.scope_id, &memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.selections().len(), 1);
+  drop(composed);
+
+  let planned = planned_query_with_generation_sources(
+    QueryExpressionV1::Or(match partial_and_authoritative {
+      QueryExpressionV1::And(children) => children,
+      _ => unreachable!(),
+    }),
+    Some((source_root, 40)),
+    None,
+  );
+  let composed = compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Authoritative);
+  assert!(composed.selections().is_empty());
+
+  let partial = planned_partial_candidate(algorithm);
+  let catalogs = partial.catalogs.clone();
+  let expression = QueryExpressionV1::Not(Box::new(QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@filename".to_string(),
+    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+  })));
+  let context = QueryPlanningContextV1::new(DATABASE_ID, PHYSICAL_INSTANCE_ID, algorithm, &partial.root, &[0x44; 32], 41).unwrap();
+  let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: "/",
+    expression: &expression,
+    catalogs: &catalogs,
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 16,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
+  let composed = compose_boolean_candidate_plan_v1(&plan, &partial.scope_id, &memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Authoritative);
+  assert!(composed.selections().is_empty());
+}
+
+#[test]
+fn partial_index_union_keeps_every_branch_and_incompatible_or_bases_fall_back() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let union = planned_phonetic_union_query_with_source("Schmidt", Some((source_root.clone(), 40)));
+  let query_memory = memory(16 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  let composed =
+    compose_boolean_candidate_plan_v1(&union.plan, &union.scope_id, &query_memory, &cancellation, composition_limits()).unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.source_namespace_root(), Some(source_root.as_slice()));
+  assert_eq!(composed.selections().len(), 2);
+  assert_ne!(composed.selections()[0].candidate_index(), composed.selections()[1].candidate_index());
+
+  let expression = QueryExpressionV1::Or(vec![
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@filename".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+    }),
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@size".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5)),
+    }),
+  ]);
+  let incompatible = planned_query_with_generation_sources(
+    expression,
+    Some((vec![0x55; algorithm.hash_length()], 40)),
+    Some((vec![0x56; algorithm.hash_length()], 39)),
+  );
+  let composed =
+    compose_boolean_candidate_plan_v1(&incompatible.plan, &incompatible.scope_id, &query_memory, &cancellation, composition_limits())
+      .unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Authoritative);
+  assert!(composed.selections().is_empty());
+}
+
+#[test]
+fn candidate_composition_retains_exact_memory_and_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let planned = planned_partial_candidate(algorithm);
+    let query_memory = memory(16 * 1_024 * 1_024);
+    let composed =
+      compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &query_memory, &CancellationToken::new(), composition_limits())
+        .unwrap();
+    assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+    assert_eq!(composed.scope_id(), Some(planned.scope_id.as_slice()));
+    assert_eq!(composed.source_namespace_root().unwrap().len(), algorithm.hash_length());
+    assert!(composed.retained_bytes() > 0);
+    assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, composed.retained_bytes());
+    drop(composed);
+    assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+  }
+
+  let complete =
+    planned_candidate(HashAlgorithm::Blake3_256, QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())));
+  let query_memory = memory(16 * 1_024 * 1_024);
+  let composed =
+    compose_boolean_candidate_plan_v1(&complete.plan, &complete.scope_id, &query_memory, &CancellationToken::new(), composition_limits())
+      .unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Complete);
+  assert_eq!(composed.retained_bytes(), 0);
+  assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn same_basis_or_unions_partial_selections_and_enforces_all_bounds() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let source_root = vec![0x55; algorithm.hash_length()];
+  let expression = QueryExpressionV1::Or(vec![
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@filename".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+    }),
+    QueryExpressionV1::Field(QueryPredicateV1 {
+      field_name: "@size".to_string(),
+      operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::Unsigned(5)),
+    }),
+  ]);
+  let planned = planned_query_with_generation_sources(expression, Some((source_root.clone(), 40)), Some((source_root.clone(), 40)));
+  let query_memory = memory(16 * 1_024 * 1_024);
+  let composed =
+    compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &query_memory, &CancellationToken::new(), composition_limits())
+      .unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.source_namespace_root(), Some(source_root.as_slice()));
+  assert_eq!(composed.selections().len(), 2);
+  drop(composed);
+
+  let duplicate_predicate = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@filename".to_string(),
+    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("alpha.json".to_string())),
+  });
+  let duplicate = planned_query_with_generation_sources(
+    QueryExpressionV1::Or(vec![duplicate_predicate.clone(), duplicate_predicate]),
+    Some((source_root.clone(), 40)),
+    None,
+  );
+  let composed =
+    compose_boolean_candidate_plan_v1(&duplicate.plan, &duplicate.scope_id, &query_memory, &CancellationToken::new(), composition_limits())
+      .unwrap();
+  assert_eq!(composed.kind(), QueryBooleanCandidatePlanKindV1::Partial);
+  assert_eq!(composed.selections().len(), 2, "distinct predicate bindings must remain independently recheckable");
+  assert_ne!(composed.selections()[0].predicate_index(), composed.selections()[1].predicate_index());
+  drop(composed);
+
+  let error = compose_boolean_candidate_plan_v1(
+    &planned.plan,
+    &planned.scope_id,
+    &query_memory,
+    &CancellationToken::new(),
+    QueryCandidateCompositionLimitsV1::new(1, 256 * 1_024).unwrap(),
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "query_candidate_composition_selection_limit");
+  assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let error = compose_boolean_candidate_plan_v1(
+    &planned.plan,
+    &planned.scope_id,
+    &query_memory,
+    &CancellationToken::new(),
+    QueryCandidateCompositionLimitsV1::new(128, 1).unwrap(),
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::InvalidRequest);
+  assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let error =
+    compose_boolean_candidate_plan_v1(&planned.plan, &[0; 32], &query_memory, &CancellationToken::new(), composition_limits()).unwrap_err();
+  assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::InvalidRequest);
+}
+
+#[test]
+fn candidate_composition_is_bounded_cancelled_and_storage_neutral() {
+  let planned = planned_partial_candidate(HashAlgorithm::Blake3_256);
+  let query_memory = memory(16 * 1_024 * 1_024);
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  let error =
+    compose_boolean_candidate_plan_v1(&planned.plan, &planned.scope_id, &query_memory, &cancellation, composition_limits()).unwrap_err();
+  assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::Cancelled);
+  assert_eq!(query_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let tiny_memory = memory(1);
+  let error = compose_boolean_candidate_plan_v1(
+    &planned.plan,
+    &planned.scope_id,
+    &tiny_memory,
+    &CancellationToken::new(),
+    QueryCandidateCompositionLimitsV1::new(1_000_000, 64 * 1_024 * 1_024).unwrap(),
+  )
+  .unwrap_err();
+  assert_eq!(error.class(), QueryCandidateCompositionErrorClassV1::ResourceLimit);
+  assert_eq!(tiny_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
+
+  let source = include_str!("../../src/engine/v4/query_candidate_composition.rs");
+  for forbidden in ["StorageEngine", "FieldNvt", "Nvt", "server::", "axum::", "tokio::spawn", "std::thread::spawn"] {
+    assert!(!source.contains(forbidden), "candidate composition gained forbidden authority: {forbidden}");
   }
 }

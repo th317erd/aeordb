@@ -1268,6 +1268,9 @@
             - [x] P7-3d3a: bind every compiled query to one deterministic compiler-owned fingerprint and extend the shared Posting scanner to planner-proven partial generations without weakening complete-generation validation.
             - [x] P7-3d3b: adapt one planner-selected partial generation and its source ScopeOrdinal identities into the existing exact complement/recheck proof engine.
             - [ ] P7-3d3c: compose complete, partial, and authoritative predicate branches for exact boolean scope execution, with every disposable partial refusal falling back to authoritative truth.
+              - [x] P7-3d3c1: derive one bounded boolean candidate-superset plan, including common-basis partial unions, without treating a candidate or NVT hint as result authority.
+              - [ ] P7-3d3c2: stream every selected common-basis partial candidate through one composite P6 exact-complement execution and normalize exact scope-local FileKey/revision identities.
+              - [ ] P7-3d3c3: route every disposable partial refusal through authoritative truth and prove complete/partial/authoritative `AND`/`OR`/`NOT` equivalence, bounds, cancellation, and reservation release.
           - [ ] P7-3d4: merge disjoint effective scopes by FileKey and implement bounded logical ordering, top-K, grouping, and incremental aggregates with comparator/collation compatibility checks.
           - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
