@@ -1315,7 +1315,7 @@
               - [x] P7-3d5c2: add one bounded exact FileKey lookup over the private ordering workspace, with checksum, cancellation, pressure, absence, and corruption proof.
               - [x] P7-3d5c3: compile one plan-bound native auxiliary source that restores the exact selected-root row and reuses the shared parser, ValueStore, and converter authorities for position and aggregate results.
               - [x] P7-3d5c4: prove real-file sort/group/aggregate behavior, both hash widths, fieldless scopes, stale identities, cancellation, pressure, corruption, and exact resource release before landing.
-            - [ ] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
+            - [x] P7-3d5d: compose native authoritative/complete/partial execution for current and historical roots across both hash widths and flat/B-tree namespaces.
               - [x] P7-3d5d1: add one native authoritative execution facade over the captured selected-root partition source and existing transactional sink path.
               - [x] P7-3d5d2: bind the exact coverage-registry snapshot into selected semantic planner catalogs and implement one captured native immutable-artifact source for complete/partial roots.
                 - [x] P7-3d5d2a: bind matching real registry generations and NVT availability into selected planner catalogs with atomic query-memory accounting.
@@ -1326,11 +1326,11 @@
                   - [x] P7-3d5d2c1: expose the sole captured-header accounted artifact-byte loader to the native query source without adding a parser, cache, or pointer read.
                   - [x] P7-3d5d2c2: adapt exact planner-selected generations into complete and partial Posting/ScopeOrdinal root receipts, requiring all matching scope dependencies to agree.
                   - [x] P7-3d5d2c3: close current/historical HEAD and pointer races, substitution, disagreement, cancellation, pressure, corruption, and retained-memory release with real first-authority fixtures.
-              - [ ] P7-3d5d3: compose per-scope complete/partial/authoritative execution into one bounded root transaction without duplicate identities or partial sink visibility.
+              - [x] P7-3d5d3: compose per-scope complete/partial/authoritative execution into one bounded root transaction without duplicate identities or partial sink visibility.
                 - [x] P7-3d5d3a: add one selected-root row/field authority shared by native authoritative scope scans and complete-candidate rechecks.
-                - [ ] P7-3d5d3b: derive the exact partial changed-document complement from captured ScopeOrdinal/ScopeReverse authority and evaluate target rows through the shared exact document evaluator.
-                - [ ] P7-3d5d3c: lend authoritative, complete, partial, complement, and recheck sources to the existing exact-scope state machine under one transactional native facade.
-              - [ ] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.
+                - [x] P7-3d5d3b: derive the exact partial changed-document complement from captured ScopeOrdinal/ScopeReverse authority and evaluate target rows through the shared exact document evaluator.
+                - [x] P7-3d5d3c: lend authoritative, complete, partial, complement, and recheck sources to the existing exact-scope state machine under one transactional native facade.
+              - [x] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.
             - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
               - [ ] Prove and, if required, replace per-document native evaluator preparation with a bounded reusable prepared-runtime cache whose eviction cannot alter results.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.

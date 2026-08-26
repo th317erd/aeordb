@@ -30,6 +30,7 @@ use aeordb::engine::v4::index_artifact_cursor::{
   ArtifactPageNeighborModeV1, ArtifactPageSeekV1,
 };
 use aeordb::engine::v4::index_coverage_planner::IndexCoverageGenerationHealthV1;
+use aeordb::engine::v4::index_definition_runtime::IndexDefinitionRuntimeV1;
 use aeordb::engine::v4::index_coverage_registry::{
   FirstAuthorityIndexCoverageRegistrySourceV1, IndexCoverageNvtDescriptorV1, IndexCoverageRegistryOptionsV1,
   IndexCoverageRegistryOwnerKindV1, IndexCoverageRegistryOwnerRequestV1, IndexCoverageRegistrySnapshotV1, IndexCoverageRegistryV1,
@@ -879,6 +880,31 @@ fn publish_file_tree_with_sizes(
   sizes: &[u64],
   corruption: FileTreeCorruption,
 ) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+  publish_file_tree_with_sizes_and_transaction(
+    publisher,
+    algorithm,
+    expected_head_hash,
+    file_record_version,
+    btree,
+    names,
+    sizes,
+    corruption,
+    [0x64; 16],
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_file_tree_with_sizes_and_transaction(
+  publisher: &V4FirstAuthorityPublisher,
+  algorithm: HashAlgorithm,
+  expected_head_hash: Vec<u8>,
+  file_record_version: u8,
+  btree: bool,
+  names: &[&str],
+  sizes: &[u64],
+  corruption: FileTreeCorruption,
+  transaction_id: [u8; 16],
+) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
   assert_eq!(names.len(), sizes.len());
   let timestamp = 1_700_000_000_400;
   let mut file_entities = Vec::new();
@@ -988,7 +1014,7 @@ fn publish_file_tree_with_sizes(
   let namespace_root = publisher
     .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
       database_id: [0x31; 16],
-      transaction_id: [0x64; 16],
+      transaction_id,
       created_at_ms: timestamp as u64 + 1,
       expected_head_hash,
       namespace_tree: PreparedNamespaceTreeV0 { root_hash, stored_value: root_value },
@@ -1285,33 +1311,85 @@ fn selected_artifact_fixture_with_options(
   capability_profile: BinaryCapabilityProfileV1,
   layout: SelectedArtifactLayoutV1,
 ) -> SelectedArtifactFixture {
+  selected_artifact_fixture_with_namespace_options(
+    algorithm,
+    manifest_live_delta,
+    publish_posting_page,
+    advance_target_root,
+    target_files,
+    field_required_reader_capabilities,
+    capability_profile,
+    layout,
+    None,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_artifact_fixture_with_namespace_options(
+  algorithm: HashAlgorithm,
+  manifest_live_delta: u64,
+  publish_posting_page: bool,
+  advance_target_root: bool,
+  target_files: bool,
+  field_required_reader_capabilities: [u8; 32],
+  capability_profile: BinaryCapabilityProfileV1,
+  layout: SelectedArtifactLayoutV1,
+  coherent_namespace_btree: Option<bool>,
+) -> SelectedArtifactFixture {
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
-  let graph = if target_files {
+  let graph = if target_files || coherent_namespace_btree.is_some() {
     complete_semantic_graph_with_scope(algorithm, semantic_scope_definition(algorithm, "/", Some("**/*.json")))
   } else {
     complete_semantic_graph(algorithm)
   };
-  let selected_root =
-    publish_complete_semantic_root(&publisher, algorithm, &first.namespace_root.value, first.namespace_root.root_hash, &graph);
-  let posting_coordinates: &[u64] = if layout.has_three_posting_pages() {
-    &[17, 29, 41]
-  } else if layout == SelectedArtifactLayoutV1::StaleNvtPageHint {
-    &[17, 29]
+  let (source_root_value, source_root_hash, source_file_identities) = if let Some(btree) = coherent_namespace_btree {
+    let (source_root, identities) = publish_file_tree_with_sizes(
+      &publisher,
+      algorithm,
+      first.namespace_root.root_hash,
+      1,
+      btree,
+      &["1.json"],
+      &[17],
+      FileTreeCorruption::None,
+    );
+    let source_root_value = publisher.load_immutable_entity_bounded(&source_root, 1024 * 1024).unwrap().unwrap().stored_value;
+    (source_root_value, source_root, identities)
   } else {
-    &[17]
+    (first.namespace_root.value, first.namespace_root.root_hash, Vec::new())
   };
-  let posting_records = posting_coordinates
+  let selected_root = publish_complete_semantic_root(&publisher, algorithm, &source_root_value, source_root_hash, &graph);
+  let query_hash = CanonicalConfigValueV1::Bytes(digest_parts(algorithm, &[b""]));
+  let coherent_posting = coherent_namespace_btree.map(|_| {
+    let runtime = IndexDefinitionRuntimeV1::from_encoded(&graph.value_store_definition, &graph.field_index_definition, algorithm).unwrap();
+    let compiled = runtime.converter().compile_query_literal(&query_hash).unwrap();
+    assert_eq!(compiled.postings.len(), 1);
+    compiled.postings[0].clone()
+  });
+  let posting_inputs = if let Some(posting) = coherent_posting {
+    vec![(posting.coordinate, posting.expansion_ordinal, posting.posting_key)]
+  } else {
+    let posting_coordinates: &[u64] = if layout.has_three_posting_pages() {
+      &[17, 29, 41]
+    } else if layout == SelectedArtifactLayoutV1::StaleNvtPageHint {
+      &[17, 29]
+    } else {
+      &[17]
+    };
+    posting_coordinates.iter().map(|coordinate| (*coordinate, 0, coordinate.to_le_bytes().to_vec())).collect()
+  };
+  let posting_records = posting_inputs
     .iter()
     .enumerate()
-    .map(|(index, coordinate)| {
+    .map(|(index, (coordinate, expansion_ordinal, posting_key))| {
       encode_posting_record(&PostingRecordV1 {
         tombstone: false,
         coordinate: *coordinate,
         document_ordinal: u64::try_from(index).unwrap() + 1,
         source_value_ordinal: 0,
-        expansion_ordinal: 0,
-        posting_key: &coordinate.to_le_bytes(),
+        expansion_ordinal: *expansion_ordinal,
+        posting_key,
       })
       .unwrap()
     })
@@ -1419,17 +1497,30 @@ fn selected_artifact_fixture_with_options(
   let posting_page = posting_pages[0].clone();
   let decoded_page = &decoded_pages[0];
   let decoded_root = decode_artifact_directory(&posting_root.value, algorithm).unwrap();
-  let scope_identities = posting_coordinates
-    .iter()
-    .enumerate()
-    .map(|(index, _)| {
-      let document_ordinal = u64::try_from(index).unwrap() + 1;
-      let path = format!("/docs/{document_ordinal}.json");
-      let file_key = digest_parts(algorithm, &[b"file:", path.as_bytes()]);
-      let record_revision_hash = digest_parts(algorithm, &[b"revision:", path.as_bytes()]);
-      (document_ordinal, path, file_key, record_revision_hash)
-    })
-    .collect::<Vec<_>>();
+  let scope_identities = if coherent_namespace_btree.is_some() {
+    assert_eq!(source_file_identities.len(), posting_inputs.len());
+    source_file_identities
+      .iter()
+      .enumerate()
+      .map(|(index, (path, record_revision_hash))| {
+        let document_ordinal = u64::try_from(index).unwrap() + 1;
+        let file_key = digest_parts(algorithm, &[b"file:", path.as_bytes()]);
+        (document_ordinal, path.clone(), file_key, record_revision_hash.clone())
+      })
+      .collect::<Vec<_>>()
+  } else {
+    posting_inputs
+      .iter()
+      .enumerate()
+      .map(|(index, _)| {
+        let document_ordinal = u64::try_from(index).unwrap() + 1;
+        let path = format!("/docs/{document_ordinal}.json");
+        let file_key = digest_parts(algorithm, &[b"file:", path.as_bytes()]);
+        let record_revision_hash = digest_parts(algorithm, &[b"revision:", path.as_bytes()]);
+        (document_ordinal, path, file_key, record_revision_hash)
+      })
+      .collect::<Vec<_>>()
+  };
   let scope_records = scope_identities
     .iter()
     .map(|(document_ordinal, path, file_key, record_revision_hash)| {
@@ -1783,18 +1874,24 @@ fn selected_artifact_fixture_with_options(
     pointer_manifests.push((ActivePointerKindV1::FieldNvt, nvt_manifest));
   }
   publish_selected_artifact_pointers(&publisher, algorithm, &pointer_manifests);
-  let mut target_identities = Vec::new();
+  let mut target_identities = source_file_identities
+    .iter()
+    .map(|(path, revision)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), revision.clone()))
+    .collect::<Vec<_>>();
   let target_root = if target_files {
     assert!(advance_target_root);
-    let (content_root, identities) = publish_file_tree_with_sizes(
+    let (target_names, target_sizes): (&[&str], &[u64]) =
+      if coherent_namespace_btree.is_some() { (&["1.json", "2.json"], &[18, 29]) } else { (&["2.json", "4.json"], &[29, 53]) };
+    let (content_root, identities) = publish_file_tree_with_sizes_and_transaction(
       &publisher,
       algorithm,
       selected_root.clone(),
       1,
-      true,
-      &["2.json", "4.json"],
-      &[29, 53],
+      coherent_namespace_btree.unwrap_or(true),
+      target_names,
+      target_sizes,
       FileTreeCorruption::None,
+      if coherent_namespace_btree.is_some() { [0x6b; 16] } else { [0x64; 16] },
     );
     target_identities =
       identities.into_iter().map(|(path, revision)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), revision)).collect();
@@ -2071,6 +2168,7 @@ struct NativePartitionFixture {
   pins: RootReadPinCoordinatorV1,
   cancellation: CancellationToken,
   selected_root: Vec<u8>,
+  semantic_state_root: Vec<u8>,
   publication_sequence: u64,
   scope_id: Vec<u8>,
   field_name: String,
@@ -2099,6 +2197,45 @@ impl NativePartitionFixture {
         cancellation: &self.cancellation,
       })
       .unwrap()
+  }
+
+  fn advance_mutable_authority(&self) {
+    let algorithm = self.plan.hash_algorithm();
+    let namespace_tree = serialize_child_entries(
+      &[ChildEntry {
+        entry_type: EntryTypeV4::DirectoryIndex.to_u8(),
+        hash: digest_parts(algorithm, &[b"dirc:"]),
+        total_size: 0,
+        created_at: 1_700_000_000_730,
+        updated_at: 1_700_000_000_730,
+        name: "partition-race".to_owned(),
+        content_type: None,
+        virtual_time: 1,
+        node_id: 1,
+      }],
+      algorithm.hash_length(),
+    )
+    .unwrap();
+    let semantic_state = self.backing_source.publisher().load_semantic_object(0x0001, &self.semantic_state_root).unwrap().unwrap();
+    let successor = self
+      .backing_source
+      .publisher()
+      .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+        database_id: [0x31; 16],
+        transaction_id: [0x6a; 16],
+        created_at_ms: 1_700_000_000_730,
+        expected_head_hash: self.selected_root.clone(),
+        namespace_tree: PreparedNamespaceTreeV0 {
+          root_hash: digest_parts(algorithm, &[b"dirc:", &namespace_tree]),
+          stored_value: namespace_tree,
+        },
+        semantic_state: EncodedSemanticObjectV1 { object_id: self.semantic_state_root.clone(), value: semantic_state },
+        required_capabilities: [0; 32],
+        typed_closure_digest: digest_parts(algorithm, &[b"native partition mutable authority advance"]),
+        authority_identity: b"HEAD".to_vec(),
+      })
+      .unwrap();
+    assert_ne!(successor.namespace_root.root_hash, self.selected_root);
   }
 
   fn assert_released(self) {
@@ -2247,11 +2384,56 @@ fn native_candidate_artifact_fixture_configured(
   target_files: bool,
   layout: SelectedArtifactLayoutV1,
 ) -> NativeCandidateArtifactFixture {
+  native_candidate_artifact_fixture_configured_with_namespace(algorithm, partial, target_files, layout, None)
+}
+
+fn native_candidate_artifact_fixture_with_namespace_layout(
+  algorithm: HashAlgorithm,
+  partial: bool,
+  target_files: bool,
+  btree: bool,
+) -> NativeCandidateArtifactFixture {
+  native_candidate_artifact_fixture_configured_with_namespace(
+    algorithm,
+    partial,
+    target_files,
+    SelectedArtifactLayoutV1::SinglePage,
+    Some(btree),
+  )
+}
+
+fn native_candidate_artifact_fixture_configured_with_namespace(
+  algorithm: HashAlgorithm,
+  partial: bool,
+  target_files: bool,
+  layout: SelectedArtifactLayoutV1,
+  coherent_namespace_btree: Option<bool>,
+) -> NativeCandidateArtifactFixture {
   let fixture = if partial {
-    selected_artifact_fixture_with_options(algorithm, 0, true, true, target_files, [0; 32], all_capabilities_profile(), layout)
+    selected_artifact_fixture_with_namespace_options(
+      algorithm,
+      0,
+      true,
+      true,
+      target_files,
+      [0; 32],
+      all_capabilities_profile(),
+      layout,
+      coherent_namespace_btree,
+    )
   } else {
     assert!(!target_files);
-    selected_artifact_fixture_with_options(algorithm, 0, true, false, false, [0; 32], all_capabilities_profile(), layout)
+    selected_artifact_fixture_with_namespace_options(
+      algorithm,
+      0,
+      true,
+      false,
+      false,
+      [0; 32],
+      all_capabilities_profile(),
+      layout,
+      coherent_namespace_btree,
+    )
   };
   let snapshot = selected_artifact_coverage_snapshot(&fixture);
   let reader = fixture.reader();
@@ -2262,7 +2444,11 @@ fn native_candidate_artifact_fixture_configured(
   let context = QueryPlanningContextV1::from_resolved_view(&fixture.view).unwrap();
   let expression = QueryExpressionV1::Field(QueryPredicateV1 {
     field_name: "@hash".to_string(),
-    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("ab".repeat(algorithm.hash_length()))),
+    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String(if coherent_namespace_btree.is_some() {
+      hex::encode(digest_parts(algorithm, &[b""]))
+    } else {
+      "ab".repeat(algorithm.hash_length())
+    })),
   });
   let mut planning_catalogs = semantic_catalog.catalogs().to_vec();
   if partial && target_files {
@@ -2403,6 +2589,7 @@ fn native_partition_fixture(
     pins,
     cancellation,
     selected_root,
+    semantic_state_root: graph.state.object_id.clone(),
     publication_sequence,
     scope_id: graph.scope_id,
     field_name,
@@ -2615,6 +2802,7 @@ fn native_partition_many_fixture_configured(
       pins,
       cancellation,
       selected_root,
+      semantic_state_root: graph.state.object_id.clone(),
       publication_sequence,
       scope_id: graph.scope_id,
       field_name: field_name.to_string(),
@@ -4213,6 +4401,148 @@ fn native_exact_scope_facade_composes_authoritative_complete_and_partial_paths_w
   assert_eq!(sink.commit_calls, 0);
   assert_eq!(sink.rollback_calls, 0);
   corrupt.assert_released();
+}
+
+fn retained_exact_scope_identities(
+  execution: &aeordb::engine::v4::query_scope_execution::QueryExactScopeExecutionV1,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+  let mut identities =
+    execution.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>();
+  identities.sort();
+  identities
+}
+
+fn retained_authoritative_scope_identities(
+  execution: &aeordb::engine::v4::query_executor::RootAwareQueryExecutionV1,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+  let mut identities =
+    execution.matches().iter().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>();
+  identities.sort();
+  identities
+}
+
+#[test]
+fn native_exact_scope_routes_match_selected_root_truth_across_root_and_namespace_layouts() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    for btree in [false, true] {
+      for historical in [false, true] {
+        let names = ["1.json", "2.json"];
+        let sizes = [3, 17];
+        let (mut authoritative, model) = native_partition_many_fixture_configured(
+          algorithm,
+          1,
+          btree,
+          &names,
+          &sizes,
+          "@size",
+          true,
+          semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+          &[],
+          Some(8),
+        );
+        if historical {
+          authoritative.advance_mutable_authority();
+        }
+        let exact = authoritative
+          .source
+          .execute_exact_scope_query_v1(
+            &authoritative.plan,
+            &authoritative.scope_id,
+            &authoritative.cancellation,
+            native_query_execution_limits(),
+            native_candidate_limits(),
+            native_partial_acceleration_limits(),
+            native_candidate_composition_limits(),
+          )
+          .unwrap();
+        assert_eq!(exact.path(), QueryExactScopeExecutionPathV1::Authoritative);
+        let actual = retained_exact_scope_identities(&exact);
+        drop(exact);
+        let truth_execution = authoritative
+          .source
+          .execute_authoritative_scope_query_v1(
+            &authoritative.plan,
+            &authoritative.scope_id,
+            &authoritative.cancellation,
+            native_query_execution_limits(),
+          )
+          .unwrap();
+        let truth = retained_authoritative_scope_identities(&truth_execution);
+        drop(truth_execution);
+        let mut expected = model
+          .into_iter()
+          .zip(sizes)
+          .filter_map(|((file_key, revision, _), size)| (size > 8).then_some((file_key, revision)))
+          .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(actual, truth);
+        assert_eq!(actual, expected);
+        authoritative.assert_released();
+
+        let mut complete = native_candidate_artifact_fixture_with_namespace_layout(algorithm, false, false, btree);
+        let mut expected = complete.target_identities.clone();
+        expected.sort();
+        if historical {
+          complete.advance_mutable_authority();
+        }
+        let exact = complete
+          .source
+          .execute_exact_scope_query_v1(
+            &complete.plan,
+            &complete.scope_id,
+            &complete.cancellation,
+            native_query_execution_limits(),
+            native_candidate_limits(),
+            native_partial_acceleration_limits(),
+            native_candidate_composition_limits(),
+          )
+          .unwrap();
+        assert_eq!(exact.path(), QueryExactScopeExecutionPathV1::Complete);
+        let actual = retained_exact_scope_identities(&exact);
+        drop(exact);
+        let truth_execution = complete
+          .source
+          .execute_authoritative_scope_query_v1(&complete.plan, &complete.scope_id, &complete.cancellation, native_query_execution_limits())
+          .unwrap();
+        let truth = retained_authoritative_scope_identities(&truth_execution);
+        drop(truth_execution);
+        assert_eq!(actual, truth);
+        assert_eq!(actual, expected);
+        complete.assert_released();
+
+        let mut partial = native_candidate_artifact_fixture_with_namespace_layout(algorithm, true, true, btree);
+        let mut expected = partial.target_identities.clone();
+        expected.sort();
+        if historical {
+          partial.advance_mutable_authority();
+        }
+        let exact = partial
+          .source
+          .execute_exact_scope_query_v1(
+            &partial.plan,
+            &partial.scope_id,
+            &partial.cancellation,
+            native_query_execution_limits(),
+            native_candidate_limits(),
+            native_partial_acceleration_limits(),
+            native_candidate_composition_limits(),
+          )
+          .unwrap();
+        assert_eq!(exact.path(), QueryExactScopeExecutionPathV1::Partial);
+        let actual = retained_exact_scope_identities(&exact);
+        drop(exact);
+        let truth_execution = partial
+          .source
+          .execute_authoritative_scope_query_v1(&partial.plan, &partial.scope_id, &partial.cancellation, native_query_execution_limits())
+          .unwrap();
+        let truth = retained_authoritative_scope_identities(&truth_execution);
+        drop(truth_execution);
+        assert_eq!(actual, truth);
+        assert_eq!(actual, expected);
+        partial.assert_released();
+      }
+    }
+  }
 }
 
 #[test]
