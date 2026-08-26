@@ -104,8 +104,14 @@ use aeordb::engine::v4::query_native_source::{
   NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
   NativeLogicalExplainLimitsV1,
 };
+use aeordb::engine::v4::query_native_locator::{
+  NativeQueryContentAssertionsV1, NativeQueryHitLocatorLimitsV1, NativeQueryHitLocatorRequestV1, NativeQueryHitRangeLimitsV1,
+  NativeQueryHitRangeRequestV1, NativeQueryHitReadErrorClassV1, NativeQueryHitReadErrorV1, NativeQueryHitSourceLimitsV1,
+  authorized_exact_scope_file_hits_v1, authorized_query_execution_file_hits_v1,
+};
 use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
 use aeordb::engine::v4::query_scope_execution::{QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1};
+use aeordb::engine::v4::locator_range::{ExactSourceRangeSelectorV1, LocatorMatchSemanticsV1, LocatorScanStopReasonV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedArtifactRootRequestV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1,
@@ -2206,7 +2212,27 @@ fn selected_source_fixture_with_scopes(
   publish_chunk: bool,
   body_shape: SelectedFileBodyShape,
 ) -> SelectedSourceFixture {
-  let algorithm = HashAlgorithm::Blake3_256;
+  selected_source_fixture_with_algorithm_and_scopes(
+    HashAlgorithm::Blake3_256,
+    value_store_fixture,
+    primary_scope,
+    extra_scopes,
+    body,
+    publish_chunk,
+    body_shape,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_source_fixture_with_algorithm_and_scopes(
+  algorithm: HashAlgorithm,
+  value_store_fixture: &str,
+  primary_scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+  body: &[u8],
+  publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
+) -> SelectedSourceFixture {
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
   let (content_root, _, chunk_hash) = publish_content_file_tree_with_chunk(
@@ -2248,6 +2274,8 @@ fn selected_source_fixture_with_scopes(
 
 struct NativePartitionFixture {
   _directory: tempfile::TempDir,
+  path: PathBuf,
+  chunk_offset: Option<(u64, u32)>,
   source: NativeAuthoritativeFieldPartitionSourceV1,
   backing_source: Arc<NativeReadViewSourceV1>,
   memory: Arc<MemoryCoordinator>,
@@ -2625,22 +2653,87 @@ fn native_partition_fixture(
   extra_scopes: &[Vec<u8>],
   body: &[u8],
 ) -> NativePartitionFixture {
-  let fixture =
-    selected_source_fixture_with_scopes(value_store_fixture, primary_scope, extra_scopes, body, true, SelectedFileBodyShape::Exact);
+  native_partition_fixture_with_algorithm_and_expression(
+    HashAlgorithm::Blake3_256,
+    value_store_fixture,
+    primary_scope,
+    extra_scopes,
+    body,
+    true,
+    SelectedFileBodyShape::Exact,
+    QueryExpressionV1::And(Vec::new()),
+  )
+}
+
+fn native_query_body_fixture(algorithm: HashAlgorithm, body: &[u8]) -> NativePartitionFixture {
+  native_query_body_fixture_configured(algorithm, body, true, SelectedFileBodyShape::Exact)
+}
+
+fn native_query_body_fixture_configured(
+  algorithm: HashAlgorithm,
+  body: &[u8],
+  publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
+) -> NativePartitionFixture {
+  let expected_body = if body_shape == SelectedFileBodyShape::RepeatedChunk { body.repeat(2) } else { body.to_vec() };
+  let expected_content_hash = if body_shape == SelectedFileBodyShape::WrongContentHash {
+    digest_parts(algorithm, &[b"deliberately wrong selected file content"])
+  } else {
+    digest_parts(algorithm, &[&expected_body])
+  };
+  let expression = QueryExpressionV1::Field(QueryPredicateV1 {
+    field_name: "@hash".to_string(),
+    operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String(hex::encode(expected_content_hash))),
+  });
+  native_partition_fixture_with_algorithm_and_expression(
+    algorithm,
+    "metadata-hash-corrected",
+    semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+    &[],
+    body,
+    publish_chunk,
+    body_shape,
+    expression,
+  )
+}
+
+fn native_partition_fixture_with_algorithm_and_expression(
+  algorithm: HashAlgorithm,
+  value_store_fixture: &str,
+  primary_scope: Vec<u8>,
+  extra_scopes: &[Vec<u8>],
+  body: &[u8],
+  publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
+  expression: QueryExpressionV1,
+) -> NativePartitionFixture {
+  let fixture = selected_source_fixture_with_algorithm_and_scopes(
+    algorithm,
+    value_store_fixture,
+    primary_scope,
+    extra_scopes,
+    body,
+    publish_chunk,
+    body_shape,
+  );
   let reader = fixture.reader();
   let semantic_catalog =
     reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
   drop(reader);
-  let SelectedSourceFixture { _directory, source: backing_source, memory, pins, cancellation, view, graph, field_name, .. } = fixture;
+  let SelectedSourceFixture { _directory, path, source: backing_source, memory, pins, cancellation, view, graph, field_name, chunk_offset } =
+    fixture;
   let selected_root = view.root_metadata().hash.clone();
   let publication_sequence = view.authority().admission.publication_sequence;
   let context = QueryPlanningContextV1::from_resolved_view(&view).unwrap();
-  let expression = QueryExpressionV1::And(Vec::new());
+  let planning_catalogs = match &expression {
+    QueryExpressionV1::And(expressions) if expressions.is_empty() => &[],
+    _ => semantic_catalog.catalogs(),
+  };
   let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
     context: &context,
     query_path: "/docs",
     expression: &expression,
-    catalogs: &[],
+    catalogs: planning_catalogs,
     sort_fields: &[],
     aggregate_fields: &[],
     group_fields: &[],
@@ -2670,6 +2763,8 @@ fn native_partition_fixture(
   .unwrap();
   NativePartitionFixture {
     _directory,
+    path,
+    chunk_offset,
     source,
     backing_source,
     memory,
@@ -2826,7 +2921,7 @@ fn native_partition_many_fixture_configured_with_cache(
   include_hash_predicate: bool,
   maximum_prepared_source_cache_entries: usize,
 ) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
-  let (directory, _path, publisher) = publisher(algorithm);
+  let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
   let (content_root, identities) = publish_file_tree_with_sizes(
     &publisher,
@@ -2952,6 +3047,8 @@ fn native_partition_many_fixture_configured_with_cache(
   (
     NativePartitionFixture {
       _directory: directory,
+      path,
+      chunk_offset: None,
       source,
       backing_source,
       memory,
@@ -6124,6 +6221,624 @@ fn selected_namespace_reader_rejects_non_namespace_child_roles() {
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
 }
 
+fn expect_native_query_hit_error<T>(result: Result<T, NativeQueryHitReadErrorV1>) -> NativeQueryHitReadErrorV1 {
+  match result {
+    Ok(_) => panic!("authorized query-hit operation unexpectedly succeeded"),
+    Err(error) => error,
+  }
+}
+
+#[test]
+fn authorized_query_hit_limit_constructors_reject_every_zero_oversized_and_inverted_bound() {
+  let source_errors = [
+    NativeQueryHitSourceLimitsV1::new(0, 1, 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1_025, 1, 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 0, 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 256 * 1_024 * 1_024 + 1, 256 * 1_024 * 1_024 + 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 2, 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 0, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 256 * 1_024 * 1_024 + 1, 1, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 1, 0, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 1, 65_537, 1),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 1, 1, 0),
+    NativeQueryHitSourceLimitsV1::new(1, 1, 1, 1, 256 * 1_024 * 1_024 + 1),
+  ];
+  for result in source_errors {
+    let error = result.unwrap_err();
+    assert_eq!(error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "native_query_hit_source_limits");
+  }
+
+  let source = NativeQueryHitSourceLimitsV1::new(2, 64, 128, 2, 64 * 1_024).unwrap();
+  let locator_errors = [
+    NativeQueryHitLocatorLimitsV1::new(source, 0, 1, 1, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1_025, 1_025, 1, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 2, 1, 1, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 0, 1, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1_025, 1, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 0, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 256 * 1_024 * 1_024 + 1, 256 * 1_024 * 1_024 + 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 2, 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 1, 0, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 1, 256 * 1_024 * 1_024 + 1, 1),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 1, 1, 0),
+    NativeQueryHitLocatorLimitsV1::new(source, 1, 1, 1, 1, 1_024 * 1_024 + 1),
+  ];
+  for result in locator_errors {
+    let error = result.unwrap_err();
+    assert_eq!(error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "native_query_hit_locator_limits");
+  }
+
+  let range_errors = [
+    NativeQueryHitRangeLimitsV1::new(source, 0, 1),
+    NativeQueryHitRangeLimitsV1::new(source, 16 * 1_024 * 1_024 + 1, 16 * 1_024 * 1_024 + 1),
+    NativeQueryHitRangeLimitsV1::new(source, 2, 1),
+    NativeQueryHitRangeLimitsV1::new(source, 1, 0),
+    NativeQueryHitRangeLimitsV1::new(source, 1, 256 * 1_024 * 1_024 + 1),
+  ];
+  for result in range_errors {
+    let error = result.unwrap_err();
+    assert_eq!(error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "native_query_hit_range_limits");
+  }
+}
+
+#[test]
+fn authorized_query_hit_requests_enforce_assertion_body_scan_match_output_and_retained_bounds() {
+  let body = b"aaaa panic: unwrap zzzz";
+  let fixture = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  let execution =
+    fixture.source.execute_authoritative_query_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&fixture.source, &execution).next().unwrap();
+  let body_bytes = body.len() as u64;
+  let baseline = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let source_limits = NativeQueryHitSourceLimitsV1::new(2, body_bytes, body_bytes * 2, 2, 64 * 1_024).unwrap();
+  let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 8, 16, body_bytes, body_bytes * 2, 128).unwrap();
+  let range_limits = NativeQueryHitRangeLimitsV1::new(source_limits, body_bytes, body_bytes * 2).unwrap();
+
+  let empty_locator_error =
+    expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(&[], &fixture.cancellation, locator_limits));
+  assert_eq!(empty_locator_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+  assert_eq!(empty_locator_error.code(), "native_query_hit_request_count");
+  let empty_range_error =
+    expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(&[], &fixture.cancellation, range_limits));
+  assert_eq!(empty_range_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+  assert_eq!(empty_range_error.code(), "native_query_hit_request_count");
+
+  let valid_locator_request = NativeQueryHitLocatorRequestV1::new(
+    hit,
+    b"panic: unwrap",
+    LocatorMatchSemanticsV1::ExactBytes,
+    0,
+    NativeQueryContentAssertionsV1::none(),
+  );
+  let one_hit_source = NativeQueryHitSourceLimitsV1::new(1, body_bytes, body_bytes * 2, 2, 64 * 1_024).unwrap();
+  let one_hit_locator_limits = NativeQueryHitLocatorLimitsV1::new(one_hit_source, 8, 16, body_bytes, body_bytes * 2, 128).unwrap();
+  let count_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request, valid_locator_request],
+    &fixture.cancellation,
+    one_hit_locator_limits,
+  ));
+  assert_eq!(count_error.code(), "native_query_hit_request_count");
+
+  let literal_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[NativeQueryHitLocatorRequestV1::new(hit, b"", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+    &fixture.cancellation,
+    locator_limits,
+  ));
+  assert_eq!(literal_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+  assert_eq!(literal_error.code(), "native_query_hit_locator_literal");
+  let short_literal_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 8, 16, body_bytes, body_bytes * 2, 1).unwrap();
+  let literal_bound_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request],
+    &fixture.cancellation,
+    short_literal_limits,
+  ));
+  assert_eq!(literal_bound_error.code(), "native_query_hit_locator_literal");
+
+  let malformed_hash = [0x31];
+  let malformed_assertion_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[NativeQueryHitLocatorRequestV1::new(
+      hit,
+      b"panic",
+      LocatorMatchSemanticsV1::ExactBytes,
+      0,
+      NativeQueryContentAssertionsV1::new(Some(&malformed_hash), None),
+    )],
+    &fixture.cancellation,
+    locator_limits,
+  ));
+  assert_eq!(malformed_assertion_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+  assert_eq!(malformed_assertion_error.code(), "native_query_hit_content_hash_assertion");
+  let zero_hash = vec![0; HashAlgorithm::Blake3_256.hash_length()];
+  let zero_assertion_error = expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 0, end: Some(1) },
+      NativeQueryContentAssertionsV1::new(Some(&zero_hash), None),
+    )],
+    &fixture.cancellation,
+    range_limits,
+  ));
+  assert_eq!(zero_assertion_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+  assert_eq!(zero_assertion_error.code(), "native_query_hit_content_hash_assertion");
+
+  let wrong_hash = digest_parts(HashAlgorithm::Blake3_256, &[b"wrong assertion"]);
+  let content_assertion_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[NativeQueryHitLocatorRequestV1::new(
+      hit,
+      b"panic",
+      LocatorMatchSemanticsV1::ExactBytes,
+      0,
+      NativeQueryContentAssertionsV1::new(Some(&wrong_hash), None),
+    )],
+    &fixture.cancellation,
+    locator_limits,
+  ));
+  assert_eq!(content_assertion_error.class(), NativeQueryHitReadErrorClassV1::AssertionFailed);
+  assert_eq!(content_assertion_error.code(), "native_query_hit_content_hash_mismatch");
+  let updated_assertion_error = expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 0, end: Some(1) },
+      NativeQueryContentAssertionsV1::new(None, Some(1_700_000_000_501)),
+    )],
+    &fixture.cancellation,
+    range_limits,
+  ));
+  assert_eq!(updated_assertion_error.class(), NativeQueryHitReadErrorClassV1::AssertionFailed);
+  assert_eq!(updated_assertion_error.code(), "native_query_hit_updated_at_mismatch");
+
+  let small_body_source = NativeQueryHitSourceLimitsV1::new(1, body_bytes - 1, body_bytes, 2, 64 * 1_024).unwrap();
+  let small_body_limits = NativeQueryHitLocatorLimitsV1::new(small_body_source, 8, 8, body_bytes, body_bytes, 128).unwrap();
+  let body_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request],
+    &fixture.cancellation,
+    small_body_limits,
+  ));
+  assert_eq!(body_error.class(), NativeQueryHitReadErrorClassV1::ResourceLimit);
+  assert_eq!(body_error.code(), "native_query_hit_body_bytes_per_hit");
+  let total_body_source = NativeQueryHitSourceLimitsV1::new(2, body_bytes, body_bytes, 2, 64 * 1_024).unwrap();
+  let total_body_limits = NativeQueryHitLocatorLimitsV1::new(total_body_source, 8, 16, body_bytes, body_bytes * 2, 128).unwrap();
+  let total_body_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request, valid_locator_request],
+    &fixture.cancellation,
+    total_body_limits,
+  ));
+  assert_eq!(total_body_error.code(), "native_query_hit_total_body_bytes");
+
+  let retained_source = NativeQueryHitSourceLimitsV1::new(1, body_bytes, body_bytes, 2, 1).unwrap();
+  let retained_limits = NativeQueryHitLocatorLimitsV1::new(retained_source, 1, 1, body_bytes, body_bytes, 128).unwrap();
+  let retained_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request],
+    &fixture.cancellation,
+    retained_limits,
+  ));
+  assert_eq!(retained_error.class(), NativeQueryHitReadErrorClassV1::ResourceLimit);
+  assert_eq!(retained_error.code(), "native_query_hit_locator_retained_bytes");
+
+  let match_limit = NativeQueryHitLocatorLimitsV1::new(source_limits, 1, 1, body_bytes, body_bytes, 128).unwrap();
+  let limited_matches = fixture
+    .source
+    .locate_authorized_query_hits_v1(
+      &[NativeQueryHitLocatorRequestV1::new(hit, b"a", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+      &fixture.cancellation,
+      match_limit,
+    )
+    .unwrap();
+  assert_eq!(limited_matches.total_match_count(), 1);
+  assert_eq!(limited_matches.hits()[0].scan().stop_reason(), LocatorScanStopReasonV1::MatchLimit);
+  assert_eq!(limited_matches.hits()[0].scan().continuation().unwrap().next_candidate_byte(), 1);
+  drop(limited_matches);
+  let scan_limit = NativeQueryHitLocatorLimitsV1::new(source_limits, 8, 8, 4, 4, 128).unwrap();
+  let limited_scan = fixture
+    .source
+    .locate_authorized_query_hits_v1(
+      &[NativeQueryHitLocatorRequestV1::new(hit, b"z", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+      &fixture.cancellation,
+      scan_limit,
+    )
+    .unwrap();
+  assert_eq!(limited_scan.hits()[0].scan().stop_reason(), LocatorScanStopReasonV1::ScanByteLimit);
+  assert!(limited_scan.hits()[0].scan().continuation().is_some());
+  drop(limited_scan);
+  let total_match_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 1, 1, body_bytes, body_bytes * 2, 128).unwrap();
+  let total_match_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[valid_locator_request, valid_locator_request],
+    &fixture.cancellation,
+    total_match_limits,
+  ));
+  assert_eq!(total_match_error.code(), "native_query_hit_locator_total_limit");
+  let total_scan_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 8, 16, body_bytes, body_bytes, 128).unwrap();
+  let no_match_request = NativeQueryHitLocatorRequestV1::new(
+    hit,
+    b"not-present",
+    LocatorMatchSemanticsV1::ExactBytes,
+    0,
+    NativeQueryContentAssertionsV1::none(),
+  );
+  let total_scan_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+    &[no_match_request, no_match_request],
+    &fixture.cancellation,
+    total_scan_limits,
+  ));
+  assert_eq!(total_scan_error.code(), "native_query_hit_locator_total_limit");
+
+  let truncated_range_limits = NativeQueryHitRangeLimitsV1::new(source_limits, 5, 5).unwrap();
+  let full_range_request = NativeQueryHitRangeRequestV1::new(
+    hit,
+    ExactSourceRangeSelectorV1::Bytes { start: 0, end: None },
+    NativeQueryContentAssertionsV1::none(),
+  );
+  let truncated =
+    fixture.source.read_authorized_query_hit_ranges_v1(&[full_range_request], &fixture.cancellation, truncated_range_limits).unwrap();
+  assert_eq!(truncated.ranges()[0].bytes(), &body[..5]);
+  assert!(truncated.ranges()[0].truncated());
+  assert_eq!(truncated.ranges()[0].continuation().unwrap().remaining_byte_range().start(), 5);
+  drop(truncated);
+  let total_output_error = expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(
+    &[full_range_request, full_range_request],
+    &fixture.cancellation,
+    truncated_range_limits,
+  ));
+  assert_eq!(total_output_error.code(), "native_query_hit_range_total_output");
+  let retained_range_source = NativeQueryHitSourceLimitsV1::new(1, body_bytes, body_bytes, 2, 1).unwrap();
+  let retained_range_limits = NativeQueryHitRangeLimitsV1::new(retained_range_source, 1, 1).unwrap();
+  let retained_range_error = expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(
+    &[full_range_request],
+    &fixture.cancellation,
+    retained_range_limits,
+  ));
+  assert_eq!(retained_range_error.code(), "native_query_hit_range_retained_bytes");
+  let malformed_range_error = expect_native_query_hit_error(fixture.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 2, end: Some(1) },
+      NativeQueryContentAssertionsV1::none(),
+    )],
+    &fixture.cancellation,
+    range_limits,
+  ));
+  assert_eq!(malformed_range_error.class(), NativeQueryHitReadErrorClassV1::InvalidRequest);
+
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(execution);
+  fixture.assert_released();
+}
+
+#[test]
+fn authorized_query_hits_reject_foreign_sources_and_both_cancellation_authorities_without_leaks() {
+  let body = b"identical authority bytes";
+  let left = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  let right = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  assert_eq!(left.selected_root, right.selected_root);
+  let execution = left.source.execute_authoritative_query_v1(&left.plan, &left.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&left.source, &execution).next().unwrap();
+  let source_limits = NativeQueryHitSourceLimitsV1::new(1, body.len() as u64, body.len() as u64, 1, 64 * 1_024).unwrap();
+  let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 2, 2, body.len() as u64, body.len() as u64, body.len()).unwrap();
+  let requests = [NativeQueryHitLocatorRequestV1::new(
+    hit,
+    b"authority",
+    LocatorMatchSemanticsV1::ExactBytes,
+    0,
+    NativeQueryContentAssertionsV1::none(),
+  )];
+  let left_baseline = left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let right_baseline = right.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+
+  let foreign_error =
+    expect_native_query_hit_error(right.source.locate_authorized_query_hits_v1(&requests, &right.cancellation, locator_limits));
+  assert_eq!(foreign_error.class(), NativeQueryHitReadErrorClassV1::CorruptSource);
+  assert_eq!(foreign_error.code(), "native_query_hit_source_authority");
+  assert_eq!(right.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, right_baseline);
+
+  let request_cancellation = CancellationToken::new();
+  request_cancellation.cancel();
+  let request_cancelled =
+    expect_native_query_hit_error(left.source.locate_authorized_query_hits_v1(&requests, &request_cancellation, locator_limits));
+  assert_eq!(request_cancelled.class(), NativeQueryHitReadErrorClassV1::Cancelled);
+  assert_eq!(request_cancelled.code(), "native_query_hit_cancelled");
+  assert_eq!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, left_baseline);
+  let retried = left.source.locate_authorized_query_hits_v1(&requests, &CancellationToken::new(), locator_limits).unwrap();
+  assert_eq!(retried.total_match_count(), 1);
+  drop(retried);
+  assert_eq!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, left_baseline);
+  drop(execution);
+  left.assert_released();
+  right.assert_released();
+
+  let selected_cancelled = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  let execution = selected_cancelled
+    .source
+    .execute_authoritative_query_v1(&selected_cancelled.plan, &selected_cancelled.cancellation, native_query_execution_limits())
+    .unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&selected_cancelled.source, &execution).next().unwrap();
+  let requests = [NativeQueryHitRangeRequestV1::new(
+    hit,
+    ExactSourceRangeSelectorV1::Bytes { start: 0, end: None },
+    NativeQueryContentAssertionsV1::none(),
+  )];
+  let range_limits = NativeQueryHitRangeLimitsV1::new(source_limits, body.len() as u64, body.len() as u64).unwrap();
+  let baseline = selected_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  selected_cancelled.cancellation.cancel();
+  let view_cancelled = expect_native_query_hit_error(selected_cancelled.source.read_authorized_query_hit_ranges_v1(
+    &requests,
+    &CancellationToken::new(),
+    range_limits,
+  ));
+  assert_eq!(view_cancelled.class(), NativeQueryHitReadErrorClassV1::Cancelled);
+  assert_eq!(view_cancelled.code(), "native_query_hit_cancelled");
+  assert_eq!(selected_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(execution);
+  selected_cancelled.assert_released();
+}
+
+#[test]
+fn authorized_query_hit_memory_pressure_is_retryable_and_releases_exactly() {
+  let body = b"pressure retry body";
+  let fixture = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  let execution =
+    fixture.source.execute_authoritative_query_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&fixture.source, &execution).next().unwrap();
+  let source_limits = NativeQueryHitSourceLimitsV1::new(1, body.len() as u64, body.len() as u64, 1, 64 * 1_024).unwrap();
+  let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 2, 2, body.len() as u64, body.len() as u64, body.len()).unwrap();
+  let requests =
+    [NativeQueryHitLocatorRequestV1::new(hit, b"retry", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())];
+  let baseline = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let snapshot = fixture.memory.snapshot().unwrap();
+  let ordinary_limit = 511 * 1_024 * 1_024;
+  let blocker_bytes = ordinary_limit - snapshot.accounted_bytes - 32 * 1_024;
+  let blocker = fixture.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+
+  let pressure_error =
+    expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(&requests, &fixture.cancellation, locator_limits));
+  assert_eq!(pressure_error.class(), NativeQueryHitReadErrorClassV1::ResourceLimit);
+  assert_eq!(pressure_error.code(), "native_query_hit_locator_memory");
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(blocker);
+
+  let retry = fixture.source.locate_authorized_query_hits_v1(&requests, &fixture.cancellation, locator_limits).unwrap();
+  assert_eq!(retry.total_match_count(), 1);
+  assert!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > baseline);
+  drop(retry);
+  assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(execution);
+  fixture.assert_released();
+}
+
+#[test]
+fn authorized_query_hits_preserve_body_corruption_chunk_bounds_and_binary_text_failures() {
+  let body = b"body authority";
+  for body_shape in [SelectedFileBodyShape::DeclaredSizeTooLarge, SelectedFileBodyShape::WrongContentHash] {
+    let fixture = native_query_body_fixture_configured(HashAlgorithm::Blake3_256, body, true, body_shape);
+    let execution =
+      fixture.source.execute_authoritative_query_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits()).unwrap();
+    let hit = authorized_query_execution_file_hits_v1(&fixture.source, &execution).next().unwrap();
+    let source_limits = NativeQueryHitSourceLimitsV1::new(1, body.len() as u64 + 1, body.len() as u64 + 1, 2, 64 * 1_024).unwrap();
+    let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 2, 2, body.len() as u64, body.len() as u64, body.len()).unwrap();
+    let error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+      &[NativeQueryHitLocatorRequestV1::new(hit, b"body", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+      &fixture.cancellation,
+      locator_limits,
+    ));
+    assert_eq!(error.class(), NativeQueryHitReadErrorClassV1::CorruptSource);
+    assert!(matches!(error.code(), "selected_file_body_length" | "selected_file_body_content_hash"));
+    drop(execution);
+    fixture.assert_released();
+  }
+
+  let missing = native_query_body_fixture_configured(HashAlgorithm::Blake3_256, body, false, SelectedFileBodyShape::Exact);
+  let execution =
+    missing.source.execute_authoritative_query_v1(&missing.plan, &missing.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&missing.source, &execution).next().unwrap();
+  let source_limits = NativeQueryHitSourceLimitsV1::new(1, body.len() as u64, body.len() as u64, 1, 64 * 1_024).unwrap();
+  let range_limits = NativeQueryHitRangeLimitsV1::new(source_limits, body.len() as u64, body.len() as u64).unwrap();
+  let wrong_assertion = digest_parts(HashAlgorithm::Blake3_256, &[b"assertions are not selectors"]);
+  let missing_error = expect_native_query_hit_error(missing.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 0, end: None },
+      NativeQueryContentAssertionsV1::new(Some(&wrong_assertion), None),
+    )],
+    &missing.cancellation,
+    range_limits,
+  ));
+  assert_eq!(missing_error.class(), NativeQueryHitReadErrorClassV1::CorruptSource);
+  assert_eq!(missing_error.code(), "selected_file_body_chunk_missing");
+  drop(execution);
+  missing.assert_released();
+
+  let corrupt = native_query_body_fixture(HashAlgorithm::Blake3_256, body);
+  let execution =
+    corrupt.source.execute_authoritative_query_v1(&corrupt.plan, &corrupt.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&corrupt.source, &execution).next().unwrap();
+  let (chunk_offset, chunk_total_length) = corrupt.chunk_offset.expect("published native query body has one chunk locator");
+  let mut file = OpenOptions::new().read(true).write(true).open(&corrupt.path).unwrap();
+  let checksum_offset = chunk_offset + u64::from(chunk_total_length) - 1;
+  file.seek(SeekFrom::Start(checksum_offset)).unwrap();
+  let mut checksum = [0; 1];
+  file.read_exact(&mut checksum).unwrap();
+  checksum[0] ^= 0xff;
+  file.seek(SeekFrom::Start(checksum_offset)).unwrap();
+  file.write_all(&checksum).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let corrupt_error = expect_native_query_hit_error(corrupt.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 0, end: None },
+      NativeQueryContentAssertionsV1::none(),
+    )],
+    &corrupt.cancellation,
+    range_limits,
+  ));
+  assert_eq!(corrupt_error.class(), NativeQueryHitReadErrorClassV1::CorruptSource);
+  drop(execution);
+  corrupt.assert_released();
+
+  let repeated = native_query_body_fixture_configured(HashAlgorithm::Blake3_256, body, true, SelectedFileBodyShape::RepeatedChunk);
+  let execution =
+    repeated.source.execute_authoritative_query_v1(&repeated.plan, &repeated.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&repeated.source, &execution).next().unwrap();
+  let repeated_body_bytes = (body.len() * 2) as u64;
+  let chunk_bound_source = NativeQueryHitSourceLimitsV1::new(1, repeated_body_bytes, repeated_body_bytes, 1, 64 * 1_024).unwrap();
+  let chunk_bound_limits = NativeQueryHitRangeLimitsV1::new(chunk_bound_source, repeated_body_bytes, repeated_body_bytes).unwrap();
+  let chunk_error = expect_native_query_hit_error(repeated.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: 0, end: None },
+      NativeQueryContentAssertionsV1::none(),
+    )],
+    &repeated.cancellation,
+    chunk_bound_limits,
+  ));
+  assert_eq!(chunk_error.class(), NativeQueryHitReadErrorClassV1::ResourceLimit);
+  assert_eq!(chunk_error.code(), "native_query_hit_body_chunks_per_hit");
+  drop(execution);
+  repeated.assert_released();
+
+  let binary_body = [0xff, b'a'];
+  let binary = native_query_body_fixture(HashAlgorithm::Blake3_256, &binary_body);
+  let execution =
+    binary.source.execute_authoritative_query_v1(&binary.plan, &binary.cancellation, native_query_execution_limits()).unwrap();
+  let hit = authorized_query_execution_file_hits_v1(&binary.source, &execution).next().unwrap();
+  let binary_source = NativeQueryHitSourceLimitsV1::new(1, 2, 2, 1, 64 * 1_024).unwrap();
+  let binary_locator_limits = NativeQueryHitLocatorLimitsV1::new(binary_source, 1, 1, 2, 2, 1).unwrap();
+  let located = binary
+    .source
+    .locate_authorized_query_hits_v1(
+      &[NativeQueryHitLocatorRequestV1::new(hit, b"a", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+      &binary.cancellation,
+      binary_locator_limits,
+    )
+    .unwrap();
+  assert!(located.hits()[0].scan().matches()[0].unicode_scalar_range().is_none());
+  drop(located);
+  let binary_range_limits = NativeQueryHitRangeLimitsV1::new(binary_source, 2, 2).unwrap();
+  let text_error = expect_native_query_hit_error(binary.source.read_authorized_query_hit_ranges_v1(
+    &[NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::UnicodeScalars { start: 0, end: None },
+      NativeQueryContentAssertionsV1::none(),
+    )],
+    &binary.cancellation,
+    binary_range_limits,
+  ));
+  assert_eq!(text_error.class(), NativeQueryHitReadErrorClassV1::InvalidUtf8);
+  drop(execution);
+  binary.assert_released();
+}
+
+#[test]
+fn authorized_exact_scope_hit_wrappers_cover_complete_and_partial_paths_without_masking_source_faults() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    for partial in [false, true] {
+      let fixture = native_candidate_artifact_fixture_with_namespace_layout(algorithm, partial, partial, false);
+      let execution = fixture
+        .source
+        .execute_exact_scope_query_v1(
+          &fixture.plan,
+          &fixture.scope_id,
+          &fixture.cancellation,
+          native_query_execution_limits(),
+          native_candidate_limits(),
+          native_partial_acceleration_limits(),
+          native_candidate_composition_limits(),
+        )
+        .unwrap();
+      assert_eq!(
+        execution.path(),
+        if partial { QueryExactScopeExecutionPathV1::Partial } else { QueryExactScopeExecutionPathV1::Complete }
+      );
+      let hit = authorized_exact_scope_file_hits_v1(&fixture.source, &execution).next().unwrap();
+      assert_eq!(hit.selected_namespace_root(), execution.selected_namespace_root());
+      let source_limits = NativeQueryHitSourceLimitsV1::new(1, 1_024 * 1_024, 1_024 * 1_024, 1, 64 * 1_024).unwrap();
+      let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 1, 1, 1_024 * 1_024, 1_024 * 1_024, 1).unwrap();
+      let body_error = expect_native_query_hit_error(fixture.source.locate_authorized_query_hits_v1(
+        &[NativeQueryHitLocatorRequestV1::new(hit, b"x", LocatorMatchSemanticsV1::ExactBytes, 0, NativeQueryContentAssertionsV1::none())],
+        &fixture.cancellation,
+        locator_limits,
+      ));
+      assert_eq!(body_error.class(), NativeQueryHitReadErrorClassV1::CorruptSource);
+      assert_eq!(body_error.code(), "selected_file_body_length");
+      drop(execution);
+      fixture.assert_released();
+    }
+  }
+}
+
+#[test]
+fn authorized_query_hits_locate_and_range_fetch_the_exact_captured_revision() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let body = "alpha\r\nβeta panic: unwrap\r\nomega".as_bytes();
+    let fixture = native_query_body_fixture(algorithm, body);
+    let execution =
+      fixture.source.execute_authoritative_query_v1(&fixture.plan, &fixture.cancellation, native_query_execution_limits()).unwrap();
+    let hit = authorized_query_execution_file_hits_v1(&fixture.source, &execution).next().unwrap();
+    let expected_content_hash = digest_parts(algorithm, &[body]);
+    fixture.advance_mutable_authority();
+    let baseline = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+    let assertions = NativeQueryContentAssertionsV1::new(Some(&expected_content_hash), Some(1_700_000_000_500));
+    let source_limits = NativeQueryHitSourceLimitsV1::new(4, 1024 * 1024, 2 * 1024 * 1024, 16, 1024 * 1024).unwrap();
+    let locator_limits = NativeQueryHitLocatorLimitsV1::new(source_limits, 8, 16, 1024 * 1024, 2 * 1024 * 1024, 1024).unwrap();
+    let locator_requests = [NativeQueryHitLocatorRequestV1::new(hit, b"panic: unwrap", LocatorMatchSemanticsV1::ExactBytes, 0, assertions)];
+
+    let locators = fixture.source.locate_authorized_query_hits_v1(&locator_requests, &fixture.cancellation, locator_limits).unwrap();
+
+    assert_eq!(locators.selected_namespace_root(), fixture.selected_root);
+    assert_eq!(locators.total_body_bytes(), body.len() as u64);
+    assert_eq!(locators.total_match_count(), 1);
+    assert_eq!(locators.hits()[0].path(), "/docs/messages.json");
+    assert_eq!(locators.hits()[0].content_hash(), expected_content_hash);
+    assert_eq!(locators.hits()[0].updated_at(), 1_700_000_000_500);
+    assert_eq!(locators.hits()[0].scan().stop_reason(), LocatorScanStopReasonV1::Complete);
+    let matched = locators.hits()[0].scan().matches()[0].byte_range();
+    assert_eq!(&body[matched.start() as usize..matched.end() as usize], b"panic: unwrap");
+    assert_eq!(locators.hits()[0].scan().matches()[0].unicode_scalar_range().unwrap().start(), 12);
+    assert_eq!(locators.hits()[0].scan().matches()[0].line_column_range().unwrap().start().line(), 2);
+    assert_eq!(locators.hits()[0].scan().matches()[0].line_column_range().unwrap().start().column(), 5);
+    drop(locators);
+    assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+
+    let range_limits = NativeQueryHitRangeLimitsV1::new(source_limits, 64 * 1024, 128 * 1024).unwrap();
+    let range_requests = [NativeQueryHitRangeRequestV1::new(
+      hit,
+      ExactSourceRangeSelectorV1::Bytes { start: matched.start(), end: Some(matched.end()) },
+      assertions,
+    )];
+    let ranges = fixture.source.read_authorized_query_hit_ranges_v1(&range_requests, &fixture.cancellation, range_limits).unwrap();
+    assert_eq!(ranges.selected_namespace_root(), fixture.selected_root);
+    assert_eq!(ranges.total_body_bytes(), body.len() as u64);
+    assert_eq!(ranges.total_output_bytes(), b"panic: unwrap".len() as u64);
+    assert_eq!(ranges.ranges()[0].bytes(), b"panic: unwrap");
+    assert_eq!(ranges.ranges()[0].source_byte_range(), matched);
+    assert!(!ranges.ranges()[0].truncated());
+    drop(ranges);
+    assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+
+    let exact = fixture
+      .source
+      .execute_exact_scope_query_v1(
+        &fixture.plan,
+        &fixture.scope_id,
+        &fixture.cancellation,
+        native_query_execution_limits(),
+        native_candidate_limits(),
+        native_partial_acceleration_limits(),
+        native_candidate_composition_limits(),
+      )
+      .unwrap();
+    let exact_hit = authorized_exact_scope_file_hits_v1(&fixture.source, &exact).next().unwrap();
+    assert_eq!(exact_hit.file_key(), hit.file_key());
+    assert_eq!(exact_hit.record_revision(), hit.record_revision());
+    assert_eq!(exact_hit.selected_namespace_root(), hit.selected_namespace_root());
+    drop(exact);
+    drop(execution);
+    fixture.assert_released();
+  }
+}
+
 #[test]
 fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypass() {
   fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
@@ -6210,6 +6925,32 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(query_native.matches("execute_exact_query_scope_into_v1(").count(), 1);
   for forbidden in ["execute_partial_index_acceleration_v1(", "QueryEngine", "ExplainResult", "execute_explain_filtered("] {
     assert!(!query_native.contains(forbidden), "native source adapter gained a duplicate exactness or sink state machine: {forbidden}");
+  }
+  let query_hit = fs::read_to_string(source_root.join("engine/v4/query_native_locator.rs")).unwrap();
+  assert_eq!(query_hit.matches("pub fn authorized_query_execution_file_hits_v1").count(), 1);
+  assert_eq!(query_hit.matches("pub fn authorized_exact_scope_file_hits_v1").count(), 1);
+  assert_eq!(query_hit.matches("pub fn locate_authorized_query_hits_v1").count(), 1);
+  assert_eq!(query_hit.matches("pub fn read_authorized_query_hit_ranges_v1").count(), 1);
+  assert_eq!(query_hit.matches(".find_row(").count(), 1);
+  assert_eq!(query_hit.matches(".restore_ordered_file_row(").count(), 1);
+  assert_eq!(query_hit.matches(".read_file_body(").count(), 2);
+  assert_eq!(query_hit.matches("locate_source_matches_v1(").count(), 1);
+  assert_eq!(query_hit.matches("read_exact_source_range_v1(").count(), 1);
+  assert!(!query_hit.contains(".inner"), "query-hit composition bypassed the source's narrow captured-authority accessors");
+  assert!(!query_native.contains("pub(super) struct NativeAuthoritativeFieldPartitionInnerV1"));
+  for forbidden in [
+    "StorageEngine",
+    "DirectoryOps",
+    "query_engine",
+    "search_locators",
+    "range_extract",
+    "crate::server",
+    "plugin",
+    "wasm",
+    "scan_files(",
+    "HEAD",
+  ] {
+    assert!(!query_hit.contains(forbidden), "query-hit composition gained forbidden authority or legacy dependency: {forbidden}");
   }
 }
 

@@ -226,12 +226,12 @@ pub struct QueryExactScopeIdentityRefV1<'a> {
   record_revision: &'a [u8],
 }
 
-impl QueryExactScopeIdentityRefV1<'_> {
-  pub const fn file_key(&self) -> &[u8] {
+impl<'identity> QueryExactScopeIdentityRefV1<'identity> {
+  pub const fn file_key(&self) -> &'identity [u8] {
     self.file_key
   }
 
-  pub const fn record_revision(&self) -> &[u8] {
+  pub const fn record_revision(&self) -> &'identity [u8] {
     self.record_revision
   }
 }

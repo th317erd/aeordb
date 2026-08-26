@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::HashAlgorithm;
-use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner, MemoryReservation};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value};
 use super::index_artifact_cursor::{
@@ -584,6 +584,34 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
 
   pub fn prepared_source_cache_metrics(&self) -> NativePreparedSourceCacheMetricsV1 {
     self.inner.prepared_source_cache_counters.snapshot()
+  }
+
+  pub(super) fn query_hit_hash_algorithm_v1(&self) -> HashAlgorithm {
+    self.inner.view.hash_algorithm()
+  }
+
+  pub(super) fn query_hit_selected_namespace_root_v1(&self) -> &[u8] {
+    &self.inner.view.root_metadata().hash
+  }
+
+  pub(super) fn query_hit_query_path_v1(&self) -> &str {
+    &self.inner.query_path
+  }
+
+  pub(super) fn query_hit_view_cancellation_v1(&self) -> &CancellationToken {
+    self.inner.view.cancellation()
+  }
+
+  pub(super) fn query_hit_memory_coordinator_v1(&self) -> &Arc<MemoryCoordinator> {
+    self.inner.source.memory_coordinator()
+  }
+
+  pub(super) fn open_query_hit_namespace_reader_v1(&self) -> Result<NativeSelectedNamespaceReaderV1<'_>, QueryExecutionSourceErrorV1> {
+    self.inner.source.selected_namespace_reader(&self.inner.view, self.inner.namespace_limits).map_err(map_native_error)
+  }
+
+  pub(super) fn open_query_hit_ordering_lookup_v1(&self) -> Result<NativeQueryOrderingLookupV1, QueryExecutionSourceErrorV1> {
+    self.inner.workspace.open_lookup().map_err(map_workspace_error)
   }
 
   pub fn logical_explain_v1(
@@ -3428,7 +3456,7 @@ fn validate_identity(identity: &[u8], algorithm: HashAlgorithm, role: &str) -> R
   Ok(())
 }
 
-fn path_is_within(parent: &str, child: &str) -> bool {
+pub(super) fn path_is_within(parent: &str, child: &str) -> bool {
   parent == "/" || parent == child || child.strip_prefix(parent).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
@@ -3475,7 +3503,7 @@ fn try_clone_u64s(values: &[u64], role: &str) -> Result<Vec<u64>, QueryExecution
   Ok(retained)
 }
 
-fn map_workspace_error(error: NativeQueryOrderingWorkspaceErrorV1) -> QueryExecutionSourceErrorV1 {
+pub(super) fn map_workspace_error(error: NativeQueryOrderingWorkspaceErrorV1) -> QueryExecutionSourceErrorV1 {
   let class = match error.class() {
     NativeQueryOrderingWorkspaceErrorClassV1::Invalid | NativeQueryOrderingWorkspaceErrorClassV1::Corrupt => {
       QueryExecutionSourceErrorClassV1::Corrupt
@@ -3487,7 +3515,7 @@ fn map_workspace_error(error: NativeQueryOrderingWorkspaceErrorV1) -> QueryExecu
   source_error(class, error.code(), error.context())
 }
 
-fn map_native_error(error: NativeSelectedNamespaceReadErrorV1) -> QueryExecutionSourceErrorV1 {
+pub(super) fn map_native_error(error: NativeSelectedNamespaceReadErrorV1) -> QueryExecutionSourceErrorV1 {
   let class = match error.class() {
     NativeSelectedNamespaceReadErrorClassV1::InvalidRequest | NativeSelectedNamespaceReadErrorClassV1::Corrupt => {
       QueryExecutionSourceErrorClassV1::Corrupt

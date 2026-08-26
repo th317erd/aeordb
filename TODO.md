@@ -1343,7 +1343,11 @@
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
         - [x] P7-4a: extract one Query-admitted captured selected-root body/chunk reader and make native parser evaluation reuse it.
         - [x] P7-4b: freeze storage-neutral locator/range contracts and prove exact byte, UTF-8 character, line, CRLF, truncation, and continuation semantics against an independent oracle.
-        - [ ] P7-4c: bind authorized query hits to exact selected-root/revision locators and same-revision range fetch with per-hit/total bounds and optional content assertions.
+        - [x] P7-4c: bind authorized query hits to exact selected-root/revision locators and same-revision range fetch with per-hit/total bounds and optional content assertions.
+          - [x] Freeze unforgeable file-hit adapters for retained authoritative and exact-scope query results without admitting synthetic aggregate identities.
+          - [x] Compose captured-workspace row restoration, the shared selected-body reader, and storage-neutral locator/range primitives under Query memory and cancellation.
+          - [x] Prove historical same-revision continuity, assertions-as-assertions, per-hit/request-total bounds, corruption, cancellation, both hash widths, and exact reservation release.
+          - [x] Freeze architecture uniqueness and pass affected, broad, static, documentation, and contract gates before landing.
         - [ ] P7-4d: expose an inactive-v4 root-aware plugin read adapter over the shared selected-body primitive and close architecture, fault, native, and broad gates.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

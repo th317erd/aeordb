@@ -211,6 +211,10 @@ impl LocatorScanV1 {
   pub const fn continuation(&self) -> Option<LocatorScanContinuationV1> {
     self.continuation
   }
+
+  pub(crate) fn allocated_match_capacity_v1(&self) -> usize {
+    self.matches.capacity()
+  }
 }
 
 pub fn locate_source_matches_v1(
