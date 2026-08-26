@@ -1376,6 +1376,9 @@
             - [x] Make recursive selected-root traversal fail closed on unknown protected families and checksum-valid directory cycles while preserving bounded depth and shared-subtree reuse.
             - [x] Pass focused, affected, architecture, static, documentation, contract, full library, and full workspace gates before closing P7-5b.
         - [ ] P7-5c: cut query/search/aggregate/explain over the shared schema, canonical APOS, root-aware locators/ranges, and the live search-root-X to fetch-root-X flow without a legacy cursor decoder.
+          - [x] P7-5c1: freeze disconnected bounded search admission and staged query/search APOS context contracts before changing public handler behavior.
+          - [ ] P7-5c2: route legacy-v3 query/search/aggregate/explain through one exact selected-root source with complete pre-observable authorization and canonical APOS only.
+          - [ ] P7-5c3: compose exact-root locator generation and same-root fetch continuity, then close architecture, affected, broad, and disposable live-server gates.
         - [ ] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.
         - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.

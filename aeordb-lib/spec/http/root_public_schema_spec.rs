@@ -5,15 +5,18 @@ use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::position::{
   LogicalPositionWriteV1, PositionComponentWriteV1, PositionRouteV1, PositionSortDirectionV1, encode_logical_position,
 };
-use aeordb::engine::v4::position_order::{PositionOrderFieldV1, PositionWindowOriginV1, compile_query_order_v1};
+use aeordb::engine::v4::position_order::{
+  PositionOrderFieldV1, PositionWindowOriginV1, compile_aggregate_group_order_v1, compile_global_search_order_v1, compile_query_order_v1,
+};
 use aeordb::engine::v4::query_planner::{QueryExpressionV1, QueryPredicateOperationV1};
 use aeordb::server::root_api::{RequestedRootSelectorV1, RootResponseV1};
 use aeordb::server::root_public_schema::{
-  PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1, PublicAffectedRelationshipChangeV1, PublicAffectedRelationshipV1, PublicCollectionMetadataV1,
-  PublicEntryTypeV1, PublicHalfOpenRangeV1, PublicItemsResponseV1, PublicLineColumnPointV1, PublicLineColumnRangeV1,
-  PublicLocatorContinuationV1, PublicLocatorMatchSemanticsV1, PublicLocatorMatchV1, PublicMutationEventMetadataV1, PublicMutationKindV1,
-  PublicPositionContextV1, PublicRangeContinuationV1, PublicRangeSelectionV1, PublicResultsResponseV1, PublicSchemaErrorV1,
-  parse_public_query_request_v1,
+  PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1, PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1, PublicAffectedRelationshipChangeV1,
+  PublicAffectedRelationshipV1, PublicCollectionMetadataV1, PublicEntryTypeV1, PublicHalfOpenRangeV1, PublicItemsResponseV1,
+  PublicLineColumnPointV1, PublicLineColumnRangeV1, PublicLocatorContinuationV1, PublicLocatorMatchSemanticsV1, PublicLocatorMatchV1,
+  PublicMutationEventMetadataV1, PublicMutationKindV1, PublicPositionContextV1, PublicRangeContinuationV1, PublicRangeSelectionV1,
+  PublicResultsResponseV1, PublicSchemaErrorV1, admit_public_query_request_v1, admit_public_search_request_v1,
+  finalize_public_query_request_v1, finalize_public_search_request_v1, parse_public_query_request_v1, parse_public_search_request_v1,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -36,6 +39,28 @@ fn position_token(order: &aeordb::engine::v4::position::CompiledRouteOrderV1, ro
       comparator: Some(aeordb::engine::v4::position::PositionComparatorV1::U64),
       state: aeordb::engine::v4::position::PositionComponentStateV1::Present,
       payload: &7_u64.to_be_bytes(),
+    },
+    PositionComponentWriteV1::utf8(b"/docs/a.txt"),
+  ];
+  String::from_utf8(
+    encode_logical_position(&LogicalPositionWriteV1 {
+      order,
+      namespace_root: root,
+      file_key_tie: &[0x41; 32],
+      record_revision_tie: &[0x51; 32],
+      components: &components,
+    })
+    .unwrap(),
+  )
+  .unwrap()
+}
+
+fn search_position_token(order: &aeordb::engine::v4::position::CompiledRouteOrderV1, root: &[u8]) -> String {
+  let components = [
+    PositionComponentWriteV1 {
+      comparator: Some(aeordb::engine::v4::position::PositionComparatorV1::FiniteF64),
+      state: aeordb::engine::v4::position::PositionComponentStateV1::Present,
+      payload: &0.75_f64.to_be_bytes(),
     },
     PositionComponentWriteV1::utf8(b"/docs/a.txt"),
   ];
@@ -264,6 +289,119 @@ fn canonical_apos_is_checked_against_explicit_root_route_and_order_before_execut
     parse_public_query_request_v1(&serde_json::to_vec(&request).unwrap(), hash_algorithm, route_context).unwrap_err().code(),
     "INVALID_POSITION_CURSOR"
   );
+}
+
+#[test]
+fn query_admission_defers_apos_decoding_until_selected_order_is_known() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let order = query_order(hash_algorithm);
+  let root = vec![0x31; hash_algorithm.hash_length()];
+  let body = json!({
+    "path": "/docs",
+    "root_hash": hex::encode(&root),
+    "where": { "field": "status", "op": "eq", "value": "ready" },
+    "after": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, br#"{"offset":10}"#),
+    "limit": 10
+  });
+
+  let admitted = admit_public_query_request_v1(&serde_json::to_vec(&body).unwrap(), hash_algorithm).unwrap();
+  assert_eq!(admitted.path, "/docs");
+  assert_eq!(admitted.selector, RequestedRootSelectorV1::ExplicitRoot(root));
+  assert_eq!(admitted.pagination.origin, PositionWindowOriginV1::After);
+  assert_eq!(finalize_public_query_request_v1(admitted, hash_algorithm, context(&order)).unwrap_err().code(), "INVALID_POSITION_CURSOR");
+
+  let no_position =
+    admit_public_query_request_v1(br#"{"path":"/docs","where":{"field":"status","op":"eq","value":"ready"}}"#, hash_algorithm).unwrap();
+  let wrong_route = PublicPositionContextV1 { route: PositionRouteV1::GlobalSearch, order_fingerprint: order.fingerprint() };
+  assert_eq!(finalize_public_query_request_v1(no_position, hash_algorithm, wrong_route).unwrap_err().code(), "INVALID_POSITION_CURSOR");
+
+  let aggregate = admit_public_query_request_v1(br#"{"path":"/docs","where":[],"aggregate":{"count":true}}"#, hash_algorithm).unwrap();
+  let aggregate_order = compile_aggregate_group_order_v1(hash_algorithm, &[]).unwrap();
+  let aggregate_context =
+    PublicPositionContextV1 { route: PositionRouteV1::AggregateGroups, order_fingerprint: aggregate_order.fingerprint() };
+  assert!(finalize_public_query_request_v1(aggregate, hash_algorithm, aggregate_context).is_ok());
+}
+
+#[test]
+fn search_schema_is_bounded_staged_and_uses_the_canonical_search_order() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let order = compile_global_search_order_v1(hash_algorithm).unwrap();
+  let root = vec![0x61; hash_algorithm.hash_length()];
+  let body = json!({
+    "query": "needle",
+    "where": { "field": "status", "op": "eq", "value": "ready" },
+    "path": "/docs",
+    "root_hash": hex::encode(&root),
+    "after": search_position_token(&order, &root),
+    "limit": 25,
+    "include_matches": true,
+    "max_matches_per_result": 7,
+    "max_locator_scan_bytes": 1048576,
+    "snippet_chars": 200,
+    "match_context_lines": 3
+  });
+  let encoded = serde_json::to_vec(&body).unwrap();
+
+  let admitted = admit_public_search_request_v1(&encoded, hash_algorithm).unwrap();
+  assert_eq!(admitted.path, "/docs");
+  assert_eq!(admitted.selector, RequestedRootSelectorV1::ExplicitRoot(root.clone()));
+  assert_eq!(admitted.pagination.origin, PositionWindowOriginV1::After);
+  assert_eq!(admitted.query.as_deref(), Some("needle"));
+  assert!(admitted.expression.is_some());
+
+  let position_context = PublicPositionContextV1 { route: PositionRouteV1::GlobalSearch, order_fingerprint: order.fingerprint() };
+  let request = finalize_public_search_request_v1(admitted, hash_algorithm, position_context).unwrap();
+  assert_eq!(request.position.as_ref().unwrap().namespace_root(), root);
+  assert_eq!(request.pagination.limit, 25);
+  assert!(request.locators.include_matches);
+  assert_eq!(request.locators.maximum_matches_per_result, 7);
+
+  let parsed = parse_public_search_request_v1(&encoded, hash_algorithm, position_context).unwrap();
+  assert_eq!(parsed.query.as_deref(), Some("needle"));
+
+  let query_route = PublicPositionContextV1 { route: PositionRouteV1::Query, order_fingerprint: order.fingerprint() };
+  assert_eq!(parse_public_search_request_v1(&encoded, hash_algorithm, query_route).unwrap_err().code(), "INVALID_POSITION_CURSOR");
+}
+
+#[test]
+fn search_schema_rejects_amplification_conflicts_and_missing_search_terms_before_planning() {
+  let hash_algorithm = HashAlgorithm::Blake3_256;
+  let order = compile_global_search_order_v1(hash_algorithm).unwrap();
+  let context = PublicPositionContextV1 { route: PositionRouteV1::GlobalSearch, order_fingerprint: order.fingerprint() };
+  let root = vec![0x61; hash_algorithm.hash_length()];
+
+  let oversized = vec![b' '; PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1 + 1];
+  assert_eq!(admit_public_search_request_v1(&oversized, hash_algorithm).unwrap_err().code(), "SEARCH_REQUEST_TOO_LARGE");
+  assert_eq!(admit_public_search_request_v1(br#"{"path":"/docs"}"#, hash_algorithm).unwrap_err().code(), "INVALID_SEARCH_REQUEST");
+  assert_eq!(
+    admit_public_search_request_v1(br#"{"query":"","path":"/docs"}"#, hash_algorithm).unwrap_err().code(),
+    "INVALID_SEARCH_REQUEST"
+  );
+
+  for body in [
+    json!({ "query": "needle", "root_hash": hex::encode(&root), "snapshot": "before-import" }),
+    json!({ "query": "needle", "page": 1, "offset": 0 }),
+    json!({ "query": "needle", "after": search_position_token(&order, &root) }),
+    json!({
+      "query": "needle",
+      "root_hash": hex::encode(&root),
+      "after": search_position_token(&order, &root),
+      "before": search_position_token(&order, &root)
+    }),
+  ] {
+    assert!(admit_public_search_request_v1(&serde_json::to_vec(&body).unwrap(), hash_algorithm).is_err());
+  }
+
+  let legacy = json!({
+    "query": "needle",
+    "root_hash": hex::encode(&root),
+    "after": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, br#"{"offset":10}"#)
+  });
+  let admitted = admit_public_search_request_v1(&serde_json::to_vec(&legacy).unwrap(), hash_algorithm).unwrap();
+  assert_eq!(finalize_public_search_request_v1(admitted, hash_algorithm, context).unwrap_err().code(), "INVALID_POSITION_CURSOR");
+
+  let unknown = br#"{"query":"needle","mystery":true}"#;
+  assert_eq!(admit_public_search_request_v1(unknown, hash_algorithm).unwrap_err().code(), "INVALID_SEARCH_REQUEST");
 }
 
 #[test]

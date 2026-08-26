@@ -27,6 +27,7 @@ use crate::engine::v4::query_planner::{
 use super::root_api::{RequestedRootSelectorV1, RootApiErrorV1, RootResponseV1, RootSelectorFieldsV1, parse_root_selector_v1};
 
 pub const PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1: usize = 16 * 1_048_576;
+pub const PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1: usize = 16 * 1_048_576;
 
 const PUBLIC_QUERY_DEFAULT_LIMIT_V1: u64 = 100;
 const PUBLIC_QUERY_MAXIMUM_WINDOW_BYTES_V1: u64 = 16 * 1_048_576;
@@ -138,6 +139,43 @@ pub struct PublicQueryRequestV1 {
   pub locators: PublicLocatorRequestV1,
 }
 
+#[derive(Debug)]
+pub struct AdmittedPublicQueryRequestV1 {
+  pub path: String,
+  pub selector: RequestedRootSelectorV1,
+  pub expression: QueryExpressionV1,
+  pub pagination: PositionWindowPlanV1,
+  pub order_by: Vec<PublicSortFieldV1>,
+  pub include_total: bool,
+  pub aggregate: Option<PublicAggregateRequestV1>,
+  pub select: Vec<String>,
+  pub explain: PublicExplainModeV1,
+  pub locators: PublicLocatorRequestV1,
+  position_token: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct PublicSearchRequestV1 {
+  pub query: Option<String>,
+  pub expression: Option<QueryExpressionV1>,
+  pub path: String,
+  pub selector: RequestedRootSelectorV1,
+  pub pagination: PositionWindowPlanV1,
+  pub position: Option<LogicalPositionV1>,
+  pub locators: PublicLocatorRequestV1,
+}
+
+#[derive(Debug)]
+pub struct AdmittedPublicSearchRequestV1 {
+  pub query: Option<String>,
+  pub expression: Option<QueryExpressionV1>,
+  pub path: String,
+  pub selector: RequestedRootSelectorV1,
+  pub pagination: PositionWindowPlanV1,
+  pub locators: PublicLocatorRequestV1,
+  position_token: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPublicQueryRequestV1 {
@@ -168,11 +206,33 @@ struct RawPublicQueryRequestV1 {
   match_context_lines: Option<u64>,
 }
 
-pub fn parse_public_query_request_v1(
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPublicSearchRequestV1 {
+  query: Option<String>,
+  #[serde(rename = "where")]
+  expression: Option<serde_json::Value>,
+  path: Option<String>,
+  root_hash: Option<String>,
+  snapshot: Option<String>,
+  version: Option<String>,
+  page: Option<u64>,
+  offset: Option<u64>,
+  after: Option<String>,
+  before: Option<String>,
+  limit: Option<u64>,
+  #[serde(default)]
+  include_matches: bool,
+  max_matches_per_result: Option<usize>,
+  max_locator_scan_bytes: Option<u64>,
+  snippet_chars: Option<usize>,
+  match_context_lines: Option<u64>,
+}
+
+pub fn admit_public_query_request_v1(
   bytes: &[u8],
   hash_algorithm: HashAlgorithm,
-  position_context: PublicPositionContextV1<'_>,
-) -> Result<PublicQueryRequestV1, PublicSchemaErrorV1> {
+) -> Result<AdmittedPublicQueryRequestV1, PublicSchemaErrorV1> {
   if bytes.len() > PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1 {
     return Err(PublicSchemaErrorV1::new(
       "QUERY_REQUEST_TOO_LARGE",
@@ -188,11 +248,9 @@ pub fn parse_public_query_request_v1(
   )
   .map_err(public_root_error)?;
 
-  let (pagination, position) = admit_public_pagination_v1(
+  let admitted_pagination = admit_public_pagination_v1(
     RawPaginationV1 { page: raw.page, offset: raw.offset, after: raw.after, before: raw.before, limit: raw.limit },
     &selector,
-    hash_algorithm,
-    position_context,
   )?;
   let expression = parse_public_query_expression_v1(&raw.expression)?;
   validate_string_fields(&raw.order_by.iter().map(|field| field.field.as_str()).collect::<Vec<_>>(), QUERY_MAXIMUM_SORT_FIELDS_V1)?;
@@ -207,19 +265,134 @@ pub fn parse_public_query_request_v1(
     raw.match_context_lines,
   )?;
 
-  Ok(PublicQueryRequestV1 {
+  Ok(AdmittedPublicQueryRequestV1 {
     path,
     selector,
     expression,
-    pagination,
-    position,
+    pagination: admitted_pagination.pagination,
     order_by: raw.order_by,
     include_total: raw.include_total,
     aggregate: raw.aggregate,
     select: raw.select,
     explain,
     locators,
+    position_token: admitted_pagination.position_token,
   })
+}
+
+pub fn finalize_public_query_request_v1(
+  admitted: AdmittedPublicQueryRequestV1,
+  hash_algorithm: HashAlgorithm,
+  position_context: PublicPositionContextV1<'_>,
+) -> Result<PublicQueryRequestV1, PublicSchemaErrorV1> {
+  let expected_route = if admitted.aggregate.is_some() { PositionRouteV1::AggregateGroups } else { PositionRouteV1::Query };
+  if position_context.route != expected_route {
+    return Err(PublicSchemaErrorV1::new("INVALID_POSITION_CURSOR", "position route does not match request route"));
+  }
+  let position = finalize_public_position_v1(admitted.position_token, &admitted.selector, hash_algorithm, position_context)?;
+  Ok(PublicQueryRequestV1 {
+    path: admitted.path,
+    selector: admitted.selector,
+    expression: admitted.expression,
+    pagination: admitted.pagination,
+    position,
+    order_by: admitted.order_by,
+    include_total: admitted.include_total,
+    aggregate: admitted.aggregate,
+    select: admitted.select,
+    explain: admitted.explain,
+    locators: admitted.locators,
+  })
+}
+
+pub fn parse_public_query_request_v1(
+  bytes: &[u8],
+  hash_algorithm: HashAlgorithm,
+  position_context: PublicPositionContextV1<'_>,
+) -> Result<PublicQueryRequestV1, PublicSchemaErrorV1> {
+  let admitted = admit_public_query_request_v1(bytes, hash_algorithm)?;
+  finalize_public_query_request_v1(admitted, hash_algorithm, position_context)
+}
+
+pub fn admit_public_search_request_v1(
+  bytes: &[u8],
+  hash_algorithm: HashAlgorithm,
+) -> Result<AdmittedPublicSearchRequestV1, PublicSchemaErrorV1> {
+  if bytes.len() > PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1 {
+    return Err(PublicSchemaErrorV1::new(
+      "SEARCH_REQUEST_TOO_LARGE",
+      format!("search request is {} bytes; maximum is {PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1}", bytes.len()),
+    ));
+  }
+  let raw = serde_json::from_slice::<RawPublicSearchRequestV1>(bytes)
+    .map_err(|source| PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", source.to_string()))?;
+  if raw.query.is_none() && raw.expression.is_none() {
+    return Err(PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", "search requires query, where, or both"));
+  }
+  if raw.query.as_ref().is_some_and(|query| query.is_empty() || query.len() > QUERY_MAXIMUM_LITERAL_BYTES_V1) {
+    return Err(PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", "search query must be nonempty and bounded"));
+  }
+  let requested_path = match raw.path.as_deref() {
+    Some(path) => path,
+    None => "/",
+  };
+  let path =
+    validate_query_path(requested_path).map_err(|error| PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", error.context().to_string()))?;
+  let selector = parse_root_selector_v1(
+    &RootSelectorFieldsV1 { root_hash: raw.root_hash, snapshot: raw.snapshot, version: raw.version },
+    hash_algorithm,
+  )
+  .map_err(public_root_error)?;
+  let admitted_pagination = admit_public_pagination_v1(
+    RawPaginationV1 { page: raw.page, offset: raw.offset, after: raw.after, before: raw.before, limit: raw.limit },
+    &selector,
+  )?;
+  let expression = raw.expression.as_ref().map(parse_public_query_expression_v1).transpose()?;
+  let locators = validate_locator_request(
+    raw.include_matches,
+    raw.max_matches_per_result,
+    raw.max_locator_scan_bytes,
+    raw.snippet_chars,
+    raw.match_context_lines,
+  )?;
+  Ok(AdmittedPublicSearchRequestV1 {
+    query: raw.query,
+    expression,
+    path,
+    selector,
+    pagination: admitted_pagination.pagination,
+    locators,
+    position_token: admitted_pagination.position_token,
+  })
+}
+
+pub fn finalize_public_search_request_v1(
+  admitted: AdmittedPublicSearchRequestV1,
+  hash_algorithm: HashAlgorithm,
+  position_context: PublicPositionContextV1<'_>,
+) -> Result<PublicSearchRequestV1, PublicSchemaErrorV1> {
+  if position_context.route != PositionRouteV1::GlobalSearch {
+    return Err(PublicSchemaErrorV1::new("INVALID_POSITION_CURSOR", "position route does not match request route"));
+  }
+  let position = finalize_public_position_v1(admitted.position_token, &admitted.selector, hash_algorithm, position_context)?;
+  Ok(PublicSearchRequestV1 {
+    query: admitted.query,
+    expression: admitted.expression,
+    path: admitted.path,
+    selector: admitted.selector,
+    pagination: admitted.pagination,
+    position,
+    locators: admitted.locators,
+  })
+}
+
+pub fn parse_public_search_request_v1(
+  bytes: &[u8],
+  hash_algorithm: HashAlgorithm,
+  position_context: PublicPositionContextV1<'_>,
+) -> Result<PublicSearchRequestV1, PublicSchemaErrorV1> {
+  let admitted = admit_public_search_request_v1(bytes, hash_algorithm)?;
+  finalize_public_search_request_v1(admitted, hash_algorithm, position_context)
 }
 
 #[derive(Debug)]
@@ -231,12 +404,16 @@ struct RawPaginationV1 {
   limit: Option<u64>,
 }
 
+#[derive(Debug)]
+struct AdmittedPublicPaginationV1 {
+  pagination: PositionWindowPlanV1,
+  position_token: Option<String>,
+}
+
 fn admit_public_pagination_v1(
   raw: RawPaginationV1,
   selector: &RequestedRootSelectorV1,
-  hash_algorithm: HashAlgorithm,
-  position_context: PublicPositionContextV1<'_>,
-) -> Result<(PositionWindowPlanV1, Option<LogicalPositionV1>), PublicSchemaErrorV1> {
+) -> Result<AdmittedPublicPaginationV1, PublicSchemaErrorV1> {
   let has_after = raw.after.is_some();
   let has_before = raw.before.is_some();
   let limits = PositionWindowLimitsV1::new(
@@ -253,10 +430,28 @@ fn admit_public_pagination_v1(
 
   let token = match (raw.after, raw.before) {
     (Some(token), None) | (None, Some(token)) => token,
-    (None, None) => return Ok((pagination, None)),
+    (None, None) => return Ok(AdmittedPublicPaginationV1 { pagination, position_token: None }),
     (Some(_), Some(_)) => {
       return Err(PublicSchemaErrorV1::new("INVALID_PAGINATION", "after and before are mutually exclusive"));
     }
+  };
+  let RequestedRootSelectorV1::ExplicitRoot(selected_root) = selector else {
+    return Err(PublicSchemaErrorV1::new("INVALID_PAGINATION", "after and before require an explicit root_hash selector"));
+  };
+  if selected_root.is_empty() {
+    return Err(PublicSchemaErrorV1::new("INVALID_PAGINATION", "after and before require a nonempty explicit root_hash selector"));
+  }
+  Ok(AdmittedPublicPaginationV1 { pagination, position_token: Some(token) })
+}
+
+fn finalize_public_position_v1(
+  position_token: Option<String>,
+  selector: &RequestedRootSelectorV1,
+  hash_algorithm: HashAlgorithm,
+  position_context: PublicPositionContextV1<'_>,
+) -> Result<Option<LogicalPositionV1>, PublicSchemaErrorV1> {
+  let Some(token) = position_token else {
+    return Ok(None);
   };
   let RequestedRootSelectorV1::ExplicitRoot(selected_root) = selector else {
     return Err(PublicSchemaErrorV1::new("INVALID_PAGINATION", "after and before require an explicit root_hash selector"));
@@ -272,7 +467,7 @@ fn admit_public_pagination_v1(
   if position.order_fingerprint() != position_context.order_fingerprint {
     return Err(PublicSchemaErrorV1::new("POSITION_ORDER_MISMATCH", "position order does not match request order"));
   }
-  Ok((pagination, Some(position)))
+  Ok(Some(position))
 }
 
 fn validate_query_path(path: &str) -> Result<String, PublicSchemaErrorV1> {
