@@ -36,7 +36,9 @@ What an attacker would want to obtain or modify:
 
 **Mitigations:**
 - Per-key `ActiveKeyRules` checked on every request that touches a path.
-- `/blobs/{hash}` and `/files/download` now route through the same scope check as `/files/{path}` (closes beta-audit P0).
+- `/blobs/{hash}`, `/files/fetch`, and `/files/download` route through the same current scope/family checks as `/files/{path}`. Current authorization completes before a supplied root selector is resolved, and selected-root permission documents may restrict but never expand current grants.
+- `root_hash`, snapshot, and version selectors are mutually exclusive and exact. A missing or unavailable supplied root never falls back to current HEAD; share-link credentials select current HEAD only.
+- ZIP files require Read, directories require List, and every recursive descendant is rechecked against both current and selected-root authority. Concealed-only requests cannot resolve a root merely to obtain root metadata.
 - `/auth/refresh` validates the issuing key's `is_revoked` and `expires_at` on every refresh, so revoking a leaked key terminates outstanding refresh chains.
 
 ### Compromised peer

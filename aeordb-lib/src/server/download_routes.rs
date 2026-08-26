@@ -41,8 +41,8 @@ pub async fn download_zip(
   active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   Json(body): Json<DownloadRequest>,
 ) -> Response {
-  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
-    return response;
+  if let Err(error) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return error.into_response();
   }
   if body.paths.is_empty() {
     return ErrorResponse::new("At least one path is required in the 'paths' array").with_status(StatusCode::BAD_REQUEST).into_response();
@@ -90,8 +90,8 @@ pub async fn download_zip(
     Ok(selector) => selector,
     Err(error) => return root_api_error_response(error, false),
   };
-  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
-    return response;
+  if let Err(error) = reject_historical_share_selector(&claims, &selector) {
+    return error.into_response();
   }
 
   const MAX_ZIP_SIZE: u64 = 2_147_483_648; // 2 GB
@@ -108,17 +108,17 @@ pub async fn download_zip(
   let mut build_guard = ResponseBuildGuard::new();
   let cancellation = build_guard.cancellation();
   let build = tokio::task::spawn_blocking(move || {
-    build_zip(
-      &build_state,
-      &build_claims,
-      build_key_rules.as_ref().map(|rules| rules.0.as_slice()),
-      &selector,
-      &paths,
+    build_zip(SelectedRootZipBuildRequest {
+      state: &build_state,
+      claims: &build_claims,
+      key_rules: build_key_rules.as_ref().map(|rules| rules.0.as_slice()),
+      selector: &selector,
+      paths: &paths,
       pre_skipped,
-      &common_prefix,
-      MAX_ZIP_SIZE,
-      &cancellation,
-    )
+      common_prefix: &common_prefix,
+      max_size: MAX_ZIP_SIZE,
+      cancellation: &cancellation,
+    })
   })
   .await;
   build_guard.disarm();
@@ -163,7 +163,7 @@ pub async fn download_zip(
 
   let response =
     builder.body(response_body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build ZIP response").into_response());
-  attach_root_metadata_headers(response, &zip.root, state.engine.hash_algo()).unwrap_or_else(|response| response)
+  attach_root_metadata_headers(response, &zip.root, state.engine.hash_algo())
 }
 
 struct ZipBuildOutput {
@@ -172,17 +172,21 @@ struct ZipBuildOutput {
   root: crate::engine::v4::read_view::ReadViewRootMetadataV1,
 }
 
-fn build_zip(
-  state: &AppState,
-  claims: &TokenClaims,
-  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  selector: &RequestedRootSelectorV1,
-  paths: &[String],
+struct SelectedRootZipBuildRequest<'request> {
+  state: &'request AppState,
+  claims: &'request TokenClaims,
+  key_rules: Option<&'request [crate::engine::api_key_rules::KeyRule]>,
+  selector: &'request RequestedRootSelectorV1,
+  paths: &'request [String],
   pre_skipped: Vec<String>,
-  common_prefix: &str,
+  common_prefix: &'request str,
   max_size: u64,
-  cancellation: &ResponseBuildCancellation,
-) -> Result<ZipBuildOutput, ZipBuildError> {
+  cancellation: &'request ResponseBuildCancellation,
+}
+
+fn build_zip(request: SelectedRootZipBuildRequest<'_>) -> Result<ZipBuildOutput, ZipBuildError> {
+  let SelectedRootZipBuildRequest { state, claims, key_rules, selector, paths, pre_skipped, common_prefix, max_size, cancellation } =
+    request;
   cancellation.check().map_err(ZipBuildError::Engine)?;
   let selected = LegacyV3SelectedRootAdapterV1::resolve(&state.engine, selector).map_err(ZipBuildError::Root)?;
   let mut file = tempfile_for_engine(&state.engine, "zip").map_err(|error| ZipBuildError::Write(error.to_string()))?;

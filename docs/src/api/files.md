@@ -98,6 +98,7 @@ Read a file or list a directory. The server determines the type automatically:
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
+| `root_hash` | string | current HEAD | Read from this exact lowercase namespace-root hash |
 | `snapshot` | string | — | Read the file as it was at this named snapshot |
 | `version` | string | — | Read the file at this version hash (hex) |
 | `nofollow` | boolean | `false` | If the path is a symlink, return metadata instead of following |
@@ -122,6 +123,9 @@ Read a file or list a directory. The server determines the type automatically:
 | `X-AeorDB-Created` | Unix timestamp (milliseconds) |
 | `X-AeorDB-Updated` | Unix timestamp (milliseconds) |
 | `Content-Type` | MIME type (if known) |
+| `X-AeorDB-Root-Hash` | Exact namespace root used for the response |
+| `X-AeorDB-Root-State` | `live` for current HEAD or `retained` for an available historical root |
+| `X-AeorDB-Root-Expires-At` | Advisory expiry; empty for legacy-v3 live/retained roots |
 
 **Body:** raw file bytes (streamed)
 
@@ -171,6 +175,11 @@ state for ordinary user data.
 
 ```json
 {
+  "root": {
+    "hash": "9f26...",
+    "state": "live",
+    "expires_at": null
+  },
   "items": [
     {
       "path": "/data/report.pdf",
@@ -220,6 +229,7 @@ When `limit` or `offset` is provided, the response includes pagination metadata:
 
 ```json
 {
+  "root": { "hash": "9f26...", "state": "live", "expires_at": null },
   "items": [...],
   "total": 150,
   "limit": 10,
@@ -286,9 +296,25 @@ curl "http://localhost:6830/files/data/report.pdf?snapshot=v1.0" \
 # Read file at a specific version hash
 curl "http://localhost:6830/files/data/report.pdf?version=a1b2c3..." \
   -H "Authorization: Bearer $TOKEN"
+
+# Read file at an exact namespace root
+curl "http://localhost:6830/files/data/report.pdf?root_hash=a1b2c3..." \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-If both `snapshot` and `version` are provided, `snapshot` takes precedence. Returns 404 if the file did not exist at that version.
+`root_hash`, `snapshot`, and `version` are mutually exclusive. Supplying more
+than one returns `400 INVALID_ROOT_SELECTOR`; malformed hashes return
+`400 INVALID_ROOT_HASH`. A supplied selector never falls back to current HEAD.
+An unavailable explicit/version root returns
+`503 HISTORICAL_VIEW_UNAVAILABLE`, while an unknown snapshot returns
+`404 INVALID_NAMESPACE_ROOT`.
+
+Current path/key/share authorization completes before historical root state or
+content is observable. Historical permission documents may further restrict a
+normal user, but cannot expand current access. Share-link credentials are
+current-HEAD only. Successful raw file/range/HEAD responses carry the three
+root headers above; directory and nofollow-symlink JSON responses include the
+exact `root` object.
 
 ### Error Responses
 
@@ -324,6 +350,7 @@ Whole-file and range responses are built in a uniquely named temporary file besi
     "/data/a.txt",
     "/data/b.json"
   ],
+  "root_hash": "9f26...",
   "max_bytes": 1048576
 }
 ```
@@ -334,10 +361,18 @@ Whole-file and range responses are built in a uniquely named temporary file besi
 | `items` | array | Yes for range mode | Range fetch requests; see below |
 | `max_bytes` | integer | No | Optional lower cumulative byte limit for this request. Values above the server cap are clamped to the server cap. |
 | `continue_on_error` | boolean | No | Range mode only. If true, per-item errors are returned in the `items` array instead of aborting the request. |
+| `root_hash` | string | No | Exact lowercase namespace-root hash. Mutually exclusive with `snapshot` and `version`. |
+| `snapshot` | string | No | Named snapshot selector. Mutually exclusive with `root_hash` and `version`. |
+| `version` | string | No | Exact namespace-root hash through the legacy version alias. Mutually exclusive with `root_hash` and `snapshot`. |
 
 ### Response
 
 **Status:** `200 OK`
+
+Successful whole-file and range responses preserve the legacy JSON body shown
+below and identify the selected root with `X-AeorDB-Root-Hash`,
+`X-AeorDB-Root-State`, and `X-AeorDB-Root-Expires-At`. They do not add a root
+object to the keyed body or range collection.
 
 ```json
 {
@@ -424,7 +459,11 @@ Range-mode response:
 }
 ```
 
-If `continue_on_error` is true, per-item errors have `status` values such as `not_found`, `stale`, `invalid`, `too_large`, or `error`.
+If `continue_on_error` is true, per-item errors have `status` values such as
+`not_found`, `stale`, `invalid`, `too_large`, or `error`. Current authorization
+is evaluated for every item before selector resolution. A mixed batch can
+return authorized results plus concealed `not_found` items, but an all-denied
+batch returns `404` without resolving or revealing the requested root.
 
 ### Limits
 
@@ -466,11 +505,20 @@ Build a ZIP archive from one or more readable files or directories. Directory in
   "paths": [
     "/docs/guide.md",
     "/media/photos/"
-  ]
+  ],
+  "snapshot": "release-2026-08"
 }
 ```
 
-The uncompressed logical input is limited to 2 GiB. AeorDB streams each source file into a same-filesystem temporary ZIP rather than buffering source files or the archive in memory, then returns the archive with `Content-Type: application/zip` and `Content-Disposition: attachment; filename="aeordb-download.zip"`. Missing or skipped paths are listed in the `X-AeorDB-Skipped` response header when applicable.
+The JSON body accepts the same mutually exclusive `root_hash`, `snapshot`, or
+`version` selector union as `/files/fetch`. Current authorization is checked
+before selector resolution. Files require Read, directories require List, and
+every recursive descendant is checked against both current and selected-root
+authority. Unauthorized requested top paths return concealed `404` responses;
+unauthorized descendants are omitted and listed in `X-AeorDB-Skipped`. Share
+credentials may download current HEAD only.
+
+The uncompressed logical input is limited to 2 GiB. AeorDB streams each source file into a same-filesystem temporary ZIP rather than buffering source files or the archive in memory, then returns the archive with `Content-Type: application/zip`, `Content-Disposition: attachment; filename="aeordb-download.zip"`, and the three exact selected-root headers. Missing or skipped paths are listed in the `X-AeorDB-Skipped` response header when applicable.
 
 Temporary archive construction is cooperatively cancelled if the request disappears, and the artifact is removed on every completion, error, panic, or response-disconnect path. A request that cannot acquire bounded streaming memory returns retryable `503 Service Unavailable` without changing database durability state.
 

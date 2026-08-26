@@ -22,6 +22,7 @@ use crate::engine::range_extract::{ExtractedRange, RangeExtractionRequest, extra
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::SymlinkRecord;
 use crate::engine::symlink_resolver::MAX_SYMLINK_DEPTH;
+use crate::engine::system_family_policy::SystemFamilyPolicyResolver;
 use crate::engine::v4::read_view::{ReadViewRootMetadataV1, ReadableRootStateV1};
 use crate::engine::version_access::{resolve_directory_at_version, resolve_file_at_version, resolve_symlink_at_version};
 use crate::engine::version_manager::VersionManager;
@@ -146,6 +147,13 @@ pub enum LegacyV3ResolvedPathV1 {
   Directory(LegacyV3SelectedDirectoryV1),
 }
 
+struct SelectedDirectoryTraversal<'path> {
+  base_path: &'path str,
+  recursive_mode: bool,
+  glob_pattern: Option<&'path str>,
+  family_policy: SystemFamilyPolicyResolver,
+}
+
 impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
   pub fn resolve(engine: &'engine StorageEngine, selector: &RequestedRootSelectorV1) -> Result<Self, LegacyV3RootAdapterErrorV1> {
     let current_head = match engine.head_hash() {
@@ -247,9 +255,7 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
   }
 
   pub fn directory(&self, path: &str) -> EngineResult<LegacyV3SelectedDirectoryV1> {
-    let normalized_path = normalize_path(path);
-    let resolved = resolve_directory_at_version(self.engine, self.selected_root(), &normalized_path)?;
-    let children = self.decode_directory_children(&resolved.hash, &resolved.header, &resolved.value)?;
+    let (normalized_path, record_hash, children) = self.selected_directory_children(path)?;
     let mut names = HashSet::with_capacity(children.len());
     let mut entries = Vec::with_capacity(children.len());
     for child in children {
@@ -261,7 +267,7 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
       }
       entries.push(self.selected_directory_entry(&normalized_path, child)?);
     }
-    Ok(LegacyV3SelectedDirectoryV1 { path: normalized_path, record_hash: resolved.hash, entries })
+    Ok(LegacyV3SelectedDirectoryV1 { path: normalized_path, record_hash, entries })
   }
 
   pub fn list_directory(&self, path: &str) -> EngineResult<Vec<LegacyV3SelectedDirectoryEntryV1>> {
@@ -270,16 +276,19 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
 
   /// Preserve the legacy recursive-listing contract while keeping every tree
   /// walk bound to this adapter's captured root.
-  pub fn list_directory_recursive(
+  pub fn list_directory_recursive_strict(
     &self,
     path: &str,
     depth: i32,
     glob_pattern: Option<&str>,
   ) -> EngineResult<Vec<LegacyV3SelectedDirectoryEntryV1>> {
     let normalized_path = normalize_path(path);
-    let recursive_mode = depth != 0;
+    let family_policy = SystemFamilyPolicyResolver::new(self.engine.hash_algo())?;
+    family_policy.policy_for_path(&normalized_path, "strict selected-root recursive traversal")?;
+    let traversal = SelectedDirectoryTraversal { base_path: &normalized_path, recursive_mode: depth != 0, glob_pattern, family_policy };
     let mut entries = Vec::new();
-    self.collect_directory_entries(&normalized_path, &normalized_path, depth, recursive_mode, glob_pattern, &mut entries)?;
+    let mut active_directory_hashes = HashSet::new();
+    self.collect_directory_entries(&traversal, &normalized_path, depth, &mut active_directory_hashes, &mut entries)?;
     Ok(entries)
   }
 
@@ -428,15 +437,27 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
     Ok(children)
   }
 
-  fn selected_directory_entry(&self, directory_path: &str, child: ChildEntry) -> EngineResult<LegacyV3SelectedDirectoryEntryV1> {
-    let entry_type = EntryType::from_u8(child.entry_type)?;
-    let path = if directory_path == "/" { format!("/{}", child.name) } else { format!("{directory_path}/{}", child.name) };
-    if child.name.is_empty() || child.name.contains('/') || child.name.contains('\0') || normalize_path(&path) != path {
+  fn selected_directory_children(&self, path: &str) -> EngineResult<(String, Vec<u8>, Vec<ChildEntry>)> {
+    let normalized_path = normalize_path(path);
+    let resolved = resolve_directory_at_version(self.engine, self.selected_root(), &normalized_path)?;
+    let children = self.decode_directory_children(&resolved.hash, &resolved.header, &resolved.value)?;
+    Ok((normalized_path, resolved.hash, children))
+  }
+
+  fn selected_child_path(directory_path: &str, child_name: &str) -> EngineResult<String> {
+    let path = if directory_path == "/" { format!("/{child_name}") } else { format!("{directory_path}/{child_name}") };
+    if child_name.is_empty() || child_name.contains('/') || child_name.contains('\0') || normalize_path(&path) != path {
       return Err(EngineError::CorruptEntry {
         offset: 0,
-        reason: format!("selected directory '{directory_path}' contains non-canonical child name '{}'", child.name),
+        reason: format!("selected directory '{directory_path}' contains non-canonical child name '{child_name}'"),
       });
     }
+    Ok(path)
+  }
+
+  fn selected_directory_entry(&self, directory_path: &str, child: ChildEntry) -> EngineResult<LegacyV3SelectedDirectoryEntryV1> {
+    let entry_type = EntryType::from_u8(child.entry_type)?;
+    let path = Self::selected_child_path(directory_path, &child.name)?;
     let child_header = self.engine.get_entry_header_including_deleted(&child.hash)?.ok_or_else(|| EngineError::CorruptEntry {
       offset: 0,
       reason: format!("selected directory entry '{path}' points to a missing record"),
@@ -501,29 +522,45 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
 
   fn collect_directory_entries(
     &self,
-    base_path: &str,
+    traversal: &SelectedDirectoryTraversal<'_>,
     current_path: &str,
     remaining_depth: i32,
-    recursive_mode: bool,
-    glob_pattern: Option<&str>,
+    active_directory_hashes: &mut HashSet<Vec<u8>>,
     output: &mut Vec<LegacyV3SelectedDirectoryEntryV1>,
   ) -> EngineResult<()> {
-    for entry in self.list_directory(current_path)? {
+    let (normalized_path, record_hash, children) = self.selected_directory_children(current_path)?;
+    if !active_directory_hashes.insert(record_hash.clone()) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("selected directory cycle at '{normalized_path}' ({})", hex::encode(record_hash)),
+      });
+    }
+    let mut names = HashSet::with_capacity(children.len());
+    for child in children {
+      if !names.insert(child.name.clone()) {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("selected directory '{normalized_path}' contains duplicate child name '{}'", child.name),
+        });
+      }
+      let child_path = Self::selected_child_path(&normalized_path, &child.name)?;
+      traversal.family_policy.policy_for_path(&child_path, "strict selected-root recursive traversal")?;
+      let entry = self.selected_directory_entry(&normalized_path, child)?;
       let entry_type = EntryType::from_u8(entry.entry_type)?;
       match entry_type {
         EntryType::FileRecord | EntryType::Symlink => {
-          if glob_pattern.is_none_or(|pattern| listing_glob_matches(pattern, base_path, &entry.path, &entry.name)) {
+          if traversal.glob_pattern.is_none_or(|pattern| listing_glob_matches(pattern, traversal.base_path, &entry.path, &entry.name)) {
             output.push(entry);
           }
         }
-        EntryType::DirectoryIndex if !recursive_mode => {
-          if glob_pattern.is_none_or(|pattern| listing_glob_matches(pattern, base_path, &entry.path, &entry.name)) {
+        EntryType::DirectoryIndex if !traversal.recursive_mode => {
+          if traversal.glob_pattern.is_none_or(|pattern| listing_glob_matches(pattern, traversal.base_path, &entry.path, &entry.name)) {
             output.push(entry);
           }
         }
         EntryType::DirectoryIndex if remaining_depth > 0 || remaining_depth == -1 => {
           let next_depth = if remaining_depth == -1 { -1 } else { remaining_depth - 1 };
-          self.collect_directory_entries(base_path, &entry.path, next_depth, true, glob_pattern, output)?;
+          self.collect_directory_entries(traversal, &entry.path, next_depth, active_directory_hashes, output)?;
         }
         EntryType::DirectoryIndex => {}
         _ => {
@@ -534,6 +571,7 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
         }
       }
     }
+    active_directory_hashes.remove(&record_hash);
     Ok(())
   }
 

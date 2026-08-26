@@ -10,7 +10,7 @@ use std::io::Write;
 
 use super::engine_routes::{
   attach_root_metadata_headers, current_path_read_is_authorized, legacy_root_adapter_error_response, reject_historical_share_selector,
-  require_legacy_root_plan, root_api_error_response, selected_path_is_authorized,
+  require_legacy_root_plan, root_api_error_response, selected_path_is_authorized, RouteResponseError,
 };
 use super::legacy_v3_root_adapter::{LegacyV3RootAdapterErrorV1, LegacyV3SelectedRootAdapterV1};
 use super::responses::{engine_error_response, ErrorResponse};
@@ -66,8 +66,8 @@ pub async fn batch_fetch(
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<BatchFetchRequest>,
 ) -> Response {
-  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
-    return response;
+  if let Err(error) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return error.into_response();
   }
   let selector_fields = RootSelectorFieldsV1 { root_hash: body.root_hash, snapshot: body.snapshot, version: body.version };
   match (body.paths, body.items) {
@@ -119,16 +119,16 @@ async fn batch_fetch_paths(
 
   let key_rules = active_key_rules.as_ref().map(|rules| rules.0.as_slice());
   for path in &paths {
-    if let Err(response) = require_current_fetch_path(&state, &claims, key_rules, path) {
-      return response;
+    if let Err(error) = require_current_fetch_path(&state, &claims, key_rules, path) {
+      return error.into_response();
     }
   }
   let selector = match parse_root_selector_v1(&selector_fields, state.engine.hash_algo()) {
     Ok(selector) => selector,
     Err(error) => return root_api_error_response(error, false),
   };
-  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
-    return response;
+  if let Err(error) = reject_historical_share_selector(&claims, &selector) {
+    return error.into_response();
   }
 
   let max_response_bytes = max_bytes.unwrap_or(MAX_BATCH_FETCH_RESPONSE_BYTES).min(MAX_BATCH_FETCH_RESPONSE_BYTES);
@@ -185,7 +185,7 @@ async fn batch_fetch_range_items(
       Ok(false) => {
         return ErrorResponse::new(format!("Not found: {}", item.path)).with_status(StatusCode::NOT_FOUND).into_response();
       }
-      Err(response) => return response,
+      Err(error) => return error.into_response(),
     }
   }
   if !has_currently_authorized_path {
@@ -195,8 +195,8 @@ async fn batch_fetch_range_items(
     Ok(selector) => selector,
     Err(error) => return root_api_error_response(error, false),
   };
-  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
-    return response;
+  if let Err(error) = reject_historical_share_selector(&claims, &selector) {
+    return error.into_response();
   }
 
   let max_response_bytes = max_bytes.unwrap_or(MAX_BATCH_FETCH_RESPONSE_BYTES).min(MAX_BATCH_FETCH_RESPONSE_BYTES);
@@ -204,16 +204,16 @@ async fn batch_fetch_range_items(
   let mut build_guard = ResponseBuildGuard::new();
   let cancellation = build_guard.cancellation();
   let build = tokio::task::spawn_blocking(move || {
-    build_batch_fetch_ranges(
-      &build_state,
-      &claims,
-      &items,
-      &current_path_authorizations,
+    build_batch_fetch_ranges(BatchFetchRangeBuildRequest {
+      state: &build_state,
+      claims: &claims,
+      items: &items,
+      current_path_authorizations: &current_path_authorizations,
       max_response_bytes,
       continue_on_error,
-      &cancellation,
-      &selector,
-    )
+      cancellation: &cancellation,
+      selector: &selector,
+    })
   })
   .await;
   build_guard.disarm();
@@ -235,10 +235,10 @@ fn require_current_fetch_path(
   claims: &TokenClaims,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   raw_path: &str,
-) -> Result<(), Response> {
+) -> Result<(), RouteResponseError> {
   match current_fetch_path_is_authorized(state, claims, key_rules, raw_path)? {
     true => Ok(()),
-    false => Err(ErrorResponse::new(format!("Not found: {raw_path}")).with_status(StatusCode::NOT_FOUND).into_response()),
+    false => Err(ErrorResponse::new(format!("Not found: {raw_path}")).with_status(StatusCode::NOT_FOUND).into_response().into()),
   }
 }
 
@@ -247,11 +247,11 @@ fn current_fetch_path_is_authorized(
   claims: &TokenClaims,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   raw_path: &str,
-) -> Result<bool, Response> {
+) -> Result<bool, RouteResponseError> {
   let normalized = normalize_path(raw_path);
   match current_path_read_is_authorized(state, claims, key_rules, &normalized) {
     Ok(authorized) => Ok(authorized),
-    Err(error) => Err(engine_error_response("Failed to authorize batch fetch path", &error)),
+    Err(error) => Err(engine_error_response("Failed to authorize batch fetch path", &error).into()),
   }
 }
 
@@ -335,16 +335,28 @@ fn build_batch_fetch_paths(
   Ok(BuiltFetchResponse { file, root: selected.root_metadata().clone() })
 }
 
-fn build_batch_fetch_ranges(
-  state: &AppState,
-  claims: &TokenClaims,
-  items: &[BatchFetchItem],
-  current_path_authorizations: &[bool],
+struct BatchFetchRangeBuildRequest<'request> {
+  state: &'request AppState,
+  claims: &'request TokenClaims,
+  items: &'request [BatchFetchItem],
+  current_path_authorizations: &'request [bool],
   max_response_bytes: u64,
   continue_on_error: bool,
-  cancellation: &ResponseBuildCancellation,
-  selector: &RequestedRootSelectorV1,
-) -> Result<BuiltFetchResponse, FetchBuildError> {
+  cancellation: &'request ResponseBuildCancellation,
+  selector: &'request RequestedRootSelectorV1,
+}
+
+fn build_batch_fetch_ranges(request: BatchFetchRangeBuildRequest<'_>) -> Result<BuiltFetchResponse, FetchBuildError> {
+  let BatchFetchRangeBuildRequest {
+    state,
+    claims,
+    items,
+    current_path_authorizations,
+    max_response_bytes,
+    continue_on_error,
+    cancellation,
+    selector,
+  } = request;
   cancellation.check()?;
   if current_path_authorizations.len() != items.len() {
     return Err(FetchBuildError::Response(
@@ -491,7 +503,7 @@ fn stream_fetch_file(output: BuiltFetchResponse, state: &AppState) -> Response {
     .header("content-length", content_length.to_string())
     .body(body)
     .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build batch fetch response").into_response());
-  attach_root_metadata_headers(response, &output.root, state.engine.hash_algo()).unwrap_or_else(|response| response)
+  attach_root_metadata_headers(response, &output.root, state.engine.hash_algo())
 }
 
 fn fetch_build_error_response(error: FetchBuildError) -> Response {

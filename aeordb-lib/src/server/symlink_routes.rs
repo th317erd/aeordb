@@ -85,12 +85,11 @@ pub async fn get_symlink(
   Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   filtered_listing: Option<Extension<FilteredListing>>,
-  method: Method,
-  Path(path): Path<String>,
+  (method, Path(path)): (Method, Path<String>),
   AxumQuery(query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
-    return response;
+  if let Err(error) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return error.into_response();
   }
   let normalized_path = normalize_path(&path);
   if let Err(response) = require_generic_data_path(&state, &normalized_path) {
@@ -100,15 +99,15 @@ pub async fn get_symlink(
     Ok(selector) => selector,
     Err(error) => return root_api_error_response(error, false),
   };
-  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
-    return response;
+  if let Err(error) = reject_historical_share_selector(&claims, &selector) {
+    return error.into_response();
   }
   let selected = match resolve_legacy_root(&state.engine, &selector) {
     Ok(selected) => selected,
-    Err(response) => return response,
+    Err(error) => return error.into_response(),
   };
   let current_filter = filtered_listing.as_ref().map(|Extension(filter)| filter);
-  if let Err(response) = selected_path_filter(
+  if let Err(error) = selected_path_filter(
     &state,
     &claims,
     &selected,
@@ -117,7 +116,7 @@ pub async fn get_symlink(
     current_filter,
     active_key_rules.is_some(),
   ) {
-    return response;
+    return error.into_response();
   }
 
   match selected.symlink(&normalized_path) {
@@ -135,7 +134,7 @@ pub async fn get_symlink(
       )
         .into_response();
       if method == Method::HEAD {
-        attach_root_headers(response, &selected).unwrap_or_else(|response| response)
+        attach_root_headers(response, &selected)
       } else {
         response
       }

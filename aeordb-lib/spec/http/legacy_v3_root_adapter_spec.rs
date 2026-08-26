@@ -108,6 +108,56 @@ fn selected_root_lists_flat_and_btree_directories_without_mixing_successor_entri
 }
 
 #[test]
+fn selected_root_recursive_listing_rejects_unknown_protected_state() {
+  let (_directory, engine) = create_engine();
+  DirectoryOps::new(&engine)
+    .store_file_buffered(
+      &RequestContext::system(),
+      "/docs/.aeordb-future/unknown.bin",
+      b"unknown protected",
+      Some("application/octet-stream"),
+    )
+    .unwrap();
+  let selected = LegacyV3SelectedRootAdapterV1::resolve(&engine, &RequestedRootSelectorV1::CurrentHead).unwrap();
+  let unknown = selected.file("/docs/.aeordb-future/unknown.bin").unwrap();
+  engine.store_entry(EntryType::FileRecord, &unknown.record_hash, b"malformed unknown record").unwrap();
+
+  let error = selected
+    .list_directory_recursive_strict("/", -1, None)
+    .expect_err("selected-root recursive traversal must fail closed on unknown protected state");
+  assert!(matches!(error, EngineError::SystemFamilyPolicy { code: "unknown_protected_system_family", .. }), "unexpected error: {error}");
+}
+
+#[test]
+fn selected_root_recursive_listing_rejects_directory_cycles() {
+  let (_directory, engine) = create_engine();
+  let root_hash = vec![0xC1; engine.hash_algo().hash_length()];
+  let child_hash = vec![0xC2; engine.hash_algo().hash_length()];
+  let directory_child = |name: &str, hash: Vec<u8>| ChildEntry {
+    entry_type: EntryType::DirectoryIndex.to_u8(),
+    hash,
+    total_size: 0,
+    created_at: 1,
+    updated_at: 1,
+    name: name.to_string(),
+    content_type: None,
+    virtual_time: 1,
+    node_id: 1,
+  };
+  let root_value = directory_child("loop", child_hash.clone()).serialize(engine.hash_algo().hash_length()).unwrap();
+  let child_value = directory_child("back", root_hash.clone()).serialize(engine.hash_algo().hash_length()).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &child_hash, &child_value).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &root_hash, &root_value).unwrap();
+
+  let selected = LegacyV3SelectedRootAdapterV1::resolve(&engine, &RequestedRootSelectorV1::ExplicitRoot(root_hash)).unwrap();
+  let error = selected
+    .list_directory_recursive_strict("/", 4, None)
+    .expect_err("selected-root recursive traversal must fail closed on a directory cycle");
+  assert!(matches!(error, EngineError::CorruptEntry { .. }), "unexpected error: {error}");
+  assert!(error.to_string().contains("directory cycle"), "cycle evidence was not preserved: {error}");
+}
+
+#[test]
 fn wrong_type_and_corrupt_roots_fail_closed() {
   let (_directory, engine) = create_engine();
   let wrong_type_root = vec![0x91; engine.hash_algo().hash_length()];
@@ -208,4 +258,76 @@ fn compatibility_adapter_is_the_single_head_capture_and_legacy_tree_walk_owner()
   ] {
     assert!(source.contains(required), "compatibility adapter lost required exact-root authority {required}");
   }
+}
+
+#[test]
+fn public_legacy_compatibility_handlers_have_one_adapter_and_no_mutable_fallback() {
+  let server_source = |file_name: &str| {
+    let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server").join(file_name)).unwrap();
+    source.split("#[cfg(test)]").next().unwrap_or(&source).to_string()
+  };
+  let adapter = server_source("legacy_v3_root_adapter.rs");
+  let engine_routes = server_source("engine_routes.rs");
+  let fetch_routes = server_source("fetch_routes.rs");
+  let download_routes = server_source("download_routes.rs");
+  let symlink_routes = server_source("symlink_routes.rs");
+
+  let operation_region = |source: &str, start: &str, end: &str| {
+    let (_, tail) = source.split_once(start).unwrap_or_else(|| panic!("missing operation start {start}"));
+    let (body, _) = tail.split_once(end).unwrap_or_else(|| panic!("missing operation end {end}"));
+    format!("{start}{body}")
+  };
+  let engine_selected_reads = format!(
+    "{}{}",
+    operation_region(&engine_routes, "struct SelectedSymlinkResolutionRequest", "pub async fn engine_delete_file"),
+    operation_region(&engine_routes, "pub async fn engine_head", "fn map_select_fields"),
+  );
+  let symlink_selected_read = operation_region(&symlink_routes, "pub async fn get_symlink", "/// DELETE /links/{*path}");
+
+  let target_sources = [&engine_routes, &fetch_routes, &download_routes, &symlink_routes];
+  assert_eq!(adapter.matches("pub struct LegacyV3SelectedRootAdapterV1").count(), 1);
+  for exact_version_walker in ["resolve_directory_at_version", "resolve_file_at_version", "resolve_symlink_at_version"] {
+    assert!(adapter.contains(exact_version_walker), "adapter lost exact-version walker {exact_version_walker}");
+    for source in target_sources {
+      assert!(!source.contains(exact_version_walker), "target handler duplicated exact-version walker {exact_version_walker}");
+    }
+  }
+
+  for (name, source) in [
+    ("file/list/hash", &engine_selected_reads),
+    ("symlink", &symlink_selected_read),
+    ("fetch", &fetch_routes),
+    ("download", &download_routes),
+  ] {
+    for forbidden in [
+      "DirectoryOps",
+      "get_metadata(",
+      "read_file_buffered(",
+      "read_file_streaming(",
+      "list_directory_strict(",
+      "EngineFileStream::from_chunk_hashes(",
+      "extract_range_from_record_including_deleted(",
+      "RequestedRootSelectorV1::CurrentHead",
+      ".head_hash()",
+    ] {
+      assert!(!source.contains(forbidden), "{name} handler retained mutable/current-only fallback {forbidden}");
+    }
+  }
+  assert!(engine_selected_reads.contains("LegacyV3SelectedRootAdapterV1"), "file/list/hash handlers lost the compatibility adapter");
+  assert!(engine_selected_reads.contains("attach_root_headers"), "file/list/hash handlers lost exact captured-root headers");
+  assert!(symlink_selected_read.contains("resolve_legacy_root"), "symlink handler lost the compatibility adapter resolver");
+  assert!(symlink_selected_read.contains("selected.symlink"), "symlink handler lost its selected-root read");
+  assert!(symlink_selected_read.contains("attach_root_headers"), "symlink handler lost exact captured-root HEAD headers");
+  for (name, source) in [("fetch", &fetch_routes), ("download", &download_routes)] {
+    assert!(source.contains("LegacyV3SelectedRootAdapterV1"), "{name} handler lost the compatibility adapter");
+    assert!(source.contains("attach_root_metadata_headers"), "{name} handler lost exact captured-root headers");
+  }
+
+  assert_eq!(engine_routes.matches("LegacyV3SelectedRootAdapterV1::resolve").count(), 1);
+  assert_eq!(fetch_routes.matches("LegacyV3SelectedRootAdapterV1::resolve").count(), 2);
+  assert_eq!(download_routes.matches("LegacyV3SelectedRootAdapterV1::resolve").count(), 1);
+  assert_eq!(fetch_routes.matches("parse_root_selector_v1(&").count(), 2);
+  assert_eq!(download_routes.matches("parse_root_selector_v1(&").count(), 1);
+  assert!(adapter.contains("extract_range_from_record_including_deleted"));
+  assert!(adapter.contains("from_chunk_hashes_including_deleted"));
 }

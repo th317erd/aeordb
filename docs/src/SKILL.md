@@ -88,6 +88,13 @@ Use returned `fetch_hint`, `ranges`, `content_hash`, and `updated_at` with `POST
 
 Use `POST /files/fetch` for batch reads and partial reads. Prefer range fetch after search hit locators instead of downloading large documents.
 
+When an exact root is known, put one of `root_hash`, `snapshot`, or `version`
+in the POST JSON body; never combine them. Successful whole/range fetch and ZIP
+responses preserve their legacy bodies and return the exact selected root in
+`X-AeorDB-Root-Hash`, `X-AeorDB-Root-State`, and
+`X-AeorDB-Root-Expires-At`. Reuse the same `root_hash` for related reads instead
+of silently accepting current HEAD. Share-link credentials are current-only.
+
 ## Safety Rules
 
 - Treat AeorDB as a database, not a disposable file server.

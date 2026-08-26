@@ -347,9 +347,17 @@ curl "http://localhost:6830/files/assets/logo.psd?snapshot=v1.0" \
 # Read a file at a specific version hash
 curl "http://localhost:6830/files/assets/logo.psd?version=a1b2c3d4..." \
   -H "Authorization: Bearer $TOKEN"
+
+# Read a file from an exact namespace root
+curl "http://localhost:6830/files/assets/logo.psd?root_hash=a1b2c3d4..." \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-Returns the file content exactly as it was at that version, with the same headers as a normal file read. If both `snapshot` and `version` are provided, `snapshot` takes precedence.
+Returns the file content exactly as it was at that root, with the normal file
+headers plus `X-AeorDB-Root-Hash`, `X-AeorDB-Root-State`, and
+`X-AeorDB-Root-Expires-At`. `root_hash`, `snapshot`, and `version` are mutually
+exclusive for reads; combining them returns `400 INVALID_ROOT_SELECTOR`, and a
+supplied selector never falls back to current HEAD.
 
 **Error Responses:**
 

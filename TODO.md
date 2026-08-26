@@ -1355,7 +1355,7 @@
           - [x] Freeze architecture isolation and unchanged plugin host/runtime/SDK registries, then pass native, affected, static, documentation, contract, and full-workspace gates.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
         - [x] P7-5a: freeze one inactive shared public request/response schema, including raw query AST admission, selectors, APOS pagination, root metadata, locators, ranges, and relationship events.
-        - [ ] P7-5b: route legacy-v3 compatibility reads through one selected-root adapter and apply the shared schema to list/file/symlink/hash/fetch/download HTTP surfaces without activating v4 authority.
+        - [x] P7-5b: route legacy-v3 compatibility reads through one selected-root adapter and apply the shared schema to list/file/symlink/hash/fetch/download HTTP surfaces without activating v4 authority.
           - [x] P7-5b1: freeze one exact-root legacy-v3 adapter for current, explicit, snapshot, and version selectors plus list/file/symlink/hash reachability.
           - [x] P7-5b2: route GET/HEAD list, file, symlink, and hash reads through the adapter with exact root envelopes or headers.
             - [x] Freeze a dedicated HTTP red proof for selector conflicts, exact historical reads after HEAD movement, rooted list/symlink envelopes, root headers, concealment, selected permission restriction, and hash reachability/diagnostic authority.
@@ -1369,7 +1369,12 @@
             - [x] Resolve all file metadata, retained chunks, JSON-pointer bodies, and ZIP directory descendants through the sole legacy selected-root adapter.
             - [x] Complete current path/key/share/protected-family authority before selected-root observables and intersect ordinary users with selected permission documents for every requested path and ZIP descendant.
             - [x] Pass the dedicated target plus existing fetch/download, scoped-key, permission, route-contract, adapter, range-extraction, cancellation, and resource-pressure regressions.
-          - [ ] P7-5b4: freeze adapter uniqueness/no-fallback architecture and pass narrow, affected, static, documentation, contract, and broad gates.
+          - [x] P7-5b4: freeze adapter uniqueness/no-fallback architecture and pass narrow, affected, static, documentation, contract, and broad gates.
+            - [x] Freeze a source-level proof that the six public compatibility surfaces have one legacy tree/body owner and no mutable or current-only fallback.
+            - [x] Update file API, bot, and threat-model documentation for mutually exclusive selectors, exact root metadata, authorization ordering, and legacy response shapes.
+            - [x] Remove the 14 strict-Clippy diagnostics exposed by the P7-5b handler bridge without adding suppressions or changing route behavior.
+            - [x] Make recursive selected-root traversal fail closed on unknown protected families and checksum-valid directory cycles while preserving bounded depth and shared-subtree reuse.
+            - [x] Pass focused, affected, architecture, static, documentation, contract, full library, and full workspace gates before closing P7-5b.
         - [ ] P7-5c: cut query/search/aggregate/explain over the shared schema, canonical APOS, root-aware locators/ranges, and the live search-root-X to fetch-root-X flow without a legacy cursor decoder.
         - [ ] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.
         - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
