@@ -1327,6 +1327,9 @@
                   - [x] P7-3d5d2c2: adapt exact planner-selected generations into complete and partial Posting/ScopeOrdinal root receipts, requiring all matching scope dependencies to agree.
                   - [x] P7-3d5d2c3: close current/historical HEAD and pointer races, substitution, disagreement, cancellation, pressure, corruption, and retained-memory release with real first-authority fixtures.
               - [ ] P7-3d5d3: compose per-scope complete/partial/authoritative execution into one bounded root transaction without duplicate identities or partial sink visibility.
+                - [x] P7-3d5d3a: add one selected-root row/field authority shared by native authoritative scope scans and complete-candidate rechecks.
+                - [ ] P7-3d5d3b: derive the exact partial changed-document complement from captured ScopeOrdinal/ScopeReverse authority and evaluate target rows through the shared exact document evaluator.
+                - [ ] P7-3d5d3c: lend authoritative, complete, partial, complement, and recheck sources to the existing exact-scope state machine under one transactional native facade.
               - [ ] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.
             - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
               - [ ] Prove and, if required, replace per-document native evaluator preparation with a bounded reusable prepared-runtime cache whose eviction cannot alter results.

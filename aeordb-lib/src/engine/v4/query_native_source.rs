@@ -26,15 +26,19 @@ use super::query_aggregate_execution::{
   QueryAggregateInputSourceV1, query_aggregate_input_row_allocated_bytes_v1,
 };
 use super::query_complete_candidate::{
-  QueryCandidateArtifactRootV1, QueryCompleteCandidateErrorClassV1, QueryCompleteCandidateErrorV1, QueryCompletePostingRootReceiptV1,
-  QueryCompletePostingRootRequestV1, QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
+  QueryCandidateArtifactRootV1, QueryCandidateRecheckReceiptV1, QueryCandidateRecheckRequestV1, QueryCompleteCandidateErrorClassV1,
+  QueryCompleteCandidateErrorV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootReceiptV1, QueryCompletePostingRootRequestV1,
+  QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
 };
 use super::query_executor::{
-  QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionErrorV1, QueryExecutionFieldDocumentV1,
-  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
-  QueryExecutionMatchSinkV1, QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
-  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionV1, execute_authoritative_partitioned_query_into_v1,
-  execute_authoritative_partitioned_query_v1,
+  QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1,
+  QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1, QueryExecutionDocumentV1,
+  QueryExecutionErrorV1, QueryExecutionFieldDocumentV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1,
+  QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
+  QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1,
+  QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
+  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1,
+  execute_authoritative_partitioned_query_into_v1, execute_authoritative_partitioned_query_v1, execute_authoritative_scope_query_v1,
 };
 use super::query_native_workspace::{
   NativeQueryOrderingCursorV1, NativeQueryOrderingLookupV1, NativeQueryOrderingWorkspaceBuilderV1,
@@ -53,8 +57,8 @@ use super::read_view::ResolvedReadViewV1;
 use super::read_view_authorization::ResolvedPathAuthorizationV1;
 use super::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactRootRequestV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1,
-  NativeSelectedNamespaceReadErrorV1, NativeSelectedSemanticCatalogV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1,
-  NativeSelectedSourceParserV1,
+  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedSemanticCatalogV1, NativeSelectedSourceLimitsV1,
+  NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
 };
 use super::scope::{EffectiveScopeCandidateV1, EffectiveScopeResolverV1, is_internal_index_path_v1, validate_canonical_absolute_path};
 
@@ -134,6 +138,19 @@ pub struct NativeAuthoritativeFieldPartitionSourceV1 {
 
 pub struct NativeQueryCandidateArtifactSourceV1 {
   inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+  lookup: Option<NativeQueryOrderingLookupV1>,
+}
+
+struct NativeAuthoritativeRowFieldSourceV1<'row, 'scope> {
+  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+  row: &'row super::read_view_native::NativeSelectedNamespaceFileRowV1,
+  effective_scope_id: &'scope [u8],
+  source_limits: NativeSelectedSourceLimitsV1,
+}
+
+struct NativeAuthoritativeFieldEvaluationV1 {
+  state: QueryExecutionFieldStateV1,
+  values: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +347,25 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
     )
   }
 
+  pub fn execute_authoritative_scope_query_v1(
+    &mut self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+    limits: QueryExecutionLimitsV1,
+  ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
+    let inner = Arc::clone(&self.inner);
+    execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
+      plan,
+      catalogs: inner.semantic_catalog.catalogs(),
+      scope_id,
+      source: self,
+      memory: inner.source.memory_coordinator().as_ref(),
+      cancellation,
+      limits,
+    })
+  }
+
   pub fn open_auxiliary_source<'plan>(
     &self,
     plan: &'plan CompiledRootAwareQueryPlanV1,
@@ -356,7 +392,7 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
   }
 
   pub fn open_candidate_artifact_source(&self) -> NativeQueryCandidateArtifactSourceV1 {
-    NativeQueryCandidateArtifactSourceV1 { inner: Arc::clone(&self.inner) }
+    NativeQueryCandidateArtifactSourceV1 { inner: Arc::clone(&self.inner), lookup: None }
   }
 }
 
@@ -591,6 +627,234 @@ impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourc
   }
 }
 
+impl QueryCompleteCandidateSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+  fn resolve_complete_posting_root(
+    &mut self,
+    request: QueryCompletePostingRootRequestV1<'_>,
+  ) -> Result<QueryCompletePostingRootReceiptV1, QueryExecutionSourceErrorV1> {
+    self.resolve_complete_posting_root_v1(request)
+  }
+
+  fn resolve_complete_scope_root(
+    &mut self,
+    request: QueryCompleteScopeRootRequestV1<'_>,
+  ) -> Result<QueryCompleteScopeRootReceiptV1, QueryExecutionSourceErrorV1> {
+    self.resolve_complete_scope_root_v1(request)
+  }
+
+  fn recheck_complete_candidate(
+    &mut self,
+    request: QueryCandidateRecheckRequestV1<'_>,
+    visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryCandidateRecheckReceiptV1, QueryExecutionScanErrorV1> {
+    self
+      .validate_target_request(request.selected_namespace_root, request.publication_sequence, request.scope_id, request.cancellation)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    validate_identity(request.file_key, self.inner.view.hash_algorithm(), "candidate FileKey")
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    validate_identity(request.indexed_revision, self.inner.view.hash_algorithm(), "candidate RecordRevision")
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    validate_canonical_absolute_path(request.indexed_path)
+      .map_err(|error| source_error(QueryExecutionSourceErrorClassV1::Corrupt, "native_candidate_path", error.to_string()))
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    if !path_is_within(&self.inner.query_path, request.indexed_path) {
+      return Err(QueryExecutionScanErrorV1::Source(source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_path",
+        "complete candidate path is outside the captured query path",
+      )));
+    }
+    if self.lookup.is_none() {
+      self.lookup = Some(self.inner.workspace.open_lookup().map_err(map_workspace_error).map_err(QueryExecutionScanErrorV1::Source)?);
+    }
+    let lookup = self.lookup.as_mut().ok_or_else(|| {
+      QueryExecutionScanErrorV1::Source(source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_candidate_lookup_state",
+        "candidate workspace lookup was not retained after successful initialization",
+      ))
+    })?;
+    let ordered = lookup
+      .find_row(request.file_key, request.cancellation)
+      .map_err(map_workspace_error)
+      .map_err(QueryExecutionScanErrorV1::Source)?
+      .ok_or_else(|| {
+        QueryExecutionScanErrorV1::Source(source_error(
+          QueryExecutionSourceErrorClassV1::Corrupt,
+          "native_candidate_document_missing",
+          "complete index candidate is absent from the captured selected-root workspace",
+        ))
+      })?;
+    if ordered.scope_id() != Some(request.scope_id) || ordered.record_revision() != request.indexed_revision {
+      return Err(QueryExecutionScanErrorV1::Source(source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_identity_stale",
+        "complete index candidate scope or revision differs from selected-root authority",
+      )));
+    }
+    let reader = self
+      .inner
+      .source
+      .selected_namespace_reader(&self.inner.view, self.inner.namespace_limits)
+      .map_err(map_native_error)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    let row = reader
+      .restore_ordered_file_row(ordered.file_key(), ordered.record_revision(), ordered.entity_version(), ordered.encoded_file_record())
+      .map_err(map_native_error)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    if row.path() != request.indexed_path || !path_is_within(&self.inner.query_path, row.path()) {
+      return Err(QueryExecutionScanErrorV1::Source(source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_candidate_path_stale",
+        "complete index candidate path differs from selected-root authority",
+      )));
+    }
+    let mut fields = NativeAuthoritativeRowFieldSourceV1 {
+      inner: Arc::clone(&self.inner),
+      row: &row,
+      effective_scope_id: request.scope_id,
+      source_limits: selected_source_limits().map_err(QueryExecutionScanErrorV1::Source)?,
+    };
+    visitor
+      .visit(QueryExecutionDocumentV1 { file_key: row.file_key(), record_revision: row.record_revision(), path: row.path() }, &mut fields)
+      .map_err(QueryExecutionScanErrorV1::Visitor)?;
+    require_not_cancelled(request.cancellation).map_err(QueryExecutionScanErrorV1::Source)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(QueryExecutionScanErrorV1::Source)?;
+    Ok(QueryCandidateRecheckReceiptV1 {
+      selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "candidate selected NamespaceRoot")
+        .map_err(QueryExecutionScanErrorV1::Source)?,
+      publication_sequence: request.publication_sequence,
+      scope_id: try_clone_bytes(request.scope_id, "candidate ScopeId").map_err(QueryExecutionScanErrorV1::Source)?,
+      file_key: try_clone_bytes(request.file_key, "candidate FileKey").map_err(QueryExecutionScanErrorV1::Source)?,
+      indexed_revision: try_clone_bytes(request.indexed_revision, "candidate RecordRevision").map_err(QueryExecutionScanErrorV1::Source)?,
+      indexed_path: try_clone_string(request.indexed_path, "candidate path").map_err(QueryExecutionScanErrorV1::Source)?,
+      document_count: 1,
+      complete: true,
+    })
+  }
+}
+
+impl QueryAuthoritativeScopeSourceV1 for NativeAuthoritativeFieldPartitionSourceV1 {
+  fn scan_scope(
+    &mut self,
+    request: QueryExecutionScopeScanRequestV1<'_>,
+    visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryExecutionScopeScanReceiptV1, QueryExecutionScanErrorV1> {
+    validate_scope_scan_request(&self.inner, &request).map_err(QueryExecutionScanErrorV1::Source)?;
+    let source_limits = selected_source_limits().map_err(QueryExecutionScanErrorV1::Source)?;
+    let mut ordering = self.inner.workspace.open_cursor().map_err(map_workspace_error).map_err(QueryExecutionScanErrorV1::Source)?;
+    let mut document_count = 0u64;
+    while let Some(ordered) =
+      ordering.next_row(request.cancellation).map_err(map_workspace_error).map_err(QueryExecutionScanErrorV1::Source)?
+    {
+      if ordered.scope_id() != Some(request.scope_id) {
+        continue;
+      }
+      let next_document_count = document_count.checked_add(1).ok_or_else(|| {
+        QueryExecutionScanErrorV1::Source(source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_scope_document_count",
+          "native scope document count overflowed",
+        ))
+      })?;
+      if next_document_count > request.maximum_documents {
+        return Err(QueryExecutionScanErrorV1::Source(source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_scope_document_limit",
+          "native authoritative scope exceeds its requested document bound",
+        )));
+      }
+      let reader = self
+        .inner
+        .source
+        .selected_namespace_reader(&self.inner.view, self.inner.namespace_limits)
+        .map_err(map_native_error)
+        .map_err(QueryExecutionScanErrorV1::Source)?;
+      let row = reader
+        .restore_ordered_file_row(ordered.file_key(), ordered.record_revision(), ordered.entity_version(), ordered.encoded_file_record())
+        .map_err(map_native_error)
+        .map_err(QueryExecutionScanErrorV1::Source)?;
+      if !path_is_within(&self.inner.query_path, row.path()) {
+        return Err(QueryExecutionScanErrorV1::Source(source_error(
+          QueryExecutionSourceErrorClassV1::Corrupt,
+          "native_scope_document_path",
+          "selected-root scope document is outside the captured query path",
+        )));
+      }
+      let mut fields = NativeAuthoritativeRowFieldSourceV1 {
+        inner: Arc::clone(&self.inner),
+        row: &row,
+        effective_scope_id: request.scope_id,
+        source_limits,
+      };
+      visitor
+        .visit(QueryExecutionDocumentV1 { file_key: row.file_key(), record_revision: row.record_revision(), path: row.path() }, &mut fields)
+        .map_err(QueryExecutionScanErrorV1::Visitor)?;
+      require_not_cancelled(request.cancellation).map_err(QueryExecutionScanErrorV1::Source)?;
+      require_not_cancelled(self.inner.view.cancellation()).map_err(QueryExecutionScanErrorV1::Source)?;
+      document_count = next_document_count;
+    }
+    Ok(QueryExecutionScopeScanReceiptV1 {
+      selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "scope selected NamespaceRoot")
+        .map_err(QueryExecutionScanErrorV1::Source)?,
+      publication_sequence: request.publication_sequence,
+      scope_id: try_clone_bytes(request.scope_id, "scope ScopeId").map_err(QueryExecutionScanErrorV1::Source)?,
+      document_count,
+      complete: true,
+    })
+  }
+}
+
+impl QueryAuthoritativeFieldSourceV1 for NativeAuthoritativeRowFieldSourceV1<'_, '_> {
+  fn scan_field_values(
+    &mut self,
+    request: QueryExecutionFieldReadRequestV1<'_>,
+    visitor: &mut dyn QueryAuthoritativeValueVisitorV1,
+  ) -> Result<QueryExecutionFieldReadReceiptV1, QueryExecutionScanErrorV1> {
+    validate_row_field_request(self, &request).map_err(QueryExecutionScanErrorV1::Source)?;
+    let catalog_index =
+      unique_field_catalog(self.inner.semantic_catalog.catalogs(), request.field_name).map_err(QueryExecutionScanErrorV1::Source)?;
+    let reader = self
+      .inner
+      .source
+      .selected_namespace_reader(&self.inner.view, self.inner.namespace_limits)
+      .map_err(map_native_error)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    let evaluation =
+      evaluate_authoritative_field(&self.inner, &reader, catalog_index, self.row, self.effective_scope_id, self.source_limits)
+        .map_err(QueryExecutionScanErrorV1::Source)?;
+    validate_values(&evaluation.values, request.maximum_values, request.maximum_canonical_value_bytes)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
+    let canonical_value_bytes = evaluation.values.iter().try_fold(0u64, |total, value| {
+      total.checked_add(value.len() as u64).ok_or_else(|| {
+        QueryExecutionScanErrorV1::Source(source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_row_field_value_bytes",
+          "canonical field value byte count overflowed",
+        ))
+      })
+    })?;
+    for value in &evaluation.values {
+      require_not_cancelled(request.cancellation).map_err(QueryExecutionScanErrorV1::Source)?;
+      visitor.visit(value).map_err(QueryExecutionScanErrorV1::Visitor)?;
+    }
+    require_not_cancelled(request.cancellation).map_err(QueryExecutionScanErrorV1::Source)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(QueryExecutionScanErrorV1::Source)?;
+    Ok(QueryExecutionFieldReadReceiptV1 {
+      selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "field selected NamespaceRoot")
+        .map_err(QueryExecutionScanErrorV1::Source)?,
+      scope_id: try_clone_bytes(request.scope_id, "field ScopeId").map_err(QueryExecutionScanErrorV1::Source)?,
+      file_key: try_clone_bytes(request.file_key, "field FileKey").map_err(QueryExecutionScanErrorV1::Source)?,
+      record_revision: try_clone_bytes(request.record_revision, "field RecordRevision").map_err(QueryExecutionScanErrorV1::Source)?,
+      field_name: try_clone_string(request.field_name, "field name").map_err(QueryExecutionScanErrorV1::Source)?,
+      state: evaluation.state,
+      value_count: evaluation.values.len() as u64,
+      canonical_value_bytes,
+      complete: true,
+    })
+  }
+}
+
 impl NativeAuthoritativeAuxiliarySourceV1<'_> {
   fn restore_document(
     &mut self,
@@ -703,6 +967,143 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
         format!("compiled auxiliary field {field_name:?} has no plan-bound native definition"),
       )
     })
+  }
+}
+
+fn validate_scope_scan_request(
+  inner: &NativeAuthoritativeFieldPartitionInnerV1,
+  request: &QueryExecutionScopeScanRequestV1<'_>,
+) -> Result<(), QueryExecutionSourceErrorV1> {
+  require_not_cancelled(request.cancellation)?;
+  require_not_cancelled(inner.view.cancellation())?;
+  validate_identity(request.scope_id, inner.view.hash_algorithm(), "requested ScopeId")?;
+  validate_canonical_absolute_path(request.query_path)
+    .map_err(|error| source_error(QueryExecutionSourceErrorClassV1::Corrupt, "native_scope_query_path", error.to_string()))?;
+  if request.selected_namespace_root != inner.view.root_metadata().hash
+    || request.publication_sequence != inner.view.authority().admission.publication_sequence
+  {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_scope_authority",
+      "authoritative scope request does not bind the captured selected root and publication",
+    ));
+  }
+  if request.query_path != inner.query_path {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_scope_query_path",
+      "authoritative scope request differs from the captured query path",
+    ));
+  }
+  if request.maximum_documents == 0 {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::ResourceLimit,
+      "native_scope_document_limit",
+      "authoritative scope document limit must be nonzero",
+    ));
+  }
+  if !inner.semantic_catalog.scope_definitions().iter().any(|scope| scope.scope_id() == request.scope_id) {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_scope_definition",
+      "requested ScopeId is absent from the captured semantic authority",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_row_field_request(
+  source: &NativeAuthoritativeRowFieldSourceV1<'_, '_>,
+  request: &QueryExecutionFieldReadRequestV1<'_>,
+) -> Result<(), QueryExecutionSourceErrorV1> {
+  require_not_cancelled(request.cancellation)?;
+  require_not_cancelled(source.inner.view.cancellation())?;
+  validate_identity(request.scope_id, source.inner.view.hash_algorithm(), "field ScopeId")?;
+  validate_identity(request.file_key, source.inner.view.hash_algorithm(), "field FileKey")?;
+  validate_identity(request.record_revision, source.inner.view.hash_algorithm(), "field RecordRevision")?;
+  if request.selected_namespace_root != source.inner.view.root_metadata().hash
+    || request.scope_id != source.effective_scope_id
+    || request.file_key != source.row.file_key()
+    || request.record_revision != source.row.record_revision()
+  {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_row_field_authority",
+      "field request does not bind the selected-root row and effective scope",
+    ));
+  }
+  if request.field_name.is_empty() {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_row_field_name",
+      "authoritative field request has an empty field name",
+    ));
+  }
+  if request.maximum_values == 0 || request.maximum_canonical_value_bytes == 0 {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::ResourceLimit,
+      "native_row_field_limits",
+      "authoritative field value and byte limits must be nonzero",
+    ));
+  }
+  Ok(())
+}
+
+fn evaluate_authoritative_field(
+  inner: &NativeAuthoritativeFieldPartitionInnerV1,
+  reader: &NativeSelectedNamespaceReaderV1<'_>,
+  catalog_index: usize,
+  row: &super::read_view_native::NativeSelectedNamespaceFileRowV1,
+  effective_scope_id: &[u8],
+  source_limits: NativeSelectedSourceLimitsV1,
+) -> Result<NativeAuthoritativeFieldEvaluationV1, QueryExecutionSourceErrorV1> {
+  let catalog = inner.semantic_catalog.catalogs().get(catalog_index).ok_or_else(|| {
+    source_error(
+      QueryExecutionSourceErrorClassV1::Internal,
+      "native_row_field_catalog_index",
+      "selected field catalog index is outside the captured catalog",
+    )
+  })?;
+  let scope_position = catalog.scopes.partition_point(|scope| scope.scope_id.as_slice() < effective_scope_id);
+  let catalog_scope = catalog.scopes.get(scope_position).filter(|scope| scope.scope_id == effective_scope_id).ok_or_else(|| {
+    source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_row_field_scope_catalog",
+      "effective ScopeId is absent from the selected field catalog",
+    )
+  })?;
+  let evaluation = reader
+    .prepare_authoritative_source(catalog, effective_scope_id, source_limits)
+    .and_then(|evaluator| evaluator.evaluate(row, NativeSelectedSourceParserV1::Native, None))
+    .map_err(map_native_error)?;
+  if evaluation.selected_root() != inner.view.root_metadata().hash
+    || evaluation.semantic_state_root() != inner.view.authority().semantic_state.object_id
+    || evaluation.scope_id() != effective_scope_id
+    || evaluation.value_store_id() != catalog_scope.value_store_id
+    || evaluation.file_key() != row.file_key()
+    || evaluation.record_revision() != row.record_revision()
+  {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_row_field_source_receipt",
+      "selected source evaluation receipt disagrees with its captured row and field definition",
+    ));
+  }
+  match evaluation.into_outcome() {
+    NativeSelectedSourceOutcomeV1::Missing => {
+      Ok(NativeAuthoritativeFieldEvaluationV1 { state: QueryExecutionFieldStateV1::Missing, values: Vec::new() })
+    }
+    NativeSelectedSourceOutcomeV1::Values(values) => {
+      Ok(NativeAuthoritativeFieldEvaluationV1 { state: QueryExecutionFieldStateV1::Values, values })
+    }
+    NativeSelectedSourceOutcomeV1::ParserUnindexable(_) | NativeSelectedSourceOutcomeV1::SourceUnindexable { .. } => {
+      Ok(NativeAuthoritativeFieldEvaluationV1 { state: QueryExecutionFieldStateV1::DeterministicUnindexable, values: Vec::new() })
+    }
+    NativeSelectedSourceOutcomeV1::OutOfScope => Err(source_error(
+      QueryExecutionSourceErrorClassV1::Corrupt,
+      "native_row_field_scope_resolution",
+      "effective-scope winner was out of scope during authoritative evaluation",
+    )),
   }
 }
 
@@ -847,42 +1248,17 @@ impl NativeAuthoritativeFieldPartitionCursorV1 {
     });
     let (scope_id, state, canonical_values, next_scope_count, next_unconfigured_count) = if let Some(scope_index) = scope_index {
       let selected_scope_id = &self.scope_ids[scope_index];
-      let catalog = &self.inner.semantic_catalog.catalogs()[self.catalog_index];
-      let evaluation = reader
-        .prepare_authoritative_source(catalog, selected_scope_id, self.source_limits)
-        .and_then(|evaluator| evaluator.evaluate(&row, NativeSelectedSourceParserV1::Native, None))
-        .map_err(map_native_error)?;
-      if evaluation.selected_root() != self.inner.view.root_metadata().hash
-        || evaluation.semantic_state_root() != self.inner.view.authority().semantic_state.object_id
-        || evaluation.scope_id() != selected_scope_id
-        || evaluation.file_key() != row.file_key()
-        || evaluation.record_revision() != row.record_revision()
-      {
-        return Err(source_error(
-          QueryExecutionSourceErrorClassV1::Corrupt,
-          "native_partition_source_receipt",
-          "selected source evaluation receipt disagrees with its ordered document",
-        ));
-      }
-      let outcome = evaluation.into_outcome();
-      let (state, values) = match outcome {
-        NativeSelectedSourceOutcomeV1::Missing => (QueryExecutionFieldStateV1::Missing, Vec::new()),
-        NativeSelectedSourceOutcomeV1::Values(values) => (QueryExecutionFieldStateV1::Values, values),
-        NativeSelectedSourceOutcomeV1::ParserUnindexable(_) | NativeSelectedSourceOutcomeV1::SourceUnindexable { .. } => {
-          (QueryExecutionFieldStateV1::DeterministicUnindexable, Vec::new())
-        }
-        NativeSelectedSourceOutcomeV1::OutOfScope => {
-          return Err(source_error(
-            QueryExecutionSourceErrorClassV1::Corrupt,
-            "native_partition_scope_resolution",
-            "effective-scope winner was out of scope during authoritative evaluation",
-          ));
-        }
-      };
+      let evaluation = evaluate_authoritative_field(&self.inner, &reader, self.catalog_index, &row, selected_scope_id, self.source_limits)?;
       let next_scope_count = self.scope_document_counts[scope_index].checked_add(1).ok_or_else(|| {
         source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_partition_scope_count", "scope document count overflowed")
       })?;
-      (Some(try_clone_bytes(selected_scope_id, "document ScopeId")?), state, values, Some((scope_index, next_scope_count)), None)
+      (
+        Some(try_clone_bytes(selected_scope_id, "document ScopeId")?),
+        evaluation.state,
+        evaluation.values,
+        Some((scope_index, next_scope_count)),
+        None,
+      )
     } else {
       let next_unconfigured_count = self.unconfigured_document_count.checked_add(1).ok_or_else(|| {
         source_error(

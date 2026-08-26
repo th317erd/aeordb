@@ -74,7 +74,9 @@ use aeordb::engine::v4::query_aggregate_execution::{
   CompiledQueryAggregateInputV1, QueryAggregateInputLimitsV1, QueryAggregateInputLookupRequestV1, QueryAggregateInputLookupResultV1,
   QueryAggregateInputSourceV1, resolve_query_aggregate_input_v1,
 };
-use aeordb::engine::v4::query_complete_candidate::{QueryCompletePostingRootRequestV1, QueryCompleteScopeRootRequestV1};
+use aeordb::engine::v4::query_complete_candidate::{
+  QueryCandidateRecheckRequestV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootRequestV1, QueryCompleteScopeRootRequestV1,
+};
 use aeordb::engine::v4::query_partial_candidate::{
   QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootRequestV1,
 };
@@ -84,8 +86,10 @@ use aeordb::engine::v4::query_planner::{
   QuerySortFieldV1, RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
 };
 use aeordb::engine::v4::query_executor::{
-  QueryAuthoritativeFieldPartitionSourceV1, QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1,
-  QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1, QueryExecutionSourceErrorClassV1,
+  QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryAuthoritativeFieldSourceV1,
+  QueryAuthoritativeValueVisitorV1, QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1,
+  QueryExecutionErrorV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1,
+  QueryExecutionErrorClassV1, QueryExecutionLimitsV1, QueryExecutionScanErrorV1, QueryExecutionSourceErrorClassV1,
 };
 use aeordb::engine::v4::query_native_source::{
   NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
@@ -3465,6 +3469,191 @@ fn native_authoritative_execution_facade_runs_the_selected_root_truth_path() {
   drop(ordered);
   drop(auxiliary);
   fixture.assert_released();
+}
+
+struct NativeCandidateValueCollector(Vec<Vec<u8>>);
+
+impl QueryAuthoritativeValueVisitorV1 for NativeCandidateValueCollector {
+  fn visit(&mut self, canonical_value: &[u8]) -> Result<(), QueryExecutionErrorV1> {
+    self.0.push(canonical_value.to_vec());
+    Ok(())
+  }
+}
+
+struct NativeCandidateDocumentCollector {
+  selected_root: Vec<u8>,
+  scope_id: Vec<u8>,
+  field_name: String,
+  cancellation: CancellationToken,
+  documents: Vec<(Vec<u8>, Vec<u8>, String, Vec<Vec<u8>>)>,
+}
+
+impl QueryAuthoritativeDocumentVisitorV1 for NativeCandidateDocumentCollector {
+  fn visit(
+    &mut self,
+    document: QueryExecutionDocumentV1<'_>,
+    fields: &mut dyn QueryAuthoritativeFieldSourceV1,
+  ) -> Result<(), QueryExecutionErrorV1> {
+    let mut values = NativeCandidateValueCollector(Vec::new());
+    let receipt = fields
+      .scan_field_values(
+        QueryExecutionFieldReadRequestV1 {
+          selected_namespace_root: &self.selected_root,
+          scope_id: &self.scope_id,
+          file_key: document.file_key,
+          record_revision: document.record_revision,
+          field_name: &self.field_name,
+          maximum_values: 16,
+          maximum_canonical_value_bytes: 1024 * 1024,
+          cancellation: &self.cancellation,
+        },
+        &mut values,
+      )
+      .expect("native candidate field source must produce selected-root values");
+    assert_eq!(receipt.selected_namespace_root, self.selected_root);
+    assert_eq!(receipt.scope_id, self.scope_id);
+    assert_eq!(receipt.file_key, document.file_key);
+    assert_eq!(receipt.record_revision, document.record_revision);
+    assert_eq!(receipt.field_name, self.field_name);
+    assert_eq!(receipt.state, QueryExecutionFieldStateV1::Values);
+    assert_eq!(receipt.value_count, values.0.len() as u64);
+    assert!(receipt.complete);
+    self.documents.push((document.file_key.to_vec(), document.record_revision.to_vec(), document.path.to_string(), values.0));
+    Ok(())
+  }
+}
+
+#[test]
+fn native_scope_and_complete_recheck_share_selected_root_row_field_authority_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let names = ["a.json", "b.json", "c.json"];
+    let sizes = [3, 17, 9];
+    let (mut fixture, expected) = native_authoritative_size_fixture(algorithm, &names, &sizes, 8);
+    let mut expected_matches =
+      expected.iter().zip(sizes).filter_map(|(identity, size)| (size > 8).then_some(identity.clone())).collect::<Vec<_>>();
+    expected_matches.sort_by(|left, right| left.0.cmp(&right.0));
+    let advanced =
+      fixture.backing_source.publisher().publish_successor_authority(&successor_request(algorithm, fixture.selected_root.clone())).unwrap();
+    assert_ne!(advanced.namespace_root.root_hash, fixture.selected_root);
+
+    let execution = fixture
+      .source
+      .execute_authoritative_scope_query_v1(&fixture.plan, &fixture.scope_id, &fixture.cancellation, native_query_execution_limits())
+      .unwrap();
+    assert_eq!(
+      execution
+        .matches()
+        .iter()
+        .map(|matched| (matched.file_key().to_vec(), matched.record_revision().to_vec(), matched.path().to_string()))
+        .collect::<Vec<_>>(),
+      expected_matches
+    );
+    drop(execution);
+
+    let (file_key, revision, path) = &expected[1];
+    let mut source = fixture.source.open_candidate_artifact_source();
+    let mut visitor = NativeCandidateDocumentCollector {
+      selected_root: fixture.selected_root.clone(),
+      scope_id: fixture.scope_id.clone(),
+      field_name: fixture.field_name.clone(),
+      cancellation: fixture.cancellation.clone(),
+      documents: Vec::new(),
+    };
+    let receipt = source
+      .recheck_complete_candidate(
+        QueryCandidateRecheckRequestV1 {
+          selected_namespace_root: &fixture.selected_root,
+          publication_sequence: fixture.publication_sequence,
+          scope_id: &fixture.scope_id,
+          file_key,
+          indexed_revision: revision,
+          indexed_path: path,
+          cancellation: &fixture.cancellation,
+        },
+        &mut visitor,
+      )
+      .unwrap();
+    assert_eq!(receipt.file_key, *file_key);
+    assert_eq!(receipt.indexed_revision, *revision);
+    assert_eq!(receipt.indexed_path, *path);
+    assert_eq!(receipt.document_count, 1);
+    assert!(receipt.complete);
+    assert_eq!(visitor.documents.len(), 1);
+    assert_eq!(visitor.documents[0].0, *file_key);
+    assert_eq!(visitor.documents[0].1, *revision);
+    assert_eq!(visitor.documents[0].2, *path);
+    assert_eq!(visitor.documents[0].3.len(), 1);
+
+    let mut stale_revision = revision.clone();
+    stale_revision[0] ^= 0xff;
+    let error = source
+      .recheck_complete_candidate(
+        QueryCandidateRecheckRequestV1 {
+          selected_namespace_root: &fixture.selected_root,
+          publication_sequence: fixture.publication_sequence,
+          scope_id: &fixture.scope_id,
+          file_key,
+          indexed_revision: &stale_revision,
+          indexed_path: path,
+          cancellation: &fixture.cancellation,
+        },
+        &mut visitor,
+      )
+      .unwrap_err();
+    assert!(matches!(
+      error,
+      QueryExecutionScanErrorV1::Source(ref error) if error.class() == QueryExecutionSourceErrorClassV1::Corrupt
+    ));
+    assert_eq!(visitor.documents.len(), 1);
+
+    let error = source
+      .recheck_complete_candidate(
+        QueryCandidateRecheckRequestV1 {
+          selected_namespace_root: &fixture.selected_root,
+          publication_sequence: fixture.publication_sequence,
+          scope_id: &fixture.scope_id,
+          file_key,
+          indexed_revision: revision,
+          indexed_path: "/docs/not-the-indexed-path.json",
+          cancellation: &fixture.cancellation,
+        },
+        &mut visitor,
+      )
+      .unwrap_err();
+    assert!(matches!(
+      error,
+      QueryExecutionScanErrorV1::Source(ref error) if error.class() == QueryExecutionSourceErrorClassV1::Corrupt
+    ));
+    assert_eq!(visitor.documents.len(), 1);
+
+    fixture.cancellation.cancel();
+    let error = fixture
+      .source
+      .execute_authoritative_scope_query_v1(&fixture.plan, &fixture.scope_id, &fixture.cancellation, native_query_execution_limits())
+      .unwrap_err();
+    assert_eq!(error.class(), QueryExecutionErrorClassV1::Cancelled);
+    let error = source
+      .recheck_complete_candidate(
+        QueryCandidateRecheckRequestV1 {
+          selected_namespace_root: &fixture.selected_root,
+          publication_sequence: fixture.publication_sequence,
+          scope_id: &fixture.scope_id,
+          file_key,
+          indexed_revision: revision,
+          indexed_path: path,
+          cancellation: &fixture.cancellation,
+        },
+        &mut visitor,
+      )
+      .unwrap_err();
+    assert!(matches!(
+      error,
+      QueryExecutionScanErrorV1::Source(ref error) if error.class() == QueryExecutionSourceErrorClassV1::Cancelled
+    ));
+    assert_eq!(visitor.documents.len(), 1);
+    drop(source);
+    fixture.assert_released();
+  }
 }
 
 #[test]
