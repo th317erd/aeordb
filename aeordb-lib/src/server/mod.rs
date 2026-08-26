@@ -874,4 +874,5 @@ pub fn create_temp_engine_for_tests() -> (Arc<StorageEngine>, tempfile::TempDir)
   (engine, temp_dir)
 }
 
+pub mod legacy_v3_root_adapter;
 pub mod root_public_schema;

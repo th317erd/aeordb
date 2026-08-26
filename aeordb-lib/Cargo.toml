@@ -1351,6 +1351,10 @@ name = "root_public_schema_spec"
 path = "spec/http/root_public_schema_spec.rs"
 
 [[test]]
+name = "legacy_v3_root_adapter_spec"
+path = "spec/http/legacy_v3_root_adapter_spec.rs"
+
+[[test]]
 name = "root_route_runtime_spec"
 path = "spec/http/root_route_runtime_spec.rs"
 
