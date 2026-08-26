@@ -1342,7 +1342,7 @@
           - [x] P7-3e3: freeze the sole logical summarizer/native exposure path and complete affected, broad, static, native real-file, documentation, and contract gates.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
         - [x] P7-4a: extract one Query-admitted captured selected-root body/chunk reader and make native parser evaluation reuse it.
-        - [ ] P7-4b: freeze storage-neutral locator/range contracts and prove exact byte, UTF-8 character, line, CRLF, truncation, and continuation semantics against an independent oracle.
+        - [x] P7-4b: freeze storage-neutral locator/range contracts and prove exact byte, UTF-8 character, line, CRLF, truncation, and continuation semantics against an independent oracle.
         - [ ] P7-4c: bind authorized query hits to exact selected-root/revision locators and same-revision range fetch with per-hit/total bounds and optional content assertions.
         - [ ] P7-4d: expose an inactive-v4 root-aware plugin read adapter over the shared selected-body primitive and close architecture, fault, native, and broad gates.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
