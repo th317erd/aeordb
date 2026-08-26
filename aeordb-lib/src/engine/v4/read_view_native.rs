@@ -116,6 +116,7 @@ pub struct NativeReadViewSourceV1 {
   publisher: Arc<V4FirstAuthorityPublisher>,
   memory: Arc<MemoryCoordinator>,
   current_configured_grace_ms: u64,
+  row_authority_token: Arc<()>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +445,7 @@ pub struct NativeSelectedSourceEvaluatorV1<'reader, 'view, 'definition> {
 
 pub(crate) struct NativePreparedSelectedSourceV1<'definition> {
   authority_binding: [u8; 32],
+  source_authority_token: Arc<()>,
   scope: ScopeDefinitionV1<'definition>,
   scope_id: Vec<u8>,
   value_store_id: Vec<u8>,
@@ -536,6 +538,7 @@ pub struct NativeSelectedNamespaceFileRowV1 {
   entity_version: u8,
   file_record: FileRecord,
   authority_binding: [u8; 32],
+  source_authority_token: Arc<()>,
 }
 
 impl NativeSelectedNamespaceFileRowV1 {
@@ -791,8 +794,8 @@ impl std::ops::Deref for AccountedLoadedImmutableEntityV1 {
 }
 
 impl NativeReadViewSourceV1 {
-  pub const fn new(publisher: Arc<V4FirstAuthorityPublisher>, memory: Arc<MemoryCoordinator>, current_configured_grace_ms: u64) -> Self {
-    Self { publisher, memory, current_configured_grace_ms }
+  pub fn new(publisher: Arc<V4FirstAuthorityPublisher>, memory: Arc<MemoryCoordinator>, current_configured_grace_ms: u64) -> Self {
+    Self { publisher, memory, current_configured_grace_ms, row_authority_token: Arc::new(()) }
   }
 
   pub fn publisher(&self) -> &Arc<V4FirstAuthorityPublisher> {
@@ -863,6 +866,10 @@ enum SelectedDirectoryVisitV1 {
 }
 
 impl<'view> NativeSelectedNamespaceReaderV1<'view> {
+  pub(super) fn selected_namespace_root_for_adapter_v1(&self) -> &'view [u8] {
+    &self.view.root_metadata().hash
+  }
+
   pub fn scan_files(
     &self,
     scope: &str,
@@ -994,7 +1001,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     limits: NativeSelectedFileBodyLimitsV1,
   ) -> Result<NativeSelectedFileBodyV1, NativeSelectedNamespaceReadErrorV1> {
     self.check_cancelled()?;
-    if row.authority_binding != self.authority_binding() {
+    if !self.row_has_exact_source_authority(row) {
       return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
         "selected_file_body_row_authority",
         "selected file-body row was not produced by this exact selected read view",
@@ -1120,6 +1127,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       entity_version,
       file_record,
       authority_binding: self.authority_binding(),
+      source_authority_token: Arc::clone(&self.source.row_authority_token),
     })
   }
 
@@ -1706,6 +1714,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     }
     Ok(NativePreparedSelectedSourceV1 {
       authority_binding: self.authority_binding(),
+      source_authority_token: Arc::clone(&self.source.row_authority_token),
       scope,
       scope_id,
       value_store_id,
@@ -1945,6 +1954,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       entity_version: loaded.entity_version,
       file_record: loaded.record,
       authority_binding: self.authority_binding(),
+      source_authority_token: Arc::clone(&self.source.row_authority_token),
     })
   }
 
@@ -2134,6 +2144,10 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     *hasher.finalize().as_bytes()
   }
 
+  fn row_has_exact_source_authority(&self, row: &NativeSelectedNamespaceFileRowV1) -> bool {
+    row.authority_binding == self.authority_binding() && Arc::ptr_eq(&row.source_authority_token, &self.source.row_authority_token)
+  }
+
   fn step(&self, work_steps: &mut u64) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
     self.check_cancelled()?;
     *work_steps = work_steps
@@ -2173,7 +2187,10 @@ impl NativePreparedSelectedSourceV1<'_> {
     mapper: Option<&dyn PluginMapperExecutorV1>,
   ) -> Result<NativeSelectedSourceEvaluationV1, NativeSelectedNamespaceReadErrorV1> {
     reader.check_cancelled()?;
-    if self.authority_binding != reader.authority_binding() || row.authority_binding != self.authority_binding {
+    if self.authority_binding != reader.authority_binding()
+      || !Arc::ptr_eq(&self.source_authority_token, &reader.source.row_authority_token)
+      || !reader.row_has_exact_source_authority(row)
+    {
       return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
         "selected_source_row_authority",
         "prepared source and row were not produced by this exact selected read view",
@@ -2262,7 +2279,7 @@ impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1<'_, '_
     if request.namespace_root() != self.reader.view.root_metadata().hash
       || request.record_revision_hash() != self.row.record_revision()
       || request.file_record() != self.row.file_record()
-      || self.row.authority_binding != self.reader.authority_binding()
+      || !self.reader.row_has_exact_source_authority(self.row)
     {
       return Err(IndexParserExecutionErrorV1::host_failure(
         "selected_source_corrupt_request",

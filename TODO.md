@@ -1340,7 +1340,7 @@
           - [x] P7-3e1: expose one native authorization/root-bound and Query-memory-accounted logical EXPLAIN over the existing compiled plan authority.
           - [x] P7-3e2: prove authoritative, complete, exact-partial, and index-union source summaries plus foreign authority, cancellation, pressure, hidden-data exclusion, and exact release.
           - [x] P7-3e3: freeze the sole logical summarizer/native exposure path and complete affected, broad, static, native real-file, documentation, and contract gates.
-      - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
+      - [x] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
         - [x] P7-4a: extract one Query-admitted captured selected-root body/chunk reader and make native parser evaluation reuse it.
         - [x] P7-4b: freeze storage-neutral locator/range contracts and prove exact byte, UTF-8 character, line, CRLF, truncation, and continuation semantics against an independent oracle.
         - [x] P7-4c: bind authorized query hits to exact selected-root/revision locators and same-revision range fetch with per-hit/total bounds and optional content assertions.
@@ -1348,7 +1348,11 @@
           - [x] Compose captured-workspace row restoration, the shared selected-body reader, and storage-neutral locator/range primitives under Query memory and cancellation.
           - [x] Prove historical same-revision continuity, assertions-as-assertions, per-hit/request-total bounds, corruption, cancellation, both hash widths, and exact reservation release.
           - [x] Freeze architecture uniqueness and pass affected, broad, static, documentation, and contract gates before landing.
-        - [ ] P7-4d: expose an inactive-v4 root-aware plugin read adapter over the shared selected-body primitive and close architecture, fault, native, and broad gates.
+        - [x] P7-4d: expose an inactive-v4 root-aware plugin read adapter over the shared selected-body primitive and close architecture, fault, native, and broad gates.
+          - [x] Map selected-row/body producers, future plugin consumers, and the frozen WASM/SDK/embedded registry boundary.
+          - [x] Add compile-red native proof for exact-root raw reads, both cancellations, foreign rows, body faults, limits, pressure, and release.
+          - [x] Implement one disconnected raw-byte adapter that delegates exactly once to `NativeSelectedNamespaceReaderV1::read_file_body`.
+          - [x] Freeze architecture isolation and unchanged plugin host/runtime/SDK registries, then pass native, affected, static, documentation, contract, and full-workspace gates.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

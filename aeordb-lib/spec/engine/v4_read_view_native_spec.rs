@@ -112,6 +112,10 @@ use aeordb::engine::v4::query_native_locator::{
 use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
 use aeordb::engine::v4::query_scope_execution::{QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1};
 use aeordb::engine::v4::locator_range::{ExactSourceRangeSelectorV1, LocatorMatchSemanticsV1, LocatorScanStopReasonV1};
+use aeordb::engine::v4::plugin_native_read::{
+  NativeRootAwarePluginReadAdapterV1, NativeRootAwarePluginReadErrorClassV1, NativeRootAwarePluginReadErrorV1,
+  NativeRootAwarePluginReadLimitsV1,
+};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedArtifactRootRequestV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1,
@@ -1147,6 +1151,47 @@ impl SelectedSourceFixture {
         NativeSelectedNamespaceLimitsV1::new(16, 1024 * 1024, u16::MAX as usize, 32, 100_000, 10_000).unwrap(),
       )
       .unwrap()
+  }
+
+  fn advance_mutable_authority(&self) {
+    let algorithm = self.view.hash_algorithm();
+    let namespace_tree = serialize_child_entries(
+      &[ChildEntry {
+        entry_type: EntryTypeV4::DirectoryIndex.to_u8(),
+        hash: digest_parts(algorithm, &[b"dirc:"]),
+        total_size: 0,
+        created_at: 1_700_000_000_740,
+        updated_at: 1_700_000_000_740,
+        name: "plugin-read-race".to_owned(),
+        content_type: None,
+        virtual_time: 1,
+        node_id: 1,
+      }],
+      algorithm.hash_length(),
+    )
+    .unwrap();
+    let semantic_state_id = self.graph.state.object_id.clone();
+    let semantic_state = self.source.publisher().load_semantic_object(0x0001, &semantic_state_id).unwrap().unwrap();
+    let selected_root = self.view.root_metadata().hash.clone();
+    let successor = self
+      .source
+      .publisher()
+      .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+        database_id: [0x31; 16],
+        transaction_id: [0x6b; 16],
+        created_at_ms: 1_700_000_000_740,
+        expected_head_hash: selected_root.clone(),
+        namespace_tree: PreparedNamespaceTreeV0 {
+          root_hash: digest_parts(algorithm, &[b"dirc:", &namespace_tree]),
+          stored_value: namespace_tree,
+        },
+        semantic_state: EncodedSemanticObjectV1 { object_id: semantic_state_id, value: semantic_state },
+        required_capabilities: [0; 32],
+        typed_closure_digest: digest_parts(algorithm, &[b"native plugin-read mutable authority advance"]),
+        authority_identity: b"HEAD".to_vec(),
+      })
+      .unwrap();
+    assert_ne!(successor.namespace_root.root_hash, selected_root);
   }
 
   fn assert_released(self) {
@@ -3549,6 +3594,236 @@ fn selected_file_body_rejects_chunk_count_declared_length_and_content_hash_drift
     drop(reader);
     fixture.assert_released();
   }
+}
+
+fn expect_native_plugin_read_error<T>(result: Result<T, NativeRootAwarePluginReadErrorV1>) -> NativeRootAwarePluginReadErrorV1 {
+  match result {
+    Ok(_) => panic!("root-aware plugin read unexpectedly succeeded"),
+    Err(error) => error,
+  }
+}
+
+#[test]
+fn root_aware_plugin_read_preserves_exact_captured_identity_and_bytes_after_head_advances() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let body = br#"{"messages":[{"user":"historical plugin bytes"}]}"#;
+    let fixture = selected_source_fixture_with_algorithm_and_scopes(
+      algorithm,
+      "json-corrected",
+      semantic_scope_definition(algorithm, "/docs", Some("*.json")),
+      &[],
+      body,
+      true,
+      SelectedFileBodyShape::Exact,
+    );
+    let reader = fixture.reader();
+    let page = reader.scan_files("/docs", None).unwrap();
+    let row = &page.rows()[0];
+    let selected_root = fixture.view.root_metadata().hash.clone();
+    let file_key = row.file_key().to_vec();
+    let record_revision = row.record_revision().to_vec();
+    let content_hash = row.file_record().content_hash.clone();
+    fixture.advance_mutable_authority();
+    let baseline = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+    let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+
+    let read =
+      adapter.read_file_v1(row, &CancellationToken::new(), NativeRootAwarePluginReadLimitsV1::new(1024 * 1024, 16).unwrap()).unwrap();
+
+    assert_eq!(read.selected_namespace_root(), selected_root);
+    assert_eq!(read.file_key(), file_key);
+    assert_eq!(read.record_revision(), record_revision);
+    assert_eq!(read.path(), "/docs/messages.json");
+    assert_eq!(read.content_type(), Some("application/json"));
+    assert_eq!(read.source_size(), body.len() as u64);
+    assert_eq!(read.created_at(), 1_700_000_000_500);
+    assert_eq!(read.updated_at(), 1_700_000_000_500);
+    assert_eq!(read.content_hash(), content_hash);
+    assert_eq!(read.bytes(), body);
+    assert!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > baseline);
+    drop(read);
+    assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+    drop(adapter);
+    drop(page);
+    drop(reader);
+    fixture.assert_released();
+  }
+}
+
+#[test]
+fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_without_leaks() {
+  for result in [
+    NativeRootAwarePluginReadLimitsV1::new(0, 1),
+    NativeRootAwarePluginReadLimitsV1::new(1, 0),
+    NativeRootAwarePluginReadLimitsV1::new(u64::MAX, usize::MAX),
+  ] {
+    let error = result.unwrap_err();
+    assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::InvalidRequest);
+    assert_eq!(error.code(), "selected_file_body_limits");
+  }
+
+  let bounded = selected_source_fixture("json-corrected", Some("*.json"), b"bounded plugin body", true);
+  let reader = bounded.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = bounded.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(
+    &page.rows()[0],
+    &CancellationToken::new(),
+    NativeRootAwarePluginReadLimitsV1::new(1, 1).unwrap(),
+  ));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_file_body_bytes");
+  assert_eq!(bounded.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(adapter);
+  drop(page);
+  drop(reader);
+  bounded.assert_released();
+
+  let identical_body = b"identical root and body";
+  let left = selected_source_fixture("json-corrected", Some("*.json"), identical_body, true);
+  let right = selected_source_fixture("json-corrected", Some("*.json"), identical_body, true);
+  assert_eq!(left.view.root_metadata().hash, right.view.root_metadata().hash);
+  let left_reader = left.reader();
+  let right_reader = right.reader();
+  let left_page = left_reader.scan_files("/docs", None).unwrap();
+  let right_page = right_reader.scan_files("/docs", None).unwrap();
+  let left_baseline = left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&left_reader);
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(
+    &right_page.rows()[0],
+    &CancellationToken::new(),
+    NativeRootAwarePluginReadLimitsV1::new(1024, 1).unwrap(),
+  ));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::CorruptSource);
+  assert_eq!(error.code(), "selected_file_body_row_authority");
+  assert_eq!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, left_baseline);
+  drop(adapter);
+  drop(right_page);
+  drop(left_page);
+  drop(right_reader);
+  drop(left_reader);
+  right.assert_released();
+  left.assert_released();
+
+  let request_cancelled = selected_source_fixture("json-corrected", Some("*.json"), b"request cancellation", true);
+  let reader = request_cancelled.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = request_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+  let cancellation = CancellationToken::new();
+  cancellation.cancel();
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(
+    &page.rows()[0],
+    &cancellation,
+    NativeRootAwarePluginReadLimitsV1::new(1024, 1).unwrap(),
+  ));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::Cancelled);
+  assert_eq!(error.code(), "native_plugin_read_cancelled");
+  assert_eq!(request_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(adapter);
+  drop(page);
+  drop(reader);
+  request_cancelled.assert_released();
+
+  let view_cancelled = selected_source_fixture("json-corrected", Some("*.json"), b"view cancellation", true);
+  let reader = view_cancelled.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = view_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+  view_cancelled.cancellation.cancel();
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(
+    &page.rows()[0],
+    &CancellationToken::new(),
+    NativeRootAwarePluginReadLimitsV1::new(1024, 1).unwrap(),
+  ));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::Cancelled);
+  assert_eq!(error.code(), "selected_namespace_cancelled");
+  assert_eq!(view_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(adapter);
+  drop(page);
+  drop(reader);
+  view_cancelled.assert_released();
+
+  let pressured = selected_source_fixture("json-corrected", Some("*.json"), b"plugin pressure retry", true);
+  let reader = pressured.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = pressured.memory.snapshot().unwrap();
+  let blocker_bytes = (511 * 1024 * 1024u64).checked_sub(baseline.accounted_bytes).unwrap().checked_sub(1).unwrap();
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+  let limits = NativeRootAwarePluginReadLimitsV1::new(1024, 1).unwrap();
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(&page.rows()[0], &CancellationToken::new(), limits));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_file_body_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline.reserved_bytes);
+  let retry = adapter.read_file_v1(&page.rows()[0], &CancellationToken::new(), limits).unwrap();
+  assert_eq!(retry.bytes(), b"plugin pressure retry");
+  drop(retry);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline.reserved_bytes);
+  drop(adapter);
+  drop(page);
+  drop(reader);
+  pressured.assert_released();
+}
+
+#[test]
+fn root_aware_plugin_read_preserves_selected_body_fault_direction_and_release() {
+  let cases = [
+    (SelectedFileBodyShape::RepeatedChunk, true, 1, "selected_file_body_chunks"),
+    (SelectedFileBodyShape::DeclaredSizeTooLarge, true, 4, "selected_file_body_length"),
+    (SelectedFileBodyShape::WrongContentHash, true, 4, "selected_file_body_content_hash"),
+    (SelectedFileBodyShape::Exact, false, 4, "selected_file_body_chunk_missing"),
+  ];
+  for (body_shape, publish_chunk, maximum_chunks, expected_code) in cases {
+    let fixture = selected_source_fixture_with_scopes(
+      "json-corrected",
+      semantic_scope_definition(HashAlgorithm::Blake3_256, "/docs", Some("*.json")),
+      &[],
+      b"plugin body fault",
+      publish_chunk,
+      body_shape,
+    );
+    let reader = fixture.reader();
+    let page = reader.scan_files("/docs", None).unwrap();
+    let baseline = fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+    let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+    let error = expect_native_plugin_read_error(adapter.read_file_v1(
+      &page.rows()[0],
+      &CancellationToken::new(),
+      NativeRootAwarePluginReadLimitsV1::new(1024, maximum_chunks).unwrap(),
+    ));
+    assert_eq!(error.code(), expected_code);
+    assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+    drop(adapter);
+    drop(page);
+    drop(reader);
+    fixture.assert_released();
+  }
+
+  let corrupt = selected_source_fixture("json-corrected", Some("*.json"), b"corrupt plugin body", true);
+  let (offset, total_length) = corrupt.chunk_offset.expect("published plugin-read chunk must have a locator");
+  let mut file = OpenOptions::new().read(true).write(true).open(&corrupt.path).unwrap();
+  file.seek(SeekFrom::Start(offset + u64::from(total_length) - 1)).unwrap();
+  file.write_all(&[0x7f]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let reader = corrupt.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = corrupt.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let adapter = NativeRootAwarePluginReadAdapterV1::new(&reader);
+  let error = expect_native_plugin_read_error(adapter.read_file_v1(
+    &page.rows()[0],
+    &CancellationToken::new(),
+    NativeRootAwarePluginReadLimitsV1::new(1024, 1).unwrap(),
+  ));
+  assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::CorruptSource);
+  assert_eq!(corrupt.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  drop(adapter);
+  drop(page);
+  drop(reader);
+  corrupt.assert_released();
 }
 
 #[test]
@@ -6951,6 +7226,46 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
     "HEAD",
   ] {
     assert!(!query_hit.contains(forbidden), "query-hit composition gained forbidden authority or legacy dependency: {forbidden}");
+  }
+  let plugin_read = fs::read_to_string(source_root.join("engine/v4/plugin_native_read.rs")).unwrap();
+  assert_eq!(plugin_read.matches("pub struct NativeRootAwarePluginReadAdapterV1").count(), 1);
+  assert_eq!(plugin_read.matches("pub struct NativeRootAwarePluginFileReadV1").count(), 1);
+  assert_eq!(plugin_read.matches("pub fn read_file_v1<'row>(").count(), 1);
+  assert_eq!(plugin_read.matches("NativeSelectedFileBodyLimitsV1::new(").count(), 1);
+  assert_eq!(plugin_read.matches(".read_file_body(").count(), 1);
+  assert_eq!(plugin_read.matches("require_not_cancelled(cancellation)?;").count(), 2);
+  for forbidden in [
+    "StorageEngine",
+    "DirectoryOps",
+    "query_engine",
+    "query_native_source",
+    "search_locators",
+    "range_extract",
+    "crate::server",
+    "PluginManager",
+    "WasmPluginRuntime",
+    "serde",
+    "base64",
+    "scan_files(",
+    "resolve_file_identity(",
+    "chunk_hashes",
+    "decompress",
+    "load_entity",
+    "HEAD",
+  ] {
+    assert!(!plugin_read.contains(forbidden), "root-aware plugin read gained forbidden authority or activation dependency: {forbidden}");
+  }
+  let wasm_runtime = fs::read_to_string(source_root.join("plugins/wasm_runtime.rs")).unwrap();
+  let plugin_sdk = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../aeordb-plugin-sdk/src/context.rs")).unwrap();
+  let root_operation = fs::read_to_string(source_root.join("engine/root_operation.rs")).unwrap();
+  assert_eq!(wasm_runtime.matches(".func_wrap(\"aeordb\", \"").count(), 9);
+  assert_eq!(wasm_runtime.matches("  pub fn ").count(), 5);
+  assert_eq!(plugin_sdk.matches("  fn aeordb_").count(), 8);
+  assert_eq!(root_operation.matches("const PLUGIN_HOST_SINGLE_ROOT:").count(), 1);
+  assert_eq!(root_operation.matches("const PLUGIN_HOST_MUTATION:").count(), 1);
+  assert_eq!(root_operation.matches("const PLUGIN_HOST_OPERATIONAL:").count(), 1);
+  for legacy in [&wasm_runtime, &plugin_sdk, &root_operation] {
+    assert!(!legacy.contains("plugin_native_read"), "inactive v4 plugin read leaked into a legacy/public plugin registry");
   }
 }
 

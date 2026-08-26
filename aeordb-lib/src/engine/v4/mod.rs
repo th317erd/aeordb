@@ -120,6 +120,7 @@ pub mod migration_source_gc;
 pub mod namespace;
 mod native_path;
 pub mod parser_plan;
+pub mod plugin_native_read;
 pub mod position;
 pub mod position_order;
 pub mod position_resolver;
