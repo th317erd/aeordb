@@ -766,13 +766,21 @@ pub struct QueryLogicalExplainV1 {
   pub fields: Vec<QueryLogicalExplainFieldV1>,
 }
 
-pub fn authorization_safe_query_explain_v1(plan: &CompiledRootAwareQueryPlanV1) -> QueryLogicalExplainV1 {
+pub fn authorization_safe_query_explain_v1(plan: &CompiledRootAwareQueryPlanV1) -> QueryPlanningResultV1<QueryLogicalExplainV1> {
+  let field_count = plan
+    .predicates
+    .len()
+    .checked_add(plan.auxiliary_fields.len())
+    .ok_or_else(|| resource_error("query_explain_field_count", "logical EXPLAIN field count overflowed"))?;
   let mut fields = Vec::new();
+  fields
+    .try_reserve_exact(field_count)
+    .map_err(|source| resource_error("query_explain_reserve", format!("cannot reserve bounded logical EXPLAIN fields: {source}")))?;
   for predicate in &plan.predicates {
     let (driver, coverage, work) = summarize_drivers(predicate.scopes.iter().map(|scope| &scope.driver));
     fields.push(QueryLogicalExplainFieldV1 {
-      field: predicate.field_name.clone(),
-      operation: predicate.operation_name().to_string(),
+      field: clone_string(&predicate.field_name, "logical EXPLAIN field")?,
+      operation: clone_string(predicate.operation_name(), "logical EXPLAIN operation")?,
       driver,
       coverage,
       work,
@@ -781,21 +789,21 @@ pub fn authorization_safe_query_explain_v1(plan: &CompiledRootAwareQueryPlanV1) 
   }
   for auxiliary in &plan.auxiliary_fields {
     let (driver, coverage, work) = summarize_drivers(auxiliary.scopes.iter().map(|scope| &scope.driver));
+    let operation = match auxiliary.operation {
+      CompiledQueryAuxiliaryOperationV1::Sort(_) => "sort",
+      CompiledQueryAuxiliaryOperationV1::Aggregate(_) => "aggregate",
+      CompiledQueryAuxiliaryOperationV1::Group => "group",
+    };
     fields.push(QueryLogicalExplainFieldV1 {
-      field: auxiliary.field_name.clone(),
-      operation: match auxiliary.operation {
-        CompiledQueryAuxiliaryOperationV1::Sort(_) => "sort",
-        CompiledQueryAuxiliaryOperationV1::Aggregate(_) => "aggregate",
-        CompiledQueryAuxiliaryOperationV1::Group => "group",
-      }
-      .to_string(),
+      field: clone_string(&auxiliary.field_name, "logical EXPLAIN auxiliary field")?,
+      operation: clone_string(operation, "logical EXPLAIN auxiliary operation")?,
       driver,
       coverage,
       work,
       exact_recheck: true,
     });
   }
-  QueryLogicalExplainV1 { root_bound: true, fields }
+  Ok(QueryLogicalExplainV1 { root_bound: true, fields })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

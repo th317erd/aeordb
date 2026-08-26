@@ -583,7 +583,7 @@ fn sort_aggregate_and_explain_are_definition_aware_bounded_and_authorization_saf
     assert!(matches!(field.scopes()[0].driver(), QueryPlanDriverV1::Index { candidate_index: 0, .. }));
   }
 
-  let explain = serde_json::to_value(authorization_safe_query_explain_v1(&plan)).unwrap();
+  let explain = serde_json::to_value(authorization_safe_query_explain_v1(&plan).unwrap()).unwrap();
   assert_eq!(explain["fields"][0]["field"], "@size");
   assert_eq!(explain["fields"][0]["driver"], serde_json::to_value(QueryLogicalDriverKindV1::Index).unwrap());
   let text = serde_json::to_string(&explain).unwrap();
@@ -940,6 +940,10 @@ fn text_strategies_use_only_mathematically_proven_candidate_supersets() {
     matches!(plan.predicates()[0].scopes()[0].driver(), QueryPlanDriverV1::IndexUnion { candidate_indexes, .. } if candidate_indexes.len() == 2),
     "phonetic plan did not retain both exact branches: {plan:#?}"
   );
+  let explain = authorization_safe_query_explain_v1(&plan).unwrap();
+  assert_eq!(explain.fields.len(), 1);
+  assert_eq!(explain.fields[0].driver, QueryLogicalDriverKindV1::IndexUnion);
+  assert_eq!(explain.fields[0].coverage, CompiledQueryCoverageV1::Complete);
 }
 
 #[test]
@@ -1144,6 +1148,7 @@ fn planner_remains_storage_neutral_and_disconnected_from_live_v3_authority() {
 
   let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
   let mut pending = vec![repository_root.join("src"), repository_root.join("../aeordb-cli/src")];
+  let mut logical_explain_callers = Vec::new();
   while let Some(path) = pending.pop() {
     for entry in std::fs::read_dir(path).unwrap() {
       let path = entry.unwrap().path();
@@ -1151,12 +1156,14 @@ fn planner_remains_storage_neutral_and_disconnected_from_live_v3_authority() {
         pending.push(path);
       } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") && !path.ends_with("engine/v4/query_planner.rs") {
         let source = std::fs::read_to_string(&path).unwrap();
-        assert!(
-          !source.contains("plan_root_aware_query_v1") && !source.contains("authorization_safe_query_explain_v1"),
-          "v4 planner activated before cutover in {}",
-          path.display()
-        );
+        assert!(!source.contains("plan_root_aware_query_v1"), "v4 planner activated before cutover in {}", path.display());
+        if source.contains("authorization_safe_query_explain_v1") {
+          logical_explain_callers.push((path, source));
+        }
       }
     }
   }
+  assert_eq!(logical_explain_callers.len(), 1, "logical EXPLAIN must have one production exposure path");
+  assert!(logical_explain_callers[0].0.ends_with("engine/v4/query_native_source.rs"));
+  assert_eq!(logical_explain_callers[0].1.matches("authorization_safe_query_explain_v1(").count(), 1);
 }

@@ -88,9 +88,10 @@ use aeordb::engine::v4::query_partial_candidate::{
   QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootRequestV1,
 };
 use aeordb::engine::v4::query_planner::{
-  CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1, QueryPlanningContextV1,
-  QueryPlanningCoverageGenerationV1, QueryPlanningIndexEstimatesV1, QueryPlanningRequestV1, QueryPredicateOperationV1, QueryPredicateV1,
-  QuerySortDirectionV1, QuerySortFieldV1, RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
+  CompiledQueryCoverageV1, CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1,
+  QueryLogicalDriverKindV1, QueryPlanningContextV1, QueryPlanningCoverageGenerationV1, QueryPlanningIndexEstimatesV1,
+  QueryPlanningRequestV1, QueryPredicateOperationV1, QueryPredicateV1, QuerySortDirectionV1, QuerySortFieldV1,
+  RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
 };
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryAuthoritativeFieldSourceV1,
@@ -101,6 +102,7 @@ use aeordb::engine::v4::query_executor::{
 };
 use aeordb::engine::v4::query_native_source::{
   NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
+  NativeLogicalExplainLimitsV1,
 };
 use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
 use aeordb::engine::v4::query_scope_execution::{QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1};
@@ -4566,6 +4568,14 @@ fn native_exact_scope_routes_match_selected_root_truth_across_root_and_namespace
         if historical {
           authoritative.advance_mutable_authority();
         }
+        assert_native_logical_explain_source(
+          &authoritative.source,
+          &authoritative.plan,
+          &authoritative.cancellation,
+          authoritative.memory.as_ref(),
+          QueryLogicalDriverKindV1::Authoritative,
+          CompiledQueryCoverageV1::AuthoritativeOnly,
+        );
         let exact = authoritative
           .source
           .execute_exact_scope_query_v1(
@@ -4608,6 +4618,14 @@ fn native_exact_scope_routes_match_selected_root_truth_across_root_and_namespace
         if historical {
           complete.advance_mutable_authority();
         }
+        assert_native_logical_explain_source(
+          &complete.source,
+          &complete.plan,
+          &complete.cancellation,
+          complete.memory.as_ref(),
+          QueryLogicalDriverKindV1::Index,
+          CompiledQueryCoverageV1::Complete,
+        );
         let exact = complete
           .source
           .execute_exact_scope_query_v1(
@@ -4639,6 +4657,14 @@ fn native_exact_scope_routes_match_selected_root_truth_across_root_and_namespace
         if historical {
           partial.advance_mutable_authority();
         }
+        assert_native_logical_explain_source(
+          &partial.source,
+          &partial.plan,
+          &partial.cancellation,
+          partial.memory.as_ref(),
+          QueryLogicalDriverKindV1::Index,
+          CompiledQueryCoverageV1::PartialExact,
+        );
         let exact = partial
           .source
           .execute_exact_scope_query_v1(
@@ -4666,6 +4692,206 @@ fn native_exact_scope_routes_match_selected_root_truth_across_root_and_namespace
       }
     }
   }
+}
+
+fn assert_native_logical_explain_source(
+  source: &NativeAuthoritativeFieldPartitionSourceV1,
+  plan: &CompiledRootAwareQueryPlanV1,
+  cancellation: &CancellationToken,
+  memory: &MemoryCoordinator,
+  expected_driver: QueryLogicalDriverKindV1,
+  expected_coverage: CompiledQueryCoverageV1,
+) {
+  let baseline = memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let retained = source.logical_explain_v1(plan, cancellation, NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap()).unwrap();
+  assert!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > baseline);
+  let explain = retained.logical();
+  assert!(explain.root_bound);
+  assert!(!explain.fields.is_empty());
+  assert_eq!(explain.fields[0].driver, expected_driver);
+  assert_eq!(explain.fields[0].coverage, expected_coverage);
+  let serialized = serde_json::to_string(explain).unwrap().to_ascii_lowercase();
+  if plan.query_path() != "/" {
+    assert!(!serialized.contains(&plan.query_path().to_ascii_lowercase()), "native logical EXPLAIN leaked its authorized query path");
+  }
+  for forbidden in [
+    hex::encode(plan.selected_namespace_root()),
+    hex::encode(plan.semantic_state_root()),
+    "manifest".to_string(),
+    "posting".to_string(),
+    "page".to_string(),
+    "offset".to_string(),
+    "nvt".to_string(),
+    "cardinality".to_string(),
+    "candidate".to_string(),
+    "estimated".to_string(),
+  ] {
+    assert!(!serialized.contains(&forbidden), "native logical EXPLAIN leaked {forbidden}: {serialized}");
+  }
+  drop(retained);
+  assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+}
+
+#[test]
+fn native_logical_explain_is_authorization_bound_source_complete_and_memory_accounted() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (authoritative, _) = native_authoritative_size_fixture(algorithm, &["a.json", "b.json"], &[3, 17], 8);
+    assert_native_logical_explain_source(
+      &authoritative.source,
+      &authoritative.plan,
+      &authoritative.cancellation,
+      authoritative.memory.as_ref(),
+      QueryLogicalDriverKindV1::Authoritative,
+      CompiledQueryCoverageV1::AuthoritativeOnly,
+    );
+    authoritative.assert_released();
+
+    let complete = native_candidate_artifact_fixture(algorithm, false);
+    assert_native_logical_explain_source(
+      &complete.source,
+      &complete.plan,
+      &complete.cancellation,
+      complete.memory.as_ref(),
+      QueryLogicalDriverKindV1::Index,
+      CompiledQueryCoverageV1::Complete,
+    );
+    complete.assert_released();
+
+    let partial = native_candidate_artifact_fixture_configured(algorithm, true, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+    assert_native_logical_explain_source(
+      &partial.source,
+      &partial.plan,
+      &partial.cancellation,
+      partial.memory.as_ref(),
+      QueryLogicalDriverKindV1::Index,
+      CompiledQueryCoverageV1::PartialExact,
+    );
+    partial.assert_released();
+  }
+
+  assert_eq!(NativeLogicalExplainLimitsV1::new(0).unwrap_err().class(), QueryExecutionSourceErrorClassV1::ResourceLimit,);
+
+  let (left, _) = native_authoritative_size_fixture(HashAlgorithm::Blake3_256, &["left.json"], &[17], 8);
+  let (right, _) = native_authoritative_size_fixture(HashAlgorithm::Blake3_256, &["right.json"], &[17], 8);
+  let error = match left.source.logical_explain_v1(&right.plan, &left.cancellation, NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap()) {
+    Ok(_) => panic!("foreign selected-root plan produced native logical EXPLAIN"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "native_query_explain_plan_authority");
+  let context = QueryPlanningContextV1::new(
+    left.plan.database_id(),
+    left.plan.physical_instance_id(),
+    left.plan.hash_algorithm(),
+    left.plan.selected_namespace_root(),
+    left.plan.semantic_state_root(),
+    left.plan.publication_sequence(),
+  )
+  .unwrap();
+  let outside_expression = QueryExpressionV1::And(Vec::new());
+  let outside_plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: "/",
+    expression: &outside_expression,
+    catalogs: &[],
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 20,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
+  let error = match left.source.logical_explain_v1(&outside_plan, &left.cancellation, NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap())
+  {
+    Ok(_) => panic!("out-of-scope query path produced native logical EXPLAIN"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "native_query_explain_plan_authority");
+  let empty_plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
+    context: &context,
+    query_path: left.plan.query_path(),
+    expression: &outside_expression,
+    catalogs: &[],
+    sort_fields: &[],
+    aggregate_fields: &[],
+    group_fields: &[],
+    result_limit: 20,
+    limits: default_query_planning_limits_v1(),
+    is_cancelled: &|| false,
+  })
+  .unwrap();
+  let baseline = left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes;
+  let empty =
+    left.source.logical_explain_v1(&empty_plan, &left.cancellation, NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap()).unwrap();
+  assert!(empty.logical().root_bound);
+  assert!(empty.logical().fields.is_empty());
+  assert!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > baseline);
+  drop(empty);
+  assert_eq!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
+  left.assert_released();
+  right.assert_released();
+
+  let (bounded, _) = native_authoritative_size_fixture(HashAlgorithm::Blake3_256, &["bounded.json"], &[17], 8);
+  let baseline = bounded.memory.snapshot().unwrap().reserved_bytes;
+  let error = match bounded.source.logical_explain_v1(&bounded.plan, &bounded.cancellation, NativeLogicalExplainLimitsV1::new(1).unwrap()) {
+    Ok(_) => panic!("one byte retained a native logical EXPLAIN"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "native_query_explain_retained_bytes");
+  assert_eq!(bounded.memory.snapshot().unwrap().reserved_bytes, baseline);
+  let request_cancellation = CancellationToken::new();
+  request_cancellation.cancel();
+  let error =
+    match bounded.source.logical_explain_v1(&bounded.plan, &request_cancellation, NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap()) {
+      Ok(_) => panic!("request-cancelled native logical EXPLAIN succeeded"),
+      Err(error) => error,
+    };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Cancelled);
+  assert_eq!(bounded.memory.snapshot().unwrap().reserved_bytes, baseline);
+  assert_native_logical_explain_source(
+    &bounded.source,
+    &bounded.plan,
+    &bounded.cancellation,
+    bounded.memory.as_ref(),
+    QueryLogicalDriverKindV1::Authoritative,
+    CompiledQueryCoverageV1::AuthoritativeOnly,
+  );
+  bounded.assert_released();
+
+  let (pressured, _) = native_authoritative_size_fixture(HashAlgorithm::Blake3_256, &["pressured.json"], &[17], 8);
+  let baseline = pressured.memory.snapshot().unwrap().reserved_bytes;
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, 511 * 1024 * 1024 - baseline - 1, AdmissionClass::Workload).unwrap();
+  let error = match pressured.source.logical_explain_v1(
+    &pressured.plan,
+    &pressured.cancellation,
+    NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap(),
+  ) {
+    Ok(_) => panic!("native logical EXPLAIN escaped Query-memory pressure"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "native_query_explain_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline);
+  pressured.assert_released();
+
+  let (cancelled, _) = native_authoritative_size_fixture(HashAlgorithm::Sha512, &["cancelled.json"], &[17], 8);
+  let baseline = cancelled.memory.snapshot().unwrap().reserved_bytes;
+  cancelled.cancellation.cancel();
+  let error = match cancelled.source.logical_explain_v1(
+    &cancelled.plan,
+    &cancelled.cancellation,
+    NativeLogicalExplainLimitsV1::new(64 * 1024).unwrap(),
+  ) {
+    Ok(_) => panic!("cancelled native source produced logical EXPLAIN"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), QueryExecutionSourceErrorClassV1::Cancelled);
+  assert_eq!(cancelled.memory.snapshot().unwrap().reserved_bytes, baseline);
+  cancelled.assert_released();
 }
 
 #[test]
@@ -5789,13 +6015,17 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(query_native.matches("IndexDefinitionRuntimeV1::from_encoded_bounded(").count(), 1);
   assert_eq!(query_native.matches("IndexDefinitionRuntimeV1::from_encoded(").count(), 0);
   assert_eq!(query_native.matches("scope_binding.runtime.compile_source_values(").count(), 1);
+  assert_eq!(query_native.matches("pub struct NativeAuthorizedLogicalExplainV1").count(), 1);
+  assert_eq!(query_native.matches("pub fn logical_explain_v1(").count(), 1);
+  assert_eq!(query_native.matches("authorization_safe_query_explain_v1(").count(), 1);
+  assert_eq!(query_native.matches("fn validate_native_plan_authority(").count(), 1);
   assert_eq!(query_native.matches("impl IndexChangedDocumentSourceV1 for").count(), 1);
   assert_eq!(query_native.matches("impl IndexPartialCandidateRecheckerV1 for").count(), 1);
   assert_eq!(query_native.matches("evaluate_authoritative_query_document_v1(").count(), 1);
   assert_eq!(query_executor.matches("pub fn evaluate_authoritative_query_document_v1(").count(), 1);
   assert_eq!(query_native.matches("execute_exact_query_scope_v1(").count(), 1);
   assert_eq!(query_native.matches("execute_exact_query_scope_into_v1(").count(), 1);
-  for forbidden in ["execute_partial_index_acceleration_v1("] {
+  for forbidden in ["execute_partial_index_acceleration_v1(", "QueryEngine", "ExplainResult", "execute_explain_filtered("] {
     assert!(!query_native.contains(forbidden), "native source adapter gained a duplicate exactness or sink state machine: {forbidden}");
   }
 }

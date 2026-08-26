@@ -62,8 +62,9 @@ use super::query_partial_candidate::{
   QueryPartialScopeRootReceiptV1, QueryPartialScopeRootRequestV1,
 };
 use super::query_planner::{
-  CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryPlanningCoverageGenerationV1,
-  RootAwareQueryFieldCatalogV1,
+  CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryLogicalExplainFieldV1, QueryLogicalExplainV1,
+  QueryPlanningCoverageGenerationV1, QueryPlanningErrorClassV1, QueryPlanningErrorV1, RootAwareQueryFieldCatalogV1,
+  authorization_safe_query_explain_v1,
 };
 use super::query_scope_execution::{
   QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionRequestV1, QueryExactScopeExecutionV1, QueryExactScopeStreamExecutionV1,
@@ -84,6 +85,7 @@ const PARTITION_CURSOR_FIXED_BYTES: u64 = 16 * 1024;
 const PARTITION_SOURCE_MAXIMUM_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const AUXILIARY_SOURCE_FIXED_BYTES: u64 = 16 * 1024;
 const AUXILIARY_ALLOCATION_OVERHEAD_BYTES: usize = 16;
+const LOGICAL_EXPLAIN_FIXED_BYTES: u64 = 4 * 1024;
 const DEFAULT_PREPARED_SOURCE_CACHE_ENTRIES: usize = 16;
 const MAXIMUM_PREPARED_SOURCE_CACHE_ENTRIES: usize = 1_024;
 const PREPARED_SOURCE_CACHE_ALLOCATION_OVERHEAD_BYTES: usize = 16;
@@ -179,6 +181,24 @@ fn validate_prepared_source_cache_entries(maximum_entries: usize) -> Result<(), 
   Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeLogicalExplainLimitsV1 {
+  maximum_retained_bytes: u64,
+}
+
+impl NativeLogicalExplainLimitsV1 {
+  pub fn new(maximum_retained_bytes: u64) -> Result<Self, QueryExecutionSourceErrorV1> {
+    if maximum_retained_bytes == 0 {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_query_explain_limits",
+        "native logical EXPLAIN retained-byte limit must be nonzero",
+      ));
+    }
+    Ok(Self { maximum_retained_bytes })
+  }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativePreparedSourceCacheMetricsV1 {
   preparations: u64,
@@ -202,6 +222,17 @@ impl NativePreparedSourceCacheMetricsV1 {
 
   pub const fn evictions(self) -> u64 {
     self.evictions
+  }
+}
+
+pub struct NativeAuthorizedLogicalExplainV1 {
+  logical: QueryLogicalExplainV1,
+  _memory: MemoryReservation,
+}
+
+impl NativeAuthorizedLogicalExplainV1 {
+  pub const fn logical(&self) -> &QueryLogicalExplainV1 {
+    &self.logical
   }
 }
 
@@ -553,6 +584,51 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
 
   pub fn prepared_source_cache_metrics(&self) -> NativePreparedSourceCacheMetricsV1 {
     self.inner.prepared_source_cache_counters.snapshot()
+  }
+
+  pub fn logical_explain_v1(
+    &self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    cancellation: &CancellationToken,
+    limits: NativeLogicalExplainLimitsV1,
+  ) -> Result<NativeAuthorizedLogicalExplainV1, QueryExecutionSourceErrorV1> {
+    require_not_cancelled(cancellation)?;
+    require_not_cancelled(self.inner.view.cancellation())?;
+    validate_native_plan_authority(
+      self.inner.as_ref(),
+      plan,
+      "native_query_explain_plan_authority",
+      "compiled query plan does not bind the authorized native selected-root EXPLAIN source",
+    )?;
+    let structural_bytes = logical_explain_structural_bytes(plan)?;
+    if structural_bytes > limits.maximum_retained_bytes {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_query_explain_retained_bytes",
+        "logical EXPLAIN cannot fit within its retained-byte limit",
+      ));
+    }
+    let mut memory = self
+      .inner
+      .source
+      .memory_coordinator()
+      .reserve(MemoryOwner::Query, limits.maximum_retained_bytes, AdmissionClass::Workload)
+      .map_err(|error| source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_memory", error.to_string()))?;
+    let logical = authorization_safe_query_explain_v1(plan).map_err(map_query_planning_error)?;
+    let retained_bytes = logical_explain_retained_bytes(&logical)?;
+    let release = memory.bytes().checked_sub(retained_bytes).ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_query_explain_retained_bytes",
+        "logical EXPLAIN retained more bytes than its admitted limit",
+      )
+    })?;
+    memory.shrink(release).map_err(|error| {
+      source_error(QueryExecutionSourceErrorClassV1::Internal, "native_query_explain_memory_accounting", error.to_string())
+    })?;
+    require_not_cancelled(cancellation)?;
+    require_not_cancelled(self.inner.view.cancellation())?;
+    Ok(NativeAuthorizedLogicalExplainV1 { logical, _memory: memory })
   }
 
   pub fn execute_authoritative_query_v1(
@@ -2450,6 +2526,20 @@ fn validate_auxiliary_plan(
   inner: &NativeAuthoritativeFieldPartitionInnerV1,
   plan: &CompiledRootAwareQueryPlanV1,
 ) -> Result<(), QueryExecutionSourceErrorV1> {
+  validate_native_plan_authority(
+    inner,
+    plan,
+    "native_auxiliary_plan_authority",
+    "compiled query plan does not bind the native selected-root source",
+  )
+}
+
+fn validate_native_plan_authority(
+  inner: &NativeAuthoritativeFieldPartitionInnerV1,
+  plan: &CompiledRootAwareQueryPlanV1,
+  code: &'static str,
+  context: &'static str,
+) -> Result<(), QueryExecutionSourceErrorV1> {
   if plan.database_id() != inner.view.database_id()
     || plan.physical_instance_id() != inner.view.physical_instance_id()
     || plan.hash_algorithm() != inner.view.hash_algorithm()
@@ -2459,13 +2549,83 @@ fn validate_auxiliary_plan(
     || plan.query_path() != inner.query_path
     || plan.query_order().route() != PositionRouteV1::Query
   {
-    return Err(source_error(
-      QueryExecutionSourceErrorClassV1::Corrupt,
-      "native_auxiliary_plan_authority",
-      "compiled query plan does not bind the native selected-root source",
-    ));
+    return Err(source_error(QueryExecutionSourceErrorClassV1::Corrupt, code, context));
   }
   Ok(())
+}
+
+fn logical_explain_structural_bytes(plan: &CompiledRootAwareQueryPlanV1) -> Result<u64, QueryExecutionSourceErrorV1> {
+  let field_count = plan.predicates().len().checked_add(plan.auxiliary_fields().len()).ok_or_else(|| {
+    source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field count overflowed")
+  })?;
+  let field_count = u64::try_from(field_count).map_err(|error| {
+    source_error(
+      QueryExecutionSourceErrorClassV1::ResourceLimit,
+      "native_query_explain_retained_bytes",
+      format!("field count does not fit retained-byte accounting: {error}"),
+    )
+  })?;
+  let mut bytes = field_count
+    .checked_mul(size_of::<QueryLogicalExplainFieldV1>() as u64)
+    .and_then(|field_bytes| LOGICAL_EXPLAIN_FIXED_BYTES.checked_add(field_bytes))
+    .ok_or_else(|| {
+      source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field slots overflowed")
+    })?;
+  for predicate in plan.predicates() {
+    bytes = bytes
+      .checked_add(predicate.field_name().len() as u64)
+      .and_then(|value| value.checked_add(predicate.operation_name().len() as u64))
+      .ok_or_else(|| {
+        source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field bytes overflowed")
+      })?;
+  }
+  for auxiliary in plan.auxiliary_fields() {
+    let operation_bytes = match auxiliary.operation() {
+      super::query_planner::CompiledQueryAuxiliaryOperationV1::Sort(_) => "sort".len(),
+      super::query_planner::CompiledQueryAuxiliaryOperationV1::Aggregate(_) => "aggregate".len(),
+      super::query_planner::CompiledQueryAuxiliaryOperationV1::Group => "group".len(),
+    };
+    bytes = bytes.checked_add(auxiliary.field_name().len() as u64).and_then(|value| value.checked_add(operation_bytes as u64)).ok_or_else(
+      || source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "auxiliary bytes overflowed"),
+    )?;
+  }
+  Ok(bytes)
+}
+
+fn logical_explain_retained_bytes(explain: &QueryLogicalExplainV1) -> Result<u64, QueryExecutionSourceErrorV1> {
+  let field_bytes = explain.fields.capacity().checked_mul(size_of::<QueryLogicalExplainFieldV1>()).ok_or_else(|| {
+    source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field capacity overflowed")
+  })?;
+  let field_bytes = u64::try_from(field_bytes).map_err(|error| {
+    source_error(
+      QueryExecutionSourceErrorClassV1::ResourceLimit,
+      "native_query_explain_retained_bytes",
+      format!("field capacity does not fit retained-byte accounting: {error}"),
+    )
+  })?;
+  let mut bytes = LOGICAL_EXPLAIN_FIXED_BYTES.checked_add(field_bytes).ok_or_else(|| {
+    source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field capacity overflowed")
+  })?;
+  for field in &explain.fields {
+    bytes = bytes
+      .checked_add(field.field.capacity() as u64)
+      .and_then(|value| value.checked_add(field.operation.capacity() as u64))
+      .ok_or_else(|| {
+        source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_query_explain_retained_bytes", "field capacity overflowed")
+      })?;
+  }
+  Ok(bytes)
+}
+
+fn map_query_planning_error(error: QueryPlanningErrorV1) -> QueryExecutionSourceErrorV1 {
+  let class = match error.class() {
+    QueryPlanningErrorClassV1::InvalidRequest => QueryExecutionSourceErrorClassV1::Corrupt,
+    QueryPlanningErrorClassV1::ResourceLimit => QueryExecutionSourceErrorClassV1::ResourceLimit,
+    QueryPlanningErrorClassV1::HistoricalViewUnavailable => QueryExecutionSourceErrorClassV1::Unavailable,
+    QueryPlanningErrorClassV1::CorruptSource => QueryExecutionSourceErrorClassV1::Corrupt,
+    QueryPlanningErrorClassV1::Cancelled => QueryExecutionSourceErrorClassV1::Cancelled,
+  };
+  source_error(class, error.code(), error.context())
 }
 
 fn auxiliary_binding_bytes(
