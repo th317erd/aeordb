@@ -1354,6 +1354,11 @@
           - [x] Implement one disconnected raw-byte adapter that delegates exactly once to `NativeSelectedNamespaceReaderV1::read_file_body`.
           - [x] Freeze architecture isolation and unchanged plugin host/runtime/SDK registries, then pass native, affected, static, documentation, contract, and full-workspace gates.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
+        - [x] P7-5a: freeze one inactive shared public request/response schema, including raw query AST admission, selectors, APOS pagination, root metadata, locators, ranges, and relationship events.
+        - [ ] P7-5b: route legacy-v3 compatibility reads through one selected-root adapter and apply the shared schema to list/file/symlink/hash/fetch/download HTTP surfaces without activating v4 authority.
+        - [ ] P7-5c: cut query/search/aggregate/explain over the shared schema, canonical APOS, root-aware locators/ranges, and the live search-root-X to fetch-root-X flow without a legacy cursor decoder.
+        - [ ] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.
+        - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
       - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

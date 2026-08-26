@@ -873,3 +873,5 @@ pub fn create_temp_engine_for_tests() -> (Arc<StorageEngine>, tempfile::TempDir)
   let engine = create_engine_for_storage(engine_path);
   (engine, temp_dir)
 }
+
+pub mod root_public_schema;
