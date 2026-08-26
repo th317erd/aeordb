@@ -3142,7 +3142,7 @@ fn map_scan_error(error: QueryExecutionScanErrorV1) -> QueryExecutionErrorV1 {
   }
 }
 
-fn map_source_error(error: QueryExecutionSourceErrorV1) -> QueryExecutionErrorV1 {
+pub(super) fn map_source_error(error: QueryExecutionSourceErrorV1) -> QueryExecutionErrorV1 {
   match error.class {
     QueryExecutionSourceErrorClassV1::Unavailable => QueryExecutionErrorV1::unavailable(error.code, error.context),
     QueryExecutionSourceErrorClassV1::ResourceLimit => QueryExecutionErrorV1::resource(error.code, error.context),

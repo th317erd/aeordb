@@ -38,8 +38,8 @@ use aeordb::engine::v4::index_coverage_registry::{
 use aeordb::engine::v4::index_manifest::FieldNvtManifestBodyV1;
 use aeordb::engine::v4::index_partial_acceleration::{
   IndexChangedDocumentScanRequestV1, IndexChangedDocumentSourceV1, IndexChangedDocumentV1, IndexChangedDocumentVisitorV1,
-  IndexPartialAccelerationErrorV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOriginV1, IndexPartialRecheckOutcomeV1,
-  IndexPartialRecheckRequestV1, IndexPartialSourceErrorClassV1,
+  IndexPartialAccelerationErrorV1, IndexPartialAccelerationLimitsV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOriginV1,
+  IndexPartialRecheckOutcomeV1, IndexPartialRecheckRequestV1, IndexPartialSourceErrorClassV1,
 };
 use aeordb::engine::v4::index_nvt::{
   NvtBasisStatusV1, NvtEntryWriteV1, NvtTileWriteV1, encode_nvt_tile, pin_field_index_v1, validate_field_nvt_basis_v1,
@@ -82,24 +82,27 @@ use aeordb::engine::v4::query_complete_candidate::{
   QueryCandidateRecheckRequestV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootRequestV1,
   QueryCompleteScopeRootRequestV1,
 };
+use aeordb::engine::v4::query_candidate_composition::QueryCandidateCompositionLimitsV1;
 use aeordb::engine::v4::query_partial_candidate::{
   QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootRequestV1,
 };
 use aeordb::engine::v4::query_planner::{
   CompiledRootAwareQueryPlanV1, QueryAggregateFieldV1, QueryAggregateKindV1, QueryExpressionV1, QueryPlanningContextV1,
-  QueryPlanningCoverageGenerationV1, QueryPlanningRequestV1, QueryPredicateOperationV1, QueryPredicateV1, QuerySortDirectionV1,
-  QuerySortFieldV1, RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
+  QueryPlanningCoverageGenerationV1, QueryPlanningIndexEstimatesV1, QueryPlanningRequestV1, QueryPredicateOperationV1, QueryPredicateV1,
+  QuerySortDirectionV1, QuerySortFieldV1, RootAwareQueryFieldCatalogV1, default_query_planning_limits_v1, plan_root_aware_query_v1,
 };
 use aeordb::engine::v4::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionSourceV1, QueryAuthoritativeFieldSourceV1,
   QueryAuthoritativeValueVisitorV1, QueryExecutionByteLimitsV1, QueryExecutionCountLimitsV1, QueryExecutionDocumentV1,
   QueryExecutionErrorV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1,
-  QueryExecutionErrorClassV1, QueryExecutionLimitsV1, QueryExecutionScanErrorV1, QueryExecutionSourceErrorClassV1,
+  QueryExecutionErrorClassV1, QueryExecutionLimitsV1, QueryExecutionMatchRefV1, QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1,
+  QueryExecutionSinkBatchReceiptV1, QueryExecutionSinkBatchV1, QueryExecutionSinkErrorV1, QueryExecutionSourceErrorClassV1,
 };
 use aeordb::engine::v4::query_native_source::{
   NativeAuthoritativeAuxiliaryLimitsV1, NativeAuthoritativeFieldPartitionLimitsV1, NativeAuthoritativeFieldPartitionSourceV1,
 };
 use aeordb::engine::v4::query_order_execution::{QueryOrderedTopKLimitsV1, QueryOrderedTopKSinkV1};
+use aeordb::engine::v4::query_scope_execution::{QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionPathV1};
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedArtifactRootRequestV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1,
@@ -2261,11 +2264,24 @@ fn native_candidate_artifact_fixture_configured(
     field_name: "@hash".to_string(),
     operation: QueryPredicateOperationV1::Eq(CanonicalConfigValueV1::String("ab".repeat(algorithm.hash_length()))),
   });
+  let mut planning_catalogs = semantic_catalog.catalogs().to_vec();
+  if partial && target_files {
+    // Native semantic loading deliberately leaves cost estimates unknown. Supply an
+    // independently bounded planner scenario here so this fixture exercises the
+    // partial dispatcher; exactness still comes only from the real artifacts and
+    // selected-root workspace below.
+    for scope in &mut planning_catalogs[0].scopes {
+      scope.authoritative_document_count = 100;
+      for candidate in &mut scope.indexes {
+        candidate.estimates = QueryPlanningIndexEstimatesV1::new(3, 3, 3, 1, 4).unwrap();
+      }
+    }
+  }
   let plan = plan_root_aware_query_v1(&QueryPlanningRequestV1 {
     context: &context,
     query_path: "/",
     expression: &expression,
-    catalogs: semantic_catalog.catalogs(),
+    catalogs: &planning_catalogs,
     sort_fields: &[],
     aggregate_fields: &[],
     group_fields: &[],
@@ -3514,6 +3530,14 @@ fn native_candidate_limits() -> QueryCompleteCandidateLimitsV1 {
     .unwrap()
 }
 
+fn native_partial_acceleration_limits() -> IndexPartialAccelerationLimitsV1 {
+  IndexPartialAccelerationLimitsV1::new(128, 128, 128, 2 * 1_024 * 1_024).unwrap()
+}
+
+fn native_candidate_composition_limits() -> QueryCandidateCompositionLimitsV1 {
+  QueryCandidateCompositionLimitsV1::new(128, 256 * 1_024).unwrap()
+}
+
 #[test]
 fn native_authoritative_execution_facade_runs_the_selected_root_truth_path() {
   let names = ["a.json", "b.json", "c.json", "d.json"];
@@ -4058,6 +4082,137 @@ fn native_partial_rechecker_uses_the_shared_exact_document_evaluator_at_both_has
     drop(rechecker);
     fixture.assert_released();
   }
+}
+
+#[derive(Default)]
+struct NativeExactScopeRecordingSinkV1 {
+  begin_calls: u64,
+  push_calls: u64,
+  commit_calls: u64,
+  rollback_calls: u64,
+}
+
+impl QueryExecutionMatchSinkV1 for NativeExactScopeRecordingSinkV1 {
+  fn begin_batch(&mut self, _batch: QueryExecutionSinkBatchV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    self.begin_calls += 1;
+    Ok(())
+  }
+
+  fn push_match(&mut self, _matched: QueryExecutionMatchRefV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    self.push_calls += 1;
+    Ok(())
+  }
+
+  fn commit_batch(&mut self, _receipt: QueryExecutionSinkBatchReceiptV1<'_>) -> Result<(), QueryExecutionSinkErrorV1> {
+    self.commit_calls += 1;
+    Ok(())
+  }
+
+  fn rollback_batch(&mut self) {
+    self.rollback_calls += 1;
+  }
+}
+
+#[test]
+fn native_exact_scope_facade_composes_authoritative_complete_and_partial_paths_without_early_sink_publication() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let names = ["a.json", "b.json", "c.json"];
+    let sizes = [3, 17, 9];
+    let (authoritative, expected) = native_authoritative_size_fixture(algorithm, &names, &sizes, 8);
+    let execution = authoritative
+      .source
+      .execute_exact_scope_query_v1(
+        &authoritative.plan,
+        &authoritative.scope_id,
+        &authoritative.cancellation,
+        native_query_execution_limits(),
+        native_candidate_limits(),
+        native_partial_acceleration_limits(),
+        native_candidate_composition_limits(),
+      )
+      .unwrap();
+    assert_eq!(execution.path(), QueryExactScopeExecutionPathV1::Authoritative);
+    assert_eq!(execution.match_count(), 2);
+    let mut observed =
+      execution.identities().map(|identity| (identity.file_key().to_vec(), identity.record_revision().to_vec())).collect::<Vec<_>>();
+    observed.sort();
+    let mut expected = expected
+      .into_iter()
+      .zip(sizes)
+      .filter_map(|((file_key, revision, _), size)| (size > 8).then_some((file_key, revision)))
+      .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(observed, expected);
+    drop(execution);
+    authoritative.assert_released();
+
+    let complete = native_candidate_artifact_fixture(algorithm, false);
+    complete.corrupt_artifact_checksum(&complete.scope_reverse_root.key);
+    let execution = complete
+      .source
+      .execute_exact_scope_query_v1(
+        &complete.plan,
+        &complete.scope_id,
+        &complete.cancellation,
+        native_query_execution_limits(),
+        native_candidate_limits(),
+        native_partial_acceleration_limits(),
+        native_candidate_composition_limits(),
+      )
+      .unwrap();
+    assert_eq!(execution.path(), QueryExactScopeExecutionPathV1::Complete);
+    assert_eq!(execution.match_count(), 0);
+    drop(execution);
+    complete.assert_released();
+
+    let partial = native_candidate_artifact_fixture_configured(algorithm, true, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+    partial.advance_mutable_authority();
+    let mut sink = NativeExactScopeRecordingSinkV1::default();
+    let execution = partial
+      .source
+      .execute_exact_scope_query_into_v1(
+        &partial.plan,
+        &partial.scope_id,
+        &partial.cancellation,
+        native_query_execution_limits(),
+        native_candidate_limits(),
+        native_partial_acceleration_limits(),
+        native_candidate_composition_limits(),
+        &mut sink,
+      )
+      .unwrap();
+    assert_eq!(execution.path(), QueryExactScopeExecutionPathV1::Partial);
+    assert_eq!(execution.receipt().match_count(), 0);
+    assert_eq!(sink.begin_calls, 1);
+    assert_eq!(sink.push_calls, 0);
+    assert_eq!(sink.commit_calls, 1);
+    assert_eq!(sink.rollback_calls, 0);
+    drop(execution);
+    partial.assert_released();
+  }
+
+  let corrupt = native_candidate_artifact_fixture_configured(HashAlgorithm::Blake3_256, true, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+  corrupt.corrupt_artifact_checksum(&corrupt.scope_reverse_root.key);
+  let mut sink = NativeExactScopeRecordingSinkV1::default();
+  let error = corrupt
+    .source
+    .execute_exact_scope_query_into_v1(
+      &corrupt.plan,
+      &corrupt.scope_id,
+      &corrupt.cancellation,
+      native_query_execution_limits(),
+      native_candidate_limits(),
+      native_partial_acceleration_limits(),
+      native_candidate_composition_limits(),
+      &mut sink,
+    )
+    .unwrap_err();
+  assert!(matches!(error, QueryExactScopeExecutionErrorV1::Partial(_)));
+  assert_eq!(sink.begin_calls, 0);
+  assert_eq!(sink.push_calls, 0);
+  assert_eq!(sink.commit_calls, 0);
+  assert_eq!(sink.rollback_calls, 0);
+  corrupt.assert_released();
 }
 
 #[test]
@@ -4991,7 +5146,9 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(query_native.matches("impl IndexPartialCandidateRecheckerV1 for").count(), 1);
   assert_eq!(query_native.matches("evaluate_authoritative_query_document_v1(").count(), 1);
   assert_eq!(query_executor.matches("pub fn evaluate_authoritative_query_document_v1(").count(), 1);
-  for forbidden in ["execute_partial_index_acceleration_v1(", "execute_exact_query_scope_v1(", "execute_exact_query_scope_into_v1("] {
+  assert_eq!(query_native.matches("execute_exact_query_scope_v1(").count(), 1);
+  assert_eq!(query_native.matches("execute_exact_query_scope_into_v1(").count(), 1);
+  for forbidden in ["execute_partial_index_acceleration_v1("] {
     assert!(!query_native.contains(forbidden), "native source adapter gained a duplicate exactness or sink state machine: {forbidden}");
   }
 }

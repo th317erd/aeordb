@@ -19,8 +19,8 @@ use super::index_definition_runtime::{IndexDefinitionErrorClassV1, IndexDefiniti
 use super::index_page::{OrderedIndexRoleV1, decode_ordered_page};
 use super::index_partial_acceleration::{
   IndexChangedDocumentScanReceiptV1, IndexChangedDocumentScanRequestV1, IndexChangedDocumentSourceV1, IndexChangedDocumentV1,
-  IndexChangedDocumentVisitorV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOutcomeV1, IndexPartialRecheckRequestV1,
-  IndexPartialScanErrorV1, IndexPartialSourceErrorV1,
+  IndexChangedDocumentVisitorV1, IndexPartialAccelerationLimitsV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOutcomeV1,
+  IndexPartialRecheckRequestV1, IndexPartialScanErrorV1, IndexPartialSourceErrorV1,
 };
 use super::index_record::{ScopeDocumentRecordV1, decode_scope_document_record, decode_scope_reverse_record};
 use super::position::{CompiledPositionComparatorV1, PositionRouteV1, PositionSortDirectionV1};
@@ -34,6 +34,7 @@ use super::query_aggregate_execution::{
   QueryAggregateInputFieldV1, QueryAggregateInputLookupRequestV1, QueryAggregateInputLookupResultV1, QueryAggregateInputRowV1,
   QueryAggregateInputSourceV1, query_aggregate_input_row_allocated_bytes_v1,
 };
+use super::query_candidate_composition::QueryCandidateCompositionLimitsV1;
 use super::query_complete_candidate::{
   QueryCandidateArtifactRootV1, QueryCandidateRecheckReceiptV1, QueryCandidateRecheckRequestV1, QueryCompleteCandidateErrorClassV1,
   QueryCompleteCandidateErrorV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootReceiptV1,
@@ -48,7 +49,7 @@ use super::query_executor::{
   QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
   RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryDocumentEvaluationRequestV1, RootAwareQueryExecutionV1,
   RootAwareQueryScopeExecutionRequestV1, evaluate_authoritative_query_document_v1, execute_authoritative_partitioned_query_into_v1,
-  execute_authoritative_partitioned_query_v1, execute_authoritative_scope_query_v1,
+  execute_authoritative_partitioned_query_v1, execute_authoritative_scope_query_v1, map_source_error,
 };
 use super::query_native_workspace::{
   NativeQueryOrderingCursorV1, NativeQueryOrderingLookupV1, NativeQueryOrderingWorkspaceBuilderV1,
@@ -62,6 +63,10 @@ use super::query_partial_candidate::{
 use super::query_planner::{
   CompiledQueryCoverageV1, CompiledQueryIndexCandidateV1, CompiledRootAwareQueryPlanV1, QueryPlanningCoverageGenerationV1,
   RootAwareQueryFieldCatalogV1,
+};
+use super::query_scope_execution::{
+  QueryExactScopeExecutionErrorV1, QueryExactScopeExecutionRequestV1, QueryExactScopeExecutionV1, QueryExactScopeStreamExecutionV1,
+  execute_exact_query_scope_into_v1, execute_exact_query_scope_v1,
 };
 use super::read_view::ResolvedReadViewV1;
 use super::read_view_authorization::ResolvedPathAuthorizationV1;
@@ -164,7 +169,7 @@ pub struct NativeQueryPartialRecheckerV1<'plan> {
   plan: &'plan CompiledRootAwareQueryPlanV1,
   scope_id: [u8; 64],
   scope_id_length: usize,
-  lookup: NativeQueryOrderingLookupV1,
+  lookup: Option<NativeQueryOrderingLookupV1>,
   limits: QueryExecutionLimitsV1,
 }
 
@@ -393,6 +398,78 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
     })
   }
 
+  #[allow(clippy::too_many_arguments)]
+  pub fn execute_exact_scope_query_v1(
+    &self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+    execution_limits: QueryExecutionLimitsV1,
+    candidate_limits: QueryCompleteCandidateLimitsV1,
+    acceleration_limits: IndexPartialAccelerationLimitsV1,
+    composition_limits: QueryCandidateCompositionLimitsV1,
+  ) -> Result<QueryExactScopeExecutionV1, QueryExactScopeExecutionErrorV1> {
+    let mut authoritative = Self { inner: Arc::clone(&self.inner) };
+    let mut complete = self.open_candidate_artifact_source();
+    let mut partial = self.open_candidate_artifact_source();
+    let mut complement = self.open_partial_complement_source(scope_id, candidate_limits).map_err(map_native_exact_scope_setup_error)?;
+    let mut rechecker = self.open_partial_rechecker(plan, scope_id, execution_limits).map_err(map_native_exact_scope_setup_error)?;
+    execute_exact_query_scope_v1(QueryExactScopeExecutionRequestV1 {
+      plan,
+      catalogs: self.inner.semantic_catalog.catalogs(),
+      scope_id,
+      authoritative_source: &mut authoritative,
+      complete_source: Some(&mut complete),
+      partial_source: Some(&mut partial),
+      complement: Some(&mut complement),
+      rechecker: Some(&mut rechecker),
+      memory: self.inner.source.memory_coordinator().as_ref(),
+      cancellation,
+      execution_limits,
+      candidate_limits,
+      acceleration_limits,
+      composition_limits,
+    })
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn execute_exact_scope_query_into_v1(
+    &self,
+    plan: &CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    cancellation: &CancellationToken,
+    execution_limits: QueryExecutionLimitsV1,
+    candidate_limits: QueryCompleteCandidateLimitsV1,
+    acceleration_limits: IndexPartialAccelerationLimitsV1,
+    composition_limits: QueryCandidateCompositionLimitsV1,
+    sink: &mut dyn QueryExecutionMatchSinkV1,
+  ) -> Result<QueryExactScopeStreamExecutionV1, QueryExactScopeExecutionErrorV1> {
+    let mut authoritative = Self { inner: Arc::clone(&self.inner) };
+    let mut complete = self.open_candidate_artifact_source();
+    let mut partial = self.open_candidate_artifact_source();
+    let mut complement = self.open_partial_complement_source(scope_id, candidate_limits).map_err(map_native_exact_scope_setup_error)?;
+    let mut rechecker = self.open_partial_rechecker(plan, scope_id, execution_limits).map_err(map_native_exact_scope_setup_error)?;
+    execute_exact_query_scope_into_v1(
+      QueryExactScopeExecutionRequestV1 {
+        plan,
+        catalogs: self.inner.semantic_catalog.catalogs(),
+        scope_id,
+        authoritative_source: &mut authoritative,
+        complete_source: Some(&mut complete),
+        partial_source: Some(&mut partial),
+        complement: Some(&mut complement),
+        rechecker: Some(&mut rechecker),
+        memory: self.inner.source.memory_coordinator().as_ref(),
+        cancellation,
+        execution_limits,
+        candidate_limits,
+        acceleration_limits,
+        composition_limits,
+      },
+      sink,
+    )
+  }
+
   pub fn open_auxiliary_source<'plan>(
     &self,
     plan: &'plan CompiledRootAwareQueryPlanV1,
@@ -445,8 +522,7 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
   ) -> Result<NativeQueryPartialRecheckerV1<'plan>, QueryExecutionSourceErrorV1> {
     validate_auxiliary_plan(&self.inner, plan)?;
     let (scope_id, scope_id_length) = retain_fixed_identity(scope_id, self.inner.view.hash_algorithm(), "partial recheck ScopeId")?;
-    let lookup = self.inner.workspace.open_lookup().map_err(map_workspace_error)?;
-    Ok(NativeQueryPartialRecheckerV1 { inner: Arc::clone(&self.inner), plan, scope_id, scope_id_length, lookup, limits })
+    Ok(NativeQueryPartialRecheckerV1 { inner: Arc::clone(&self.inner), plan, scope_id, scope_id_length, lookup: None, limits })
   }
 }
 
@@ -1226,8 +1302,17 @@ impl IndexPartialCandidateRecheckerV1 for NativeQueryPartialRecheckerV1<'_> {
     }
     let retained_scope_id = self.scope_id;
     let scope_id = &retained_scope_id[..self.scope_id_length];
+    if self.lookup.is_none() {
+      self.lookup = Some(self.inner.workspace.open_lookup().map_err(map_workspace_error).map_err(map_execution_partial_error)?);
+    }
+    let lookup = self.lookup.as_mut().ok_or_else(|| {
+      IndexPartialSourceErrorV1::internal(
+        "native_partial_recheck_lookup_state",
+        "selected-root workspace lookup was not retained after successful initialization",
+      )
+    })?;
     let Some(ordered) =
-      self.lookup.find_row(request.file_key, request.cancellation).map_err(map_workspace_error).map_err(map_execution_partial_error)?
+      lookup.find_row(request.file_key, request.cancellation).map_err(map_workspace_error).map_err(map_execution_partial_error)?
     else {
       return Ok(IndexPartialRecheckOutcomeV1::Absent);
     };
@@ -2499,6 +2584,10 @@ fn map_execution_partial_error(error: QueryExecutionSourceErrorV1) -> IndexParti
     QueryExecutionSourceErrorClassV1::Cancelled => IndexPartialSourceErrorV1::cancelled(error.code(), error.context()),
     QueryExecutionSourceErrorClassV1::Internal => IndexPartialSourceErrorV1::internal(error.code(), error.context()),
   }
+}
+
+fn map_native_exact_scope_setup_error(error: QueryExecutionSourceErrorV1) -> QueryExactScopeExecutionErrorV1 {
+  QueryExactScopeExecutionErrorV1::Execution(map_source_error(error))
 }
 
 fn map_query_execution_partial_error(error: QueryExecutionErrorV1) -> IndexPartialSourceErrorV1 {
