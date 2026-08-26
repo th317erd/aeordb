@@ -60,20 +60,21 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // Administrative routes under /files/ (query, fetch, download, mkdir, share,
   // share-link, share-links) are protected by their own handler-level
   // auth checks and must not be treated as file paths.
-  let is_files_route = request_path.starts_with("/files/")
-    && request_path != "/files/query"
-    && request_path != "/files/search"
-    && request_path != "/files/fetch"
-    && request_path != "/files/download"
-    && request_path != "/files/mkdir"
-    && request_path != "/files/copy"
-    && request_path != "/files/share"
-    && request_path != "/files/shares"
-    && request_path != "/files/share-link"
-    && request_path != "/files/shared-with-me"
-    && request_path != "/files/deleted"
-    && request_path != "/files/restore"
-    && !request_path.starts_with("/files/share-links");
+  let is_files_route = request_path == "/files"
+    || (request_path.starts_with("/files/")
+      && request_path != "/files/query"
+      && request_path != "/files/search"
+      && request_path != "/files/fetch"
+      && request_path != "/files/download"
+      && request_path != "/files/mkdir"
+      && request_path != "/files/copy"
+      && request_path != "/files/share"
+      && request_path != "/files/shares"
+      && request_path != "/files/share-link"
+      && request_path != "/files/shared-with-me"
+      && request_path != "/files/deleted"
+      && request_path != "/files/restore"
+      && !request_path.starts_with("/files/share-links"));
   // Symlinks are path-aware writes under /links/*; treat them like file paths
   // so scoped keys can't create symlinks outside their scope.
   let is_links_route = request_path.starts_with("/links/");
@@ -104,10 +105,15 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
     return next.run(request).await;
   }
 
-  // Extract the route sub-path. Both /files/ and /links/ have the same prefix
-  // length (7 chars) so this works for either.
-  let prefix_len = if is_links_route { "/links/".len() } else { "/files/".len() };
-  let engine_path = &request_path[prefix_len..];
+  // Extract the route sub-path. `/files` is the canonical root listing and
+  // therefore has an empty engine path; wildcard routes retain their prefix.
+  let engine_path = if request_path == "/files" {
+    ""
+  } else if is_links_route {
+    &request_path["/links/".len()..]
+  } else {
+    &request_path["/files/".len()..]
+  };
 
   // Extract claims from extensions (set by auth_middleware).
   let claims = match request.extensions().get::<TokenClaims>() {

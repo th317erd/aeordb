@@ -1357,7 +1357,12 @@
         - [x] P7-5a: freeze one inactive shared public request/response schema, including raw query AST admission, selectors, APOS pagination, root metadata, locators, ranges, and relationship events.
         - [ ] P7-5b: route legacy-v3 compatibility reads through one selected-root adapter and apply the shared schema to list/file/symlink/hash/fetch/download HTTP surfaces without activating v4 authority.
           - [x] P7-5b1: freeze one exact-root legacy-v3 adapter for current, explicit, snapshot, and version selectors plus list/file/symlink/hash reachability.
-          - [ ] P7-5b2: route GET/HEAD list, file, symlink, and hash reads through the adapter with exact root envelopes or headers.
+          - [x] P7-5b2: route GET/HEAD list, file, symlink, and hash reads through the adapter with exact root envelopes or headers.
+            - [x] Freeze a dedicated HTTP red proof for selector conflicts, exact historical reads after HEAD movement, rooted list/symlink envelopes, root headers, concealment, selected permission restriction, and hash reachability/diagnostic authority.
+            - [x] Make `/files`, `/files/{*path}`, `/links/{*path}`, and `/blobs/{hex_hash}` consume their frozen root-operation plan and one query-selector parser before resolving the legacy adapter.
+            - [x] Preserve current path/key/descendant authorization before root resolution, intersect ordinary users with selected permission documents, and keep share reads current-only.
+            - [x] Preserve flat/recursive listing, file/range, symlink follow/nofollow, HEAD, and diagnostic hash behavior while attaching the exact shared root envelope or three headers.
+            - [x] Pass the dedicated target plus affected authorization, listing, file, version, symlink, route-contract, and adapter regressions before moving to P7-5b3.
           - [ ] P7-5b3: route whole-file/range fetch and ZIP download through the same selected-root adapter while preserving legacy collection/body shapes.
           - [ ] P7-5b4: freeze adapter uniqueness/no-fallback architecture and pass narrow, affected, static, documentation, contract, and broad gates.
         - [ ] P7-5c: cut query/search/aggregate/explain over the shared schema, canonical APOS, root-aware locators/ranges, and the live search-root-X to fetch-root-X flow without a legacy cursor decoder.

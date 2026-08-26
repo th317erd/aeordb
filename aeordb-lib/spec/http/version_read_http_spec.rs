@@ -212,9 +212,9 @@ async fn test_get_file_not_at_version() {
   assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// When both ?snapshot= and ?version= are provided, snapshot takes precedence.
+/// Root selectors form a strict tagged union; conflicting selectors are rejected.
 #[tokio::test]
-async fn test_get_file_snapshot_precedence() {
+async fn test_get_file_rejects_conflicting_snapshot_and_version_selectors() {
   let (app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
@@ -238,13 +238,13 @@ async fn test_get_file_snapshot_precedence() {
   let snapshot2 = vm.create_snapshot(&ctx, "snap2", HashMap::new()).unwrap();
   let snap2_hex = hex::encode(&snapshot2.root_hash);
 
-  // Provide both: snapshot=snap1 and version=<snap2 hash>
-  // Snapshot should take precedence; we should get v1 "snap-content"
+  // Providing both selectors is ambiguous and must never silently choose one.
   let app = rebuild_app(&jwt_manager, &engine);
   let uri = format!("/files/file.txt?snapshot=snap1&version={}", snap2_hex);
   let (status, _, bytes) = get_file(app, &auth, &uri).await;
-  assert_eq!(status, StatusCode::OK);
-  assert_eq!(bytes, b"snap-content");
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+  let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+  assert_eq!(error["code"], "INVALID_ROOT_SELECTOR");
 
   // Verify the other snapshot would give different content (sanity check)
   let app = rebuild_app(&jwt_manager, &engine);

@@ -2,7 +2,7 @@ use axum::{
   Extension,
   body::Body,
   extract::{Path, Query as AxumQuery, State},
-  http::{header, HeaderMap, StatusCode},
+  http::{header, HeaderMap, Method, StatusCode},
   response::{IntoResponse, Response},
   Json,
 };
@@ -12,7 +12,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use super::blocking::run_engine_blocking;
-use super::route_permissions::{reject_share_key, require_generic_data_engine_path, require_generic_data_path, RoutePermissionChecker};
+use super::legacy_v3_root_adapter::{
+  LegacyV3ResolvedPathV1, LegacyV3SelectedDirectoryEntryV1, LegacyV3SelectedPathV1, LegacyV3SelectedRootAdapterV1,
+};
+use super::root_api::{
+  RequestedRootSelectorV1, RootApiErrorV1, RootRequestAdapterV1, RootSelectorFieldsV1, RootServiceModeV1, RouteRootRequestPlanV1,
+  parse_root_selector_v1, root_error_response_v1, root_response_headers_v1,
+};
+use super::route_permissions::{reject_share_key, require_generic_data_path, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::search_locators::{
   broad_query_terms, terms_from_query_node, try_generate_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
@@ -21,8 +28,7 @@ use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
-use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, VersionManager, is_root};
-use crate::engine::directory_listing::list_directory_recursive_strict;
+use crate::engine::{DirectoryOps, RequestContext, SearchResult, StorageEngine, TaskStatus, is_root};
 use crate::engine::directory_ops::{
   read_chunk_reserved, reserve_streaming_read, stream_hash_inventory_bytes, streaming_memory_error, file_content_hash, ReservedReadChunk,
 };
@@ -38,7 +44,6 @@ use crate::engine::query_engine::{
   SortField, DEFAULT_QUERY_LIMIT,
 };
 use crate::engine::system_family_policy::GenericDataPathSelection;
-use crate::engine::symlink_resolver::{resolve_symlink, ResolvedTarget};
 use crate::engine::SystemFamilyPolicyResolver;
 
 /// Check if a file path is deleted and the user lacks delete permission.
@@ -78,6 +83,7 @@ fn is_deleted_and_forbidden(state: &AppState, claims: &TokenClaims, path: &str) 
 /// Query parameters for GET /files/*path (version access + directory listing).
 #[derive(Deserialize, Default)]
 pub struct EngineGetQuery {
+  pub root_hash: Option<String>,
   pub snapshot: Option<String>,
   pub version: Option<String>,
   pub depth: Option<i32>,
@@ -89,6 +95,140 @@ pub struct EngineGetQuery {
   pub sort: Option<String>,
   /// Sort order: "asc" or "desc" (default: "asc")
   pub order: Option<String>,
+}
+
+impl EngineGetQuery {
+  pub(super) fn selector(&self, engine: &StorageEngine) -> Result<RequestedRootSelectorV1, RootApiErrorV1> {
+    parse_root_selector_v1(
+      &RootSelectorFieldsV1 { root_hash: self.root_hash.clone(), snapshot: self.snapshot.clone(), version: self.version.clone() },
+      engine.hash_algo(),
+    )
+  }
+}
+
+pub(super) fn require_legacy_root_plan(plan: RouteRootRequestPlanV1, expected_adapter: RootRequestAdapterV1) -> Result<(), Response> {
+  if plan.adapter == expected_adapter && plan.service_mode == RootServiceModeV1::LegacyV3Compatibility {
+    return Ok(());
+  }
+  tracing::error!(?plan, ?expected_adapter, "Handler received an incompatible root-operation plan");
+  Err(ErrorResponse::new("Internal route root contract is inconsistent").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response())
+}
+
+pub(super) fn root_api_error_response(error: RootApiErrorV1, conceal: bool) -> Response {
+  let response = root_error_response_v1(error, conceal);
+  (response.status, Json(response.body)).into_response()
+}
+
+pub(super) fn resolve_legacy_root<'engine>(
+  engine: &'engine StorageEngine,
+  selector: &RequestedRootSelectorV1,
+) -> Result<LegacyV3SelectedRootAdapterV1<'engine>, Response> {
+  LegacyV3SelectedRootAdapterV1::resolve(engine, selector).map_err(|error| {
+    if let Some(source) = error.engine_source() {
+      tracing::error!(context = error.context(), %source, "Legacy selected-root resolution failed");
+    }
+    root_api_error_response(error.public_error(), false)
+  })
+}
+
+pub(super) fn attach_root_headers(mut response: Response, selected: &LegacyV3SelectedRootAdapterV1<'_>) -> Result<Response, Response> {
+  let headers = root_response_headers_v1(selected.root_metadata(), selected.engine_hash_algorithm())
+    .map_err(|error| root_api_error_response(error, false))?;
+  for (name, value) in &headers {
+    response.headers_mut().insert(name.clone(), value.clone());
+  }
+  Ok(response)
+}
+
+pub(super) fn reject_historical_share_selector(claims: &TokenClaims, selector: &RequestedRootSelectorV1) -> Result<(), Response> {
+  if claims.sub.starts_with("share:") && !matches!(selector, RequestedRootSelectorV1::CurrentHead) {
+    return Err(root_api_error_response(RootApiErrorV1::InvalidRootSelector, true));
+  }
+  Ok(())
+}
+
+fn selected_permission_denial(path: &str, conceal: bool) -> Response {
+  if conceal {
+    ErrorResponse::new(format!("Not found: {path}")).with_status(StatusCode::NOT_FOUND).into_response()
+  } else {
+    ErrorResponse::new("Permission denied").with_status(StatusCode::FORBIDDEN).into_response()
+  }
+}
+
+pub(super) fn selected_path_filter(
+  state: &AppState,
+  claims: &TokenClaims,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  path: &str,
+  operation: CrudlifyOp,
+  current_filter: Option<&crate::auth::permission_middleware::FilteredListing>,
+  conceal: bool,
+) -> Result<Option<crate::auth::permission_middleware::FilteredListing>, Response> {
+  if claims.sub.starts_with("share:") || Uuid::parse_str(&claims.sub).is_ok_and(|user_id| is_root(&user_id)) {
+    return Ok(current_filter.cloned());
+  }
+  let user_id = Uuid::parse_str(&claims.sub)
+    .map_err(|_| ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response())?;
+  let groups = state
+    .group_cache
+    .get(&user_id, &state.engine)
+    .map_err(|error| engine_error_response("Failed to load current group authority", &error))?;
+  let decision = selected
+    .authorize_path(path, operation, &groups)
+    .map_err(|error| engine_error_response("Failed to evaluate selected permission authority", &error))?
+    .ok_or_else(|| selected_permission_denial(path, conceal))?;
+  let selected_children = decision.allowed_children().map(|children| children.iter().cloned().collect::<std::collections::HashSet<_>>());
+  let allowed_children = match (current_filter, selected_children) {
+    (None, None) => return Ok(None),
+    (Some(current), None) => current.allowed_children.clone(),
+    (None, Some(selected)) => selected,
+    (Some(current), Some(selected)) => current.allowed_children.intersection(&selected).cloned().collect(),
+  };
+  if allowed_children.is_empty() {
+    return Err(selected_permission_denial(path, conceal));
+  }
+  Ok(Some(crate::auth::permission_middleware::FilteredListing { allowed_children }))
+}
+
+fn current_path_read_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  path: &str,
+) -> EngineResult<bool> {
+  let policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?.generic_data_path_selection(path)?;
+  if policy != GenericDataPathSelection::Include {
+    return Ok(false);
+  }
+  if let Some(rules) = key_rules {
+    return Ok(match_rules(rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, 'r')));
+  }
+  if claims.sub.starts_with("share:") {
+    return Ok(false);
+  }
+  let user_id = Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
+  if is_root(&user_id) {
+    return Ok(true);
+  }
+  RoutePermissionChecker::for_user(state, user_id).has_path_permission(path, CrudlifyOp::Read)
+}
+
+fn selected_path_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  path: &str,
+  operation: CrudlifyOp,
+) -> EngineResult<bool> {
+  if claims.sub.starts_with("share:") {
+    return Ok(true);
+  }
+  let user_id = Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
+  if is_root(&user_id) {
+    return Ok(true);
+  }
+  let groups = state.group_cache.get(&user_id, &state.engine)?;
+  Ok(selected.authorize_path(path, operation, &groups)?.is_some())
 }
 
 /// Filter a listing of JSON entries based on active API key rules.
@@ -142,6 +282,7 @@ fn paginated_listing_response(
   offset: Option<usize>,
   sort: Option<&str>,
   order: Option<&str>,
+  root: &super::root_api::RootResponseV1,
 ) -> Response {
   // Sort before pagination
   let sort_field = sort.unwrap_or("name");
@@ -199,6 +340,7 @@ fn paginated_listing_response(
   (
     StatusCode::OK,
     Json(serde_json::json!({
+      "root": root,
       "items": listing,
       "total": total,
       "limit": limit,
@@ -1140,43 +1282,6 @@ async fn build_file_streaming_response(
   response_builder.body(body).unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
 }
 
-/// Convert a flat directory listing (ChildEntry vec) to JSON values.
-///
-/// Each entry is enriched with its full path and, for symlink entries,
-/// the symlink target is included.
-fn build_directory_listing(
-  entries: &[crate::engine::ChildEntry],
-  base_path: &str,
-  directory_ops: &DirectoryOps,
-) -> EngineResult<Vec<serde_json::Value>> {
-  let normalized = crate::engine::path_utils::normalize_path(base_path);
-  let mut listing = Vec::with_capacity(entries.len());
-  for child in entries {
-    let child_path = if normalized == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized, child.name) };
-    let mut entry_json = serde_json::json!({
-      "path": child_path,
-      "name": child.name,
-      "entry_type": child.entry_type,
-      "hash": hex::encode(&child.hash),
-      "size": child.total_size,
-      "created_at": child.created_at,
-      "updated_at": child.updated_at,
-      "content_type": child.content_type,
-    });
-
-    if child.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-      let symlink_record = directory_ops.get_symlink(&child_path)?.ok_or_else(|| EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("directory names missing symlink record at {child_path}"),
-      })?;
-      entry_json["target"] = serde_json::json!(symlink_record.target);
-    }
-
-    listing.push(entry_json);
-  }
-  Ok(listing)
-}
-
 /// Apply API key rules and system-path filtering to a listing.
 ///
 /// Returns `Err(Response)` if the user identity is invalid; otherwise mutates
@@ -1426,70 +1531,47 @@ fn attach_effective_permissions(
 
 /// Handle a symlink path: resolve and produce the appropriate file or
 /// directory response, or return an error for dangling / cyclic symlinks.
-async fn handle_symlink_resolution(
-  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+async fn handle_selected_symlink_resolution(
+  state: &AppState,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   path: &str,
   symlink_target: &str,
   request_headers: &HeaderMap,
-  user_id_str: &str,
+  claims: &TokenClaims,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
   limit: Option<usize>,
   offset: Option<usize>,
 ) -> Response {
-  let directory_ops = DirectoryOps::new(engine);
-
-  match resolve_symlink(engine, path) {
-    Ok(ResolvedTarget::File(file_record)) => {
-      if let Err(response) = require_generic_data_engine_path(engine, &file_record.path) {
-        return response;
-      }
-
-      // Check if the resolved target path is allowed by API key rules
-      if let Some(rules) = key_rules {
-        if !rules.is_empty() {
-          let target_path = &file_record.path;
-          let normalized_target = if target_path.starts_with('/') { target_path.to_string() } else { format!("/{}", target_path) };
-          match match_rules(rules, &normalized_target) {
-            Some(rule) => {
-              if !check_operation_permitted(&rule.permitted, 'r') {
-                return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
-              }
-            }
-            None => {
-              return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response();
-            }
-          }
-        }
-      }
-
-      build_file_streaming_response(engine, file_record, Some(symlink_target), request_headers, false, &[]).await
+  let resolved = selected.follow_path_authorized(path, |target_path| {
+    if !current_path_read_is_authorized(state, claims, key_rules, target_path)? {
+      return Ok(false);
     }
-    Ok(ResolvedTarget::Directory(dir_path)) => {
-      if let Err(response) = require_generic_data_engine_path(engine, &dir_path) {
-        return response;
-      }
-
-      match directory_ops.list_directory_strict(&dir_path) {
-        Ok(entries) => {
-          let mut listing = match build_directory_listing(&entries, &dir_path, &directory_ops) {
-            Ok(listing) => listing,
-            Err(error) => return engine_error_response("Failed to build resolved directory listing", &error),
-          };
-          match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
-            Ok(()) => paginated_listing_response(listing, limit, offset, None, None),
-            Err(response) => response,
-          }
-        }
-        Err(error) => {
-          tracing::error!("Engine: failed to list resolved directory: {}", error);
-          ErrorResponse::new(format!(
-            "Failed to list directory after resolving symlink '{}'. If this persists, check GET /system/health for system status",
-            path
-          ))
-          .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-          .into_response()
-        }
+    selected_path_is_authorized(state, claims, selected, target_path, CrudlifyOp::Read)
+  });
+  match resolved {
+    Ok(LegacyV3ResolvedPathV1::File(file)) => {
+      let response = build_file_streaming_response(
+        &state.engine,
+        file.record,
+        Some(symlink_target),
+        request_headers,
+        selected.root().state != "live",
+        &[],
+      )
+      .await;
+      attach_root_headers(response, selected).unwrap_or_else(|response| response)
+    }
+    Ok(LegacyV3ResolvedPathV1::Directory(directory)) => {
+      let target_filter =
+        match selected_path_filter(state, claims, selected, &directory.path, CrudlifyOp::Read, filtered_listing, key_rules.is_some()) {
+          Ok(filter) => filter,
+          Err(response) => return response,
+        };
+      let mut listing = selected_entries_json(directory.entries);
+      match apply_listing_filters(&state.engine, &mut listing, key_rules, &claims.sub, target_filter.as_ref()) {
+        Ok(()) => paginated_listing_response(listing, limit, offset, None, None, selected.root()),
+        Err(response) => response,
       }
     }
     Err(EngineError::NotFound(msg)) => {
@@ -1512,70 +1594,104 @@ async fn handle_symlink_resolution(
 }
 
 /// Handle a direct file read: stream the file content as an HTTP response.
-async fn handle_file_response(
+async fn handle_selected_file_response(
   engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   file_record: FileRecord,
   request_headers: &HeaderMap,
 ) -> Response {
-  build_file_streaming_response(engine, file_record, None, request_headers, false, &[]).await
+  let response = build_file_streaming_response(engine, file_record, None, request_headers, selected.root().state != "live", &[]).await;
+  attach_root_headers(response, selected).unwrap_or_else(|response| response)
+}
+
+fn selected_file_head_response(file_record: &FileRecord, selected: &LegacyV3SelectedRootAdapterV1<'_>) -> Response {
+  let safe_path = file_record.path.replace(['\n', '\r'], "");
+  let mut builder = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-AeorDB-Type", "file")
+    .header("X-AeorDB-Path", safe_path)
+    .header("X-AeorDB-Size", file_record.total_size.to_string())
+    .header("X-AeorDB-Created", file_record.created_at.to_string())
+    .header("X-AeorDB-Updated", file_record.updated_at.to_string());
+  if let Some(content_type) = file_record.content_type.as_deref() {
+    builder = builder.header(header::CONTENT_TYPE, content_type);
+  }
+  let response = builder.body(Body::empty()).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+  attach_root_headers(response, selected).unwrap_or_else(|response| response)
+}
+
+fn selected_symlink_head_response(
+  symlink: &crate::engine::symlink_record::SymlinkRecord,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+) -> Response {
+  let response = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-AeorDB-Type", "symlink")
+    .header("X-AeorDB-Link-Target", symlink.target.replace(['\n', '\r'], ""))
+    .header("X-AeorDB-Path", symlink.path.replace(['\n', '\r'], ""))
+    .header("X-AeorDB-Created", symlink.created_at.to_string())
+    .header("X-AeorDB-Updated", symlink.updated_at.to_string())
+    .body(Body::empty())
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+  attach_root_headers(response, selected).unwrap_or_else(|response| response)
+}
+
+fn selected_directory_head_response(path: &str, selected: &LegacyV3SelectedRootAdapterV1<'_>) -> Response {
+  let response = axum::http::Response::builder()
+    .status(StatusCode::OK)
+    .header("X-AeorDB-Type", "directory")
+    .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
+    .body(Body::empty())
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+  attach_root_headers(response, selected).unwrap_or_else(|response| response)
+}
+
+fn selected_entries_json(entries: Vec<LegacyV3SelectedDirectoryEntryV1>) -> Vec<serde_json::Value> {
+  entries
+    .into_iter()
+    .map(|entry| {
+      let mut value = serde_json::json!({
+        "path": entry.path,
+        "name": entry.name,
+        "entry_type": entry.entry_type,
+        "hash": hex::encode(entry.record_hash),
+        "size": entry.total_size,
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+        "content_type": entry.content_type,
+      });
+      if let Some(target) = entry.symlink_target {
+        value["target"] = serde_json::json!(target);
+      }
+      value
+    })
+    .collect()
 }
 
 /// Handle recursive directory listing with depth and/or glob parameters.
 fn handle_recursive_listing(
-  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  state: &AppState,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   path: &str,
   version_query: &EngineGetQuery,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  user_id_str: &str,
+  claims: &TokenClaims,
   filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
-  state: Option<&AppState>,
 ) -> Response {
-  let directory_ops = DirectoryOps::new(engine);
-
   let depth = version_query.depth.unwrap_or(0);
   // M17: Clamp recursive listing depth to prevent runaway traversals.
   let depth = if depth < 0 { -1 } else { depth.min(256) };
   let glob = version_query.glob.as_deref();
 
-  match list_directory_recursive_strict(engine, path, depth, glob, None) {
+  match selected.list_directory_recursive(path, depth, glob) {
     Ok(entries) => {
-      let mut listing = Vec::with_capacity(entries.len());
-      for entry in &entries {
-        let mut entry_json = serde_json::json!({
-          "path": entry.path,
-          "name": entry.name,
-          "entry_type": entry.entry_type,
-          "hash": hex::encode(&entry.hash),
-          "size": entry.total_size,
-          "created_at": entry.created_at,
-          "updated_at": entry.updated_at,
-          "content_type": entry.content_type,
-        });
+      let mut listing = selected_entries_json(entries);
 
-        if entry.entry_type == crate::engine::entry_type::EntryType::Symlink.to_u8() {
-          let symlink_record = match directory_ops.get_symlink(&entry.path) {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-              return engine_error_response(
-                "Failed to build recursive directory listing",
-                &EngineError::CorruptEntry { offset: 0, reason: format!("directory names missing symlink record at {}", entry.path) },
-              )
-            }
-            Err(error) => return engine_error_response("Failed to build recursive directory listing", &error),
-          };
-          entry_json["target"] = serde_json::json!(symlink_record.target);
-        }
-
-        listing.push(entry_json);
-      }
-
-      match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, None) {
+      match apply_listing_filters(&state.engine, &mut listing, key_rules, &claims.sub, None) {
         Ok(()) => {
           if filtered_listing.is_some() {
-            if let Some(st) = state {
-              if let Err(error) = filter_results_by_direct_read(&mut listing, user_id_str, &st.engine, &st.group_cache) {
-                return engine_error_response("Failed to filter recursive listing permissions", &error);
-              }
+            if let Err(error) = filter_results_by_direct_read(&mut listing, &claims.sub, &state.engine, &state.group_cache) {
+              return engine_error_response("Failed to filter recursive listing permissions", &error);
             }
           }
           paginated_listing_response(
@@ -1584,6 +1700,7 @@ fn handle_recursive_listing(
             version_query.offset,
             version_query.sort.as_deref(),
             version_query.order.as_deref(),
+            selected.root(),
           )
         }
         Err(response) => response,
@@ -1613,36 +1730,29 @@ struct ListingPagination<'a> {
 
 /// Handle default (flat) directory listing without depth/glob parameters.
 fn handle_directory_listing(
-  engine: &std::sync::Arc<crate::engine::StorageEngine>,
+  state: &AppState,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   path: &str,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  user_id_str: &str,
+  claims: &TokenClaims,
   pagination: ListingPagination<'_>,
-  state: Option<&AppState>,
   filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
 ) -> Response {
   let ListingPagination { limit, offset, sort, order } = pagination;
-  let directory_ops = DirectoryOps::new(engine);
-
-  match directory_ops.list_directory_strict(path) {
+  match selected.list_directory(path) {
     Ok(entries) => {
-      let mut listing = match build_directory_listing(&entries, path, &directory_ops) {
-        Ok(listing) => listing,
-        Err(error) => return engine_error_response("Failed to build directory listing", &error),
-      };
-      match apply_listing_filters(engine, &mut listing, key_rules, user_id_str, filtered_listing) {
+      let mut listing = selected_entries_json(entries);
+      match apply_listing_filters(&state.engine, &mut listing, key_rules, &claims.sub, filtered_listing) {
         Ok(()) => {
           // Attach effective_permissions for non-root users
-          if let Some(st) = state {
-            if let Ok(uid) = uuid::Uuid::parse_str(user_id_str) {
-              if let Err(error) = attach_effective_permissions(&mut listing, &uid, &st.engine, &st.group_cache) {
-                return engine_error_response("Failed to resolve listing permissions", &error);
-              }
-            } else if !user_id_str.starts_with("share:") {
-              return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
+          if let Ok(uid) = uuid::Uuid::parse_str(&claims.sub) {
+            if let Err(error) = attach_effective_permissions(&mut listing, &uid, &state.engine, &state.group_cache) {
+              return engine_error_response("Failed to resolve listing permissions", &error);
             }
+          } else if !claims.sub.starts_with("share:") {
+            return ErrorResponse::new("Invalid user identity").with_status(StatusCode::FORBIDDEN).into_response();
           }
-          paginated_listing_response(listing, limit, offset, sort, order)
+          paginated_listing_response(listing, limit, offset, sort, order, selected.root())
         }
         Err(response) => response,
       }
@@ -1666,24 +1776,41 @@ fn handle_directory_listing(
 pub async fn engine_get_root(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
+  method: Method,
   headers: HeaderMap,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
-  engine_get(State(state), Extension(claims), active_key_rules, filtered_listing, headers, Path("/".to_string()), AxumQuery(version_query))
-    .await
+  engine_get(
+    State(state),
+    Extension(claims),
+    Extension(root_plan),
+    active_key_rules,
+    filtered_listing,
+    method,
+    headers,
+    Path("/".to_string()),
+    AxumQuery(version_query),
+  )
+  .await
 }
 
 pub async fn engine_get(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
+  method: Method,
   headers: HeaderMap,
   Path(path): Path<String>,
   AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
+  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return response;
+  }
   if let Err(response) = require_generic_data_path(&state, &path) {
     return response;
   }
@@ -1695,137 +1822,102 @@ pub async fn engine_get(
     Err(error) => return engine_error_response("Failed to check deleted-file access", &error),
   }
 
-  // If snapshot or version query param is present, read from historical version
-  if version_query.snapshot.is_some() || version_query.version.is_some() {
-    return engine_get_at_version(&state, &path, &version_query, &headers).await;
-  }
-
   // Extract key rules slice for helpers (avoids passing axum Extension around)
   let key_rules: Option<&[crate::engine::api_key_rules::KeyRule]> = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
-  let filter_ref: Option<&crate::auth::permission_middleware::FilteredListing> = filtered_listing.as_ref().map(|Extension(f)| f);
-
-  let directory_ops = DirectoryOps::new(&state.engine);
-
-  // Check for symlink first
-  let symlink_record = match directory_ops.get_symlink(&path) {
-    Ok(record) => record,
-    Err(error) => return engine_error_response("Failed to inspect symlink", &error),
+  let current_filter = filtered_listing.as_ref().map(|Extension(filter)| filter);
+  let selector = match version_query.selector(&state.engine) {
+    Ok(selector) => selector,
+    Err(error) => return root_api_error_response(error, false),
   };
-  if let Some(symlink_record) = symlink_record {
-    // nofollow: return symlink metadata without resolving
-    if version_query.nofollow == Some(true) {
-      return (
-        StatusCode::OK,
-        Json(serde_json::json!({
-          "path": symlink_record.path,
-          "target": symlink_record.target,
-          "entry_type": 8,
-          "created_at": symlink_record.created_at,
-          "updated_at": symlink_record.updated_at,
-        })),
-      )
-        .into_response();
-    }
-
-    return handle_symlink_resolution(
-      &state.engine,
-      &path,
-      &symlink_record.target,
-      &headers,
-      &claims.sub,
-      key_rules,
-      filter_ref,
-      version_query.limit,
-      version_query.offset,
-    )
-    .await;
+  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
+    return response;
   }
+  let selected = match resolve_legacy_root(&state.engine, &selector) {
+    Ok(selected) => selected,
+    Err(response) => return response,
+  };
+  let operation = if method == Method::HEAD {
+    CrudlifyOp::Read
+  } else if path.ends_with('/') {
+    CrudlifyOp::List
+  } else {
+    CrudlifyOp::Read
+  };
+  let selected_filter = match selected_path_filter(&state, &claims, &selected, &path, operation, current_filter, key_rules.is_some()) {
+    Ok(filter) => filter,
+    Err(response) => return response,
+  };
+  let filter_ref = selected_filter.as_ref();
 
-  // Try as file first
-  match directory_ops.get_metadata(&path) {
-    Ok(Some(file_record)) => {
-      return handle_file_response(&state.engine, file_record, &headers).await;
+  let selected_path = match selected.path(&path) {
+    Ok(selected_path) => selected_path,
+    Err(EngineError::NotFound(_)) => {
+      return ErrorResponse::new(format!("Not found: {path}")).with_status(StatusCode::NOT_FOUND).into_response();
     }
-    Ok(None) => {
-      // Not a file -- fall through to directory listing
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      return ErrorResponse::new(format!("Failed to read path '{}'. If this persists, check GET /system/health for system status", path))
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .into_response();
-    }
-  }
-
-  // Try as directory -- recursive listing if depth/glob specified
-  if version_query.depth.is_some() || version_query.glob.is_some() {
-    return handle_recursive_listing(&state.engine, &path, &version_query, key_rules, &claims.sub, filter_ref, Some(&state));
-  }
-
-  // Default flat directory listing
-  handle_directory_listing(
-    &state.engine,
-    &path,
-    key_rules,
-    &claims.sub,
-    ListingPagination {
-      limit: version_query.limit,
-      offset: version_query.offset,
-      sort: version_query.sort.as_deref(),
-      order: version_query.order.as_deref(),
-    },
-    Some(&state),
-    filter_ref,
-  )
-}
-
-/// Read a file at a historical version (snapshot or explicit root hash).
-async fn engine_get_at_version(state: &AppState, path: &str, version_query: &EngineGetQuery, request_headers: &HeaderMap) -> Response {
-  let vm = VersionManager::new(&state.engine);
-
-  // Resolve root hash: snapshot takes precedence
-  let root_hash = if let Some(ref snapshot_name) = version_query.snapshot {
-    match vm.resolve_root_hash(Some(snapshot_name)) {
-      Ok(hash) => hash,
-      Err(_) => {
-        return ErrorResponse::new(format!("Snapshot '{}' not found", snapshot_name)).with_status(StatusCode::NOT_FOUND).into_response();
+    Err(error) => return engine_error_response("Failed to read selected path", &error),
+  };
+  match selected_path {
+    LegacyV3SelectedPathV1::File(file) => {
+      if method == Method::HEAD {
+        return selected_file_head_response(&file.record, &selected);
       }
+      handle_selected_file_response(&state.engine, &selected, file.record, &headers).await
     }
-  } else if let Some(ref version_hex) = version_query.version {
-    match hex::decode(version_hex) {
-      Ok(hash) => hash,
-      Err(_) => {
-        return ErrorResponse::new("Invalid version hash: value is not valid hex. Use the root_hash from a snapshot or version response")
-          .with_status(StatusCode::BAD_REQUEST)
+    LegacyV3SelectedPathV1::Symlink(symlink) => {
+      if method == Method::HEAD {
+        return selected_symlink_head_response(&symlink.record, &selected);
+      }
+      if version_query.nofollow == Some(true) {
+        return (
+          StatusCode::OK,
+          Json(serde_json::json!({
+            "root": selected.root(),
+            "path": symlink.record.path,
+            "target": symlink.record.target,
+            "entry_type": 8,
+            "created_at": symlink.record.created_at,
+            "updated_at": symlink.record.updated_at,
+          })),
+        )
           .into_response();
       }
+      handle_selected_symlink_resolution(
+        &state,
+        &selected,
+        &path,
+        &symlink.record.target,
+        &headers,
+        &claims,
+        key_rules,
+        filter_ref,
+        version_query.limit,
+        version_query.offset,
+      )
+      .await
     }
-  } else {
-    return ErrorResponse::new(
-      "No snapshot or version specified. Use ?snapshot=<name> or ?version=<hex_hash> to read a historical version",
-    )
-    .with_status(StatusCode::BAD_REQUEST)
-    .into_response();
-  };
-
-  // Resolve the file at this version
-  let (_file_hash, file_record) = match crate::engine::version_access::resolve_file_at_version(&state.engine, &root_hash, path) {
-    Ok(result) => result,
-    Err(crate::engine::errors::EngineError::NotFound(msg)) => {
-      return ErrorResponse::new(msg).with_status(StatusCode::NOT_FOUND).into_response();
+    LegacyV3SelectedPathV1::Directory(_) => {
+      if method == Method::HEAD {
+        return selected_directory_head_response(&path, &selected);
+      }
+      if version_query.depth.is_some() || version_query.glob.is_some() {
+        return handle_recursive_listing(&state, &selected, &path, &version_query, key_rules, &claims, filter_ref);
+      }
+      handle_directory_listing(
+        &state,
+        &selected,
+        &path,
+        key_rules,
+        &claims,
+        ListingPagination {
+          limit: version_query.limit,
+          offset: version_query.offset,
+          sort: version_query.sort.as_deref(),
+          order: version_query.order.as_deref(),
+        },
+        filter_ref,
+      )
     }
-    Err(error) => {
-      tracing::error!("Engine: failed to read file '{}' at version: {}", path, error);
-      return ErrorResponse::new(format!(
-        "Failed to read file '{}' at historical version. If this persists, check GET /system/health for system status",
-        path
-      ))
-      .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-      .into_response();
-    }
-  };
-
-  build_file_streaming_response(&state.engine, file_record, None, request_headers, true, &[]).await
+  }
 }
 
 /// DELETE /engine/*path -- delete a file via the custom storage engine.
@@ -2004,75 +2096,28 @@ pub async fn list_deleted_files(
   }
 }
 
-pub async fn engine_head(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(path): Path<String>) -> Response {
-  if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
-  }
-
-  // Deleted files are invisible to users without 'd' permission
-  match is_deleted_and_forbidden(&state, &claims, &path) {
-    Ok(true) => return ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
-    Ok(false) => {}
-    Err(error) => return engine_error_response("Failed to check deleted-file access", &error),
-  }
-
-  let directory_ops = DirectoryOps::new(&state.engine);
-
-  // Check symlink first
-  let symlink_record = match directory_ops.get_symlink(&path) {
-    Ok(record) => record,
-    Err(error) => return engine_error_response("Failed to inspect symlink", &error),
-  };
-  if let Some(symlink_record) = symlink_record {
-    return axum::http::Response::builder()
-      .status(StatusCode::OK)
-      .header("X-AeorDB-Type", "symlink")
-      .header("X-AeorDB-Link-Target", symlink_record.target.replace(['\n', '\r'], ""))
-      .header("X-AeorDB-Path", path.replace(['\n', '\r'], ""))
-      .header("X-AeorDB-Created", symlink_record.created_at.to_string())
-      .header("X-AeorDB-Updated", symlink_record.updated_at.to_string())
-      .body(Body::empty())
-      .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-  }
-
-  match directory_ops.get_metadata(&path) {
-    Ok(Some(file_record)) => {
-      let safe_path = file_record.path.replace(['\n', '\r'], "");
-      let mut response_builder = axum::http::Response::builder()
-        .status(StatusCode::OK)
-        .header("X-AeorDB-Type", "file")
-        .header("X-AeorDB-Path", safe_path)
-        .header("X-AeorDB-Size", file_record.total_size.to_string())
-        .header("X-AeorDB-Created", file_record.created_at.to_string())
-        .header("X-AeorDB-Updated", file_record.updated_at.to_string());
-
-      if let Some(ref content_type) = file_record.content_type {
-        response_builder = response_builder.header("content-type", content_type.as_str());
-      }
-
-      response_builder.body(Body::empty()).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    }
-    Ok(None) => {
-      // Check if it is a directory
-      match directory_ops.list_directory_strict(&path) {
-        Ok(_) => {
-          let safe_path = path.replace(['\n', '\r'], "");
-          axum::http::Response::builder()
-            .status(StatusCode::OK)
-            .header("X-AeorDB-Type", "directory")
-            .header("X-AeorDB-Path", safe_path)
-            .body(Body::empty())
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        }
-        Err(EngineError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
-        Err(error) => engine_error_response("Failed to inspect directory", &error),
-      }
-    }
-    Err(error) => {
-      tracing::error!("Engine: failed to get metadata for '{}': {}", path, error);
-      StatusCode::INTERNAL_SERVER_ERROR.into_response()
-    }
-  }
+pub async fn engine_head(
+  State(state): State<AppState>,
+  Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
+  active_key_rules: Option<Extension<ActiveKeyRules>>,
+  filtered_listing: Option<Extension<crate::auth::permission_middleware::FilteredListing>>,
+  headers: HeaderMap,
+  Path(path): Path<String>,
+  AxumQuery(version_query): AxumQuery<EngineGetQuery>,
+) -> Response {
+  engine_get(
+    State(state),
+    Extension(claims),
+    Extension(root_plan),
+    active_key_rules,
+    filtered_listing,
+    Method::HEAD,
+    headers,
+    Path(path),
+    AxumQuery(version_query),
+  )
+  .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2093,11 +2138,16 @@ pub async fn engine_head(State(state): State<AppState>, Extension(claims): Exten
 /// many files. Root and unscoped keys retain full access.
 pub async fn engine_get_by_hash(
   State(state): State<AppState>,
-  Extension(_claims): Extension<TokenClaims>,
+  Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<crate::auth::permission_middleware::ActiveKeyRules>>,
   headers: HeaderMap,
   Path(hex_hash): Path<String>,
+  AxumQuery(version_query): AxumQuery<EngineGetQuery>,
 ) -> Response {
+  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::RetrieveHashFromSelectedRoot) {
+    return response;
+  }
   let hash_bytes = match hex::decode(&hex_hash) {
     Ok(bytes) => bytes,
     Err(_) => {
@@ -2106,12 +2156,13 @@ pub async fn engine_get_by_hash(
         .into_response();
     }
   };
-
   let header = {
     let engine = std::sync::Arc::clone(&state.engine);
     let hash = hash_bytes.clone();
     match run_engine_blocking("get_entry_header_by_hash", "Failed to retrieve entry header", move || {
-      engine.get_entry_header(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(hash))))
+      engine
+        .get_entry_header_including_deleted(&hash)?
+        .ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(hash))))
     })
     .await
     {
@@ -2120,20 +2171,15 @@ pub async fn engine_get_by_hash(
     }
   };
 
-  // Block ALL access to system-flagged entries via API — system data is only
-  // accessible through the internal system_store module, never through HTTP.
-  if header.is_system_entry() {
-    return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-  }
-
-  let mut file_record = if header.entry_type == EntryType::FileRecord {
+  let file_record = if header.entry_type == EntryType::FileRecord {
     let engine = std::sync::Arc::clone(&state.engine);
     let hash = hash_bytes.clone();
     let hash_length = state.engine.hash_algo().hash_length();
     let entry_version = header.entry_version;
     match run_engine_blocking("get_file_record_by_hash", "Failed to retrieve file record", move || {
-      let (_, _, value) =
-        engine.get_entry_verified(&hash)?.ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(&hash))))?;
+      let (_, _, value) = engine
+        .get_entry_verified_including_deleted(&hash)?
+        .ok_or_else(|| EngineError::NotFound(format!("Entry not found: {}", hex::encode(&hash))))?;
       FileRecord::deserialize(&value, hash_length, entry_version)
     })
     .await
@@ -2145,32 +2191,38 @@ pub async fn engine_get_by_hash(
     None
   };
 
-  // Scoped-key check. ActiveKeyRules is only inserted by the permission
-  // middleware when the key is scoped (rules non-empty). Root keys and
-  // unscoped keys skip this entirely.
-  if let Some(Extension(rules)) = active_key_rules.as_ref() {
-    use crate::engine::api_key_rules::{match_rules, check_operation_permitted};
-    match header.entry_type {
-      EntryType::FileRecord => {
-        let path = match file_record.as_ref() {
-          Some(record) => &record.path,
-          None => return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response(),
-        };
-        let allowed = match match_rules(&rules.0, path) {
-          Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
-          None => false,
-        };
-        if !allowed {
-          // Use 404 (not 403) so scoped keys cannot enumerate forbidden
-          // paths by probing hashes.
-          return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-        }
-      }
-      // For raw chunks and other non-path entries, we can't tie the hash
-      // back to a path the scoped key is permitted to access. Deny.
-      _ => {
-        return ErrorResponse::new(format!("Entry not found: {}", hex_hash)).with_status(StatusCode::NOT_FOUND).into_response();
-      }
+  let key_rules = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  let is_root_request = Uuid::parse_str(&claims.sub).is_ok_and(|user_id| is_root(&user_id));
+  if header.entry_type == EntryType::FileRecord {
+    let path = match file_record.as_ref() {
+      Some(record) => record.path.as_str(),
+      None => return ErrorResponse::new(format!("Entry not found: {hex_hash}")).with_status(StatusCode::NOT_FOUND).into_response(),
+    };
+    let current_allowed = match current_path_read_is_authorized(&state, &claims, key_rules, path) {
+      Ok(current_allowed) => current_allowed,
+      Err(error) => return engine_error_response("Failed to authorize hash path", &error),
+    };
+    if !current_allowed {
+      return ErrorResponse::new(format!("Entry not found: {hex_hash}")).with_status(StatusCode::NOT_FOUND).into_response();
+    }
+  } else if !is_root_request {
+    return ErrorResponse::new(format!("Entry not found: {hex_hash}")).with_status(StatusCode::NOT_FOUND).into_response();
+  }
+
+  let selector = match version_query.selector(&state.engine) {
+    Ok(selector) => selector,
+    Err(error) => return root_api_error_response(error, false),
+  };
+  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
+    return response;
+  }
+  let selected = match resolve_legacy_root(&state.engine, &selector) {
+    Ok(selected) => selected,
+    Err(response) => return response,
+  };
+  if let Some(record) = file_record.as_ref() {
+    if let Err(response) = selected_path_filter(&state, &claims, &selected, &record.path, CrudlifyOp::Read, None, true) {
+      return response;
     }
   }
 
@@ -2193,27 +2245,34 @@ pub async fn engine_get_by_hash(
 
   match header.entry_type {
     EntryType::FileRecord => {
-      let file_record = match required_dispatch_value(file_record.take(), "FileRecord", &hex_hash) {
-        Ok(file_record) => file_record,
-        Err(response) => return response,
+      let selected_file = match selected.file_by_hash(&hash_bytes) {
+        Ok(selected_file) => selected_file,
+        Err(EngineError::NotFound(_)) => {
+          return ErrorResponse::new(format!("Entry not found: {hex_hash}")).with_status(StatusCode::NOT_FOUND).into_response();
+        }
+        Err(error) => return engine_error_response("Failed to validate selected FileRecord reachability", &error),
       };
-
-      build_file_streaming_response(
+      let response = build_file_streaming_response(
         &state.engine,
-        file_record,
+        selected_file.record,
         None,
         &headers,
-        false,
+        selected.root().state != "live",
         &[("X-AeorDB-Type", header.entry_type.to_u8().to_string()), ("X-AeorDB-Hash", hex_hash.clone())],
       )
-      .await
+      .await;
+      attach_root_headers(response, &selected).unwrap_or_else(|response| response)
     }
 
     EntryType::Chunk => {
       let data = {
         let engine = std::sync::Arc::clone(&state.engine);
         let hash = hash_bytes.clone();
-        match run_engine_blocking("get_chunk_by_hash", "Failed to retrieve chunk", move || read_chunk_reserved(&engine, &hash, false)).await
+        let include_deleted = selected.root().state != "live";
+        match run_engine_blocking("get_chunk_by_hash", "Failed to retrieve chunk", move || {
+          read_chunk_reserved(&engine, &hash, include_deleted)
+        })
+        .await
         {
           Ok(data) => data,
           Err(response) => return response,
@@ -2221,13 +2280,14 @@ pub async fn engine_get_by_hash(
       };
       state.engine.counters().record_read(data.len() as u64);
 
-      axum::http::Response::builder()
+      let response = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(axum::body::Bytes::from_owner(data)))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response());
+      attach_root_headers(response, &selected).unwrap_or_else(|response| response)
     }
 
     EntryType::DirectoryIndex => {
@@ -2236,13 +2296,14 @@ pub async fn engine_get_by_hash(
         Err(response) => return response,
       };
       state.engine.counters().record_read(value.len() as u64);
-      axum::http::Response::builder()
+      let response = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(axum::body::Bytes::from_owner(value)))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response());
+      attach_root_headers(response, &selected).unwrap_or_else(|response| response)
     }
 
     _ => {
@@ -2251,13 +2312,14 @@ pub async fn engine_get_by_hash(
         Ok(value) => value,
         Err(response) => return response,
       };
-      axum::http::Response::builder()
+      let response = axum::http::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
         .header("X-AeorDB-Type", header.entry_type.to_u8().to_string())
         .header("X-AeorDB-Hash", &hex_hash)
         .body(Body::from(axum::body::Bytes::from_owner(value)))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response())
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response());
+      attach_root_headers(response, &selected).unwrap_or_else(|response| response)
     }
   }
 }

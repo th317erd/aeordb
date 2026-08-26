@@ -217,22 +217,32 @@ async fn actual_cli_preserves_six_class_v3_routes_streaming_and_http_fallbacks()
 
   let read = client.get(server.url("/files/qualification/stream.bin")).send().await.expect("read live streamed file");
   assert_eq!(read.status(), StatusCode::OK);
-  for header in ["x-aeordb-root-hash", "x-aeordb-root-state", "x-aeordb-root-expires-at"] {
-    assert!(read.headers().get(header).is_none(), "inactive v4 read emitted {header}");
-  }
+  let read_root_hash = read.headers().get("x-aeordb-root-hash").expect("file read root hash").to_str().unwrap().to_string();
+  assert_eq!(read_root_hash.len(), 64);
+  assert_eq!(read.headers().get("x-aeordb-root-state").expect("file read root state"), "live");
+  assert_eq!(read.headers().get("x-aeordb-root-expires-at").expect("file read root expiry"), "");
   assert_eq!(read.bytes().await.expect("read streamed response bytes").as_ref(), streamed_bytes);
 
   let head = client.head(server.url("/files/qualification/stream.bin")).send().await.expect("HEAD live streamed file");
   assert_eq!(head.status(), StatusCode::OK);
+  assert_eq!(head.headers().get("x-aeordb-root-hash").expect("HEAD root hash"), &read_root_hash);
+  assert_eq!(head.headers().get("x-aeordb-root-state").expect("HEAD root state"), "live");
+  assert_eq!(head.headers().get("x-aeordb-root-expires-at").expect("HEAD root expiry"), "");
   assert!(head.bytes().await.expect("read HEAD response").is_empty());
 
   let listing = client.get(server.url("/files/qualification")).send().await.expect("list live directory");
   assert_eq!(listing.status(), StatusCode::OK);
   let listing = listing.json::<Value>().await.expect("decode live listing");
+  assert_eq!(listing["root"]["hash"], read_root_hash);
+  assert_eq!(listing["root"]["state"], "live");
+  assert!(listing["root"]["expires_at"].is_null());
   assert!(listing.to_string().contains("stream.bin"), "live listing omitted streamed file: {listing}");
 
   let by_hash = client.get(server.url(&format!("/blobs/{file_hash}"))).send().await.expect("fetch live file by hash");
   assert_eq!(by_hash.status(), StatusCode::OK);
+  assert_eq!(by_hash.headers().get("x-aeordb-root-hash").expect("hash read root hash"), &read_root_hash);
+  assert_eq!(by_hash.headers().get("x-aeordb-root-state").expect("hash read root state"), "live");
+  assert_eq!(by_hash.headers().get("x-aeordb-root-expires-at").expect("hash read root expiry"), "");
   assert_eq!(by_hash.bytes().await.expect("read hash response").as_ref(), streamed_bytes);
 
   let config = client.get(server.url("/blobs/config")).send().await.expect("request blob config");
