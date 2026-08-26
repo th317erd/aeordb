@@ -8,19 +8,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
+use super::engine_routes::{
+  attach_root_metadata_headers, current_path_read_is_authorized, legacy_root_adapter_error_response, reject_historical_share_selector,
+  require_legacy_root_plan, root_api_error_response, selected_path_is_authorized,
+};
+use super::legacy_v3_root_adapter::{LegacyV3RootAdapterErrorV1, LegacyV3SelectedRootAdapterV1};
 use super::responses::{engine_error_response, ErrorResponse};
-use super::route_permissions::RoutePermissionChecker;
+use super::root_api::{RequestedRootSelectorV1, RootRequestAdapterV1, RootSelectorFieldsV1, RouteRootRequestPlanV1, parse_root_selector_v1};
 use super::state::AppState;
 use super::temp_response::{body_from_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
 use crate::auth::permission_middleware::ActiveKeyRules;
 use crate::auth::TokenClaims;
-use crate::engine::api_key_rules::{check_operation_permitted, match_rules};
-use crate::engine::directory_ops::{reserve_streaming_read, DirectoryOps, EngineFileStream};
-use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::directory_ops::{EngineFileStream, reserve_streaming_read};
+use crate::engine::errors::EngineError;
 use crate::engine::path_utils::{file_name, normalize_path};
 use crate::engine::permission_resolver::CrudlifyOp;
-use crate::engine::range_extract::{extract_range_from_record, RangeExtractionRequest};
-use crate::engine::SystemFamilyPolicyResolver;
+use crate::engine::range_extract::RangeExtractionRequest;
 
 const MAX_BATCH_FETCH_FILES: usize = 10_000;
 const MAX_BATCH_FETCH_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
@@ -31,6 +34,9 @@ pub struct BatchFetchRequest {
   pub items: Option<Vec<BatchFetchItem>>,
   pub max_bytes: Option<u64>,
   pub continue_on_error: Option<bool>,
+  pub root_hash: Option<String>,
+  pub snapshot: Option<String>,
+  pub version: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -56,9 +62,14 @@ struct BatchFetchRangeError {
 pub async fn batch_fetch(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
   Json(body): Json<BatchFetchRequest>,
 ) -> Response {
+  if let Err(response) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return response;
+  }
+  let selector_fields = RootSelectorFieldsV1 { root_hash: body.root_hash, snapshot: body.snapshot, version: body.version };
   match (body.paths, body.items) {
     (Some(_), Some(_)) => {
       return ErrorResponse::new("Provide either 'paths' for whole-file fetch or 'items' for range fetch, not both")
@@ -66,7 +77,7 @@ pub async fn batch_fetch(
         .into_response();
     }
     (Some(paths), None) => {
-      return batch_fetch_paths(state, claims, active_key_rules.map(|Extension(rules)| rules), paths, body.max_bytes).await
+      return batch_fetch_paths(state, claims, active_key_rules.map(|Extension(rules)| rules), paths, body.max_bytes, selector_fields).await
     }
     (None, Some(items)) => {
       return batch_fetch_range_items(
@@ -76,6 +87,7 @@ pub async fn batch_fetch(
         items,
         body.max_bytes,
         body.continue_on_error.unwrap_or(false),
+        selector_fields,
       )
       .await;
     }
@@ -93,6 +105,7 @@ async fn batch_fetch_paths(
   active_key_rules: Option<ActiveKeyRules>,
   paths: Vec<String>,
   max_bytes: Option<u64>,
+  selector_fields: RootSelectorFieldsV1,
 ) -> Response {
   if paths.is_empty() {
     return ErrorResponse::new("At least one path is required in the 'paths' array").with_status(StatusCode::BAD_REQUEST).into_response();
@@ -104,24 +117,31 @@ async fn batch_fetch_paths(
       .into_response();
   }
 
+  let key_rules = active_key_rules.as_ref().map(|rules| rules.0.as_slice());
+  for path in &paths {
+    if let Err(response) = require_current_fetch_path(&state, &claims, key_rules, path) {
+      return response;
+    }
+  }
+  let selector = match parse_root_selector_v1(&selector_fields, state.engine.hash_algo()) {
+    Ok(selector) => selector,
+    Err(error) => return root_api_error_response(error, false),
+  };
+  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
+    return response;
+  }
+
   let max_response_bytes = max_bytes.unwrap_or(MAX_BATCH_FETCH_RESPONSE_BYTES).min(MAX_BATCH_FETCH_RESPONSE_BYTES);
   let build_state = state.clone();
   let mut build_guard = ResponseBuildGuard::new();
   let cancellation = build_guard.cancellation();
   let build = tokio::task::spawn_blocking(move || {
-    build_batch_fetch_paths(
-      &build_state,
-      &claims,
-      active_key_rules.as_ref().map(|rules| rules.0.as_slice()),
-      &paths,
-      max_response_bytes,
-      &cancellation,
-    )
+    build_batch_fetch_paths(&build_state, &claims, &paths, max_response_bytes, &cancellation, &selector)
   })
   .await;
   build_guard.disarm();
-  let file = match build {
-    Ok(Ok(file)) => file,
+  let output = match build {
+    Ok(Ok(output)) => output,
     Ok(Err(error)) => return fetch_build_error_response(error),
     Err(error) => {
       tracing::error!("Batch fetch builder task panicked: {}", error);
@@ -130,7 +150,7 @@ async fn batch_fetch_paths(
         .into_response();
     }
   };
-  stream_fetch_file(file, &state)
+  stream_fetch_file(output, &state)
 }
 
 async fn batch_fetch_range_items(
@@ -140,6 +160,7 @@ async fn batch_fetch_range_items(
   items: Vec<BatchFetchItem>,
   max_bytes: Option<u64>,
   continue_on_error: bool,
+  selector_fields: RootSelectorFieldsV1,
 ) -> Response {
   if items.is_empty() {
     return ErrorResponse::new("At least one item is required in the 'items' array").with_status(StatusCode::BAD_REQUEST).into_response();
@@ -151,6 +172,33 @@ async fn batch_fetch_range_items(
       .into_response();
   }
 
+  let key_rules = active_key_rules.as_ref().map(|rules| rules.0.as_slice());
+  let mut current_path_authorizations = Vec::with_capacity(items.len());
+  let mut has_currently_authorized_path = false;
+  for item in &items {
+    match current_fetch_path_is_authorized(&state, &claims, key_rules, &item.path) {
+      Ok(true) => {
+        current_path_authorizations.push(true);
+        has_currently_authorized_path = true;
+      }
+      Ok(false) if continue_on_error => current_path_authorizations.push(false),
+      Ok(false) => {
+        return ErrorResponse::new(format!("Not found: {}", item.path)).with_status(StatusCode::NOT_FOUND).into_response();
+      }
+      Err(response) => return response,
+    }
+  }
+  if !has_currently_authorized_path {
+    return ErrorResponse::new(format!("Not found: {}", items[0].path)).with_status(StatusCode::NOT_FOUND).into_response();
+  }
+  let selector = match parse_root_selector_v1(&selector_fields, state.engine.hash_algo()) {
+    Ok(selector) => selector,
+    Err(error) => return root_api_error_response(error, false),
+  };
+  if let Err(response) = reject_historical_share_selector(&claims, &selector) {
+    return response;
+  }
+
   let max_response_bytes = max_bytes.unwrap_or(MAX_BATCH_FETCH_RESPONSE_BYTES).min(MAX_BATCH_FETCH_RESPONSE_BYTES);
   let build_state = state.clone();
   let mut build_guard = ResponseBuildGuard::new();
@@ -159,17 +207,18 @@ async fn batch_fetch_range_items(
     build_batch_fetch_ranges(
       &build_state,
       &claims,
-      active_key_rules.as_ref().map(|rules| rules.0.as_slice()),
       &items,
+      &current_path_authorizations,
       max_response_bytes,
       continue_on_error,
       &cancellation,
+      &selector,
     )
   })
   .await;
   build_guard.disarm();
-  let file = match build {
-    Ok(Ok(file)) => file,
+  let output = match build {
+    Ok(Ok(output)) => output,
     Ok(Err(error)) => return fetch_build_error_response(error),
     Err(error) => {
       tracing::error!("Batch range fetch builder task panicked: {}", error);
@@ -178,12 +227,43 @@ async fn batch_fetch_range_items(
         .into_response();
     }
   };
-  stream_fetch_file(file, &state)
+  stream_fetch_file(output, &state)
+}
+
+fn require_current_fetch_path(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  raw_path: &str,
+) -> Result<(), Response> {
+  match current_fetch_path_is_authorized(state, claims, key_rules, raw_path)? {
+    true => Ok(()),
+    false => Err(ErrorResponse::new(format!("Not found: {raw_path}")).with_status(StatusCode::NOT_FOUND).into_response()),
+  }
+}
+
+fn current_fetch_path_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  raw_path: &str,
+) -> Result<bool, Response> {
+  let normalized = normalize_path(raw_path);
+  match current_path_read_is_authorized(state, claims, key_rules, &normalized) {
+    Ok(authorized) => Ok(authorized),
+    Err(error) => Err(engine_error_response("Failed to authorize batch fetch path", &error)),
+  }
+}
+
+struct BuiltFetchResponse {
+  file: tempfile::NamedTempFile,
+  root: crate::engine::v4::read_view::ReadViewRootMetadataV1,
 }
 
 #[derive(Debug)]
 enum FetchBuildError {
   Engine(EngineError),
+  Root(LegacyV3RootAdapterErrorV1),
   Response(StatusCode, String),
   Io(String),
 }
@@ -197,14 +277,13 @@ impl From<EngineError> for FetchBuildError {
 fn build_batch_fetch_paths(
   state: &AppState,
   claims: &TokenClaims,
-  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   paths: &[String],
   max_response_bytes: u64,
   cancellation: &ResponseBuildCancellation,
-) -> Result<tempfile::NamedTempFile, FetchBuildError> {
+  selector: &RequestedRootSelectorV1,
+) -> Result<BuiltFetchResponse, FetchBuildError> {
   cancellation.check()?;
-  let ops = DirectoryOps::new(&state.engine);
-  let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?;
+  let selected = LegacyV3SelectedRootAdapterV1::resolve(&state.engine, selector).map_err(FetchBuildError::Root)?;
   let mut file = tempfile_for_engine(&state.engine, "fetch").map_err(|error| FetchBuildError::Io(error.to_string()))?;
   file.write_all(b"{").map_err(fetch_io)?;
   let mut cumulative_size = 0u64;
@@ -213,16 +292,17 @@ fn build_batch_fetch_paths(
   for raw_path in paths {
     cancellation.check()?;
     let normalized = normalize_path(raw_path);
-    if !family_policy.generic_data_path_is_visible(&normalized)? || !can_fetch_path(state, claims, key_rules, &normalized)? {
+    if !selected_path_is_authorized(state, claims, &selected, &normalized, CrudlifyOp::Read)? {
       return Err(FetchBuildError::Response(StatusCode::NOT_FOUND, format!("Not found: {raw_path}")));
     }
-    let mut record = match ops.get_metadata(&normalized) {
-      Ok(Some(record)) => record,
-      Ok(None) | Err(EngineError::NotFound(_)) => {
+    let selected_file = match selected.file(&normalized) {
+      Ok(selected_file) => selected_file,
+      Err(EngineError::NotFound(_)) => {
         return Err(FetchBuildError::Response(StatusCode::NOT_FOUND, format!("Not found: {raw_path}")));
       }
       Err(error) => return Err(FetchBuildError::Engine(error)),
     };
+    let record = &selected_file.record;
     cumulative_size = cumulative_size
       .checked_add(record.total_size)
       .ok_or_else(|| FetchBuildError::Response(StatusCode::PAYLOAD_TOO_LARGE, "Batch fetch response size overflowed".to_string()))?;
@@ -247,38 +327,43 @@ fn build_batch_fetch_paths(
     file.write_all(b",\"content_type\":").map_err(fetch_io)?;
     serde_json::to_writer(&mut file, &record.content_type).map_err(fetch_json)?;
     file.write_all(b",\"content\":\"").map_err(fetch_io)?;
-    let hashes = std::mem::take(&mut record.chunk_hashes);
-    let stream = EngineFileStream::from_chunk_hashes(hashes, &state.engine)?;
+    let stream = selected.file_stream(&selected_file)?;
     write_lossy_json_content(&mut file, stream, &state.engine, cancellation)?;
     file.write_all(b"\"}").map_err(fetch_io)?;
   }
   file.write_all(b"}").map_err(fetch_io)?;
-  Ok(file)
+  Ok(BuiltFetchResponse { file, root: selected.root_metadata().clone() })
 }
 
 fn build_batch_fetch_ranges(
   state: &AppState,
   claims: &TokenClaims,
-  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   items: &[BatchFetchItem],
+  current_path_authorizations: &[bool],
   max_response_bytes: u64,
   continue_on_error: bool,
   cancellation: &ResponseBuildCancellation,
-) -> Result<tempfile::NamedTempFile, FetchBuildError> {
+  selector: &RequestedRootSelectorV1,
+) -> Result<BuiltFetchResponse, FetchBuildError> {
   cancellation.check()?;
-  let ops = DirectoryOps::new(&state.engine);
-  let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?;
+  if current_path_authorizations.len() != items.len() {
+    return Err(FetchBuildError::Response(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "Batch range authorization result count did not match the item count".to_string(),
+    ));
+  }
+  let selected = LegacyV3SelectedRootAdapterV1::resolve(&state.engine, selector).map_err(FetchBuildError::Root)?;
   let mut file = tempfile_for_engine(&state.engine, "fetch-range").map_err(|error| FetchBuildError::Io(error.to_string()))?;
   file.write_all(b"{\"items\":[").map_err(fetch_io)?;
   let mut cumulative_size = 0u64;
   let mut has_errors = false;
 
-  for (index, item) in items.iter().enumerate() {
+  for (index, (item, currently_authorized)) in items.iter().zip(current_path_authorizations).enumerate() {
     cancellation.check()?;
     if index > 0 {
       file.write_all(b",").map_err(fetch_io)?;
     }
-    match fetch_one_range_item(state, claims, key_rules, &ops, family_policy, item) {
+    match fetch_one_range_item(state, claims, &selected, item, *currently_authorized) {
       Ok(value) => {
         let content_len = value.content_len();
         if cumulative_size.saturating_add(content_len) > max_response_bytes {
@@ -312,7 +397,7 @@ fn build_batch_fetch_ranges(
     cancellation.check()?;
   }
   write!(file, "],\"has_errors\":{has_errors}}}").map_err(fetch_io)?;
-  Ok(file)
+  Ok(BuiltFetchResponse { file, root: selected.root_metadata().clone() })
 }
 
 fn write_lossy_json_content(
@@ -395,22 +480,24 @@ fn write_json_escaped(writer: &mut impl Write, text: &str) -> std::io::Result<()
   Ok(())
 }
 
-fn stream_fetch_file(file: tempfile::NamedTempFile, state: &AppState) -> Response {
-  let (body, content_length) = match body_from_tempfile(file, std::sync::Arc::clone(&state.engine)) {
+fn stream_fetch_file(output: BuiltFetchResponse, state: &AppState) -> Response {
+  let (body, content_length) = match body_from_tempfile(output.file, std::sync::Arc::clone(&state.engine)) {
     Ok(response) => response,
     Err(error) => return engine_error_response("Failed to stream batch fetch response", &error),
   };
-  axum::http::Response::builder()
+  let response = axum::http::Response::builder()
     .status(StatusCode::OK)
     .header("content-type", "application/json")
     .header("content-length", content_length.to_string())
     .body(body)
-    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build batch fetch response").into_response())
+    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build batch fetch response").into_response());
+  attach_root_metadata_headers(response, &output.root, state.engine.hash_algo()).unwrap_or_else(|response| response)
 }
 
 fn fetch_build_error_response(error: FetchBuildError) -> Response {
   match error {
     FetchBuildError::Engine(error) => engine_error_response("Failed to build batch fetch response", &error),
+    FetchBuildError::Root(error) => legacy_root_adapter_error_response(error),
     FetchBuildError::Response(status, message) => ErrorResponse::new(message).with_status(status).into_response(),
     FetchBuildError::Io(error) => {
       tracing::error!("Failed to build batch fetch response: {}", error);
@@ -502,21 +589,22 @@ impl FetchedRangeItem {
 fn fetch_one_range_item(
   state: &AppState,
   claims: &TokenClaims,
-  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  ops: &DirectoryOps<'_>,
-  family_policy: SystemFamilyPolicyResolver,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   item: &BatchFetchItem,
+  currently_authorized: bool,
 ) -> Result<FetchedRangeItem, RangeFetchError> {
   let normalized = normalize_path(&item.path);
 
-  let visible = family_policy.generic_data_path_is_visible(&normalized).map_err(RangeFetchError::Engine)?;
-  if !visible || !can_fetch_path(state, claims, key_rules, &normalized).map_err(RangeFetchError::Engine)? {
+  if !currently_authorized {
+    return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
+  }
+  if !selected_path_is_authorized(state, claims, selected, &normalized, CrudlifyOp::Read).map_err(RangeFetchError::Engine)? {
     return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
   }
 
-  let file_record = match ops.get_metadata(&normalized) {
-    Ok(Some(record)) => record,
-    Ok(None) => {
+  let selected_file = match selected.file(&normalized) {
+    Ok(selected_file) => selected_file,
+    Err(EngineError::NotFound(_)) => {
       return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
     }
     Err(error) => {
@@ -531,6 +619,7 @@ fn fetch_one_range_item(
       ));
     }
   };
+  let file_record = &selected_file.record;
 
   let content_hash = file_record.content_hash_hex();
   if let Some(expected) = item.if_content_hash.as_deref() {
@@ -550,7 +639,7 @@ fn fetch_one_range_item(
     range_request.max_bytes = item.max_bytes;
   }
 
-  let extracted = match extract_range_from_record(&state.engine, &file_record, &range_request) {
+  let extracted = match selected.extract_range(&selected_file, &range_request) {
     Ok(extracted) => extracted,
     Err(EngineError::NotFound(_)) => {
       return Err(RangeFetchError::Response(StatusCode::NOT_FOUND, range_error(item, "not_found", format!("Not found: {}", item.path))));
@@ -575,7 +664,7 @@ fn fetch_one_range_item(
   let name = file_name(&file_record.path).unwrap_or("").to_string();
   Ok(FetchedRangeItem {
     id: item.id.clone(),
-    path: file_record.path,
+    path: file_record.path.clone(),
     name,
     size: file_record.total_size,
     created_at: file_record.created_at,
@@ -593,39 +682,12 @@ fn range_error_value(item: &BatchFetchItem, status: &'static str, message: Strin
   serde_json::to_value(range_error(item, status, message)).unwrap_or_else(|_| serde_json::json!({"status": status}))
 }
 
-fn can_fetch_path(
-  state: &AppState,
-  claims: &TokenClaims,
-  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
-  path: &str,
-) -> EngineResult<bool> {
-  if let Some(rules) = key_rules {
-    if !rules.is_empty() {
-      return Ok(match match_rules(rules, path) {
-        Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
-        None => false,
-      });
-    }
-  }
-
-  if claims.sub.starts_with("share:") {
-    return Ok(true);
-  }
-
-  let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
-  let permissions = RoutePermissionChecker::for_user(state, user_id);
-  if permissions.is_root() {
-    return Ok(true);
-  }
-
-  permissions.has_direct_permission(path, CrudlifyOp::Read)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::engine::directory_ops::DirectoryOps;
   use crate::engine::memory_coordinator::MemoryOwner;
-  use crate::engine::range_extract::{RangeExtractionRequest, RangeMode};
+  use crate::engine::range_extract::{RangeExtractionRequest, RangeMode, extract_range_from_record};
   use crate::engine::request_context::RequestContext;
   use crate::server::create_temp_engine_for_tests;
 

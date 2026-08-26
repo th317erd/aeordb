@@ -281,7 +281,69 @@ async fn actual_cli_preserves_six_class_v3_routes_streaming_and_http_fallbacks()
 
   let staged = client.get(server.url("/files/qualification/staged.txt")).send().await.expect("read committed staged file");
   assert_eq!(staged.status(), StatusCode::OK);
+  let staged_root_hash = staged.headers().get("x-aeordb-root-hash").expect("staged file root hash").to_str().unwrap().to_string();
+  assert_eq!(staged.headers().get("x-aeordb-root-state").expect("staged file root state"), "live");
+  assert_eq!(staged.headers().get("x-aeordb-root-expires-at").expect("staged file root expiry"), "");
   assert_eq!(staged.bytes().await.expect("read staged file").as_ref(), blob_bytes);
+
+  let whole_fetch = client
+    .post(server.url("/files/fetch"))
+    .json(&json!({ "paths": ["/qualification/staged.txt"] }))
+    .send()
+    .await
+    .expect("request live whole-file batch fetch");
+  assert_eq!(whole_fetch.status(), StatusCode::OK);
+  assert_eq!(whole_fetch.headers().get("x-aeordb-root-hash").expect("whole fetch root hash"), &staged_root_hash);
+  assert_eq!(whole_fetch.headers().get("x-aeordb-root-state").expect("whole fetch root state"), "live");
+  assert_eq!(whole_fetch.headers().get("x-aeordb-root-expires-at").expect("whole fetch root expiry"), "");
+  let whole_fetch = whole_fetch.json::<Value>().await.expect("decode live whole-file batch fetch");
+  assert_eq!(whole_fetch["/qualification/staged.txt"]["content"], "live content-staging round trip");
+  assert!(whole_fetch.get("root").is_none(), "legacy whole-file fetch body gained a root envelope");
+
+  let range_fetch = client
+    .post(server.url("/files/fetch"))
+    .json(&json!({
+      "items": [{
+        "id": "live-range",
+        "path": "/qualification/staged.txt",
+        "range": { "mode": "bytes", "start": 5, "end": 20 }
+      }]
+    }))
+    .send()
+    .await
+    .expect("request live range batch fetch");
+  assert_eq!(range_fetch.status(), StatusCode::OK);
+  assert_eq!(range_fetch.headers().get("x-aeordb-root-hash").expect("range fetch root hash"), &staged_root_hash);
+  let range_fetch = range_fetch.json::<Value>().await.expect("decode live range batch fetch");
+  assert_eq!(range_fetch["items"][0]["id"], "live-range");
+  assert_eq!(range_fetch["items"][0]["content"], "content-staging");
+  assert_eq!(range_fetch["has_errors"], false);
+
+  let download = client
+    .post(server.url("/files/download"))
+    .json(&json!({ "paths": ["/qualification/staged.txt"] }))
+    .send()
+    .await
+    .expect("request live ZIP download");
+  assert_eq!(download.status(), StatusCode::OK);
+  assert_eq!(download.headers().get("x-aeordb-root-hash").expect("ZIP root hash"), &staged_root_hash);
+  assert_eq!(download.headers().get("x-aeordb-root-state").expect("ZIP root state"), "live");
+  assert_eq!(download.headers().get("content-type").expect("ZIP content type"), "application/zip");
+  assert_eq!(
+    download.headers().get("content-disposition").expect("ZIP content disposition"),
+    "attachment; filename=\"aeordb-download.zip\""
+  );
+  let download = download.bytes().await.expect("read live ZIP bytes");
+  assert!(download.starts_with(b"PK\x03\x04"), "live download did not contain a ZIP local-file header");
+
+  let malformed_selector = client
+    .post(server.url("/files/fetch"))
+    .json(&json!({ "paths": ["/qualification/staged.txt"], "root_hash": "xyz" }))
+    .send()
+    .await
+    .expect("request malformed live batch selector");
+  assert_eq!(malformed_selector.status(), StatusCode::BAD_REQUEST);
+  assert_eq!(malformed_selector.json::<Value>().await.expect("decode malformed selector response")["code"], "INVALID_ROOT_HASH");
 
   let multi_root = client.post(server.url("/versions/diff")).send().await.expect("request malformed multi-root operation");
   assert_eq!(multi_root.status(), StatusCode::BAD_REQUEST);

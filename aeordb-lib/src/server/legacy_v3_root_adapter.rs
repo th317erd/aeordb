@@ -18,6 +18,7 @@ use crate::engine::file_record::FileRecord;
 use crate::engine::path_utils::normalize_path;
 use crate::engine::permission_resolver::{CrudlifyOp, evaluate_ordered_path_permissions};
 use crate::engine::permissions::{PathPermissions, PermissionLink};
+use crate::engine::range_extract::{ExtractedRange, RangeExtractionRequest, extract_range_from_record_including_deleted};
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::symlink_record::SymlinkRecord;
 use crate::engine::symlink_resolver::MAX_SYMLINK_DEPTH;
@@ -230,6 +231,14 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
   pub fn read_file_body(&self, path: &str) -> EngineResult<Vec<u8>> {
     let selected_file = self.file(path)?;
     EngineFileStream::from_chunk_hashes_including_deleted(selected_file.record.chunk_hashes, self.engine)?.collect_to_vec()
+  }
+
+  pub fn file_stream(&self, selected_file: &LegacyV3SelectedFileV1) -> EngineResult<EngineFileStream<'engine>> {
+    EngineFileStream::from_chunk_hashes_including_deleted(selected_file.record.chunk_hashes.clone(), self.engine)
+  }
+
+  pub fn extract_range(&self, selected_file: &LegacyV3SelectedFileV1, request: &RangeExtractionRequest) -> EngineResult<ExtractedRange> {
+    extract_range_from_record_including_deleted(self.engine, &selected_file.record, request)
   }
 
   pub fn symlink(&self, path: &str) -> EngineResult<LegacyV3SelectedSymlinkV1> {

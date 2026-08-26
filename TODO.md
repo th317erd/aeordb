@@ -1363,7 +1363,12 @@
             - [x] Preserve current path/key/descendant authorization before root resolution, intersect ordinary users with selected permission documents, and keep share reads current-only.
             - [x] Preserve flat/recursive listing, file/range, symlink follow/nofollow, HEAD, and diagnostic hash behavior while attaching the exact shared root envelope or three headers.
             - [x] Pass the dedicated target plus affected authorization, listing, file, version, symlink, route-contract, and adapter regressions before moving to P7-5b3.
-          - [ ] P7-5b3: route whole-file/range fetch and ZIP download through the same selected-root adapter while preserving legacy collection/body shapes.
+          - [x] P7-5b3: route whole-file/range fetch and ZIP download through the same selected-root adapter while preserving legacy collection/body shapes.
+            - [x] Freeze a dedicated red HTTP proof for historical whole/range fetch and recursive ZIP bytes after HEAD movement, exact root headers, selector conflicts/no fallback, authorization ordering, selected restriction, and share-current policy.
+            - [x] Make both JSON-body routes require the frozen single-root request plan and parse the one mutually-exclusive selector without changing legacy body/archive shapes.
+            - [x] Resolve all file metadata, retained chunks, JSON-pointer bodies, and ZIP directory descendants through the sole legacy selected-root adapter.
+            - [x] Complete current path/key/share/protected-family authority before selected-root observables and intersect ordinary users with selected permission documents for every requested path and ZIP descendant.
+            - [x] Pass the dedicated target plus existing fetch/download, scoped-key, permission, route-contract, adapter, range-extraction, cancellation, and resource-pressure regressions.
           - [ ] P7-5b4: freeze adapter uniqueness/no-fallback architecture and pass narrow, affected, static, documentation, contract, and broad gates.
         - [ ] P7-5c: cut query/search/aggregate/explain over the shared schema, canonical APOS, root-aware locators/ranges, and the live search-root-X to fetch-root-X flow without a legacy cursor decoder.
         - [ ] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.

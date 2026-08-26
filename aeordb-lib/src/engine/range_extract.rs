@@ -70,6 +70,26 @@ pub fn extract_range_from_record(
   file_record: &FileRecord,
   request: &RangeExtractionRequest,
 ) -> EngineResult<ExtractedRange> {
+  extract_range_from_record_with_chunk_visibility(engine, file_record, request, false)
+}
+
+/// Extract from an immutable retained FileRecord whose chunks may no longer
+/// be present in the live KV view. Callers must first prove that the record is
+/// reachable from their selected namespace root.
+pub fn extract_range_from_record_including_deleted(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  request: &RangeExtractionRequest,
+) -> EngineResult<ExtractedRange> {
+  extract_range_from_record_with_chunk_visibility(engine, file_record, request, true)
+}
+
+fn extract_range_from_record_with_chunk_visibility(
+  engine: &StorageEngine,
+  file_record: &FileRecord,
+  request: &RangeExtractionRequest,
+  include_deleted: bool,
+) -> EngineResult<ExtractedRange> {
   let max_bytes = effective_max_bytes(request.max_bytes)?;
   let mut memory_reservation = reserve_streaming_read(
     engine,
@@ -91,7 +111,7 @@ pub fn extract_range_from_record(
           return Err(EngineError::InvalidInput("Range end must be greater than or equal to start".to_string()));
         }
       }
-      let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes.clone(), engine)?;
+      let stream = file_record_stream(engine, file_record, include_deleted)?;
       let extracted = extract_lines_from_stream(stream, start, end, max_bytes)?;
       ExtractedRange {
         content: extracted.text,
@@ -113,7 +133,7 @@ pub fn extract_range_from_record(
           return Err(EngineError::InvalidInput("Range end must be greater than or equal to start".to_string()));
         }
       }
-      let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes.clone(), engine)?;
+      let stream = file_record_stream(engine, file_record, include_deleted)?;
       let extracted = extract_chars_from_stream(stream, start, end, max_bytes)?;
       ExtractedRange {
         content: extracted.text,
@@ -135,7 +155,7 @@ pub fn extract_range_from_record(
           return Err(EngineError::InvalidInput("Range end must be greater than or equal to start".to_string()));
         }
       }
-      let stream = EngineFileStream::from_chunk_hashes(file_record.chunk_hashes.clone(), engine)?;
+      let stream = file_record_stream(engine, file_record, include_deleted)?;
       let extracted = extract_bytes_from_stream(stream, start, end, max_bytes)?;
       ExtractedRange {
         content: extracted.text,
@@ -152,8 +172,7 @@ pub fn extract_range_from_record(
     RangeMode::JsonPointer => {
       let pointer =
         request.pointer.as_deref().ok_or_else(|| EngineError::InvalidInput("json_pointer range requires 'pointer'".to_string()))?;
-      let directory_ops = DirectoryOps::new(engine);
-      let data = directory_ops.read_file_buffered(&file_record.path)?;
+      let data = file_record_stream(engine, file_record, include_deleted)?.collect_to_vec()?;
       let value: serde_json::Value =
         serde_json::from_slice(&data).map_err(|error| EngineError::JsonParseError(format!("Stored file is not valid JSON: {}", error)))?;
       let selected = value.pointer(pointer).ok_or_else(|| EngineError::InvalidInput(format!("JSON pointer not found: {}", pointer)))?;
@@ -194,6 +213,18 @@ pub fn extract_range_from_record(
 
   engine.counters().record_read(extracted.content.len() as u64);
   Ok(extracted)
+}
+
+fn file_record_stream<'engine>(
+  engine: &'engine StorageEngine,
+  file_record: &FileRecord,
+  include_deleted: bool,
+) -> EngineResult<EngineFileStream<'engine>> {
+  if include_deleted {
+    EngineFileStream::from_chunk_hashes_including_deleted(file_record.chunk_hashes.clone(), engine)
+  } else {
+    EngineFileStream::from_chunk_hashes(file_record.chunk_hashes.clone(), engine)
+  }
 }
 
 fn extraction_working_set_bytes(mode: &RangeMode, source_size: u64, max_bytes: usize) -> EngineResult<u64> {

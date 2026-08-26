@@ -1359,6 +1359,10 @@ name = "legacy_v3_root_http_spec"
 path = "spec/http/legacy_v3_root_http_spec.rs"
 
 [[test]]
+name = "legacy_v3_bulk_http_spec"
+path = "spec/http/legacy_v3_bulk_http_spec.rs"
+
+[[test]]
 name = "root_route_runtime_spec"
 path = "spec/http/root_route_runtime_spec.rs"
 

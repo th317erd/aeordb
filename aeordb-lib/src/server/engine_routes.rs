@@ -123,17 +123,26 @@ pub(super) fn resolve_legacy_root<'engine>(
   engine: &'engine StorageEngine,
   selector: &RequestedRootSelectorV1,
 ) -> Result<LegacyV3SelectedRootAdapterV1<'engine>, Response> {
-  LegacyV3SelectedRootAdapterV1::resolve(engine, selector).map_err(|error| {
-    if let Some(source) = error.engine_source() {
-      tracing::error!(context = error.context(), %source, "Legacy selected-root resolution failed");
-    }
-    root_api_error_response(error.public_error(), false)
-  })
+  LegacyV3SelectedRootAdapterV1::resolve(engine, selector).map_err(legacy_root_adapter_error_response)
 }
 
-pub(super) fn attach_root_headers(mut response: Response, selected: &LegacyV3SelectedRootAdapterV1<'_>) -> Result<Response, Response> {
-  let headers = root_response_headers_v1(selected.root_metadata(), selected.engine_hash_algorithm())
-    .map_err(|error| root_api_error_response(error, false))?;
+pub(super) fn legacy_root_adapter_error_response(error: super::legacy_v3_root_adapter::LegacyV3RootAdapterErrorV1) -> Response {
+  if let Some(source) = error.engine_source() {
+    tracing::error!(context = error.context(), %source, "Legacy selected-root resolution failed");
+  }
+  root_api_error_response(error.public_error(), false)
+}
+
+pub(super) fn attach_root_headers(response: Response, selected: &LegacyV3SelectedRootAdapterV1<'_>) -> Result<Response, Response> {
+  attach_root_metadata_headers(response, selected.root_metadata(), selected.engine_hash_algorithm())
+}
+
+pub(super) fn attach_root_metadata_headers(
+  mut response: Response,
+  root: &crate::engine::v4::read_view::ReadViewRootMetadataV1,
+  hash_algorithm: crate::engine::HashAlgorithm,
+) -> Result<Response, Response> {
+  let headers = root_response_headers_v1(root, hash_algorithm).map_err(|error| root_api_error_response(error, false))?;
   for (name, value) in &headers {
     response.headers_mut().insert(name.clone(), value.clone());
   }
@@ -190,18 +199,20 @@ pub(super) fn selected_path_filter(
   Ok(Some(crate::auth::permission_middleware::FilteredListing { allowed_children }))
 }
 
-fn current_path_read_is_authorized(
+pub(super) fn current_path_is_authorized(
   state: &AppState,
   claims: &TokenClaims,
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   path: &str,
+  operation: CrudlifyOp,
 ) -> EngineResult<bool> {
   let policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())?.generic_data_path_selection(path)?;
   if policy != GenericDataPathSelection::Include {
     return Ok(false);
   }
   if let Some(rules) = key_rules {
-    return Ok(match_rules(rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, 'r')));
+    let flag = crate::engine::api_key_rules::operation_to_flag_char(&operation);
+    return Ok(match_rules(rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, flag)));
   }
   if claims.sub.starts_with("share:") {
     return Ok(false);
@@ -210,10 +221,19 @@ fn current_path_read_is_authorized(
   if is_root(&user_id) {
     return Ok(true);
   }
-  RoutePermissionChecker::for_user(state, user_id).has_path_permission(path, CrudlifyOp::Read)
+  RoutePermissionChecker::for_user(state, user_id).has_path_permission(path, operation)
 }
 
-fn selected_path_is_authorized(
+pub(super) fn current_path_read_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  path: &str,
+) -> EngineResult<bool> {
+  current_path_is_authorized(state, claims, key_rules, path, CrudlifyOp::Read)
+}
+
+pub(super) fn selected_path_is_authorized(
   state: &AppState,
   claims: &TokenClaims,
   selected: &LegacyV3SelectedRootAdapterV1<'_>,
