@@ -36,7 +36,11 @@ use aeordb::engine::v4::index_coverage_registry::{
   field_definition_fingerprint, field_dependency_fingerprint,
 };
 use aeordb::engine::v4::index_manifest::FieldNvtManifestBodyV1;
-use aeordb::engine::v4::index_partial_acceleration::IndexPartialSourceErrorClassV1;
+use aeordb::engine::v4::index_partial_acceleration::{
+  IndexChangedDocumentScanRequestV1, IndexChangedDocumentSourceV1, IndexChangedDocumentV1, IndexChangedDocumentVisitorV1,
+  IndexPartialAccelerationErrorV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOriginV1, IndexPartialRecheckOutcomeV1,
+  IndexPartialRecheckRequestV1, IndexPartialSourceErrorClassV1,
+};
 use aeordb::engine::v4::index_nvt::{
   NvtBasisStatusV1, NvtEntryWriteV1, NvtTileWriteV1, encode_nvt_tile, pin_field_index_v1, validate_field_nvt_basis_v1,
 };
@@ -75,7 +79,8 @@ use aeordb::engine::v4::query_aggregate_execution::{
   QueryAggregateInputSourceV1, resolve_query_aggregate_input_v1,
 };
 use aeordb::engine::v4::query_complete_candidate::{
-  QueryCandidateRecheckRequestV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootRequestV1, QueryCompleteScopeRootRequestV1,
+  QueryCandidateRecheckRequestV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootRequestV1,
+  QueryCompleteScopeRootRequestV1,
 };
 use aeordb::engine::v4::query_partial_candidate::{
   QueryPartialCandidateArtifactSourceV1, QueryPartialPostingRootRequestV1, QueryPartialScopeRootRequestV1,
@@ -1049,6 +1054,8 @@ struct SelectedArtifactFixture {
   posting_page: EncodedImmutableIndexArtifactV1,
   posting_root: EncodedImmutableIndexArtifactV1,
   scope_ordinal_root: EncodedImmutableIndexArtifactV1,
+  scope_reverse_root: EncodedImmutableIndexArtifactV1,
+  target_identities: Vec<(Vec<u8>, Vec<u8>)>,
   nvt_descriptor: Option<IndexCoverageNvtDescriptorV1>,
   nvt_tile: Option<EncodedImmutableIndexArtifactV1>,
   nvt_manifest: Option<EncodedImmutableIndexArtifactV1>,
@@ -1143,6 +1150,7 @@ fn selected_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixtur
     0,
     true,
     false,
+    false,
     [0; 32],
     all_capabilities_profile(),
     SelectedArtifactLayoutV1::SinglePage,
@@ -1150,7 +1158,7 @@ fn selected_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixtur
 }
 
 fn selected_artifact_fixture_with_layout(algorithm: HashAlgorithm, layout: SelectedArtifactLayoutV1) -> SelectedArtifactFixture {
-  selected_artifact_fixture_with_options(algorithm, 0, true, false, [0; 32], all_capabilities_profile(), layout)
+  selected_artifact_fixture_with_options(algorithm, 0, true, false, false, [0; 32], all_capabilities_profile(), layout)
 }
 
 fn selected_artifact_fixture_with_manifest_live_delta(algorithm: HashAlgorithm, manifest_live_delta: u64) -> SelectedArtifactFixture {
@@ -1158,6 +1166,7 @@ fn selected_artifact_fixture_with_manifest_live_delta(algorithm: HashAlgorithm, 
     algorithm,
     manifest_live_delta,
     true,
+    false,
     false,
     [0; 32],
     all_capabilities_profile(),
@@ -1171,6 +1180,7 @@ fn selected_partial_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifa
     0,
     true,
     true,
+    false,
     [0; 32],
     all_capabilities_profile(),
     SelectedArtifactLayoutV1::SinglePage,
@@ -1183,6 +1193,7 @@ fn selected_stale_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArti
     0,
     true,
     false,
+    false,
     [0; 32],
     all_capabilities_profile(),
     SelectedArtifactLayoutV1::StaleNvtPageHint,
@@ -1194,6 +1205,7 @@ fn selected_valid_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArti
     algorithm,
     0,
     true,
+    false,
     false,
     [0; 32],
     all_capabilities_profile(),
@@ -1208,6 +1220,7 @@ fn selected_artifact_fixture_with_unadmitted_capability(algorithm: HashAlgorithm
     algorithm,
     0,
     true,
+    false,
     false,
     required_reader_capabilities,
     BinaryCapabilityProfileV1::new(baseline, baseline),
@@ -1264,13 +1277,18 @@ fn selected_artifact_fixture_with_options(
   manifest_live_delta: u64,
   publish_posting_page: bool,
   advance_target_root: bool,
+  target_files: bool,
   field_required_reader_capabilities: [u8; 32],
   capability_profile: BinaryCapabilityProfileV1,
   layout: SelectedArtifactLayoutV1,
 ) -> SelectedArtifactFixture {
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
-  let graph = complete_semantic_graph(algorithm);
+  let graph = if target_files {
+    complete_semantic_graph_with_scope(algorithm, semantic_scope_definition(algorithm, "/", Some("**/*.json")))
+  } else {
+    complete_semantic_graph(algorithm)
+  };
   let selected_root =
     publish_complete_semantic_root(&publisher, algorithm, &first.namespace_root.value, first.namespace_root.root_hash, &graph);
   let posting_coordinates: &[u64] = if layout.has_three_posting_pages() {
@@ -1762,7 +1780,54 @@ fn selected_artifact_fixture_with_options(
     pointer_manifests.push((ActivePointerKindV1::FieldNvt, nvt_manifest));
   }
   publish_selected_artifact_pointers(&publisher, algorithm, &pointer_manifests);
-  let target_root = if advance_target_root {
+  let mut target_identities = Vec::new();
+  let target_root = if target_files {
+    assert!(advance_target_root);
+    let (content_root, identities) = publish_file_tree_with_sizes(
+      &publisher,
+      algorithm,
+      selected_root.clone(),
+      1,
+      true,
+      &["2.json", "4.json"],
+      &[29, 53],
+      FileTreeCorruption::None,
+    );
+    target_identities =
+      identities.into_iter().map(|(path, revision)| (digest_parts(algorithm, &[b"file:", path.as_bytes()]), revision)).collect();
+    let captured = publisher.observe().unwrap().selected;
+    let content_root_value = publisher
+      .load_immutable_entity_at_captured_header(&captured, &content_root, 1024 * 1024, &CancellationToken::new())
+      .unwrap()
+      .unwrap()
+      .stored_value;
+    let decoded_content_root = decode_namespace_root(&content_root_value, algorithm).unwrap();
+    let namespace_tree = publisher
+      .load_immutable_entity_at_captured_header(
+        &captured,
+        &decoded_content_root.namespace_tree_root,
+        1024 * 1024,
+        &CancellationToken::new(),
+      )
+      .unwrap()
+      .unwrap()
+      .stored_value;
+    publisher
+      .publish_successor_authority(&SuccessorAuthorityPublicationRequestV1 {
+        database_id: [0x31; 16],
+        transaction_id: [0x69; 16],
+        created_at_ms: 1_700_000_000_490,
+        expected_head_hash: content_root,
+        namespace_tree: PreparedNamespaceTreeV0 { root_hash: decoded_content_root.namespace_tree_root, stored_value: namespace_tree },
+        semantic_state: graph.state.clone(),
+        required_capabilities: [0; 32],
+        typed_closure_digest: digest_parts(algorithm, &[b"selected artifact partial file target closure"]),
+        authority_identity: b"HEAD".to_vec(),
+      })
+      .unwrap()
+      .namespace_root
+      .root_hash
+  } else if advance_target_root {
     let timestamp = 1_700_000_000_450;
     let namespace_tree = serialize_child_entries(
       &[ChildEntry {
@@ -1853,6 +1918,8 @@ fn selected_artifact_fixture_with_options(
     posting_page,
     posting_root,
     scope_ordinal_root,
+    scope_reverse_root,
+    target_identities,
     nvt_descriptor,
     nvt_tile,
     nvt_manifest,
@@ -2055,6 +2122,8 @@ struct NativeCandidateArtifactFixture {
   posting_page: EncodedImmutableIndexArtifactV1,
   posting_root: EncodedImmutableIndexArtifactV1,
   scope_ordinal_root: EncodedImmutableIndexArtifactV1,
+  scope_reverse_root: EncodedImmutableIndexArtifactV1,
+  target_identities: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl NativeCandidateArtifactFixture {
@@ -2158,7 +2227,29 @@ impl NativeCandidateArtifactFixture {
 }
 
 fn native_candidate_artifact_fixture(algorithm: HashAlgorithm, partial: bool) -> NativeCandidateArtifactFixture {
-  let fixture = if partial { selected_partial_artifact_fixture(algorithm) } else { selected_artifact_fixture(algorithm) };
+  native_candidate_artifact_fixture_with_layout(algorithm, partial, SelectedArtifactLayoutV1::SinglePage)
+}
+
+fn native_candidate_artifact_fixture_with_layout(
+  algorithm: HashAlgorithm,
+  partial: bool,
+  layout: SelectedArtifactLayoutV1,
+) -> NativeCandidateArtifactFixture {
+  native_candidate_artifact_fixture_configured(algorithm, partial, false, layout)
+}
+
+fn native_candidate_artifact_fixture_configured(
+  algorithm: HashAlgorithm,
+  partial: bool,
+  target_files: bool,
+  layout: SelectedArtifactLayoutV1,
+) -> NativeCandidateArtifactFixture {
+  let fixture = if partial {
+    selected_artifact_fixture_with_options(algorithm, 0, true, true, target_files, [0; 32], all_capabilities_profile(), layout)
+  } else {
+    assert!(!target_files);
+    selected_artifact_fixture_with_options(algorithm, 0, true, false, false, [0; 32], all_capabilities_profile(), layout)
+  };
   let snapshot = selected_artifact_coverage_snapshot(&fixture);
   let reader = fixture.reader();
   let mut semantic_catalog = reader.load_planner_catalogs("/", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
@@ -2197,6 +2288,8 @@ fn native_candidate_artifact_fixture(algorithm: HashAlgorithm, partial: bool) ->
     posting_page,
     posting_root,
     scope_ordinal_root,
+    scope_reverse_root,
+    target_identities,
     ..
   } = fixture;
   let limits = NativeAuthoritativeFieldPartitionLimitsV1::new(
@@ -2233,6 +2326,8 @@ fn native_candidate_artifact_fixture(algorithm: HashAlgorithm, partial: bool) ->
     posting_page,
     posting_root,
     scope_ordinal_root,
+    scope_reverse_root,
+    target_identities,
   }
 }
 
@@ -3414,6 +3509,11 @@ fn native_query_execution_limits() -> QueryExecutionLimitsV1 {
   )
 }
 
+fn native_candidate_limits() -> QueryCompleteCandidateLimitsV1 {
+  QueryCompleteCandidateLimitsV1::new(64, 1_024, 128, 128 * 1_024, 16_384, 2 * 1_024 * 1_024, ArtifactPageCursorLimitsV1::default())
+    .unwrap()
+}
+
 #[test]
 fn native_authoritative_execution_facade_runs_the_selected_root_truth_path() {
   let names = ["a.json", "b.json", "c.json", "d.json"];
@@ -3652,6 +3752,310 @@ fn native_scope_and_complete_recheck_share_selected_root_row_field_authority_at_
     ));
     assert_eq!(visitor.documents.len(), 1);
     drop(source);
+    fixture.assert_released();
+  }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeChangedDocumentOwnedV1 {
+  file_key: Vec<u8>,
+  basis_revision_hash: Option<Vec<u8>>,
+  target_revision_hash: Option<Vec<u8>>,
+}
+
+struct NativeChangedDocumentCollectorV1(Vec<NativeChangedDocumentOwnedV1>);
+
+impl IndexChangedDocumentVisitorV1 for NativeChangedDocumentCollectorV1 {
+  fn visit(&mut self, document: IndexChangedDocumentV1<'_>) -> Result<(), IndexPartialAccelerationErrorV1> {
+    self.0.push(NativeChangedDocumentOwnedV1 {
+      file_key: document.file_key.to_vec(),
+      basis_revision_hash: document.basis_revision_hash.map(<[u8]>::to_vec),
+      target_revision_hash: document.target_revision_hash.map(<[u8]>::to_vec),
+    });
+    Ok(())
+  }
+}
+
+#[test]
+fn native_partial_complement_merges_captured_scope_closure_with_selected_target_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let fixture = native_candidate_artifact_fixture_with_layout(algorithm, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+    assert_ne!(fixture.plan.selected_namespace_root(), fixture.generation.source_namespace_root);
+    assert!(!fixture.scope_reverse_root.key.is_empty());
+    let mut complement = fixture
+      .source
+      .open_partial_complement_source(&fixture.scope_id, native_candidate_limits())
+      .expect("captured scope complement source must open");
+    fixture.advance_mutable_authority();
+    let mut collector = NativeChangedDocumentCollectorV1(Vec::new());
+    let receipt = complement
+      .scan_changed_documents(
+        IndexChangedDocumentScanRequestV1 {
+          hash_algorithm: algorithm,
+          generation_manifest_hash: &fixture.generation.manifest_hash,
+          source_namespace_root: &fixture.generation.source_namespace_root,
+          target_namespace_root: fixture.plan.selected_namespace_root(),
+          covered_through_publication_sequence: fixture.generation.coverage_publication_sequence,
+          target_publication_sequence: fixture.plan.publication_sequence(),
+          maximum_changed_documents: 8,
+          cancellation: &fixture.cancellation,
+        },
+        &mut collector,
+      )
+      .unwrap();
+    let mut expected = (1..=3u64)
+      .map(|ordinal| {
+        let path = format!("/docs/{ordinal}.json");
+        NativeChangedDocumentOwnedV1 {
+          file_key: digest_parts(algorithm, &[b"file:", path.as_bytes()]),
+          basis_revision_hash: Some(digest_parts(algorithm, &[b"revision:", path.as_bytes()])),
+          target_revision_hash: None,
+        }
+      })
+      .collect::<Vec<_>>();
+    expected.sort_by(|left, right| left.file_key.cmp(&right.file_key));
+    assert_eq!(collector.0, expected);
+    assert_eq!(receipt.source_namespace_root, fixture.generation.source_namespace_root);
+    assert_eq!(receipt.target_namespace_root, fixture.plan.selected_namespace_root());
+    assert_eq!(receipt.covered_through_publication_sequence, fixture.generation.coverage_publication_sequence);
+    assert_eq!(receipt.target_publication_sequence, fixture.plan.publication_sequence());
+    assert_eq!(receipt.changed_document_count, 3);
+    assert!(receipt.complete);
+    drop(complement);
+    fixture.assert_released();
+  }
+}
+
+#[test]
+fn native_partial_complement_reports_target_additions_modifications_and_deletions_in_file_key_order() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let fixture = native_candidate_artifact_fixture_configured(algorithm, true, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+  let mut complement = fixture.source.open_partial_complement_source(&fixture.scope_id, native_candidate_limits()).unwrap();
+  let mut collector = NativeChangedDocumentCollectorV1(Vec::new());
+  let receipt = complement
+    .scan_changed_documents(
+      IndexChangedDocumentScanRequestV1 {
+        hash_algorithm: algorithm,
+        generation_manifest_hash: &fixture.generation.manifest_hash,
+        source_namespace_root: &fixture.generation.source_namespace_root,
+        target_namespace_root: fixture.plan.selected_namespace_root(),
+        covered_through_publication_sequence: fixture.generation.coverage_publication_sequence,
+        target_publication_sequence: fixture.plan.publication_sequence(),
+        maximum_changed_documents: 8,
+        cancellation: &fixture.cancellation,
+      },
+      &mut collector,
+    )
+    .unwrap();
+  let source = (1..=3u64)
+    .map(|ordinal| {
+      let path = format!("/docs/{ordinal}.json");
+      (digest_parts(algorithm, &[b"file:", path.as_bytes()]), digest_parts(algorithm, &[b"revision:", path.as_bytes()]))
+    })
+    .collect::<BTreeMap<_, _>>();
+  let target = fixture.target_identities.iter().cloned().collect::<BTreeMap<_, _>>();
+  let mut keys = source.keys().chain(target.keys()).cloned().collect::<Vec<_>>();
+  keys.sort();
+  keys.dedup();
+  let expected = keys
+    .into_iter()
+    .filter_map(|file_key| {
+      let basis_revision_hash = source.get(&file_key).cloned();
+      let target_revision_hash = target.get(&file_key).cloned();
+      (basis_revision_hash != target_revision_hash).then_some(NativeChangedDocumentOwnedV1 {
+        file_key,
+        basis_revision_hash,
+        target_revision_hash,
+      })
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(collector.0, expected);
+  assert_eq!(receipt.changed_document_count, 4);
+  assert!(receipt.complete);
+  drop(complement);
+  fixture.assert_released();
+}
+
+#[test]
+fn native_partial_complement_fails_closed_on_corruption_limits_and_cancellation() {
+  let corrupt = native_candidate_artifact_fixture_with_layout(HashAlgorithm::Blake3_256, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+  corrupt.corrupt_artifact_checksum(&corrupt.scope_reverse_root.key);
+  let mut complement = corrupt.source.open_partial_complement_source(&corrupt.scope_id, native_candidate_limits()).unwrap();
+  let mut collector = NativeChangedDocumentCollectorV1(Vec::new());
+  let error = complement
+    .scan_changed_documents(
+      IndexChangedDocumentScanRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        generation_manifest_hash: &corrupt.generation.manifest_hash,
+        source_namespace_root: &corrupt.generation.source_namespace_root,
+        target_namespace_root: corrupt.plan.selected_namespace_root(),
+        covered_through_publication_sequence: corrupt.generation.coverage_publication_sequence,
+        target_publication_sequence: corrupt.plan.publication_sequence(),
+        maximum_changed_documents: 8,
+        cancellation: &corrupt.cancellation,
+      },
+      &mut collector,
+    )
+    .unwrap_err();
+  assert!(matches!(error, aeordb::engine::v4::index_partial_acceleration::IndexPartialScanErrorV1::Source(ref error)
+    if error.class() == IndexPartialSourceErrorClassV1::Corrupt));
+  assert!(collector.0.is_empty());
+  drop(complement);
+  corrupt.assert_released();
+
+  let limited = native_candidate_artifact_fixture_with_layout(HashAlgorithm::Blake3_256, true, SelectedArtifactLayoutV1::TwoLevelNvt);
+  let limits =
+    QueryCompleteCandidateLimitsV1::new(64, 1_024, 2, 128 * 1_024, 16_384, 2 * 1_024 * 1_024, ArtifactPageCursorLimitsV1::default())
+      .unwrap();
+  let mut complement = limited.source.open_partial_complement_source(&limited.scope_id, limits).unwrap();
+  let mut collector = NativeChangedDocumentCollectorV1(Vec::new());
+  let error = complement
+    .scan_changed_documents(
+      IndexChangedDocumentScanRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        generation_manifest_hash: &limited.generation.manifest_hash,
+        source_namespace_root: &limited.generation.source_namespace_root,
+        target_namespace_root: limited.plan.selected_namespace_root(),
+        covered_through_publication_sequence: limited.generation.coverage_publication_sequence,
+        target_publication_sequence: limited.plan.publication_sequence(),
+        maximum_changed_documents: 8,
+        cancellation: &limited.cancellation,
+      },
+      &mut collector,
+    )
+    .unwrap_err();
+  assert!(matches!(error, aeordb::engine::v4::index_partial_acceleration::IndexPartialScanErrorV1::Source(ref error)
+    if error.class() == IndexPartialSourceErrorClassV1::ResourceLimit));
+  drop(complement);
+  limited.assert_released();
+
+  let cancelled = native_candidate_artifact_fixture(HashAlgorithm::Blake3_256, true);
+  let mut complement = cancelled.source.open_partial_complement_source(&cancelled.scope_id, native_candidate_limits()).unwrap();
+  cancelled.cancellation.cancel();
+  let mut collector = NativeChangedDocumentCollectorV1(Vec::new());
+  let error = complement
+    .scan_changed_documents(
+      IndexChangedDocumentScanRequestV1 {
+        hash_algorithm: HashAlgorithm::Blake3_256,
+        generation_manifest_hash: &cancelled.generation.manifest_hash,
+        source_namespace_root: &cancelled.generation.source_namespace_root,
+        target_namespace_root: cancelled.plan.selected_namespace_root(),
+        covered_through_publication_sequence: cancelled.generation.coverage_publication_sequence,
+        target_publication_sequence: cancelled.plan.publication_sequence(),
+        maximum_changed_documents: 8,
+        cancellation: &cancelled.cancellation,
+      },
+      &mut collector,
+    )
+    .unwrap_err();
+  assert!(matches!(error, aeordb::engine::v4::index_partial_acceleration::IndexPartialScanErrorV1::Source(ref error)
+    if error.class() == IndexPartialSourceErrorClassV1::Cancelled));
+  assert!(collector.0.is_empty());
+  drop(complement);
+  cancelled.assert_released();
+}
+
+#[test]
+fn native_partial_rechecker_uses_the_shared_exact_document_evaluator_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let names = ["a.json", "b.json", "c.json"];
+    let sizes = [3, 17, 9];
+    let (fixture, expected) = native_authoritative_size_fixture(algorithm, &names, &sizes, 8);
+    let mut rechecker = fixture
+      .source
+      .open_partial_rechecker(&fixture.plan, &fixture.scope_id, native_query_execution_limits())
+      .expect("selected-root partial rechecker must open");
+    let advanced =
+      fixture.backing_source.publisher().publish_successor_authority(&successor_request(algorithm, fixture.selected_root.clone())).unwrap();
+    assert_ne!(advanced.namespace_root.root_hash, fixture.selected_root);
+    let basis_revision = vec![0x44; algorithm.hash_length()];
+    for ((file_key, revision, _), size) in expected.iter().zip(sizes) {
+      let outcome = rechecker
+        .recheck(IndexPartialRecheckRequestV1 {
+          hash_algorithm: algorithm,
+          target_namespace_root: &fixture.selected_root,
+          target_publication_sequence: fixture.publication_sequence,
+          query_fingerprint: fixture.plan.query_fingerprint(),
+          file_key,
+          basis_revision_hash: Some(&basis_revision),
+          expected_target_revision_hash: Some(revision),
+          origin: IndexPartialRecheckOriginV1::ChangedDocumentComplement,
+          cancellation: &fixture.cancellation,
+        })
+        .unwrap();
+      assert_eq!(outcome, IndexPartialRecheckOutcomeV1::Present { record_revision_hash: revision.clone(), matches: size > 8 });
+    }
+
+    let mut stale_expected_revision = expected[1].1.clone();
+    stale_expected_revision[0] ^= 0xff;
+    assert_eq!(
+      rechecker
+        .recheck(IndexPartialRecheckRequestV1 {
+          hash_algorithm: algorithm,
+          target_namespace_root: &fixture.selected_root,
+          target_publication_sequence: fixture.publication_sequence,
+          query_fingerprint: fixture.plan.query_fingerprint(),
+          file_key: &expected[1].0,
+          basis_revision_hash: Some(&basis_revision),
+          expected_target_revision_hash: Some(&stale_expected_revision),
+          origin: IndexPartialRecheckOriginV1::ChangedDocumentComplement,
+          cancellation: &fixture.cancellation,
+        })
+        .unwrap(),
+      IndexPartialRecheckOutcomeV1::Present { record_revision_hash: expected[1].1.clone(), matches: true }
+    );
+
+    let mut foreign_fingerprint = fixture.plan.query_fingerprint().to_vec();
+    foreign_fingerprint[0] ^= 0xff;
+    let error = rechecker
+      .recheck(IndexPartialRecheckRequestV1 {
+        hash_algorithm: algorithm,
+        target_namespace_root: &fixture.selected_root,
+        target_publication_sequence: fixture.publication_sequence,
+        query_fingerprint: &foreign_fingerprint,
+        file_key: &expected[0].0,
+        basis_revision_hash: Some(&basis_revision),
+        expected_target_revision_hash: Some(&expected[0].1),
+        origin: IndexPartialRecheckOriginV1::AcceleratorCandidate,
+        cancellation: &fixture.cancellation,
+      })
+      .unwrap_err();
+    assert_eq!(error.class(), IndexPartialSourceErrorClassV1::Corrupt);
+
+    let missing = digest_parts(algorithm, &[b"file:/docs/missing.json"]);
+    assert_eq!(
+      rechecker
+        .recheck(IndexPartialRecheckRequestV1 {
+          hash_algorithm: algorithm,
+          target_namespace_root: &fixture.selected_root,
+          target_publication_sequence: fixture.publication_sequence,
+          query_fingerprint: fixture.plan.query_fingerprint(),
+          file_key: &missing,
+          basis_revision_hash: Some(&basis_revision),
+          expected_target_revision_hash: None,
+          origin: IndexPartialRecheckOriginV1::AcceleratorCandidate,
+          cancellation: &fixture.cancellation,
+        })
+        .unwrap(),
+      IndexPartialRecheckOutcomeV1::Absent
+    );
+
+    fixture.cancellation.cancel();
+    let error = rechecker
+      .recheck(IndexPartialRecheckRequestV1 {
+        hash_algorithm: algorithm,
+        target_namespace_root: &fixture.selected_root,
+        target_publication_sequence: fixture.publication_sequence,
+        query_fingerprint: fixture.plan.query_fingerprint(),
+        file_key: &expected[0].0,
+        basis_revision_hash: Some(&basis_revision),
+        expected_target_revision_hash: Some(&expected[0].1),
+        origin: IndexPartialRecheckOriginV1::AcceleratorCandidate,
+        cancellation: &fixture.cancellation,
+      })
+      .unwrap_err();
+    assert_eq!(error.class(), IndexPartialSourceErrorClassV1::Cancelled);
+    drop(rechecker);
     fixture.assert_released();
   }
 }
@@ -4581,6 +4985,15 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
     assert!(!adapter.contains("decode_semantic_catalog_node("), "semantic adapter bypassed the shared bounded catalog walker");
     assert!(!adapter.contains("decode_semantic_definition_record("), "semantic adapter bypassed shared definition closure");
   }
+  let query_native = fs::read_to_string(source_root.join("engine/v4/query_native_source.rs")).unwrap();
+  let query_executor = fs::read_to_string(source_root.join("engine/v4/query_executor.rs")).unwrap();
+  assert_eq!(query_native.matches("impl IndexChangedDocumentSourceV1 for").count(), 1);
+  assert_eq!(query_native.matches("impl IndexPartialCandidateRecheckerV1 for").count(), 1);
+  assert_eq!(query_native.matches("evaluate_authoritative_query_document_v1(").count(), 1);
+  assert_eq!(query_executor.matches("pub fn evaluate_authoritative_query_document_v1(").count(), 1);
+  for forbidden in ["execute_partial_index_acceleration_v1(", "execute_exact_query_scope_v1(", "execute_exact_query_scope_into_v1("] {
+    assert!(!query_native.contains(forbidden), "native source adapter gained a duplicate exactness or sink state machine: {forbidden}");
+  }
 }
 
 #[test]
@@ -4814,8 +5227,20 @@ fn selected_artifact_root_adapter_resolves_posting_and_exact_dependent_scope_roo
       ArtifactDirectoryRootSummaryV1::from_directory(&decode_artifact_directory(&fixture.scope_ordinal_root.value, algorithm).unwrap())
     );
 
+    let reverse =
+      reader.load_index_artifact_root(&selected_artifact_root_request(&fixture, OrderedIndexRoleV1::ScopeReverse)).unwrap().unwrap();
+    assert_eq!(reverse.root_key(), fixture.scope_reverse_root.key);
+    assert_eq!(reverse.owner_id(), fixture.scope_id);
+    assert_eq!(reverse.generation(), 7);
+    assert_eq!(reverse.role(), OrderedIndexRoleV1::ScopeReverse);
+    assert_eq!(
+      reverse.summary(),
+      ArtifactDirectoryRootSummaryV1::from_directory(&decode_artifact_directory(&fixture.scope_reverse_root.value, algorithm).unwrap())
+    );
+
     drop(posting);
     drop(scope);
+    drop(reverse);
     assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
     drop(reader);
     fixture.assert_released();
@@ -4828,7 +5253,12 @@ fn selected_artifact_root_adapter_resolves_posting_and_exact_dependent_scope_roo
     reader.load_index_artifact_root(&selected_artifact_root_request(&partial, OrderedIndexRoleV1::ScopeOrdinal)).unwrap().unwrap();
   assert_eq!(scope.root_key(), partial.scope_ordinal_root.key);
   assert_eq!(scope.owner_id(), partial.scope_id);
+  let reverse =
+    reader.load_index_artifact_root(&selected_artifact_root_request(&partial, OrderedIndexRoleV1::ScopeReverse)).unwrap().unwrap();
+  assert_eq!(reverse.root_key(), partial.scope_reverse_root.key);
+  assert_eq!(reverse.owner_id(), partial.scope_id);
   drop(scope);
+  drop(reverse);
   drop(reader);
   partial.assert_released();
 }
@@ -5440,6 +5870,7 @@ fn selected_artifact_cursor_rejects_catalog_manifest_and_root_closure_drift() {
   let missing_page = selected_artifact_fixture_with_options(
     HashAlgorithm::Blake3_256,
     0,
+    false,
     false,
     false,
     [0; 32],

@@ -1586,10 +1586,16 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         "artifact catalog does not bind the exact complete selected semantic authority",
       ));
     }
-    if !matches!(role, OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState | OrderedIndexRoleV1::ScopeOrdinal) {
+    if !matches!(
+      role,
+      OrderedIndexRoleV1::Posting
+        | OrderedIndexRoleV1::IndexDocumentState
+        | OrderedIndexRoleV1::ScopeOrdinal
+        | OrderedIndexRoleV1::ScopeReverse
+    ) {
       return Err(NativeSelectedNamespaceReadErrorV1::invalid(
         "selected_artifact_catalog_role",
-        "field-index artifact catalogs admit only Posting, IndexDocumentState, or their dependent ScopeOrdinal role",
+        "field-index artifact catalogs admit only Posting, IndexDocumentState, or their dependent ScopeOrdinal/ScopeReverse roles",
       ));
     }
     let coverage_is_partial = selected_generation.source_namespace_root != catalog.selected_namespace_root;

@@ -773,7 +773,10 @@ fn load_selected_directory_closure(
     }
     (
       IndexManifestBodyV1::FieldIndex(field_body),
-      OrderedIndexRoleV1::Posting | OrderedIndexRoleV1::IndexDocumentState | OrderedIndexRoleV1::ScopeOrdinal,
+      OrderedIndexRoleV1::Posting
+      | OrderedIndexRoleV1::IndexDocumentState
+      | OrderedIndexRoleV1::ScopeOrdinal
+      | OrderedIndexRoleV1::ScopeReverse,
     ) => {
       let value_bytes = load_required_manifest(
         publisher,
@@ -808,7 +811,7 @@ fn load_selected_directory_closure(
       let definition_fingerprint = field_definition_fingerprint(captured.header.hash_algorithm, field_body.field_index_definition);
       let dependency_fingerprint = field_dependency_fingerprint(captured.header.hash_algorithm, scope.owner_id, value.owner_id);
       validate_selected_fingerprints(selected_generation, &definition_fingerprint, &dependency_fingerprint)?;
-      if role == OrderedIndexRoleV1::ScopeOrdinal {
+      if matches!(role, OrderedIndexRoleV1::ScopeOrdinal | OrderedIndexRoleV1::ScopeReverse) {
         let IndexManifestBodyV1::ScopeCatalog(scope_body) = &scope.details else {
           return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
             "selected_artifact_scope_manifest_kind",

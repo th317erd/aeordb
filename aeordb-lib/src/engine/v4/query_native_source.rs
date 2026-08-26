@@ -1,5 +1,6 @@
 //! Native selected-root source for partitioned authoritative query truth.
 
+use std::cmp::Ordering;
 use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,10 +11,18 @@ use crate::engine::HashAlgorithm;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner, MemoryReservation};
 
 use super::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, decode_canonical_value};
-use super::index_artifact_cursor::{ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, RetainedArtifactBytesV1};
+use super::index_artifact_cursor::{
+  ArtifactCursorReadErrorV1, ArtifactCursorSourceV1, ArtifactPageCursorErrorV1, ArtifactPageCursorRequestV1, ArtifactPageCursorRootV1,
+  ArtifactPageNeighborModeV1, ArtifactPageSeekV1, RetainedArtifactBytesV1, load_artifact_page_cursor_v1,
+};
 use super::index_definition_runtime::{IndexDefinitionErrorClassV1, IndexDefinitionRuntimeV1};
-use super::index_page::OrderedIndexRoleV1;
-use super::index_partial_acceleration::IndexPartialSourceErrorV1;
+use super::index_page::{OrderedIndexRoleV1, decode_ordered_page};
+use super::index_partial_acceleration::{
+  IndexChangedDocumentScanReceiptV1, IndexChangedDocumentScanRequestV1, IndexChangedDocumentSourceV1, IndexChangedDocumentV1,
+  IndexChangedDocumentVisitorV1, IndexPartialCandidateRecheckerV1, IndexPartialRecheckOutcomeV1, IndexPartialRecheckRequestV1,
+  IndexPartialScanErrorV1, IndexPartialSourceErrorV1,
+};
+use super::index_record::{ScopeDocumentRecordV1, decode_scope_document_record, decode_scope_reverse_record};
 use super::position::{CompiledPositionComparatorV1, PositionRouteV1, PositionSortDirectionV1};
 use super::position_order::{
   LogicalOrderComponentOwnedV1, LogicalOrderRowOwnedV1, compare_logical_order_components_v1, logical_order_row_allocated_bytes_v1,
@@ -27,18 +36,19 @@ use super::query_aggregate_execution::{
 };
 use super::query_complete_candidate::{
   QueryCandidateArtifactRootV1, QueryCandidateRecheckReceiptV1, QueryCandidateRecheckRequestV1, QueryCompleteCandidateErrorClassV1,
-  QueryCompleteCandidateErrorV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootReceiptV1, QueryCompletePostingRootRequestV1,
-  QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
+  QueryCompleteCandidateErrorV1, QueryCompleteCandidateLimitsV1, QueryCompleteCandidateSourceV1, QueryCompletePostingRootReceiptV1,
+  QueryCompletePostingRootRequestV1, QueryCompleteScopeRootReceiptV1, QueryCompleteScopeRootRequestV1,
 };
 use super::query_executor::{
   QueryAuthoritativeDocumentVisitorV1, QueryAuthoritativeFieldPartitionCursorV1, QueryAuthoritativeFieldPartitionSourceV1,
   QueryAuthoritativeFieldSourceV1, QueryAuthoritativeScopeSourceV1, QueryAuthoritativeValueVisitorV1, QueryExecutionDocumentV1,
-  QueryExecutionErrorV1, QueryExecutionFieldDocumentV1, QueryExecutionFieldPartitionOpenRequestV1, QueryExecutionFieldPartitionReceiptV1,
-  QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1, QueryExecutionLimitsV1,
-  QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1, QueryExecutionScopeScanRequestV1,
-  QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
-  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryExecutionV1, RootAwareQueryScopeExecutionRequestV1,
-  execute_authoritative_partitioned_query_into_v1, execute_authoritative_partitioned_query_v1, execute_authoritative_scope_query_v1,
+  QueryExecutionErrorClassV1, QueryExecutionErrorV1, QueryExecutionFieldDocumentV1, QueryExecutionFieldPartitionOpenRequestV1,
+  QueryExecutionFieldPartitionReceiptV1, QueryExecutionFieldReadReceiptV1, QueryExecutionFieldReadRequestV1, QueryExecutionFieldStateV1,
+  QueryExecutionLimitsV1, QueryExecutionMatchSinkV1, QueryExecutionScanErrorV1, QueryExecutionScopeScanReceiptV1,
+  QueryExecutionScopeScanRequestV1, QueryExecutionSourceErrorClassV1, QueryExecutionSourceErrorV1, QueryExecutionStreamReceiptV1,
+  RootAwarePartitionedQueryExecutionRequestV1, RootAwareQueryDocumentEvaluationRequestV1, RootAwareQueryExecutionV1,
+  RootAwareQueryScopeExecutionRequestV1, evaluate_authoritative_query_document_v1, execute_authoritative_partitioned_query_into_v1,
+  execute_authoritative_partitioned_query_v1, execute_authoritative_scope_query_v1,
 };
 use super::query_native_workspace::{
   NativeQueryOrderingCursorV1, NativeQueryOrderingLookupV1, NativeQueryOrderingWorkspaceBuilderV1,
@@ -139,6 +149,23 @@ pub struct NativeAuthoritativeFieldPartitionSourceV1 {
 pub struct NativeQueryCandidateArtifactSourceV1 {
   inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
   lookup: Option<NativeQueryOrderingLookupV1>,
+}
+
+pub struct NativeQueryPartialComplementSourceV1 {
+  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+  artifacts: NativeQueryCandidateArtifactSourceV1,
+  scope_id: [u8; 64],
+  scope_id_length: usize,
+  limits: QueryCompleteCandidateLimitsV1,
+}
+
+pub struct NativeQueryPartialRecheckerV1<'plan> {
+  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+  plan: &'plan CompiledRootAwareQueryPlanV1,
+  scope_id: [u8; 64],
+  scope_id_length: usize,
+  lookup: NativeQueryOrderingLookupV1,
+  limits: QueryExecutionLimitsV1,
 }
 
 struct NativeAuthoritativeRowFieldSourceV1<'row, 'scope> {
@@ -394,6 +421,33 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
   pub fn open_candidate_artifact_source(&self) -> NativeQueryCandidateArtifactSourceV1 {
     NativeQueryCandidateArtifactSourceV1 { inner: Arc::clone(&self.inner), lookup: None }
   }
+
+  pub fn open_partial_complement_source(
+    &self,
+    scope_id: &[u8],
+    limits: QueryCompleteCandidateLimitsV1,
+  ) -> Result<NativeQueryPartialComplementSourceV1, QueryExecutionSourceErrorV1> {
+    let (scope_id, scope_id_length) = retain_fixed_identity(scope_id, self.inner.view.hash_algorithm(), "partial complement ScopeId")?;
+    Ok(NativeQueryPartialComplementSourceV1 {
+      inner: Arc::clone(&self.inner),
+      artifacts: self.open_candidate_artifact_source(),
+      scope_id,
+      scope_id_length,
+      limits,
+    })
+  }
+
+  pub fn open_partial_rechecker<'plan>(
+    &self,
+    plan: &'plan CompiledRootAwareQueryPlanV1,
+    scope_id: &[u8],
+    limits: QueryExecutionLimitsV1,
+  ) -> Result<NativeQueryPartialRecheckerV1<'plan>, QueryExecutionSourceErrorV1> {
+    validate_auxiliary_plan(&self.inner, plan)?;
+    let (scope_id, scope_id_length) = retain_fixed_identity(scope_id, self.inner.view.hash_algorithm(), "partial recheck ScopeId")?;
+    let lookup = self.inner.workspace.open_lookup().map_err(map_workspace_error)?;
+    Ok(NativeQueryPartialRecheckerV1 { inner: Arc::clone(&self.inner), plan, scope_id, scope_id_length, lookup, limits })
+  }
 }
 
 impl ArtifactCursorSourceV1 for NativeQueryCandidateArtifactSourceV1 {
@@ -432,7 +486,7 @@ impl NativeQueryCandidateArtifactSourceV1 {
     request: QueryCompleteScopeRootRequestV1<'_>,
   ) -> Result<QueryCompleteScopeRootReceiptV1, QueryExecutionSourceErrorV1> {
     self.validate_target_request(request.selected_namespace_root, request.publication_sequence, request.scope_id, request.cancellation)?;
-    let root = self.resolve_scope_root(request.scope_id, request.selected_namespace_root, None)?;
+    let root = self.resolve_scope_root(request.scope_id, request.selected_namespace_root, None, OrderedIndexRoleV1::ScopeOrdinal)?;
     Ok(QueryCompleteScopeRootReceiptV1 {
       selected_namespace_root: try_clone_bytes(request.selected_namespace_root, "complete selected NamespaceRoot")?,
       publication_sequence: request.publication_sequence,
@@ -518,7 +572,15 @@ impl NativeQueryCandidateArtifactSourceV1 {
     scope_id: &[u8],
     source_namespace_root: &[u8],
     source_publication_sequence: Option<u64>,
+    role: OrderedIndexRoleV1,
   ) -> Result<Option<QueryCandidateArtifactRootV1>, QueryExecutionSourceErrorV1> {
+    if !matches!(role, OrderedIndexRoleV1::ScopeOrdinal | OrderedIndexRoleV1::ScopeReverse) {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_candidate_scope_role",
+        "dependent scope-root resolution requires ScopeOrdinal or ScopeReverse",
+      ));
+    }
     validate_identity(source_namespace_root, self.inner.view.hash_algorithm(), "coverage NamespaceRoot")?;
     let mut resolved: Option<Option<QueryCandidateArtifactRootV1>> = None;
     let mut matched = false;
@@ -537,7 +599,7 @@ impl NativeQueryCandidateArtifactSourceV1 {
           continue;
         }
         matched = true;
-        let root = self.load_root(catalog, scope_id, generation, OrderedIndexRoleV1::ScopeOrdinal)?;
+        let root = self.load_root(catalog, scope_id, generation, role)?;
         merge_candidate_scope_root(&mut resolved, root)?;
       }
     }
@@ -552,7 +614,7 @@ impl NativeQueryCandidateArtifactSourceV1 {
       source_error(
         QueryExecutionSourceErrorClassV1::Internal,
         "native_candidate_scope_resolution",
-        "matched scope generations produced no root resolution outcome",
+        "matched scope generations produced no dependent root resolution outcome",
       )
     })
   }
@@ -569,7 +631,7 @@ fn merge_candidate_scope_root(
       return Err(source_error(
         QueryExecutionSourceErrorClassV1::Corrupt,
         "native_candidate_scope_root_disagreement",
-        "matching planner-selected generations disagree on their dependent ScopeOrdinal root",
+        "matching planner-selected generations disagree on their dependent scope root",
       ));
     }
   }
@@ -615,7 +677,12 @@ impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourc
     require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
     validate_identity(request.scope_id, self.inner.view.hash_algorithm(), "partial ScopeId").map_err(map_execution_partial_error)?;
     let root = self
-      .resolve_scope_root(request.scope_id, request.source_namespace_root, Some(request.source_publication_sequence))
+      .resolve_scope_root(
+        request.scope_id,
+        request.source_namespace_root,
+        Some(request.source_publication_sequence),
+        OrderedIndexRoleV1::ScopeOrdinal,
+      )
       .map_err(map_execution_partial_error)?;
     Ok(QueryPartialScopeRootReceiptV1 {
       source_namespace_root: clone_partial_bytes(request.source_namespace_root, "partial source NamespaceRoot")?,
@@ -730,6 +797,481 @@ impl QueryCompleteCandidateSourceV1 for NativeQueryCandidateArtifactSourceV1 {
       indexed_path: try_clone_string(request.indexed_path, "candidate path").map_err(QueryExecutionScanErrorV1::Source)?,
       document_count: 1,
       complete: true,
+    })
+  }
+}
+
+#[derive(Clone, Copy)]
+struct NativePartialTargetIdentityV1 {
+  file_key: [u8; 64],
+  record_revision: [u8; 64],
+  hash_length: usize,
+}
+
+impl NativePartialTargetIdentityV1 {
+  fn file_key(&self) -> &[u8] {
+    &self.file_key[..self.hash_length]
+  }
+
+  fn record_revision(&self) -> &[u8] {
+    &self.record_revision[..self.hash_length]
+  }
+}
+
+struct NativePartialHistoricalIdentityV1 {
+  file_key: [u8; 64],
+  record_revision: [u8; 64],
+  hash_length: usize,
+  within_query_path: bool,
+}
+
+impl NativePartialHistoricalIdentityV1 {
+  fn file_key(&self) -> &[u8] {
+    &self.file_key[..self.hash_length]
+  }
+
+  fn record_revision(&self) -> &[u8] {
+    &self.record_revision[..self.hash_length]
+  }
+}
+
+struct NativePartialComplementBudgetV1<'a> {
+  limits: QueryCompleteCandidateLimitsV1,
+  request_cancellation: &'a CancellationToken,
+  view_cancellation: &'a CancellationToken,
+  work_steps: u64,
+  page_seeks: u64,
+  historical_documents: u64,
+  identity_bytes: u64,
+}
+
+impl NativePartialComplementBudgetV1<'_> {
+  fn require_not_cancelled(&self) -> Result<(), IndexPartialSourceErrorV1> {
+    if self.request_cancellation.is_cancelled() || self.view_cancellation.is_cancelled() {
+      Err(IndexPartialSourceErrorV1::cancelled("native_partial_complement_cancelled", "native changed-document complement was cancelled"))
+    } else {
+      Ok(())
+    }
+  }
+
+  fn charge_work(&mut self, amount: u64) -> Result<(), IndexPartialSourceErrorV1> {
+    self.require_not_cancelled()?;
+    self.work_steps = self
+      .work_steps
+      .checked_add(amount)
+      .ok_or_else(|| IndexPartialSourceErrorV1::resource_limit("native_partial_complement_work", "complement work counter overflowed"))?;
+    if self.work_steps > self.limits.maximum_work_steps() {
+      return Err(IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_complement_work",
+        "changed-document complement exceeded its admitted work-step bound",
+      ));
+    }
+    Ok(())
+  }
+
+  fn charge_page(&mut self) -> Result<(), IndexPartialSourceErrorV1> {
+    self.charge_work(1)?;
+    self.page_seeks = self.page_seeks.checked_add(1).ok_or_else(|| {
+      IndexPartialSourceErrorV1::resource_limit("native_partial_complement_pages", "complement page-seek counter overflowed")
+    })?;
+    if self.page_seeks > self.limits.maximum_page_seeks() {
+      return Err(IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_complement_pages",
+        "changed-document complement exceeded its admitted page-seek bound",
+      ));
+    }
+    Ok(())
+  }
+
+  fn charge_historical(&mut self, identity_bytes: u64) -> Result<(), IndexPartialSourceErrorV1> {
+    self.charge_work(1)?;
+    self.historical_documents = self.historical_documents.checked_add(1).ok_or_else(|| {
+      IndexPartialSourceErrorV1::resource_limit("native_partial_complement_historical_count", "historical document counter overflowed")
+    })?;
+    if self.historical_documents > self.limits.maximum_candidate_documents() {
+      return Err(IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_complement_historical_limit",
+        "historical ScopeReverse identities exceed the admitted candidate-document bound",
+      ));
+    }
+    self.identity_bytes = self.identity_bytes.checked_add(identity_bytes).ok_or_else(|| {
+      IndexPartialSourceErrorV1::resource_limit("native_partial_complement_identity_bytes", "historical identity byte counter overflowed")
+    })?;
+    if self.identity_bytes > self.limits.maximum_identity_bytes() {
+      return Err(IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_complement_identity_limit",
+        "historical ScopeOrdinal identities exceed the admitted identity-byte bound",
+      ));
+    }
+    Ok(())
+  }
+}
+
+impl IndexChangedDocumentSourceV1 for NativeQueryPartialComplementSourceV1 {
+  fn scan_changed_documents(
+    &mut self,
+    request: IndexChangedDocumentScanRequestV1<'_>,
+    visitor: &mut dyn IndexChangedDocumentVisitorV1,
+  ) -> Result<IndexChangedDocumentScanReceiptV1, IndexPartialScanErrorV1> {
+    self.validate_request(&request)?;
+    let view_cancellation = self.inner.view.cancellation().clone();
+    let mut budget = NativePartialComplementBudgetV1 {
+      limits: self.limits,
+      request_cancellation: request.cancellation,
+      view_cancellation: &view_cancellation,
+      work_steps: 0,
+      page_seeks: 0,
+      historical_documents: 0,
+      identity_bytes: 0,
+    };
+    let ordinal_root = self
+      .artifacts
+      .resolve_scope_root(
+        self.scope_id(),
+        request.source_namespace_root,
+        Some(request.covered_through_publication_sequence),
+        OrderedIndexRoleV1::ScopeOrdinal,
+      )
+      .map_err(map_execution_partial_error)?;
+    let reverse_root = self
+      .artifacts
+      .resolve_scope_root(
+        self.scope_id(),
+        request.source_namespace_root,
+        Some(request.covered_through_publication_sequence),
+        OrderedIndexRoleV1::ScopeReverse,
+      )
+      .map_err(map_execution_partial_error)?;
+    validate_partial_scope_root_pair(self.scope_id(), ordinal_root.as_ref(), reverse_root.as_ref())?;
+
+    let mut target = self.inner.workspace.open_cursor().map_err(map_workspace_error).map_err(map_execution_partial_error)?;
+    let mut prior_target = None;
+    let mut target_head = next_partial_target(&mut target, self.scope_id(), request.cancellation, &mut budget, &mut prior_target)?;
+    let mut prior_historical = None;
+    let mut changed_document_count = 0u64;
+
+    if let (Some(ordinal_root), Some(reverse_root)) = (ordinal_root.as_ref(), reverse_root.as_ref()) {
+      for page_ordinal in 0..reverse_root.summary().page_count {
+        budget.charge_page()?;
+        let cursor_request = partial_cursor_request(
+          request.hash_algorithm,
+          reverse_root,
+          OrderedIndexRoleV1::ScopeReverse,
+          ArtifactPageSeekV1::PageOrdinal(page_ordinal),
+          self.limits,
+        );
+        let reverse_cursor = load_artifact_page_cursor_v1(&cursor_request, &mut self.artifacts, &|| {
+          request.cancellation.is_cancelled() || self.inner.view.cancellation().is_cancelled()
+        })
+        .map_err(map_artifact_cursor_partial_error)?
+        .ok_or_else(|| {
+          IndexPartialSourceErrorV1::corrupt(
+            "native_partial_reverse_page_missing",
+            "a nonempty ScopeReverse root omitted one of its declared pages",
+          )
+        })?;
+        let reverse_page = decode_ordered_page(reverse_cursor.page(), request.hash_algorithm).map_err(|error| {
+          IndexPartialSourceErrorV1::corrupt("native_partial_reverse_page", format!("cannot decode ScopeReverse page: {error}"))
+        })?;
+        for record in reverse_page.records.iter() {
+          budget.charge_work(1)?;
+          let record = record.map_err(|error| {
+            IndexPartialSourceErrorV1::corrupt("native_partial_reverse_record", format!("cannot decode ScopeReverse row: {error}"))
+          })?;
+          let reverse = decode_scope_reverse_record(record.encoded, request.hash_algorithm).map_err(|error| {
+            IndexPartialSourceErrorV1::corrupt("native_partial_reverse_record", format!("cannot decode ScopeReverse row: {error}"))
+          })?;
+          if prior_historical.as_ref().is_some_and(|prior: &NativePartialTargetIdentityV1| prior.file_key() >= reverse.file_key) {
+            return Err(
+              IndexPartialSourceErrorV1::corrupt(
+                "native_partial_reverse_order",
+                "historical ScopeReverse rows are not in strict FileKey order",
+              )
+              .into(),
+            );
+          }
+          let historical = self.resolve_historical_identity(request.hash_algorithm, ordinal_root, &reverse, &mut budget)?;
+          prior_historical = Some(fixed_target_identity(historical.file_key(), historical.record_revision())?);
+          if !historical.within_query_path {
+            continue;
+          }
+          while target_head.as_ref().is_some_and(|target| target.file_key() < historical.file_key()) {
+            let current = target_head
+              .ok_or_else(|| IndexPartialSourceErrorV1::internal("native_partial_target_state", "validated target head disappeared"))?;
+            changed_document_count = emit_native_changed_document(
+              visitor,
+              current.file_key(),
+              None,
+              Some(current.record_revision()),
+              changed_document_count,
+              request.maximum_changed_documents,
+              &budget,
+            )?;
+            target_head = next_partial_target(&mut target, self.scope_id(), request.cancellation, &mut budget, &mut prior_target)?;
+          }
+          match target_head.as_ref().map(|target| target.file_key().cmp(historical.file_key())) {
+            Some(Ordering::Equal) => {
+              let current = target_head.ok_or_else(|| {
+                IndexPartialSourceErrorV1::internal("native_partial_target_state", "validated equal target head disappeared")
+              })?;
+              if current.record_revision() != historical.record_revision() {
+                changed_document_count = emit_native_changed_document(
+                  visitor,
+                  historical.file_key(),
+                  Some(historical.record_revision()),
+                  Some(current.record_revision()),
+                  changed_document_count,
+                  request.maximum_changed_documents,
+                  &budget,
+                )?;
+              }
+              target_head = next_partial_target(&mut target, self.scope_id(), request.cancellation, &mut budget, &mut prior_target)?;
+            }
+            Some(Ordering::Greater) | None => {
+              changed_document_count = emit_native_changed_document(
+                visitor,
+                historical.file_key(),
+                Some(historical.record_revision()),
+                None,
+                changed_document_count,
+                request.maximum_changed_documents,
+                &budget,
+              )?;
+            }
+            Some(Ordering::Less) => {
+              return Err(
+                IndexPartialSourceErrorV1::internal(
+                  "native_partial_merge_state",
+                  "target FileKey remained below the historical FileKey after merge advancement",
+                )
+                .into(),
+              );
+            }
+          }
+        }
+      }
+      if budget.historical_documents != reverse_root.summary().live_count {
+        return Err(
+          IndexPartialSourceErrorV1::corrupt(
+            "native_partial_reverse_live_count",
+            "ScopeReverse traversal disagrees with its captured root live count",
+          )
+          .into(),
+        );
+      }
+    }
+    while let Some(current) = target_head {
+      changed_document_count = emit_native_changed_document(
+        visitor,
+        current.file_key(),
+        None,
+        Some(current.record_revision()),
+        changed_document_count,
+        request.maximum_changed_documents,
+        &budget,
+      )?;
+      target_head = next_partial_target(&mut target, self.scope_id(), request.cancellation, &mut budget, &mut prior_target)?;
+    }
+    budget.require_not_cancelled()?;
+    Ok(IndexChangedDocumentScanReceiptV1 {
+      source_namespace_root: clone_partial_bytes(request.source_namespace_root, "complement source NamespaceRoot")?,
+      target_namespace_root: clone_partial_bytes(request.target_namespace_root, "complement target NamespaceRoot")?,
+      covered_through_publication_sequence: request.covered_through_publication_sequence,
+      target_publication_sequence: request.target_publication_sequence,
+      changed_document_count,
+      complete: true,
+    })
+  }
+}
+
+impl NativeQueryPartialComplementSourceV1 {
+  fn scope_id(&self) -> &[u8] {
+    &self.scope_id[..self.scope_id_length]
+  }
+
+  fn validate_request(&self, request: &IndexChangedDocumentScanRequestV1<'_>) -> Result<(), IndexPartialSourceErrorV1> {
+    require_not_cancelled(request.cancellation).map_err(map_execution_partial_error)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
+    validate_identity(request.generation_manifest_hash, request.hash_algorithm, "partial generation manifest")
+      .map_err(map_execution_partial_error)?;
+    validate_identity(request.source_namespace_root, request.hash_algorithm, "partial source NamespaceRoot")
+      .map_err(map_execution_partial_error)?;
+    validate_identity(request.target_namespace_root, request.hash_algorithm, "partial target NamespaceRoot")
+      .map_err(map_execution_partial_error)?;
+    if request.hash_algorithm != self.inner.view.hash_algorithm()
+      || request.target_namespace_root != self.inner.view.root_metadata().hash
+      || request.target_publication_sequence != self.inner.view.authority().admission.publication_sequence
+      || request.covered_through_publication_sequence >= request.target_publication_sequence
+      || request.maximum_changed_documents == 0
+    {
+      return Err(IndexPartialSourceErrorV1::corrupt(
+        "native_partial_complement_authority",
+        "changed-document request does not bind a strict historical-to-selected-root interval",
+      ));
+    }
+    Ok(())
+  }
+
+  fn resolve_historical_identity(
+    &mut self,
+    algorithm: HashAlgorithm,
+    ordinal_root: &QueryCandidateArtifactRootV1,
+    reverse: &super::index_record::ScopeReverseRecordV1<'_>,
+    budget: &mut NativePartialComplementBudgetV1<'_>,
+  ) -> Result<NativePartialHistoricalIdentityV1, IndexPartialSourceErrorV1> {
+    budget.charge_page()?;
+    let ordinal_key = reverse.document_ordinal.to_le_bytes();
+    let request = partial_cursor_request(
+      algorithm,
+      ordinal_root,
+      OrderedIndexRoleV1::ScopeOrdinal,
+      ArtifactPageSeekV1::OrderLowerBound(&ordinal_key),
+      self.limits,
+    );
+    let cursor = load_artifact_page_cursor_v1(&request, &mut self.artifacts, &|| {
+      budget.request_cancellation.is_cancelled() || budget.view_cancellation.is_cancelled()
+    })
+    .map_err(map_artifact_cursor_partial_error)?
+    .ok_or_else(|| {
+      IndexPartialSourceErrorV1::corrupt(
+        "native_partial_ordinal_missing",
+        "ScopeReverse identity resolves beyond the captured ScopeOrdinal root",
+      )
+    })?;
+    let page = decode_ordered_page(cursor.page(), algorithm).map_err(|error| {
+      IndexPartialSourceErrorV1::corrupt("native_partial_ordinal_page", format!("cannot decode ScopeOrdinal page: {error}"))
+    })?;
+    let mut selected: Option<ScopeDocumentRecordV1<'_>> = None;
+    for record in page.records.iter() {
+      budget.charge_work(1)?;
+      let record = record.map_err(|error| {
+        IndexPartialSourceErrorV1::corrupt("native_partial_ordinal_record", format!("cannot decode ScopeOrdinal row: {error}"))
+      })?;
+      if record.document_ordinal < reverse.document_ordinal {
+        continue;
+      }
+      if record.document_ordinal == reverse.document_ordinal {
+        selected = Some(decode_scope_document_record(record.encoded, algorithm).map_err(|error| {
+          IndexPartialSourceErrorV1::corrupt("native_partial_ordinal_record", format!("cannot decode ScopeOrdinal row: {error}"))
+        })?);
+      }
+      break;
+    }
+    let selected = selected.ok_or_else(|| {
+      IndexPartialSourceErrorV1::corrupt("native_partial_ordinal_missing", "ScopeReverse identity has no exact ScopeOrdinal row")
+    })?;
+    if selected.tombstone || selected.file_key != reverse.file_key || selected.document_ordinal != reverse.document_ordinal {
+      return Err(IndexPartialSourceErrorV1::corrupt(
+        "native_partial_scope_bijection",
+        "ScopeReverse identity does not map to the same live ScopeOrdinal row",
+      ));
+    }
+    let identity_bytes = selected
+      .file_key
+      .len()
+      .checked_add(selected.record_revision_hash.len())
+      .and_then(|bytes| bytes.checked_add(selected.path.len()))
+      .ok_or_else(|| {
+        IndexPartialSourceErrorV1::resource_limit(
+          "native_partial_complement_identity_bytes",
+          "historical identity byte length overflowed usize",
+        )
+      })?;
+    let identity_bytes = u64::try_from(identity_bytes).map_err(|error| {
+      IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_complement_identity_bytes",
+        format!("historical identity bytes exceed u64: {error}"),
+      )
+    })?;
+    budget.charge_historical(identity_bytes)?;
+    let (file_key, hash_length) =
+      retain_fixed_identity(selected.file_key, algorithm, "historical FileKey").map_err(map_execution_partial_error)?;
+    let (record_revision, revision_length) =
+      retain_fixed_identity(selected.record_revision_hash, algorithm, "historical RecordRevision").map_err(map_execution_partial_error)?;
+    if revision_length != hash_length {
+      return Err(IndexPartialSourceErrorV1::internal(
+        "native_partial_identity_width",
+        "validated historical identities retained different hash widths",
+      ));
+    }
+    Ok(NativePartialHistoricalIdentityV1 {
+      file_key,
+      record_revision,
+      hash_length,
+      within_query_path: path_is_within(&self.inner.query_path, selected.path),
+    })
+  }
+}
+
+impl IndexPartialCandidateRecheckerV1 for NativeQueryPartialRecheckerV1<'_> {
+  fn recheck(&mut self, request: IndexPartialRecheckRequestV1<'_>) -> Result<IndexPartialRecheckOutcomeV1, IndexPartialSourceErrorV1> {
+    require_not_cancelled(request.cancellation).map_err(map_execution_partial_error)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
+    validate_identity(request.file_key, request.hash_algorithm, "partial recheck FileKey").map_err(map_execution_partial_error)?;
+    if let Some(revision) = request.basis_revision_hash {
+      validate_identity(revision, request.hash_algorithm, "partial recheck basis RecordRevision").map_err(map_execution_partial_error)?;
+    }
+    if let Some(revision) = request.expected_target_revision_hash {
+      validate_identity(revision, request.hash_algorithm, "partial recheck target RecordRevision").map_err(map_execution_partial_error)?;
+    }
+    if request.hash_algorithm != self.plan.hash_algorithm()
+      || request.target_namespace_root != self.plan.selected_namespace_root()
+      || request.target_publication_sequence != self.plan.publication_sequence()
+      || request.query_fingerprint != self.plan.query_fingerprint()
+    {
+      return Err(IndexPartialSourceErrorV1::corrupt(
+        "native_partial_recheck_authority",
+        "partial recheck request does not bind the captured compiled selected-root query",
+      ));
+    }
+    let retained_scope_id = self.scope_id;
+    let scope_id = &retained_scope_id[..self.scope_id_length];
+    let Some(ordered) =
+      self.lookup.find_row(request.file_key, request.cancellation).map_err(map_workspace_error).map_err(map_execution_partial_error)?
+    else {
+      return Ok(IndexPartialRecheckOutcomeV1::Absent);
+    };
+    if ordered.scope_id() != Some(scope_id) {
+      return Ok(IndexPartialRecheckOutcomeV1::Absent);
+    }
+    let reader = self
+      .inner
+      .source
+      .selected_namespace_reader(&self.inner.view, self.inner.namespace_limits)
+      .map_err(map_native_error)
+      .map_err(map_execution_partial_error)?;
+    let row = reader
+      .restore_ordered_file_row(ordered.file_key(), ordered.record_revision(), ordered.entity_version(), ordered.encoded_file_record())
+      .map_err(map_native_error)
+      .map_err(map_execution_partial_error)?;
+    if !path_is_within(&self.inner.query_path, row.path()) {
+      return Err(IndexPartialSourceErrorV1::corrupt(
+        "native_partial_recheck_path",
+        "selected-root recheck row is outside the captured query path",
+      ));
+    }
+    let mut fields = NativeAuthoritativeRowFieldSourceV1 {
+      inner: Arc::clone(&self.inner),
+      row: &row,
+      effective_scope_id: scope_id,
+      source_limits: selected_source_limits().map_err(map_execution_partial_error)?,
+    };
+    let matches = evaluate_authoritative_query_document_v1(RootAwareQueryDocumentEvaluationRequestV1 {
+      plan: self.plan,
+      catalogs: self.inner.semantic_catalog.catalogs(),
+      scope_id,
+      document: QueryExecutionDocumentV1 { file_key: row.file_key(), record_revision: row.record_revision(), path: row.path() },
+      fields: &mut fields,
+      memory: self.inner.source.memory_coordinator().as_ref(),
+      cancellation: request.cancellation,
+      limits: self.limits,
+    })
+    .map_err(map_query_execution_partial_error)?;
+    require_not_cancelled(request.cancellation).map_err(map_execution_partial_error)?;
+    require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
+    Ok(IndexPartialRecheckOutcomeV1::Present {
+      record_revision_hash: clone_partial_bytes(row.record_revision(), "partial recheck RecordRevision")?,
+      matches,
     })
   }
 }
@@ -1957,6 +2499,168 @@ fn map_execution_partial_error(error: QueryExecutionSourceErrorV1) -> IndexParti
     QueryExecutionSourceErrorClassV1::Cancelled => IndexPartialSourceErrorV1::cancelled(error.code(), error.context()),
     QueryExecutionSourceErrorClassV1::Internal => IndexPartialSourceErrorV1::internal(error.code(), error.context()),
   }
+}
+
+fn map_query_execution_partial_error(error: QueryExecutionErrorV1) -> IndexPartialSourceErrorV1 {
+  match error.class() {
+    QueryExecutionErrorClassV1::InvalidRequest | QueryExecutionErrorClassV1::CorruptSource => {
+      IndexPartialSourceErrorV1::corrupt(error.code(), error.context())
+    }
+    QueryExecutionErrorClassV1::ResourceLimit => IndexPartialSourceErrorV1::resource_limit(error.code(), error.context()),
+    QueryExecutionErrorClassV1::HistoricalViewUnavailable => IndexPartialSourceErrorV1::unavailable(error.code(), error.context()),
+    QueryExecutionErrorClassV1::Cancelled => IndexPartialSourceErrorV1::cancelled(error.code(), error.context()),
+    QueryExecutionErrorClassV1::Internal => IndexPartialSourceErrorV1::internal(error.code(), error.context()),
+  }
+}
+
+fn map_artifact_cursor_partial_error(error: ArtifactPageCursorErrorV1) -> IndexPartialSourceErrorV1 {
+  let code = error.code();
+  let context = error.to_string();
+  match error {
+    ArtifactPageCursorErrorV1::Cancelled => IndexPartialSourceErrorV1::cancelled(code, context),
+    ArtifactPageCursorErrorV1::SourcePressure(_) | ArtifactPageCursorErrorV1::Allocation(_) => {
+      IndexPartialSourceErrorV1::resource_limit(code, context)
+    }
+    ArtifactPageCursorErrorV1::SourceOperational(_) => IndexPartialSourceErrorV1::unavailable(code, context),
+    ArtifactPageCursorErrorV1::InvalidLimits(_)
+    | ArtifactPageCursorErrorV1::MissingArtifact { .. }
+    | ArtifactPageCursorErrorV1::SourceCorrupt(_)
+    | ArtifactPageCursorErrorV1::Malformed(_) => IndexPartialSourceErrorV1::corrupt(code, context),
+  }
+}
+
+fn retain_fixed_identity(identity: &[u8], algorithm: HashAlgorithm, role: &str) -> Result<([u8; 64], usize), QueryExecutionSourceErrorV1> {
+  validate_identity(identity, algorithm, role)?;
+  let mut retained = [0u8; 64];
+  retained[..identity.len()].copy_from_slice(identity);
+  Ok((retained, identity.len()))
+}
+
+fn fixed_target_identity(file_key: &[u8], record_revision: &[u8]) -> Result<NativePartialTargetIdentityV1, IndexPartialSourceErrorV1> {
+  if file_key.is_empty() || file_key.len() > 64 || record_revision.len() != file_key.len() {
+    return Err(IndexPartialSourceErrorV1::corrupt(
+      "native_partial_target_identity",
+      "target FileKey and RecordRevision have inconsistent fixed hash widths",
+    ));
+  }
+  let mut retained_file_key = [0u8; 64];
+  retained_file_key[..file_key.len()].copy_from_slice(file_key);
+  let mut retained_revision = [0u8; 64];
+  retained_revision[..record_revision.len()].copy_from_slice(record_revision);
+  Ok(NativePartialTargetIdentityV1 { file_key: retained_file_key, record_revision: retained_revision, hash_length: file_key.len() })
+}
+
+fn validate_partial_scope_root_pair(
+  scope_id: &[u8],
+  ordinal: Option<&QueryCandidateArtifactRootV1>,
+  reverse: Option<&QueryCandidateArtifactRootV1>,
+) -> Result<(), IndexPartialSourceErrorV1> {
+  match (ordinal, reverse) {
+    (None, None) => Ok(()),
+    (Some(ordinal), Some(reverse))
+      if ordinal.owner_id() == scope_id
+        && reverse.owner_id() == scope_id
+        && ordinal.generation() == reverse.generation()
+        && ordinal.summary().live_count == reverse.summary().live_count
+        && reverse.summary().tombstone_count == 0 =>
+    {
+      Ok(())
+    }
+    (Some(_), Some(_)) => Err(IndexPartialSourceErrorV1::corrupt(
+      "native_partial_scope_root_pair",
+      "captured ScopeOrdinal and ScopeReverse roots do not describe one exact live scope closure",
+    )),
+    (Some(_), None) | (None, Some(_)) => Err(IndexPartialSourceErrorV1::corrupt(
+      "native_partial_scope_root_absence",
+      "captured scope closure has only one of its ScopeOrdinal/ScopeReverse roots",
+    )),
+  }
+}
+
+fn partial_cursor_request<'a>(
+  algorithm: HashAlgorithm,
+  root: &'a QueryCandidateArtifactRootV1,
+  role: OrderedIndexRoleV1,
+  seek: ArtifactPageSeekV1<'a>,
+  limits: QueryCompleteCandidateLimitsV1,
+) -> ArtifactPageCursorRequestV1<'a> {
+  ArtifactPageCursorRequestV1 {
+    root: ArtifactPageCursorRootV1 {
+      hash_algorithm: algorithm,
+      root_key: root.root_key(),
+      owner_id: root.owner_id(),
+      role,
+      maximum_generation: root.generation(),
+      expected_summary: Some(root.summary()),
+    },
+    seek,
+    neighbors: ArtifactPageNeighborModeV1::None,
+    limits: limits.cursor(),
+  }
+}
+
+fn next_partial_target(
+  cursor: &mut NativeQueryOrderingCursorV1,
+  scope_id: &[u8],
+  cancellation: &CancellationToken,
+  budget: &mut NativePartialComplementBudgetV1<'_>,
+  prior: &mut Option<NativePartialTargetIdentityV1>,
+) -> Result<Option<NativePartialTargetIdentityV1>, IndexPartialSourceErrorV1> {
+  loop {
+    budget.charge_work(1)?;
+    let Some(row) = cursor.next_row(cancellation).map_err(map_workspace_error).map_err(map_execution_partial_error)? else {
+      return Ok(None);
+    };
+    let identity = fixed_target_identity(row.file_key(), row.record_revision())?;
+    if prior.as_ref().is_some_and(|prior| prior.file_key() >= identity.file_key()) {
+      return Err(IndexPartialSourceErrorV1::corrupt(
+        "native_partial_target_order",
+        "selected-root workspace rows are not in strict FileKey order",
+      ));
+    }
+    *prior = Some(identity);
+    if row.scope_id() == Some(scope_id) {
+      return Ok(Some(identity));
+    }
+  }
+}
+
+fn emit_native_changed_document(
+  visitor: &mut dyn IndexChangedDocumentVisitorV1,
+  file_key: &[u8],
+  basis_revision_hash: Option<&[u8]>,
+  target_revision_hash: Option<&[u8]>,
+  changed_document_count: u64,
+  maximum_changed_documents: u64,
+  budget: &NativePartialComplementBudgetV1<'_>,
+) -> Result<u64, IndexPartialScanErrorV1> {
+  budget.require_not_cancelled()?;
+  if basis_revision_hash.is_none() && target_revision_hash.is_none()
+    || basis_revision_hash.is_some() && basis_revision_hash == target_revision_hash
+  {
+    return Err(
+      IndexPartialSourceErrorV1::corrupt(
+        "native_partial_changed_identity",
+        "changed-document merge produced an unchanged or doubly absent identity",
+      )
+      .into(),
+    );
+  }
+  let next = changed_document_count
+    .checked_add(1)
+    .ok_or_else(|| IndexPartialSourceErrorV1::resource_limit("native_partial_changed_count", "changed-document count overflowed"))?;
+  if next > maximum_changed_documents {
+    return Err(
+      IndexPartialSourceErrorV1::resource_limit(
+        "native_partial_changed_limit",
+        "exact changed-document complement exceeds its requested document bound",
+      )
+      .into(),
+    );
+  }
+  visitor.visit(IndexChangedDocumentV1 { file_key, basis_revision_hash, target_revision_hash })?;
+  budget.require_not_cancelled()?;
+  Ok(next)
 }
 
 fn clone_partial_bytes(value: &[u8], role: &'static str) -> Result<Vec<u8>, IndexPartialSourceErrorV1> {

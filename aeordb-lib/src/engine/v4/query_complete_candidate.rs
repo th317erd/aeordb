@@ -208,6 +208,22 @@ impl QueryCompleteCandidateLimitsV1 {
   pub const fn maximum_candidate_documents(self) -> u64 {
     self.maximum_candidate_documents
   }
+
+  pub const fn maximum_page_seeks(self) -> u64 {
+    self.maximum_page_seeks
+  }
+
+  pub const fn maximum_identity_bytes(self) -> u64 {
+    self.maximum_identity_bytes
+  }
+
+  pub const fn maximum_work_steps(self) -> u64 {
+    self.maximum_work_steps
+  }
+
+  pub const fn cursor(self) -> ArtifactPageCursorLimitsV1 {
+    self.cursor
+  }
 }
 
 #[derive(Clone, Copy)]

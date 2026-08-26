@@ -627,6 +627,19 @@ pub struct RootAwareQueryScopeExecutionRequestV1<'a> {
   pub limits: QueryExecutionLimitsV1,
 }
 
+/// One storage-neutral selected-root document evaluation through the same
+/// compiled predicate engine used by authoritative scope execution.
+pub struct RootAwareQueryDocumentEvaluationRequestV1<'a> {
+  pub plan: &'a CompiledRootAwareQueryPlanV1,
+  pub catalogs: &'a [RootAwareQueryFieldCatalogV1],
+  pub scope_id: &'a [u8],
+  pub document: QueryExecutionDocumentV1<'a>,
+  pub fields: &'a mut dyn QueryAuthoritativeFieldSourceV1,
+  pub memory: &'a MemoryCoordinator,
+  pub cancellation: &'a CancellationToken,
+  pub limits: QueryExecutionLimitsV1,
+}
+
 pub struct RootAwarePartitionedQueryExecutionRequestV1<'a> {
   pub plan: &'a CompiledRootAwareQueryPlanV1,
   pub catalogs: &'a [RootAwareQueryFieldCatalogV1],
@@ -1064,6 +1077,94 @@ pub fn execute_authoritative_scope_query_into_v1(
     Some(scope_id),
     sink,
   )
+}
+
+pub fn evaluate_authoritative_query_document_v1(
+  request: RootAwareQueryDocumentEvaluationRequestV1<'_>,
+) -> Result<bool, QueryExecutionErrorV1> {
+  let mut source = OneDocumentAuthoritativeScopeSourceV1 {
+    selected_namespace_root: request.plan.selected_namespace_root(),
+    publication_sequence: request.plan.publication_sequence(),
+    query_path: request.plan.query_path(),
+    scope_id: request.scope_id,
+    document: request.document,
+    fields: request.fields,
+    cancellation: request.cancellation,
+    visited: false,
+  };
+  let execution = execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
+    plan: request.plan,
+    catalogs: request.catalogs,
+    scope_id: request.scope_id,
+    source: &mut source,
+    memory: request.memory,
+    cancellation: request.cancellation,
+    limits: request.limits,
+  })?;
+  if execution.examined_documents() != 1 || execution.matches().len() > 1 {
+    return Err(QueryExecutionErrorV1::internal(
+      "query_document_evaluation_receipt",
+      "one-document authoritative evaluation returned an impossible document or match count",
+    ));
+  }
+  Ok(!execution.matches().is_empty())
+}
+
+struct OneDocumentAuthoritativeScopeSourceV1<'a> {
+  selected_namespace_root: &'a [u8],
+  publication_sequence: u64,
+  query_path: &'a str,
+  scope_id: &'a [u8],
+  document: QueryExecutionDocumentV1<'a>,
+  fields: &'a mut dyn QueryAuthoritativeFieldSourceV1,
+  cancellation: &'a CancellationToken,
+  visited: bool,
+}
+
+impl QueryAuthoritativeScopeSourceV1 for OneDocumentAuthoritativeScopeSourceV1<'_> {
+  fn scan_scope(
+    &mut self,
+    request: QueryExecutionScopeScanRequestV1<'_>,
+    visitor: &mut dyn QueryAuthoritativeDocumentVisitorV1,
+  ) -> Result<QueryExecutionScopeScanReceiptV1, QueryExecutionScanErrorV1> {
+    if self.visited
+      || request.selected_namespace_root != self.selected_namespace_root
+      || request.publication_sequence != self.publication_sequence
+      || request.query_path != self.query_path
+      || request.scope_id != self.scope_id
+      || request.maximum_documents == 0
+    {
+      return Err(QueryExecutionScanErrorV1::Source(QueryExecutionSourceErrorV1::new(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "query_document_evaluation_authority",
+        "one-document source request disagrees with its captured selected-root authority",
+      )));
+    }
+    if request.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
+      return Err(QueryExecutionScanErrorV1::Source(QueryExecutionSourceErrorV1::new(
+        QueryExecutionSourceErrorClassV1::Cancelled,
+        "query_document_evaluation_cancelled",
+        "one-document evaluation was cancelled",
+      )));
+    }
+    visitor.visit(self.document, self.fields).map_err(QueryExecutionScanErrorV1::Visitor)?;
+    if request.cancellation.is_cancelled() || self.cancellation.is_cancelled() {
+      return Err(QueryExecutionScanErrorV1::Source(QueryExecutionSourceErrorV1::new(
+        QueryExecutionSourceErrorClassV1::Cancelled,
+        "query_document_evaluation_cancelled",
+        "one-document evaluation was cancelled after document evaluation",
+      )));
+    }
+    self.visited = true;
+    Ok(QueryExecutionScopeScanReceiptV1 {
+      selected_namespace_root: try_clone_bytes(self.selected_namespace_root, "document evaluation selected root")
+        .map_err(QueryExecutionScanErrorV1::Visitor)?,
+      publication_sequence: self.publication_sequence,
+      scope_id: try_clone_bytes(self.scope_id, "document evaluation scope").map_err(QueryExecutionScanErrorV1::Visitor)?,
+      document_count: 1,
+      complete: true,
+    })
+  }
 }
 
 pub fn execute_authoritative_partitioned_query_v1(
