@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use aeordb::engine::HashAlgorithm;
@@ -98,7 +98,7 @@ struct PartitionFeed {
   documents: Vec<DocumentFixture>,
   field_scopes: BTreeMap<String, Vec<Vec<u8>>>,
   fault: PartitionFeedFault,
-  opened_fields: Vec<String>,
+  opened_fields: RefCell<Vec<String>>,
 }
 
 struct PartitionCursor {
@@ -206,7 +206,7 @@ impl QueryExecutionMatchSinkV1 for RecordingSink {
 
 impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionFeed {
   fn open_field_partition(
-    &mut self,
+    &self,
     request: QueryExecutionFieldPartitionOpenRequestV1<'_>,
   ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1>, QueryExecutionSourceErrorV1> {
     assert_eq!(request.selected_namespace_root, self.root);
@@ -256,7 +256,7 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionFeed {
     if self.fault == PartitionFeedFault::ReverseFilenameDocuments && request.field_name == "@filename" {
       rows.reverse();
     }
-    self.opened_fields.push(request.field_name.to_string());
+    self.opened_fields.borrow_mut().push(request.field_name.to_string());
     Ok(Box::new(PartitionCursor {
       root: self.root.clone(),
       publication_sequence: self.publication_sequence,
@@ -640,7 +640,7 @@ fn partition_feed(
     field_scopes: BTreeMap::from([("@filename".to_string(), filename_scopes), ("@size".to_string(), size_scopes)]),
     documents,
     fault,
-    opened_fields: Vec::new(),
+    opened_fields: RefCell::new(Vec::new()),
   }
 }
 
@@ -1182,7 +1182,7 @@ fn partitioned_authoritative_execution_joins_nonidentical_field_scopes_by_file_k
   .unwrap();
 
   assert_eq!(execution.matches().iter().map(|row| row.file_key().to_vec()).collect::<Vec<_>>(), expected);
-  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  assert_eq!(source.opened_fields.borrow().as_slice(), ["@filename", "@size"]);
   drop(execution);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
@@ -1209,7 +1209,7 @@ fn partitioned_authoritative_execution_retains_documents_whose_effective_scope_o
   })
   .unwrap();
 
-  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  assert_eq!(source.opened_fields.borrow().as_slice(), ["@filename", "@size"]);
   drop(execution);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
@@ -1293,7 +1293,7 @@ fn partitioned_authoritative_execution_accepts_an_empty_authoritative_universe()
   .unwrap();
 
   assert!(execution.matches().is_empty());
-  assert_eq!(source.opened_fields, ["@filename", "@size"]);
+  assert_eq!(source.opened_fields.borrow().as_slice(), ["@filename", "@size"]);
   drop(execution);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
@@ -1344,7 +1344,7 @@ fn partitioned_authoritative_execution_rejects_every_incomplete_or_malformed_fil
     .unwrap_err();
     assert_eq!(error.class(), QueryExecutionErrorClassV1::CorruptSource);
     assert_eq!(error.code(), "query_execution_catalog_partition");
-    assert!(source.opened_fields.is_empty());
+    assert!(source.opened_fields.borrow().is_empty());
     assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
   }
 
@@ -1362,7 +1362,7 @@ fn partitioned_authoritative_execution_rejects_every_incomplete_or_malformed_fil
   })
   .unwrap_err();
   assert_eq!(error.class(), QueryExecutionErrorClassV1::Cancelled);
-  assert!(source.opened_fields.is_empty());
+  assert!(source.opened_fields.borrow().is_empty());
   assert_eq!(pressure_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
 
@@ -1392,7 +1392,7 @@ fn partitioned_execution_fails_before_open_under_pressure_and_preserves_field_st
   })
   .unwrap_err();
   assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
-  assert!(source.opened_fields.is_empty());
+  assert!(source.opened_fields.borrow().is_empty());
   assert_eq!(pressure_memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 
   for (field, expected) in [
@@ -1445,7 +1445,7 @@ fn partitioned_execution_charges_catalog_partition_and_sort_work_before_source_o
 
   assert_eq!(error.class(), QueryExecutionErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "query_execution_work_limit");
-  assert!(source.opened_fields.is_empty());
+  assert!(source.opened_fields.borrow().is_empty());
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 0);
 }
 

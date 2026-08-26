@@ -377,7 +377,7 @@ impl PartitionSource {
 
 impl QueryAuthoritativeFieldPartitionSourceV1 for PartitionSource {
   fn open_field_partition(
-    &mut self,
+    &self,
     request: QueryExecutionFieldPartitionOpenRequestV1<'_>,
   ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1>, QueryExecutionSourceErrorV1> {
     assert_eq!(request.selected_namespace_root, self.root);

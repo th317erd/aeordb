@@ -239,10 +239,10 @@ pub trait QueryAuthoritativeFieldPartitionSourceV1 {
   /// Open one complete field stream already merged across the requested
   /// effective scopes. The returned cursor owns its read state so the query
   /// executor can keep one bounded head per distinct field.
-  fn open_field_partition(
-    &mut self,
+  fn open_field_partition<'source>(
+    &'source self,
     request: QueryExecutionFieldPartitionOpenRequestV1<'_>,
-  ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1>, QueryExecutionSourceErrorV1>;
+  ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1 + 'source>, QueryExecutionSourceErrorV1>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -702,9 +702,9 @@ struct PartitionFieldPlanV1<'plan> {
   predicate_indices: Vec<usize>,
 }
 
-struct OpenPartitionCursorV1<'prepared, 'plan, 'value, 'field> {
+struct OpenPartitionCursorV1<'source, 'prepared, 'plan, 'value, 'field> {
   prepared: &'prepared PreparedPartitionFieldV1<'plan, 'value, 'field>,
-  cursor: Box<dyn QueryAuthoritativeFieldPartitionCursorV1>,
+  cursor: Box<dyn QueryAuthoritativeFieldPartitionCursorV1 + 'source>,
   head: Option<QueryExecutionFieldDocumentV1>,
   prior_file_key: Option<Vec<u8>>,
   observed_scope_counts: Vec<u64>,
@@ -2793,7 +2793,7 @@ fn partition_cursor_workspace_bound(
   limits: QueryExecutionLimitsV1,
 ) -> Result<u64, QueryExecutionErrorV1> {
   let mut bytes = (prepared.fields.len() as u64)
-    .checked_mul(size_of::<OpenPartitionCursorV1<'_, '_, '_, '_>>() as u64)
+    .checked_mul(size_of::<OpenPartitionCursorV1<'_, '_, '_, '_, '_>>() as u64)
     .ok_or_else(|| QueryExecutionErrorV1::resource("query_execution_semantic_memory", "partition cursor bound overflowed"))?;
   let maximum_head_bytes = maximum_partition_head_bytes(plan.hash_algorithm(), limits)?;
   for field in &prepared.fields {
@@ -2921,7 +2921,7 @@ fn evaluate_partition_field_document(
 
 fn validate_partition_receipt(
   plan: &CompiledRootAwareQueryPlanV1,
-  cursor: &OpenPartitionCursorV1<'_, '_, '_, '_>,
+  cursor: &OpenPartitionCursorV1<'_, '_, '_, '_, '_>,
   receipt: &QueryExecutionFieldPartitionReceiptV1,
 ) -> Result<(), QueryExecutionErrorV1> {
   let scope_ids_match = receipt.scope_ids.len() == cursor.prepared.scopes.len()

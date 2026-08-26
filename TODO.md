@@ -1304,7 +1304,7 @@
               - [x] Differentially compare default-path top-K and grouped aggregate output with independent models across presence, multi-value, and numeric boundaries.
               - [x] Prove duplicate/missing identities, dishonest receipts, cancellation, and overlapping executor/sink memory pressure roll back atomically and release every reservation.
               - [x] Run affected, common, suppression, static, documentation, and contract gates, then record the adversarial architecture review.
-          - [ ] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
+          - [x] P7-3d5: close native current/historical, both-hash-width, flat/B-tree, corruption, cancellation, pressure, cache-eviction, and architecture-uniqueness proof before P7-3e.
             - [x] P7-3d5a: freeze one shared effective-scope winner resolver and correct every producer/native-query consumer to use the ratified one-config-per-file rule.
             - [x] P7-3d5b: implement one page-bounded native authoritative field-partition source over the captured selected-root reader and shared source evaluator.
               - [x] P7-3d5b1: retain the complete applicable ScopeDefinition universe in the captured semantic catalog and prove exact accounting/identity.
@@ -1331,8 +1331,11 @@
                 - [x] P7-3d5d3b: derive the exact partial changed-document complement from captured ScopeOrdinal/ScopeReverse authority and evaluate target rows through the shared exact document evaluator.
                 - [x] P7-3d5d3c: lend authoritative, complete, partial, complement, and recheck sources to the existing exact-scope state machine under one transactional native facade.
               - [x] P7-3d5d4: prove exact native differential behavior for current/historical roots, both hash widths, flat/B-tree namespaces, and all three execution paths.
-            - [ ] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
-              - [ ] Prove and, if required, replace per-document native evaluator preparation with a bounded reusable prepared-runtime cache whose eviction cannot alter results.
+            - [x] P7-3d5e: close corruption, cancellation, pressure, cache-eviction, retained-memory, and architecture-uniqueness proof, then run affected/broad/static/native gates.
+              - [x] Prove and replace per-document native evaluator preparation with a bounded reusable prepared-runtime cache whose eviction cannot alter results.
+              - [x] Retain one plan-bound auxiliary converter runtime per selected definition instead of rebuilding it for every document.
+              - [x] Prove lazy unselected-branch admission, cancellation, memory pressure, exact authority binding, and final-handle reservation release.
+              - [x] Freeze the five intended cache routes and sole native preparation/converter authorities, then pass affected, broad, static, native, documentation, and contract gates.
         - [ ] P7-3e: expose authorization-filtered logical EXPLAIN, prove architecture uniqueness and source coverage, and complete affected/broad/static/native real-file gates before P7-4.
       - [ ] P7-4: integrate on-demand locators, exact range continuity, and root-aware plugin reads.
       - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.

@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use tokio_util::sync::CancellationToken;
 
@@ -72,8 +73,8 @@ use super::read_view::ResolvedReadViewV1;
 use super::read_view_authorization::ResolvedPathAuthorizationV1;
 use super::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactRootRequestV1, NativeSelectedNamespaceLimitsV1, NativeSelectedNamespaceReadErrorClassV1,
-  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedSemanticCatalogV1, NativeSelectedSourceLimitsV1,
-  NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
+  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedSemanticCatalogV1, NativePreparedSelectedSourceV1,
+  NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1, NativeSelectedSourceParserV1,
 };
 use super::scope::{EffectiveScopeCandidateV1, EffectiveScopeResolverV1, is_internal_index_path_v1, validate_canonical_absolute_path};
 
@@ -83,6 +84,9 @@ const PARTITION_CURSOR_FIXED_BYTES: u64 = 16 * 1024;
 const PARTITION_SOURCE_MAXIMUM_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const AUXILIARY_SOURCE_FIXED_BYTES: u64 = 16 * 1024;
 const AUXILIARY_ALLOCATION_OVERHEAD_BYTES: usize = 16;
+const DEFAULT_PREPARED_SOURCE_CACHE_ENTRIES: usize = 16;
+const MAXIMUM_PREPARED_SOURCE_CACHE_ENTRIES: usize = 1_024;
+const PREPARED_SOURCE_CACHE_ALLOCATION_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeAuthoritativeAuxiliaryLimitsV1 {
@@ -90,6 +94,7 @@ pub struct NativeAuthoritativeAuxiliaryLimitsV1 {
   maximum_scope_bindings: usize,
   maximum_binding_bytes: u64,
   maximum_path_bytes: u64,
+  maximum_prepared_source_cache_entries: usize,
 }
 
 impl NativeAuthoritativeAuxiliaryLimitsV1 {
@@ -106,7 +111,22 @@ impl NativeAuthoritativeAuxiliaryLimitsV1 {
         "native auxiliary field, scope, retained-byte, and path limits must be nonzero",
       ));
     }
-    Ok(Self { maximum_fields, maximum_scope_bindings, maximum_binding_bytes, maximum_path_bytes })
+    Ok(Self {
+      maximum_fields,
+      maximum_scope_bindings,
+      maximum_binding_bytes,
+      maximum_path_bytes,
+      maximum_prepared_source_cache_entries: DEFAULT_PREPARED_SOURCE_CACHE_ENTRIES,
+    })
+  }
+
+  pub fn with_prepared_source_cache_entries(
+    mut self,
+    maximum_prepared_source_cache_entries: usize,
+  ) -> Result<Self, QueryExecutionSourceErrorV1> {
+    validate_prepared_source_cache_entries(maximum_prepared_source_cache_entries)?;
+    self.maximum_prepared_source_cache_entries = maximum_prepared_source_cache_entries;
+    Ok(self)
   }
 }
 
@@ -114,6 +134,7 @@ impl NativeAuthoritativeAuxiliaryLimitsV1 {
 pub struct NativeAuthoritativeFieldPartitionLimitsV1 {
   namespace: NativeSelectedNamespaceLimitsV1,
   ordering: NativeQueryOrderingWorkspaceLimitsV1,
+  maximum_prepared_source_cache_entries: usize,
 }
 
 impl NativeAuthoritativeFieldPartitionLimitsV1 {
@@ -134,7 +155,188 @@ impl NativeAuthoritativeFieldPartitionLimitsV1 {
       merge_fan_in,
     )
     .map_err(map_workspace_error)?;
-    Ok(Self { namespace, ordering })
+    Ok(Self { namespace, ordering, maximum_prepared_source_cache_entries: DEFAULT_PREPARED_SOURCE_CACHE_ENTRIES })
+  }
+
+  pub fn with_prepared_source_cache_entries(
+    mut self,
+    maximum_prepared_source_cache_entries: usize,
+  ) -> Result<Self, QueryExecutionSourceErrorV1> {
+    validate_prepared_source_cache_entries(maximum_prepared_source_cache_entries)?;
+    self.maximum_prepared_source_cache_entries = maximum_prepared_source_cache_entries;
+    Ok(self)
+  }
+}
+
+fn validate_prepared_source_cache_entries(maximum_entries: usize) -> Result<(), QueryExecutionSourceErrorV1> {
+  if maximum_entries == 0 || maximum_entries > MAXIMUM_PREPARED_SOURCE_CACHE_ENTRIES {
+    return Err(source_error(
+      QueryExecutionSourceErrorClassV1::ResourceLimit,
+      "native_prepared_cache_entries",
+      "prepared source cache entry bound must be nonzero and remain within the protocol maximum",
+    ));
+  }
+  Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativePreparedSourceCacheMetricsV1 {
+  preparations: u64,
+  hits: u64,
+  misses: u64,
+  evictions: u64,
+}
+
+impl NativePreparedSourceCacheMetricsV1 {
+  pub const fn preparations(self) -> u64 {
+    self.preparations
+  }
+
+  pub const fn hits(self) -> u64 {
+    self.hits
+  }
+
+  pub const fn misses(self) -> u64 {
+    self.misses
+  }
+
+  pub const fn evictions(self) -> u64 {
+    self.evictions
+  }
+}
+
+#[derive(Default)]
+struct NativePreparedSourceCacheCountersV1 {
+  preparations: AtomicU64,
+  hits: AtomicU64,
+  misses: AtomicU64,
+  evictions: AtomicU64,
+}
+
+impl NativePreparedSourceCacheCountersV1 {
+  fn snapshot(&self) -> NativePreparedSourceCacheMetricsV1 {
+    NativePreparedSourceCacheMetricsV1 {
+      preparations: self.preparations.load(AtomicOrdering::Relaxed),
+      hits: self.hits.load(AtomicOrdering::Relaxed),
+      misses: self.misses.load(AtomicOrdering::Relaxed),
+      evictions: self.evictions.load(AtomicOrdering::Relaxed),
+    }
+  }
+}
+
+struct NativePreparedSourceCacheEntryV1<'definition> {
+  catalog_index: usize,
+  source_limits: NativeSelectedSourceLimitsV1,
+  prepared: NativePreparedSelectedSourceV1<'definition>,
+  last_used: u64,
+}
+
+struct NativePreparedSourceCacheV1<'definition> {
+  inner: &'definition NativeAuthoritativeFieldPartitionInnerV1,
+  entries: Vec<NativePreparedSourceCacheEntryV1<'definition>>,
+  maximum_entries: usize,
+  clock: u64,
+  _memory: MemoryReservation,
+}
+
+impl<'definition> NativePreparedSourceCacheV1<'definition> {
+  fn new(
+    inner: &'definition NativeAuthoritativeFieldPartitionInnerV1,
+    maximum_entries: usize,
+  ) -> Result<Self, QueryExecutionSourceErrorV1> {
+    validate_prepared_source_cache_entries(maximum_entries)?;
+    let slot_bytes = maximum_entries
+      .checked_mul(size_of::<NativePreparedSourceCacheEntryV1<'_>>() + PREPARED_SOURCE_CACHE_ALLOCATION_OVERHEAD_BYTES)
+      .ok_or_else(|| {
+        source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_prepared_cache_memory", "prepared cache bytes overflowed")
+      })?;
+    let slot_bytes = u64::try_from(slot_bytes).map_err(|error| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_prepared_cache_memory",
+        format!("prepared cache bytes do not fit the retained-memory counter: {error}"),
+      )
+    })?;
+    let memory =
+      inner.source.memory_coordinator().reserve(MemoryOwner::Query, slot_bytes.max(1), AdmissionClass::Workload).map_err(|error| {
+        source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_prepared_cache_memory", error.to_string())
+      })?;
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(maximum_entries).map_err(|error| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_prepared_cache_allocation",
+        format!("cannot allocate bounded prepared cache: {error}"),
+      )
+    })?;
+    let retained_slot_bytes = entries.capacity().checked_mul(size_of::<NativePreparedSourceCacheEntryV1<'_>>()).ok_or_else(|| {
+      source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_prepared_cache_memory", "prepared cache capacity overflowed")
+    })?;
+    let retained_slot_bytes = u64::try_from(retained_slot_bytes).map_err(|error| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_prepared_cache_memory",
+        format!("prepared cache capacity does not fit the retained-memory counter: {error}"),
+      )
+    })?;
+    if retained_slot_bytes > memory.bytes() {
+      return Err(source_error(
+        QueryExecutionSourceErrorClassV1::ResourceLimit,
+        "native_prepared_cache_memory",
+        "prepared cache allocation exceeds its admitted slot bound",
+      ));
+    }
+    Ok(Self { inner, entries, maximum_entries, clock: 0, _memory: memory })
+  }
+
+  fn evaluate(
+    &mut self,
+    reader: &NativeSelectedNamespaceReaderV1<'_>,
+    catalog_index: usize,
+    row: &super::read_view_native::NativeSelectedNamespaceFileRowV1,
+    scope_id: &[u8],
+    source_limits: NativeSelectedSourceLimitsV1,
+  ) -> Result<NativeSelectedSourceEvaluationV1, QueryExecutionSourceErrorV1> {
+    self.clock = self.clock.checked_add(1).ok_or_else(|| {
+      source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_prepared_cache_clock", "prepared cache clock overflowed")
+    })?;
+    if let Some(index) = self.entries.iter().position(|entry| {
+      entry.catalog_index == catalog_index && entry.source_limits == source_limits && entry.prepared.scope_id() == scope_id
+    }) {
+      self.entries[index].last_used = self.clock;
+      self.inner.prepared_source_cache_counters.hits.fetch_add(1, AtomicOrdering::Relaxed);
+      return self.entries[index].prepared.evaluate(reader, row, NativeSelectedSourceParserV1::Native, None).map_err(map_native_error);
+    }
+
+    self.inner.prepared_source_cache_counters.misses.fetch_add(1, AtomicOrdering::Relaxed);
+    if self.entries.len() == self.maximum_entries {
+      let lru = self
+        .entries
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, entry)| entry.last_used)
+        .map(|(index, _)| index)
+        .ok_or_else(|| source_error(QueryExecutionSourceErrorClassV1::Internal, "native_prepared_cache_state", "full cache is empty"))?;
+      self.entries.swap_remove(lru);
+      self.inner.prepared_source_cache_counters.evictions.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    let catalog = self.inner.semantic_catalog.catalogs().get(catalog_index).ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_prepared_cache_catalog",
+        "prepared cache catalog index is outside selected semantic authority",
+      )
+    })?;
+    let prepared = reader.prepare_authoritative_source_runtime(catalog, scope_id, source_limits).map_err(map_native_error)?;
+    self.entries.push(NativePreparedSourceCacheEntryV1 { catalog_index, source_limits, prepared, last_used: self.clock });
+    self.inner.prepared_source_cache_counters.preparations.fetch_add(1, AtomicOrdering::Relaxed);
+    self
+      .entries
+      .last()
+      .ok_or_else(|| source_error(QueryExecutionSourceErrorClassV1::Internal, "native_prepared_cache_state", "prepared entry disappeared"))?
+      .prepared
+      .evaluate(reader, row, NativeSelectedSourceParserV1::Native, None)
+      .map_err(map_native_error)
   }
 }
 
@@ -145,36 +347,41 @@ struct NativeAuthoritativeFieldPartitionInnerV1 {
   workspace: NativeQueryOrderingWorkspaceV1,
   query_path: String,
   namespace_limits: NativeSelectedNamespaceLimitsV1,
+  maximum_prepared_source_cache_entries: usize,
+  prepared_source_cache_counters: NativePreparedSourceCacheCountersV1,
 }
 
 pub struct NativeAuthoritativeFieldPartitionSourceV1 {
   inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
 }
 
-pub struct NativeQueryCandidateArtifactSourceV1 {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+pub struct NativeQueryCandidateArtifactSourceV1<'source> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
   lookup: Option<NativeQueryOrderingLookupV1>,
+  prepared_sources: Option<NativePreparedSourceCacheV1<'source>>,
 }
 
-pub struct NativeQueryPartialComplementSourceV1 {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
-  artifacts: NativeQueryCandidateArtifactSourceV1,
+pub struct NativeQueryPartialComplementSourceV1<'source> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
+  artifacts: NativeQueryCandidateArtifactSourceV1<'source>,
   scope_id: [u8; 64],
   scope_id_length: usize,
   limits: QueryCompleteCandidateLimitsV1,
 }
 
-pub struct NativeQueryPartialRecheckerV1<'plan> {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+pub struct NativeQueryPartialRecheckerV1<'source, 'plan> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
   plan: &'plan CompiledRootAwareQueryPlanV1,
   scope_id: [u8; 64],
   scope_id_length: usize,
   lookup: Option<NativeQueryOrderingLookupV1>,
   limits: QueryExecutionLimitsV1,
+  prepared_sources: Option<NativePreparedSourceCacheV1<'source>>,
 }
 
-struct NativeAuthoritativeRowFieldSourceV1<'row, 'scope> {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+struct NativeAuthoritativeRowFieldSourceV1<'source, 'cache, 'row, 'scope> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
+  prepared_sources: &'cache mut NativePreparedSourceCacheV1<'source>,
   row: &'row super::read_view_native::NativeSelectedNamespaceFileRowV1,
   effective_scope_id: &'scope [u8],
   source_limits: NativeSelectedSourceLimitsV1,
@@ -185,22 +392,22 @@ struct NativeAuthoritativeFieldEvaluationV1 {
   values: Vec<Vec<u8>>,
 }
 
-#[derive(Clone, Debug)]
-struct NativeAuxiliaryScopeBindingV1 {
+#[derive(Debug)]
+struct NativeAuxiliaryScopeBindingV1<'definition> {
   scope_id: Vec<u8>,
   catalog_scope_index: usize,
-  catalog_index_index: usize,
+  runtime: IndexDefinitionRuntimeV1<'definition, 'definition>,
 }
 
-#[derive(Clone, Debug)]
-struct NativeAuxiliaryFieldBindingV1 {
+#[derive(Debug)]
+struct NativeAuxiliaryFieldBindingV1<'definition> {
   field_name: String,
   comparator: super::position::PositionComparatorV1,
   comparison_semantics: u16,
   collation_semantics: u16,
   behavior_fingerprint: [u8; 32],
   catalog_index: usize,
-  scopes: Vec<NativeAuxiliaryScopeBindingV1>,
+  scopes: Vec<NativeAuxiliaryScopeBindingV1<'definition>>,
 }
 
 struct NativeRestoredAuxiliaryDocumentV1 {
@@ -214,12 +421,13 @@ struct NativeAuxiliaryFieldEvaluationV1 {
   values: Vec<LogicalOrderComponentOwnedV1>,
 }
 
-pub struct NativeAuthoritativeAuxiliarySourceV1<'plan> {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+pub struct NativeAuthoritativeAuxiliarySourceV1<'source, 'plan> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
   plan: &'plan CompiledRootAwareQueryPlanV1,
   lookup: NativeQueryOrderingLookupV1,
-  fields: Vec<NativeAuxiliaryFieldBindingV1>,
+  fields: Vec<NativeAuxiliaryFieldBindingV1<'source>>,
   maximum_path_bytes: u64,
+  prepared_sources: NativePreparedSourceCacheV1<'source>,
   _memory: MemoryReservation,
 }
 
@@ -329,6 +537,8 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
         workspace,
         query_path,
         namespace_limits: limits.namespace,
+        maximum_prepared_source_cache_entries: limits.maximum_prepared_source_cache_entries,
+        prepared_source_cache_counters: NativePreparedSourceCacheCountersV1::default(),
       }),
     })
   }
@@ -341,37 +551,41 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
     self.inner.workspace.workspace_bytes()
   }
 
+  pub fn prepared_source_cache_metrics(&self) -> NativePreparedSourceCacheMetricsV1 {
+    self.inner.prepared_source_cache_counters.snapshot()
+  }
+
   pub fn execute_authoritative_query_v1(
-    &mut self,
+    &self,
     plan: &CompiledRootAwareQueryPlanV1,
     cancellation: &CancellationToken,
     limits: QueryExecutionLimitsV1,
   ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
-    let inner = Arc::clone(&self.inner);
+    let mut authoritative = Self { inner: Arc::clone(&self.inner) };
     execute_authoritative_partitioned_query_v1(RootAwarePartitionedQueryExecutionRequestV1 {
       plan,
-      catalogs: inner.semantic_catalog.catalogs(),
-      source: self,
-      memory: inner.source.memory_coordinator().as_ref(),
+      catalogs: self.inner.semantic_catalog.catalogs(),
+      source: &mut authoritative,
+      memory: self.inner.source.memory_coordinator().as_ref(),
       cancellation,
       limits,
     })
   }
 
   pub fn execute_authoritative_query_into_v1(
-    &mut self,
+    &self,
     plan: &CompiledRootAwareQueryPlanV1,
     cancellation: &CancellationToken,
     limits: QueryExecutionLimitsV1,
     sink: &mut dyn QueryExecutionMatchSinkV1,
   ) -> Result<QueryExecutionStreamReceiptV1, QueryExecutionErrorV1> {
-    let inner = Arc::clone(&self.inner);
+    let mut authoritative = Self { inner: Arc::clone(&self.inner) };
     execute_authoritative_partitioned_query_into_v1(
       RootAwarePartitionedQueryExecutionRequestV1 {
         plan,
-        catalogs: inner.semantic_catalog.catalogs(),
-        source: self,
-        memory: inner.source.memory_coordinator().as_ref(),
+        catalogs: self.inner.semantic_catalog.catalogs(),
+        source: &mut authoritative,
+        memory: self.inner.source.memory_coordinator().as_ref(),
         cancellation,
         limits,
       },
@@ -380,19 +594,19 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
   }
 
   pub fn execute_authoritative_scope_query_v1(
-    &mut self,
+    &self,
     plan: &CompiledRootAwareQueryPlanV1,
     scope_id: &[u8],
     cancellation: &CancellationToken,
     limits: QueryExecutionLimitsV1,
   ) -> Result<RootAwareQueryExecutionV1, QueryExecutionErrorV1> {
-    let inner = Arc::clone(&self.inner);
+    let mut authoritative = Self { inner: Arc::clone(&self.inner) };
     execute_authoritative_scope_query_v1(RootAwareQueryScopeExecutionRequestV1 {
       plan,
-      catalogs: inner.semantic_catalog.catalogs(),
+      catalogs: self.inner.semantic_catalog.catalogs(),
       scope_id,
-      source: self,
-      memory: inner.source.memory_coordinator().as_ref(),
+      source: &mut authoritative,
+      memory: self.inner.source.memory_coordinator().as_ref(),
       cancellation,
       limits,
     })
@@ -470,43 +684,55 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
     )
   }
 
-  pub fn open_auxiliary_source<'plan>(
-    &self,
+  pub fn open_auxiliary_source<'source, 'plan>(
+    &'source self,
     plan: &'plan CompiledRootAwareQueryPlanV1,
     limits: NativeAuthoritativeAuxiliaryLimitsV1,
-  ) -> Result<NativeAuthoritativeAuxiliarySourceV1<'plan>, QueryExecutionSourceErrorV1> {
-    validate_auxiliary_plan(&self.inner, plan)?;
-    let binding_bytes = auxiliary_binding_bytes(plan, limits)?;
-    let memory = self
+  ) -> Result<NativeAuthoritativeAuxiliarySourceV1<'source, 'plan>, QueryExecutionSourceErrorV1> {
+    validate_auxiliary_plan(self.inner.as_ref(), plan)?;
+    let structural_binding_bytes = auxiliary_binding_bytes(plan, limits)?;
+    let mut memory = self
       .inner
       .source
       .memory_coordinator()
-      .reserve(MemoryOwner::Query, binding_bytes, AdmissionClass::Workload)
+      .reserve(MemoryOwner::Query, limits.maximum_binding_bytes, AdmissionClass::Workload)
       .map_err(|error| source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_auxiliary_memory", error.to_string()))?;
-    let fields = compile_auxiliary_bindings(&self.inner, plan, limits)?;
+    let (fields, retained_binding_bytes) = compile_auxiliary_bindings(self.inner.as_ref(), plan, structural_binding_bytes, limits)?;
+    let release = memory.bytes().checked_sub(retained_binding_bytes).ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_auxiliary_memory_accounting",
+        "compiled auxiliary bindings exceeded their admitted reservation",
+      )
+    })?;
+    memory
+      .shrink(release)
+      .map_err(|error| source_error(QueryExecutionSourceErrorClassV1::Internal, "native_auxiliary_memory_accounting", error.to_string()))?;
     let lookup = self.inner.workspace.open_lookup().map_err(map_workspace_error)?;
+    let prepared_sources = NativePreparedSourceCacheV1::new(self.inner.as_ref(), limits.maximum_prepared_source_cache_entries)?;
     Ok(NativeAuthoritativeAuxiliarySourceV1 {
-      inner: Arc::clone(&self.inner),
+      inner: self.inner.as_ref(),
       plan,
       lookup,
       fields,
       maximum_path_bytes: limits.maximum_path_bytes,
+      prepared_sources,
       _memory: memory,
     })
   }
 
-  pub fn open_candidate_artifact_source(&self) -> NativeQueryCandidateArtifactSourceV1 {
-    NativeQueryCandidateArtifactSourceV1 { inner: Arc::clone(&self.inner), lookup: None }
+  pub fn open_candidate_artifact_source(&self) -> NativeQueryCandidateArtifactSourceV1<'_> {
+    NativeQueryCandidateArtifactSourceV1 { inner: self.inner.as_ref(), lookup: None, prepared_sources: None }
   }
 
-  pub fn open_partial_complement_source(
-    &self,
+  pub fn open_partial_complement_source<'source>(
+    &'source self,
     scope_id: &[u8],
     limits: QueryCompleteCandidateLimitsV1,
-  ) -> Result<NativeQueryPartialComplementSourceV1, QueryExecutionSourceErrorV1> {
+  ) -> Result<NativeQueryPartialComplementSourceV1<'source>, QueryExecutionSourceErrorV1> {
     let (scope_id, scope_id_length) = retain_fixed_identity(scope_id, self.inner.view.hash_algorithm(), "partial complement ScopeId")?;
     Ok(NativeQueryPartialComplementSourceV1 {
-      inner: Arc::clone(&self.inner),
+      inner: self.inner.as_ref(),
       artifacts: self.open_candidate_artifact_source(),
       scope_id,
       scope_id_length,
@@ -514,19 +740,27 @@ impl NativeAuthoritativeFieldPartitionSourceV1 {
     })
   }
 
-  pub fn open_partial_rechecker<'plan>(
-    &self,
+  pub fn open_partial_rechecker<'source, 'plan>(
+    &'source self,
     plan: &'plan CompiledRootAwareQueryPlanV1,
     scope_id: &[u8],
     limits: QueryExecutionLimitsV1,
-  ) -> Result<NativeQueryPartialRecheckerV1<'plan>, QueryExecutionSourceErrorV1> {
-    validate_auxiliary_plan(&self.inner, plan)?;
+  ) -> Result<NativeQueryPartialRecheckerV1<'source, 'plan>, QueryExecutionSourceErrorV1> {
+    validate_auxiliary_plan(self.inner.as_ref(), plan)?;
     let (scope_id, scope_id_length) = retain_fixed_identity(scope_id, self.inner.view.hash_algorithm(), "partial recheck ScopeId")?;
-    Ok(NativeQueryPartialRecheckerV1 { inner: Arc::clone(&self.inner), plan, scope_id, scope_id_length, lookup: None, limits })
+    Ok(NativeQueryPartialRecheckerV1 {
+      inner: self.inner.as_ref(),
+      plan,
+      scope_id,
+      scope_id_length,
+      lookup: None,
+      limits,
+      prepared_sources: None,
+    })
   }
 }
 
-impl ArtifactCursorSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+impl ArtifactCursorSourceV1 for NativeQueryCandidateArtifactSourceV1<'_> {
   fn read_immutable_artifact(&mut self, key: &[u8], maximum_bytes: usize) -> Result<RetainedArtifactBytesV1, ArtifactCursorReadErrorV1> {
     let reader =
       self.inner.source.selected_namespace_reader(&self.inner.view, self.inner.namespace_limits).map_err(map_native_artifact_error)?;
@@ -534,7 +768,7 @@ impl ArtifactCursorSourceV1 for NativeQueryCandidateArtifactSourceV1 {
   }
 }
 
-impl NativeQueryCandidateArtifactSourceV1 {
+impl NativeQueryCandidateArtifactSourceV1<'_> {
   pub fn resolve_complete_posting_root_v1(
     &mut self,
     request: QueryCompletePostingRootRequestV1<'_>,
@@ -714,7 +948,7 @@ fn merge_candidate_scope_root(
   Ok(())
 }
 
-impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourceV1<'_> {
   fn resolve_partial_posting_root(
     &mut self,
     request: QueryPartialPostingRootRequestV1<'_>,
@@ -770,7 +1004,7 @@ impl QueryPartialCandidateArtifactSourceV1 for NativeQueryCandidateArtifactSourc
   }
 }
 
-impl QueryCompleteCandidateSourceV1 for NativeQueryCandidateArtifactSourceV1 {
+impl QueryCompleteCandidateSourceV1 for NativeQueryCandidateArtifactSourceV1<'_> {
   fn resolve_complete_posting_root(
     &mut self,
     request: QueryCompletePostingRootRequestV1<'_>,
@@ -852,8 +1086,22 @@ impl QueryCompleteCandidateSourceV1 for NativeQueryCandidateArtifactSourceV1 {
         "complete index candidate path differs from selected-root authority",
       )));
     }
+    if self.prepared_sources.is_none() {
+      self.prepared_sources = Some(
+        NativePreparedSourceCacheV1::new(self.inner, self.inner.maximum_prepared_source_cache_entries)
+          .map_err(QueryExecutionScanErrorV1::Source)?,
+      );
+    }
+    let prepared_sources = self.prepared_sources.as_mut().ok_or_else(|| {
+      QueryExecutionScanErrorV1::Source(source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_candidate_prepared_cache_state",
+        "complete candidate prepared cache was not retained after initialization",
+      ))
+    })?;
     let mut fields = NativeAuthoritativeRowFieldSourceV1 {
-      inner: Arc::clone(&self.inner),
+      inner: self.inner,
+      prepared_sources,
       row: &row,
       effective_scope_id: request.scope_id,
       source_limits: selected_source_limits().map_err(QueryExecutionScanErrorV1::Source)?,
@@ -983,7 +1231,7 @@ impl NativePartialComplementBudgetV1<'_> {
   }
 }
 
-impl IndexChangedDocumentSourceV1 for NativeQueryPartialComplementSourceV1 {
+impl IndexChangedDocumentSourceV1 for NativeQueryPartialComplementSourceV1<'_> {
   fn scan_changed_documents(
     &mut self,
     request: IndexChangedDocumentScanRequestV1<'_>,
@@ -1160,7 +1408,7 @@ impl IndexChangedDocumentSourceV1 for NativeQueryPartialComplementSourceV1 {
   }
 }
 
-impl NativeQueryPartialComplementSourceV1 {
+impl NativeQueryPartialComplementSourceV1<'_> {
   fn scope_id(&self) -> &[u8] {
     &self.scope_id[..self.scope_id_length]
   }
@@ -1279,7 +1527,7 @@ impl NativeQueryPartialComplementSourceV1 {
   }
 }
 
-impl IndexPartialCandidateRecheckerV1 for NativeQueryPartialRecheckerV1<'_> {
+impl IndexPartialCandidateRecheckerV1 for NativeQueryPartialRecheckerV1<'_, '_> {
   fn recheck(&mut self, request: IndexPartialRecheckRequestV1<'_>) -> Result<IndexPartialRecheckOutcomeV1, IndexPartialSourceErrorV1> {
     require_not_cancelled(request.cancellation).map_err(map_execution_partial_error)?;
     require_not_cancelled(self.inner.view.cancellation()).map_err(map_execution_partial_error)?;
@@ -1335,8 +1583,21 @@ impl IndexPartialCandidateRecheckerV1 for NativeQueryPartialRecheckerV1<'_> {
         "selected-root recheck row is outside the captured query path",
       ));
     }
+    if self.prepared_sources.is_none() {
+      self.prepared_sources = Some(
+        NativePreparedSourceCacheV1::new(self.inner, self.inner.maximum_prepared_source_cache_entries)
+          .map_err(map_execution_partial_error)?,
+      );
+    }
+    let prepared_sources = self.prepared_sources.as_mut().ok_or_else(|| {
+      IndexPartialSourceErrorV1::internal(
+        "native_partial_recheck_prepared_cache_state",
+        "partial recheck prepared cache was not retained after initialization",
+      )
+    })?;
     let mut fields = NativeAuthoritativeRowFieldSourceV1 {
-      inner: Arc::clone(&self.inner),
+      inner: self.inner,
+      prepared_sources,
       row: &row,
       effective_scope_id: scope_id,
       source_limits: selected_source_limits().map_err(map_execution_partial_error)?,
@@ -1369,6 +1630,8 @@ impl QueryAuthoritativeScopeSourceV1 for NativeAuthoritativeFieldPartitionSource
   ) -> Result<QueryExecutionScopeScanReceiptV1, QueryExecutionScanErrorV1> {
     validate_scope_scan_request(&self.inner, &request).map_err(QueryExecutionScanErrorV1::Source)?;
     let source_limits = selected_source_limits().map_err(QueryExecutionScanErrorV1::Source)?;
+    let mut prepared_sources = NativePreparedSourceCacheV1::new(self.inner.as_ref(), self.inner.maximum_prepared_source_cache_entries)
+      .map_err(QueryExecutionScanErrorV1::Source)?;
     let mut ordering = self.inner.workspace.open_cursor().map_err(map_workspace_error).map_err(QueryExecutionScanErrorV1::Source)?;
     let mut document_count = 0u64;
     while let Some(ordered) =
@@ -1409,7 +1672,8 @@ impl QueryAuthoritativeScopeSourceV1 for NativeAuthoritativeFieldPartitionSource
         )));
       }
       let mut fields = NativeAuthoritativeRowFieldSourceV1 {
-        inner: Arc::clone(&self.inner),
+        inner: self.inner.as_ref(),
+        prepared_sources: &mut prepared_sources,
         row: &row,
         effective_scope_id: request.scope_id,
         source_limits,
@@ -1432,7 +1696,7 @@ impl QueryAuthoritativeScopeSourceV1 for NativeAuthoritativeFieldPartitionSource
   }
 }
 
-impl QueryAuthoritativeFieldSourceV1 for NativeAuthoritativeRowFieldSourceV1<'_, '_> {
+impl QueryAuthoritativeFieldSourceV1 for NativeAuthoritativeRowFieldSourceV1<'_, '_, '_, '_> {
   fn scan_field_values(
     &mut self,
     request: QueryExecutionFieldReadRequestV1<'_>,
@@ -1447,9 +1711,16 @@ impl QueryAuthoritativeFieldSourceV1 for NativeAuthoritativeRowFieldSourceV1<'_,
       .selected_namespace_reader(&self.inner.view, self.inner.namespace_limits)
       .map_err(map_native_error)
       .map_err(QueryExecutionScanErrorV1::Source)?;
-    let evaluation =
-      evaluate_authoritative_field(&self.inner, &reader, catalog_index, self.row, self.effective_scope_id, self.source_limits)
-        .map_err(QueryExecutionScanErrorV1::Source)?;
+    let evaluation = evaluate_authoritative_field(
+      self.inner,
+      self.prepared_sources,
+      &reader,
+      catalog_index,
+      self.row,
+      self.effective_scope_id,
+      self.source_limits,
+    )
+    .map_err(QueryExecutionScanErrorV1::Source)?;
     validate_values(&evaluation.values, request.maximum_values, request.maximum_canonical_value_bytes)
       .map_err(QueryExecutionScanErrorV1::Source)?;
     let canonical_value_bytes = evaluation.values.iter().try_fold(0u64, |total, value| {
@@ -1482,7 +1753,7 @@ impl QueryAuthoritativeFieldSourceV1 for NativeAuthoritativeRowFieldSourceV1<'_,
   }
 }
 
-impl NativeAuthoritativeAuxiliarySourceV1<'_> {
+impl NativeAuthoritativeAuxiliarySourceV1<'_, '_> {
   fn restore_document(
     &mut self,
     file_key: &[u8],
@@ -1515,13 +1786,20 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
   }
 
   fn evaluate_field(
-    &self,
-    binding: &NativeAuxiliaryFieldBindingV1,
+    &mut self,
+    binding_index: usize,
     row: &super::read_view_native::NativeSelectedNamespaceFileRowV1,
     effective_scope_id: Option<&[u8]>,
     maximum_values: u64,
     maximum_bytes: u64,
   ) -> Result<NativeAuxiliaryFieldEvaluationV1, QueryExecutionSourceErrorV1> {
+    let binding = self.fields.get(binding_index).ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Internal,
+        "native_auxiliary_field_index",
+        "native auxiliary binding index is outside the compiled field set",
+      )
+    })?;
     let Some(effective_scope_id) = effective_scope_id else {
       return Ok(NativeAuxiliaryFieldEvaluationV1 { scope_id: None, state: QueryExecutionFieldStateV1::Missing, values: Vec::new() });
     };
@@ -1532,10 +1810,7 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
     let catalog = &self.inner.semantic_catalog.catalogs()[binding.catalog_index];
     let catalog_scope = &catalog.scopes[scope_binding.catalog_scope_index];
     let reader = self.inner.source.selected_namespace_reader(&self.inner.view, self.inner.namespace_limits).map_err(map_native_error)?;
-    let evaluation = reader
-      .prepare_authoritative_source(catalog, effective_scope_id, selected_source_limits()?)
-      .and_then(|evaluator| evaluator.evaluate(row, NativeSelectedSourceParserV1::Native, None))
-      .map_err(map_native_error)?;
+    let evaluation = self.prepared_sources.evaluate(&reader, binding.catalog_index, row, effective_scope_id, selected_source_limits()?)?;
     if evaluation.selected_root() != self.inner.view.root_metadata().hash
       || evaluation.semantic_state_root() != self.inner.view.authority().semantic_state.object_id
       || evaluation.scope_id() != effective_scope_id
@@ -1556,15 +1831,7 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
         values: Vec::new(),
       }),
       NativeSelectedSourceOutcomeV1::Values(values) => {
-        let logical = convert_auxiliary_values(
-          binding,
-          catalog_scope,
-          scope_binding,
-          self.plan.hash_algorithm(),
-          &values,
-          maximum_values,
-          maximum_bytes,
-        )?;
+        let logical = convert_auxiliary_values(binding, scope_binding, &values, maximum_values, maximum_bytes)?;
         Ok(NativeAuxiliaryFieldEvaluationV1 {
           scope_id: Some(try_clone_bytes(effective_scope_id, "aggregate ScopeId")?),
           state: QueryExecutionFieldStateV1::Values,
@@ -1586,8 +1853,18 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
     }
   }
 
-  fn field_binding(&self, field_name: &str) -> Result<&NativeAuxiliaryFieldBindingV1, QueryExecutionSourceErrorV1> {
+  fn field_binding(&self, field_name: &str) -> Result<&NativeAuxiliaryFieldBindingV1<'_>, QueryExecutionSourceErrorV1> {
     self.fields.iter().find(|field| field.field_name == field_name).ok_or_else(|| {
+      source_error(
+        QueryExecutionSourceErrorClassV1::Corrupt,
+        "native_auxiliary_field_binding",
+        format!("compiled auxiliary field {field_name:?} has no plan-bound native definition"),
+      )
+    })
+  }
+
+  fn field_binding_index(&self, field_name: &str) -> Result<usize, QueryExecutionSourceErrorV1> {
+    self.fields.iter().position(|field| field.field_name == field_name).ok_or_else(|| {
       source_error(
         QueryExecutionSourceErrorClassV1::Corrupt,
         "native_auxiliary_field_binding",
@@ -1640,7 +1917,7 @@ fn validate_scope_scan_request(
 }
 
 fn validate_row_field_request(
-  source: &NativeAuthoritativeRowFieldSourceV1<'_, '_>,
+  source: &NativeAuthoritativeRowFieldSourceV1<'_, '_, '_, '_>,
   request: &QueryExecutionFieldReadRequestV1<'_>,
 ) -> Result<(), QueryExecutionSourceErrorV1> {
   require_not_cancelled(request.cancellation)?;
@@ -1678,6 +1955,7 @@ fn validate_row_field_request(
 
 fn evaluate_authoritative_field(
   inner: &NativeAuthoritativeFieldPartitionInnerV1,
+  prepared_sources: &mut NativePreparedSourceCacheV1<'_>,
   reader: &NativeSelectedNamespaceReaderV1<'_>,
   catalog_index: usize,
   row: &super::read_view_native::NativeSelectedNamespaceFileRowV1,
@@ -1699,10 +1977,7 @@ fn evaluate_authoritative_field(
       "effective ScopeId is absent from the selected field catalog",
     )
   })?;
-  let evaluation = reader
-    .prepare_authoritative_source(catalog, effective_scope_id, source_limits)
-    .and_then(|evaluator| evaluator.evaluate(row, NativeSelectedSourceParserV1::Native, None))
-    .map_err(map_native_error)?;
+  let evaluation = prepared_sources.evaluate(reader, catalog_index, row, effective_scope_id, source_limits)?;
   if evaluation.selected_root() != inner.view.root_metadata().hash
     || evaluation.semantic_state_root() != inner.view.authority().semantic_state.object_id
     || evaluation.scope_id() != effective_scope_id
@@ -1735,10 +2010,10 @@ fn evaluate_authoritative_field(
 }
 
 impl QueryAuthoritativeFieldPartitionSourceV1 for NativeAuthoritativeFieldPartitionSourceV1 {
-  fn open_field_partition(
-    &mut self,
+  fn open_field_partition<'source>(
+    &'source self,
     request: QueryExecutionFieldPartitionOpenRequestV1<'_>,
-  ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1>, QueryExecutionSourceErrorV1> {
+  ) -> Result<Box<dyn QueryAuthoritativeFieldPartitionCursorV1 + 'source>, QueryExecutionSourceErrorV1> {
     require_not_cancelled(request.cancellation)?;
     validate_open_request(&self.inner, &request)?;
     let catalog_index = unique_field_catalog(self.inner.semantic_catalog.catalogs(), request.field_name)?;
@@ -1780,6 +2055,7 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for NativeAuthoritativeFieldPartit
       ));
     }
     let source_limits = selected_source_limits()?;
+    let prepared_sources = NativePreparedSourceCacheV1::new(self.inner.as_ref(), self.inner.maximum_prepared_source_cache_entries)?;
     let cursor_memory_bytes = cursor_memory_bytes(&request, self.inner.view.hash_algorithm(), scope_ids.len())?;
     let cursor_memory =
       self.inner.source.memory_coordinator().reserve(MemoryOwner::Query, cursor_memory_bytes, AdmissionClass::Workload).map_err(
@@ -1796,7 +2072,7 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for NativeAuthoritativeFieldPartit
     })?;
     scope_document_counts.resize(scope_ids.len(), 0);
     Ok(Box::new(NativeAuthoritativeFieldPartitionCursorV1 {
-      inner: Arc::clone(&self.inner),
+      inner: self.inner.as_ref(),
       ordering: cursor,
       field_name: try_clone_string(request.field_name, "field name")?,
       catalog_index,
@@ -1809,6 +2085,7 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for NativeAuthoritativeFieldPartit
       maximum_canonical_value_bytes_per_document: request.maximum_canonical_value_bytes_per_document,
       maximum_path_bytes: request.maximum_path_bytes,
       source_limits,
+      prepared_sources,
       exhausted: false,
       finished: false,
       failed: false,
@@ -1817,8 +2094,8 @@ impl QueryAuthoritativeFieldPartitionSourceV1 for NativeAuthoritativeFieldPartit
   }
 }
 
-struct NativeAuthoritativeFieldPartitionCursorV1 {
-  inner: Arc<NativeAuthoritativeFieldPartitionInnerV1>,
+struct NativeAuthoritativeFieldPartitionCursorV1<'source> {
+  inner: &'source NativeAuthoritativeFieldPartitionInnerV1,
   ordering: NativeQueryOrderingCursorV1,
   field_name: String,
   catalog_index: usize,
@@ -1831,13 +2108,14 @@ struct NativeAuthoritativeFieldPartitionCursorV1 {
   maximum_canonical_value_bytes_per_document: u64,
   maximum_path_bytes: u64,
   source_limits: NativeSelectedSourceLimitsV1,
+  prepared_sources: NativePreparedSourceCacheV1<'source>,
   exhausted: bool,
   finished: bool,
   failed: bool,
   _memory: MemoryReservation,
 }
 
-impl NativeAuthoritativeFieldPartitionCursorV1 {
+impl NativeAuthoritativeFieldPartitionCursorV1<'_> {
   fn next_document_inner(
     &mut self,
     cancellation: &CancellationToken,
@@ -1875,7 +2153,15 @@ impl NativeAuthoritativeFieldPartitionCursorV1 {
     });
     let (scope_id, state, canonical_values, next_scope_count, next_unconfigured_count) = if let Some(scope_index) = scope_index {
       let selected_scope_id = &self.scope_ids[scope_index];
-      let evaluation = evaluate_authoritative_field(&self.inner, &reader, self.catalog_index, &row, selected_scope_id, self.source_limits)?;
+      let evaluation = evaluate_authoritative_field(
+        self.inner,
+        &mut self.prepared_sources,
+        &reader,
+        self.catalog_index,
+        &row,
+        selected_scope_id,
+        self.source_limits,
+      )?;
       let next_scope_count = self.scope_document_counts[scope_index].checked_add(1).ok_or_else(|| {
         source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_partition_scope_count", "scope document count overflowed")
       })?;
@@ -1948,7 +2234,7 @@ impl NativeAuthoritativeFieldPartitionCursorV1 {
   }
 }
 
-impl QueryAuthoritativeFieldPartitionCursorV1 for NativeAuthoritativeFieldPartitionCursorV1 {
+impl QueryAuthoritativeFieldPartitionCursorV1 for NativeAuthoritativeFieldPartitionCursorV1<'_> {
   fn next_document(
     &mut self,
     cancellation: &CancellationToken,
@@ -1987,7 +2273,7 @@ impl QueryAuthoritativeFieldPartitionCursorV1 for NativeAuthoritativeFieldPartit
   }
 }
 
-impl PositionUniverseSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_> {
+impl PositionUniverseSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_, '_> {
   fn resolve_position(
     &mut self,
     request: PositionUniverseLookupRequestV1<'_>,
@@ -1997,7 +2283,7 @@ impl PositionUniverseSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_> {
   }
 }
 
-impl NativeAuthoritativeAuxiliarySourceV1<'_> {
+impl NativeAuthoritativeAuxiliarySourceV1<'_, '_> {
   fn resolve_position_inner(
     &mut self,
     request: PositionUniverseLookupRequestV1<'_>,
@@ -2049,8 +2335,8 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
           "query order contains a framing-only comparator",
         ));
       };
-      let binding = self.field_binding(&sort.field)?;
-      if binding.comparator != comparator {
+      let binding_index = self.field_binding_index(&sort.field)?;
+      if self.fields[binding_index].comparator != comparator {
         return Err(source_error(
           QueryExecutionSourceErrorClassV1::Corrupt,
           "native_auxiliary_position_comparator",
@@ -2058,12 +2344,13 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
         ));
       }
       let maximum_values = request.maximum_row_bytes() / size_of::<LogicalOrderComponentOwnedV1>() as u64;
-      let evaluation = self.evaluate_field(binding, &row, effective_scope_id.as_deref(), maximum_values, request.maximum_row_bytes())?;
+      let evaluation =
+        self.evaluate_field(binding_index, &row, effective_scope_id.as_deref(), maximum_values, request.maximum_row_bytes())?;
       let component = match evaluation.state {
         QueryExecutionFieldStateV1::Missing | QueryExecutionFieldStateV1::DeterministicUnindexable => {
           LogicalOrderComponentOwnedV1::missing()
         }
-        QueryExecutionFieldStateV1::Values => select_position_component(binding, sort.direction, evaluation.values)?,
+        QueryExecutionFieldStateV1::Values => select_position_component(&self.fields[binding_index], sort.direction, evaluation.values)?,
       };
       components.push(component);
     }
@@ -2091,7 +2378,7 @@ impl NativeAuthoritativeAuxiliarySourceV1<'_> {
   }
 }
 
-impl QueryAggregateInputSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_> {
+impl QueryAggregateInputSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_, '_> {
   fn resolve_aggregate_input(
     &mut self,
     request: QueryAggregateInputLookupRequestV1<'_>,
@@ -2123,10 +2410,10 @@ impl QueryAggregateInputSourceV1 for NativeAuthoritativeAuxiliarySourceV1<'_> {
     let mut remaining_values = request.limits().maximum_total_values();
     for expected in request.fields() {
       require_not_cancelled(cancellation)?;
-      let binding = self.field_binding(expected.field_name())?;
+      let binding_index = self.field_binding_index(expected.field_name())?;
       let maximum_values = request.limits().maximum_values_per_field().min(remaining_values);
       let evaluation =
-        self.evaluate_field(binding, &row, effective_scope_id.as_deref(), maximum_values, request.limits().maximum_row_bytes())?;
+        self.evaluate_field(binding_index, &row, effective_scope_id.as_deref(), maximum_values, request.limits().maximum_row_bytes())?;
       remaining_values = remaining_values.checked_sub(evaluation.values.len() as u64).ok_or_else(|| {
         source_error(
           QueryExecutionSourceErrorClassV1::ResourceLimit,
@@ -2198,14 +2485,14 @@ fn auxiliary_binding_bytes(
     scope_count = scope_count.checked_add(field.scopes().len()).ok_or_else(|| {
       source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_auxiliary_scope_limit", "auxiliary scope count overflowed")
     })?;
-    let scope_slots = field.scopes().len().checked_mul(size_of::<NativeAuxiliaryScopeBindingV1>()).ok_or_else(|| {
+    let scope_slots = field.scopes().len().checked_mul(size_of::<NativeAuxiliaryScopeBindingV1<'static>>()).ok_or_else(|| {
       source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_auxiliary_binding_bytes", "scope slot bytes overflowed")
     })?;
     let scope_id_bytes = field.scopes().len().checked_mul(plan.hash_algorithm().hash_length()).ok_or_else(|| {
       source_error(QueryExecutionSourceErrorClassV1::ResourceLimit, "native_auxiliary_binding_bytes", "ScopeId bytes overflowed")
     })?;
     bytes = bytes
-      .checked_add(size_of::<NativeAuxiliaryFieldBindingV1>() as u64)
+      .checked_add(size_of::<NativeAuxiliaryFieldBindingV1<'static>>() as u64)
       .and_then(|bytes| bytes.checked_add(field.field_name().len() as u64))
       .and_then(|bytes| bytes.checked_add(scope_slots as u64))
       .and_then(|bytes| bytes.checked_add(scope_id_bytes as u64))
@@ -2223,12 +2510,14 @@ fn auxiliary_binding_bytes(
   Ok(bytes)
 }
 
-fn compile_auxiliary_bindings(
-  inner: &NativeAuthoritativeFieldPartitionInnerV1,
+fn compile_auxiliary_bindings<'definition>(
+  inner: &'definition NativeAuthoritativeFieldPartitionInnerV1,
   plan: &CompiledRootAwareQueryPlanV1,
+  structural_binding_bytes: u64,
   limits: NativeAuthoritativeAuxiliaryLimitsV1,
-) -> Result<Vec<NativeAuxiliaryFieldBindingV1>, QueryExecutionSourceErrorV1> {
-  let mut fields: Vec<NativeAuxiliaryFieldBindingV1> = Vec::new();
+) -> Result<(Vec<NativeAuxiliaryFieldBindingV1<'definition>>, u64), QueryExecutionSourceErrorV1> {
+  let mut fields: Vec<NativeAuxiliaryFieldBindingV1<'definition>> = Vec::new();
+  let mut retained_binding_bytes = structural_binding_bytes;
   fields.try_reserve_exact(plan.auxiliary_fields().len().min(limits.maximum_fields)).map_err(|error| {
     source_error(
       QueryExecutionSourceErrorClassV1::ResourceLimit,
@@ -2289,12 +2578,43 @@ fn compile_auxiliary_bindings(
           )
         })?;
       let candidate = &catalog_scope.indexes[catalog_index_index];
-      let runtime = IndexDefinitionRuntimeV1::from_encoded(
+      let remaining_runtime_bytes = limits.maximum_binding_bytes.checked_sub(retained_binding_bytes).ok_or_else(|| {
+        source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_auxiliary_binding_limit",
+          "compiled auxiliary runtimes exceed the retained-byte limit",
+        )
+      })?;
+      let runtime_inline_bytes = size_of::<IndexDefinitionRuntimeV1<'static, 'static>>() as u64;
+      let maximum_runtime_bytes = remaining_runtime_bytes.checked_add(runtime_inline_bytes).ok_or_else(|| {
+        source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_auxiliary_binding_bytes",
+          "compiled auxiliary runtime bound overflowed",
+        )
+      })?;
+      let runtime = IndexDefinitionRuntimeV1::from_encoded_bounded(
         &catalog_scope.encoded_value_store_definition,
         &candidate.encoded_field_definition,
         plan.hash_algorithm(),
+        maximum_runtime_bytes,
       )
       .map_err(map_index_definition_error)?;
+      let runtime_retained_bytes = runtime.maximum_retained_bytes().map_err(map_index_definition_error)?;
+      let runtime_allocated_bytes = runtime_retained_bytes.checked_sub(runtime_inline_bytes).ok_or_else(|| {
+        source_error(
+          QueryExecutionSourceErrorClassV1::Internal,
+          "native_auxiliary_memory_accounting",
+          "compiled auxiliary runtime retained fewer bytes than its inline representation",
+        )
+      })?;
+      retained_binding_bytes = retained_binding_bytes.checked_add(runtime_allocated_bytes).ok_or_else(|| {
+        source_error(
+          QueryExecutionSourceErrorClassV1::ResourceLimit,
+          "native_auxiliary_binding_bytes",
+          "compiled auxiliary runtime bytes overflowed",
+        )
+      })?;
       if runtime.index_id() != selected_candidate.index_id()
         || runtime.strategy().name != selected_candidate.strategy_name()
         || super::position::PositionComparatorV1::from_name(runtime.converter().definition().name)
@@ -2312,7 +2632,7 @@ fn compile_auxiliary_bindings(
       scopes.push(NativeAuxiliaryScopeBindingV1 {
         scope_id: try_clone_bytes(planned_scope.scope_id(), "auxiliary ScopeId")?,
         catalog_scope_index,
-        catalog_index_index,
+        runtime,
       });
     }
     fields.push(NativeAuxiliaryFieldBindingV1 {
@@ -2325,11 +2645,11 @@ fn compile_auxiliary_bindings(
       scopes,
     });
   }
-  Ok(fields)
+  Ok((fields, retained_binding_bytes))
 }
 
 fn validate_aggregate_request(
-  source: &NativeAuthoritativeAuxiliarySourceV1<'_>,
+  source: &NativeAuthoritativeAuxiliarySourceV1<'_, '_>,
   request: QueryAggregateInputLookupRequestV1<'_>,
 ) -> Result<(), QueryExecutionSourceErrorV1> {
   if request.database_id() != source.plan.database_id()
@@ -2363,10 +2683,8 @@ fn validate_aggregate_request(
 }
 
 fn convert_auxiliary_values(
-  binding: &NativeAuxiliaryFieldBindingV1,
-  catalog_scope: &super::query_planner::QueryPlanningScopeV1,
-  scope_binding: &NativeAuxiliaryScopeBindingV1,
-  hash_algorithm: HashAlgorithm,
+  binding: &NativeAuxiliaryFieldBindingV1<'_>,
+  scope_binding: &NativeAuxiliaryScopeBindingV1<'_>,
   canonical_values: &[Vec<u8>],
   maximum_values: u64,
   maximum_bytes: u64,
@@ -2392,13 +2710,6 @@ fn convert_auxiliary_values(
       "logical value slots exceed the auxiliary byte limit",
     ));
   }
-  let candidate = &catalog_scope.indexes[scope_binding.catalog_index_index];
-  let runtime = IndexDefinitionRuntimeV1::from_encoded(
-    &catalog_scope.encoded_value_store_definition,
-    &candidate.encoded_field_definition,
-    hash_algorithm,
-  )
-  .map_err(map_index_definition_error)?;
   let mut non_null = Vec::new();
   non_null.try_reserve_exact(canonical_values.len()).map_err(|error| {
     source_error(
@@ -2440,7 +2751,7 @@ fn convert_auxiliary_values(
       non_null.push(try_clone_bytes(value, "canonical source value")?);
     }
   }
-  let compiled = runtime.compile_source_values(&non_null).map_err(map_index_definition_error)?;
+  let compiled = scope_binding.runtime.compile_source_values(&non_null).map_err(map_index_definition_error)?;
   if compiled.values.len() != non_null.len()
     || compiled.values.iter().any(|value| value.postings.len() != 1 || value.postings[0].expansion_ordinal != 0)
   {
@@ -2487,7 +2798,7 @@ fn convert_auxiliary_values(
 }
 
 fn select_position_component(
-  binding: &NativeAuxiliaryFieldBindingV1,
+  binding: &NativeAuxiliaryFieldBindingV1<'_>,
   direction: PositionSortDirectionV1,
   mut values: Vec<LogicalOrderComponentOwnedV1>,
 ) -> Result<LogicalOrderComponentOwnedV1, QueryExecutionSourceErrorV1> {
