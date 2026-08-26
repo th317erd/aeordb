@@ -23,6 +23,7 @@ use super::index_producer_collector::{
   IndexParserOutcomeV1,
 };
 use super::parser_plan::{ParserCandidateKind, ParserCandidateV1, ParserPlanKind};
+use super::selected_file_body::selected_file_body_reservation_bytes_v1;
 
 const MIME_ROUTER_ID: &str = "/org/aeordev/aeordb/native/mime-router-v1";
 const RAW_JSON_ID: &str = "/org/aeordev/aeordb/native/raw-json-v1";
@@ -35,9 +36,7 @@ const CORRECTED_ARCHIVE_WORKSPACE_MULTIPLIER: u64 = 4;
 
 #[doc(hidden)]
 pub fn native_parser_body_reservation_bytes_v1(total_size: u64) -> Result<u64, IndexParserExecutionErrorV1> {
-  total_size
-    .checked_mul(2)
-    .and_then(|bytes| bytes.checked_add(BODY_FIXED_BYTES))
+  selected_file_body_reservation_bytes_v1(total_size)
     .ok_or_else(|| host_failure("native_parser_body_accounting", "body reservation overflowed"))
 }
 

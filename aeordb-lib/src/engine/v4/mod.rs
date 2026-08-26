@@ -139,6 +139,7 @@ pub mod read_view_native;
 pub mod reader;
 pub mod root_authority;
 pub mod scope;
+mod selected_file_body;
 pub mod semantic_catalog;
 pub mod semantic_store;
 pub mod source_evaluator;

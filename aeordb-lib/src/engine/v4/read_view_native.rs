@@ -39,9 +39,7 @@ use super::index_coverage_registry::{
   IndexCoverageNvtDescriptorV1, IndexCoverageNvtStatusV1, IndexCoverageRegistryOwnerKindV1, IndexCoverageRegistrySelectionV1,
   IndexCoverageRegistryGenerationV1, IndexCoverageRegistrySnapshotV1, field_definition_fingerprint, field_dependency_fingerprint,
 };
-use super::index_native_parser::{
-  NativeIndexParserBodySourceV1, NativeIndexParserBodyV1, NativeIndexParserExecutorV1, native_parser_body_reservation_bytes_v1,
-};
+use super::index_native_parser::{NativeIndexParserBodySourceV1, NativeIndexParserBodyV1, NativeIndexParserExecutorV1};
 use super::index_producer_collector::{IndexParserExecutionErrorV1, IndexParserExecutorV1};
 use super::index_source::PluginMapperExecutorV1;
 use super::namespace::{NamespaceTreeEdgeV0, SemanticAvailabilityV1};
@@ -58,6 +56,7 @@ use super::read_view_authorization::{
 };
 use super::root_authority::ImmutableNamespaceAuthorityV1;
 use super::scope::{ScopeDefinitionV1, decode_scope_definition, scope_matches_path, scope_owner_overlaps_query_path};
+use super::selected_file_body::selected_file_body_reservation_bytes_v1;
 use super::semantic_catalog::{
   SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1,
   SemanticCatalogTraversalBoundsV1, SemanticCatalogWalkStatsV1, validate_semantic_definition_identity_v1,
@@ -106,6 +105,8 @@ const SELECTED_SEMANTIC_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
 const SELECTED_SOURCE_MAXIMUM_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 const SELECTED_SOURCE_RECEIPT_FIXED_BYTES: u64 = 4 * 1024;
 const SELECTED_SOURCE_PREPARED_FIXED_BYTES: u64 = 4 * 1024;
+const SELECTED_FILE_BODY_MAXIMUM_BYTES: u64 = 256 * 1024 * 1024;
+const SELECTED_FILE_BODY_MAXIMUM_CHUNKS: usize = 65_536;
 
 /// One production source for captured v4 authority, lifecycle, and selected
 /// permission reads. Callers must use the same process memory coordinator for
@@ -115,6 +116,51 @@ pub struct NativeReadViewSourceV1 {
   publisher: Arc<V4FirstAuthorityPublisher>,
   memory: Arc<MemoryCoordinator>,
   current_configured_grace_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSelectedFileBodyLimitsV1 {
+  maximum_body_bytes: u64,
+  maximum_chunks: usize,
+}
+
+impl NativeSelectedFileBodyLimitsV1 {
+  pub fn new(maximum_body_bytes: u64, maximum_chunks: usize) -> Result<Self, NativeSelectedNamespaceReadErrorV1> {
+    if maximum_body_bytes == 0
+      || maximum_body_bytes > SELECTED_FILE_BODY_MAXIMUM_BYTES
+      || maximum_chunks == 0
+      || maximum_chunks > SELECTED_FILE_BODY_MAXIMUM_CHUNKS
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::invalid(
+        "selected_file_body_limits",
+        "selected file-body limits must be nonzero and remain within protocol maxima",
+      ));
+    }
+    Ok(Self { maximum_body_bytes, maximum_chunks })
+  }
+}
+
+pub struct NativeSelectedFileBodyV1 {
+  bytes: Vec<u8>,
+  _memory: MemoryReservation,
+}
+
+impl NativeSelectedFileBodyV1 {
+  pub fn as_bytes(&self) -> &[u8] {
+    &self.bytes
+  }
+
+  pub fn len(&self) -> usize {
+    self.bytes.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.bytes.is_empty()
+  }
+
+  fn into_parts(self) -> (Vec<u8>, MemoryReservation) {
+    (self.bytes, self._memory)
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -940,6 +986,94 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     }
     self.check_cancelled()?;
     self.build_identity_result(state.found, result_memory)
+  }
+
+  pub fn read_file_body(
+    &self,
+    row: &NativeSelectedNamespaceFileRowV1,
+    limits: NativeSelectedFileBodyLimitsV1,
+  ) -> Result<NativeSelectedFileBodyV1, NativeSelectedNamespaceReadErrorV1> {
+    self.check_cancelled()?;
+    if row.authority_binding != self.authority_binding() {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_file_body_row_authority",
+        "selected file-body row was not produced by this exact selected read view",
+      ));
+    }
+    self.validate_path(row.path(), false)?;
+    self.validate_authorized_scope(row.path())?;
+    let record = row.file_record();
+    if record.total_size > limits.maximum_body_bytes {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_file_body_bytes",
+        "selected file body exceeds the admitted source-byte bound",
+      ));
+    }
+    if record.chunk_hashes.len() > limits.maximum_chunks {
+      return Err(NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_file_body_chunks",
+        "selected file body exceeds the admitted chunk-count bound",
+      ));
+    }
+    let expected_size = usize::try_from(record.total_size).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource(
+        "selected_file_body_platform_size",
+        format!("selected file-body size does not fit this platform: {error}"),
+      )
+    })?;
+    let reservation_bytes = selected_file_body_reservation_bytes_v1(record.total_size).ok_or_else(|| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_file_body_accounting", "selected file-body reservation overflowed")
+    })?;
+    let body_memory = self
+      .source
+      .memory
+      .reserve(MemoryOwner::Query, reservation_bytes.max(1), AdmissionClass::Workload)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_file_body_memory", error.to_string()))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(expected_size).map_err(|error| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_file_body_allocation", format!("cannot reserve selected file body: {error}"))
+    })?;
+    for chunk_hash in &record.chunk_hashes {
+      self.check_cancelled()?;
+      if chunk_hash.len() != self.view.hash_algorithm().hash_length() || chunk_hash.iter().all(|byte| *byte == 0) {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_file_body_chunk_hash",
+          "selected FileRecord contains a foreign-width or zero chunk hash",
+        ));
+      }
+      let remaining = expected_size.checked_sub(bytes.len()).ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::corrupt("selected_file_body_length", "selected file body already exceeds its declared size")
+      })?;
+      let chunk = self.load_selected_file_body_chunk(row.path(), chunk_hash, remaining)?;
+      let next = bytes
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| NativeSelectedNamespaceReadErrorV1::corrupt("selected_file_body_length", "selected file-body length overflowed"))?;
+      if next > expected_size {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_file_body_length",
+          "selected file body exceeds its declared size",
+        ));
+      }
+      bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != expected_size {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_file_body_length",
+        format!("selected file body has {} bytes; FileRecord declares {expected_size}", bytes.len()),
+      ));
+    }
+    if !record.content_hash.is_empty()
+      && (record.content_hash.len() != self.view.hash_algorithm().hash_length()
+        || digest_parts(self.view.hash_algorithm(), &[&bytes]) != record.content_hash)
+    {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_file_body_content_hash",
+        "selected file body does not match the FileRecord whole-content hash",
+      ));
+    }
+    self.check_cancelled()?;
+    Ok(NativeSelectedFileBodyV1 { bytes, _memory: body_memory })
   }
 
   pub(crate) fn restore_ordered_file_row(
@@ -1890,6 +2024,40 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     Ok(())
   }
 
+  fn load_selected_file_body_chunk(
+    &self,
+    path: &str,
+    chunk_hash: &[u8],
+    maximum_decoded_bytes: usize,
+  ) -> Result<Vec<u8>, NativeSelectedNamespaceReadErrorV1> {
+    let chunk = self
+      .source
+      .load_entity_at_header(self.view.captured_header(), chunk_hash, MAX_CHUNK_ENTITY_BYTES, self.view.cancellation())
+      .map_err(NativeSelectedNamespaceReadErrorV1::from)?
+      .ok_or_else(|| {
+        NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_file_body_chunk_missing",
+          format!("selected chunk {} for {path} is missing", hex::encode(chunk_hash)),
+        )
+      })?;
+    if chunk.entry_type != EntryTypeV4::Chunk || chunk.entity_version != 0 || chunk.flags != 0 || chunk.key != chunk_hash {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_file_body_chunk_representation",
+        "selected chunk representation is noncanonical",
+      ));
+    }
+    let decoded =
+      crate::engine::compression::decompress_bounded(&chunk.stored_value, chunk.compression_algorithm, maximum_decoded_bytes)
+        .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_file_body_chunk_compression", error.to_string()))?;
+    if digest_parts(self.view.hash_algorithm(), &[b"chunk:", &decoded]) != chunk_hash {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_file_body_chunk_identity",
+        "selected chunk content identity is invalid",
+      ));
+    }
+    Ok(decoded)
+  }
+
   fn build_identity_result(
     &self,
     found: Option<NativeSelectedNamespaceFileRowV1>,
@@ -2107,103 +2275,23 @@ impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1<'_, '_
         "selected source body read was cancelled",
       ));
     }
-    let record = request.file_record();
-    let expected_size = usize::try_from(record.total_size).map_err(|error| {
-      IndexParserExecutionErrorV1::host_failure(
-        "selected_source_corrupt_size",
-        format!("selected document size does not fit this platform: {error}"),
-      )
-    })?;
-    let body_bytes = native_parser_body_reservation_bytes_v1(record.total_size)?;
-    let body_memory = self
-      .reader
-      .source
-      .memory
-      .reserve(MemoryOwner::Query, body_bytes.max(1), AdmissionClass::Workload)
-      .map_err(|error| IndexParserExecutionErrorV1::host_failure("selected_source_resource_body", error.to_string()))?;
     let workspace_memory = self
       .reader
       .source
       .memory
       .reserve(MemoryOwner::Query, workspace_bytes.max(1), AdmissionClass::Workload)
       .map_err(|error| IndexParserExecutionErrorV1::host_failure("selected_source_resource_workspace", error.to_string()))?;
-    let mut body = Vec::new();
-    body.try_reserve_exact(expected_size).map_err(|error| {
-      IndexParserExecutionErrorV1::host_failure("selected_source_resource_allocation", format!("cannot reserve selected body: {error}"))
-    })?;
-    for chunk_hash in &record.chunk_hashes {
-      if (request.is_cancelled())() {
-        return Err(IndexParserExecutionErrorV1::cancelled(
-          "selected_source_cancelled_during_body",
-          "selected source body read was cancelled",
-        ));
-      }
-      if chunk_hash.len() != self.reader.view.hash_algorithm().hash_length() || chunk_hash.iter().all(|byte| *byte == 0) {
-        return Err(IndexParserExecutionErrorV1::host_failure(
-          "selected_source_corrupt_chunk_hash",
-          "selected FileRecord contains a foreign-width or zero chunk hash",
-        ));
-      }
-      let remaining = expected_size.checked_sub(body.len()).ok_or_else(|| {
-        IndexParserExecutionErrorV1::host_failure("selected_source_corrupt_body_length", "selected body already exceeds its declared size")
-      })?;
-      let chunk = self
-        .reader
-        .source
-        .load_entity_at_header(self.reader.view.captured_header(), chunk_hash, MAX_CHUNK_ENTITY_BYTES, self.reader.view.cancellation())
-        .map_err(map_selected_body_authorization_error)?
-        .ok_or_else(|| {
-          IndexParserExecutionErrorV1::host_failure(
-            "selected_source_corrupt_chunk_missing",
-            format!("selected chunk {} is missing", hex::encode(chunk_hash)),
-          )
-        })?;
-      if chunk.entry_type != EntryTypeV4::Chunk || chunk.entity_version != 0 || chunk.flags != 0 || chunk.key != *chunk_hash {
-        return Err(IndexParserExecutionErrorV1::host_failure(
-          "selected_source_corrupt_chunk_representation",
-          "selected chunk representation is noncanonical",
-        ));
-      }
-      let decoded = crate::engine::compression::decompress_bounded(&chunk.stored_value, chunk.compression_algorithm, remaining)
-        .map_err(|error| IndexParserExecutionErrorV1::host_failure("selected_source_corrupt_chunk_compression", error.to_string()))?;
-      if digest_parts(self.reader.view.hash_algorithm(), &[b"chunk:", &decoded]) != *chunk_hash {
-        return Err(IndexParserExecutionErrorV1::host_failure(
-          "selected_source_corrupt_chunk_identity",
-          "selected chunk content identity is invalid",
-        ));
-      }
-      let next = body.len().checked_add(decoded.len()).ok_or_else(|| {
-        IndexParserExecutionErrorV1::host_failure("selected_source_corrupt_body_length", "selected body length overflowed")
-      })?;
-      if next > expected_size {
-        return Err(IndexParserExecutionErrorV1::host_failure(
-          "selected_source_corrupt_body_length",
-          "selected body exceeds its declared size",
-        ));
-      }
-      body.extend_from_slice(&decoded);
-    }
-    if body.len() != expected_size {
-      return Err(IndexParserExecutionErrorV1::host_failure(
-        "selected_source_corrupt_body_length",
-        format!("selected body has {} bytes; FileRecord declares {expected_size}", body.len()),
-      ));
-    }
-    if !record.content_hash.is_empty()
-      && (record.content_hash.len() != self.reader.view.hash_algorithm().hash_length()
-        || digest_parts(self.reader.view.hash_algorithm(), &[&body]) != record.content_hash)
-    {
-      return Err(IndexParserExecutionErrorV1::host_failure(
-        "selected_source_corrupt_content_hash",
-        "selected body does not match the FileRecord whole-content hash",
-      ));
-    }
-    if (request.is_cancelled())() {
-      return Err(IndexParserExecutionErrorV1::cancelled(
-        "selected_source_cancelled_after_body",
-        "selected source body read was cancelled",
-      ));
-    }
+    let body = self
+      .reader
+      .read_file_body(
+        self.row,
+        NativeSelectedFileBodyLimitsV1 {
+          maximum_body_bytes: SELECTED_FILE_BODY_MAXIMUM_BYTES,
+          maximum_chunks: SELECTED_FILE_BODY_MAXIMUM_CHUNKS,
+        },
+      )
+      .map_err(map_selected_file_body_parser_error)?;
+    let (body, body_memory) = body.into_parts();
     Ok(NativeIndexParserBodyV1::new(body, body_memory, workspace_memory))
   }
 }
@@ -3181,17 +3269,29 @@ fn map_selected_source_evaluator_error(error: AuthoritativeSourceEvaluationError
   }
 }
 
-fn map_selected_body_authorization_error(error: ReadViewAuthorizationFailureV1) -> IndexParserExecutionErrorV1 {
-  match error {
-    ReadViewAuthorizationFailureV1::Canceled => {
-      IndexParserExecutionErrorV1::cancelled("selected_source_cancelled_during_body", error.to_string())
-    }
-    ReadViewAuthorizationFailureV1::Denied | ReadViewAuthorizationFailureV1::Corrupt(_) => {
-      IndexParserExecutionErrorV1::host_failure("selected_source_corrupt_entity", error.to_string())
-    }
-    ReadViewAuthorizationFailureV1::Unavailable(_) => {
-      IndexParserExecutionErrorV1::host_failure("selected_source_unavailable_entity", error.to_string())
-    }
+fn map_selected_file_body_parser_error(error: NativeSelectedNamespaceReadErrorV1) -> IndexParserExecutionErrorV1 {
+  let code = match error.code() {
+    "selected_file_body_row_authority" => "selected_source_corrupt_request",
+    "selected_file_body_chunk_hash" => "selected_source_corrupt_chunk_hash",
+    "selected_file_body_chunk_missing" => "selected_source_corrupt_chunk_missing",
+    "selected_file_body_chunk_representation" => "selected_source_corrupt_chunk_representation",
+    "selected_file_body_chunk_compression" => "selected_source_corrupt_chunk_compression",
+    "selected_file_body_chunk_identity" => "selected_source_corrupt_chunk_identity",
+    "selected_file_body_length" => "selected_source_corrupt_body_length",
+    "selected_file_body_content_hash" => "selected_source_corrupt_content_hash",
+    _ => match error.class() {
+      NativeSelectedNamespaceReadErrorClassV1::InvalidRequest | NativeSelectedNamespaceReadErrorClassV1::Corrupt => {
+        "selected_source_corrupt_entity"
+      }
+      NativeSelectedNamespaceReadErrorClassV1::ResourceLimit => "selected_source_resource_body",
+      NativeSelectedNamespaceReadErrorClassV1::Unavailable => "selected_source_unavailable_entity",
+      NativeSelectedNamespaceReadErrorClassV1::Cancelled => "selected_source_cancelled_during_body",
+    },
+  };
+  if error.class() == NativeSelectedNamespaceReadErrorClassV1::Cancelled {
+    IndexParserExecutionErrorV1::cancelled(code, error.context())
+  } else {
+    IndexParserExecutionErrorV1::host_failure(code, error.context())
   }
 }
 

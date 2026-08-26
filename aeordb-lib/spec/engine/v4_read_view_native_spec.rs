@@ -109,7 +109,7 @@ use aeordb::engine::v4::query_scope_execution::{QueryExactScopeExecutionErrorV1,
 use aeordb::engine::v4::read_view_native::{
   NativeReadViewSourceV1, NativeSelectedArtifactCursorRequestV1, NativeSelectedNamespaceFileRowV1, NativeSelectedNamespaceLimitsV1,
   NativeSelectedArtifactRootRequestV1, NativeSelectedNvtFallbackReasonV1, NativeSelectedNamespaceReadErrorClassV1,
-  NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedPostingSeekRequestV1,
+  NativeSelectedFileBodyLimitsV1, NativeSelectedNamespaceReadErrorV1, NativeSelectedNamespaceReaderV1, NativeSelectedPostingSeekRequestV1,
   NativeSelectedPostingSeekSourceV1, NativeSelectedSemanticByteLimitsV1, NativeSelectedSemanticCountLimitsV1,
   NativeSelectedSemanticLimitsV1, NativeSelectedSourceEvaluationV1, NativeSelectedSourceLimitsV1, NativeSelectedSourceOutcomeV1,
   NativeSelectedSourceParserV1, default_native_selected_semantic_limits_v1,
@@ -571,7 +571,24 @@ fn publish_content_file_tree(
   content: &[u8],
   transaction_id: [u8; 16],
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-  publish_content_file_tree_with_chunk(publisher, algorithm, expected_head_hash, name, content, transaction_id, true)
+  publish_content_file_tree_with_chunk(
+    publisher,
+    algorithm,
+    expected_head_hash,
+    name,
+    content,
+    transaction_id,
+    true,
+    SelectedFileBodyShape::Exact,
+  )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedFileBodyShape {
+  Exact,
+  RepeatedChunk,
+  DeclaredSizeTooLarge,
+  WrongContentHash,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -583,19 +600,29 @@ fn publish_content_file_tree_with_chunk(
   content: &[u8],
   transaction_id: [u8; 16],
   publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
   let timestamp = 1_700_000_000_500;
   let path = format!("/docs/{name}");
   let chunk_hash = digest_parts(algorithm, &[b"chunk:", content]);
+  let chunk_repetitions = if body_shape == SelectedFileBodyShape::RepeatedChunk { 2 } else { 1 };
+  let expected_body = content.repeat(chunk_repetitions);
+  let total_size =
+    if body_shape == SelectedFileBodyShape::DeclaredSizeTooLarge { expected_body.len() as u64 + 1 } else { expected_body.len() as u64 };
+  let content_hash = if body_shape == SelectedFileBodyShape::WrongContentHash {
+    digest_parts(algorithm, &[b"deliberately wrong selected file content"])
+  } else {
+    digest_parts(algorithm, &[&expected_body])
+  };
   let record = FileRecord {
     path,
     content_type: Some("application/json".to_string()),
-    total_size: content.len() as u64,
+    total_size,
     created_at: timestamp,
     updated_at: timestamp,
     metadata: Vec::new(),
-    content_hash: digest_parts(algorithm, &[content]),
-    chunk_hashes: vec![chunk_hash.clone()],
+    content_hash,
+    chunk_hashes: vec![chunk_hash.clone(); chunk_repetitions],
   };
   let record_bytes = record.serialize_for_version(algorithm.hash_length(), 1).unwrap();
   let record_revision = digest_parts(algorithm, &[b"filec:", &record_bytes]);
@@ -603,7 +630,7 @@ fn publish_content_file_tree_with_chunk(
     &[ChildEntry {
       entry_type: EntryTypeV4::FileRecord.to_u8(),
       hash: record_revision.clone(),
-      total_size: content.len() as u64,
+      total_size,
       created_at: timestamp,
       updated_at: timestamp,
       name: name.to_string(),
@@ -2167,6 +2194,7 @@ fn selected_source_fixture(value_store_fixture: &str, scope_glob: Option<&str>, 
     &[],
     body,
     publish_chunk,
+    SelectedFileBodyShape::Exact,
   )
 }
 
@@ -2176,6 +2204,7 @@ fn selected_source_fixture_with_scopes(
   extra_scopes: &[Vec<u8>],
   body: &[u8],
   publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
 ) -> SelectedSourceFixture {
   let algorithm = HashAlgorithm::Blake3_256;
   let (directory, path, publisher) = publisher(algorithm);
@@ -2188,6 +2217,7 @@ fn selected_source_fixture_with_scopes(
     body,
     [0x68; 16],
     publish_chunk,
+    body_shape,
   );
   let chunk_offset = publisher.locator(&chunk_hash).unwrap().map(|locator| (locator.offset, locator.total_length));
   let content_root_value = publisher.load_immutable_entity_bounded(&content_root, 1024 * 1024).unwrap().unwrap().stored_value;
@@ -2595,7 +2625,8 @@ fn native_partition_fixture(
   extra_scopes: &[Vec<u8>],
   body: &[u8],
 ) -> NativePartitionFixture {
-  let fixture = selected_source_fixture_with_scopes(value_store_fixture, primary_scope, extra_scopes, body, true);
+  let fixture =
+    selected_source_fixture_with_scopes(value_store_fixture, primary_scope, extra_scopes, body, true, SelectedFileBodyShape::Exact);
   let reader = fixture.reader();
   let semantic_catalog =
     reader.load_planner_catalogs("/docs", &[fixture.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
@@ -3259,6 +3290,13 @@ fn selected_source_evaluation_reads_historical_chunks_and_retains_exact_query_me
     assert_eq!(row.record_revision(), historical_revision);
     let before = memory.snapshot().unwrap().owner(aeordb::engine::memory_coordinator::MemoryOwner::Query).unwrap().reserved_bytes;
 
+    let body = reader.read_file_body(row, NativeSelectedFileBodyLimitsV1::new(1024 * 1024, 16).unwrap()).unwrap();
+
+    assert_eq!(body.as_bytes(), historical_body);
+    assert!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > before);
+    drop(body);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, before);
+
     let evaluation = reader
       .evaluate_authoritative_source(
         row,
@@ -3293,6 +3331,126 @@ fn selected_source_evaluation_reads_historical_chunks_and_retains_exact_query_me
     drop(view);
     assert_eq!(pins.active_pin_count().unwrap(), 0);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn selected_file_body_limits_cancellation_pressure_and_cross_view_rows_fail_closed_without_leaks() {
+  assert_eq!(NativeSelectedFileBodyLimitsV1::new(0, 1).unwrap_err().class(), NativeSelectedNamespaceReadErrorClassV1::InvalidRequest,);
+  assert_eq!(NativeSelectedFileBodyLimitsV1::new(1, 0).unwrap_err().class(), NativeSelectedNamespaceReadErrorClassV1::InvalidRequest,);
+  assert_eq!(
+    NativeSelectedFileBodyLimitsV1::new(u64::MAX, usize::MAX).unwrap_err().class(),
+    NativeSelectedNamespaceReadErrorClassV1::InvalidRequest,
+  );
+
+  let bounded = selected_source_fixture("json-corrected", Some("*.json"), b"bounded body", true);
+  let reader = bounded.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = bounded.memory.snapshot().unwrap().reserved_bytes;
+  let error = match reader.read_file_body(&page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1, 1).unwrap()) {
+    Ok(_) => panic!("selected file body escaped its source-byte bound"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_file_body_bytes");
+  assert_eq!(bounded.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(reader);
+  bounded.assert_released();
+
+  let cancelled = selected_source_fixture("json-corrected", Some("*.json"), b"cancelled body", true);
+  let reader = cancelled.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = cancelled.memory.snapshot().unwrap().reserved_bytes;
+  cancelled.cancellation.cancel();
+  let error = match reader.read_file_body(&page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1024, 1).unwrap()) {
+    Ok(_) => panic!("cancelled selected file-body read continued"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Cancelled);
+  assert_eq!(cancelled.memory.snapshot().unwrap().reserved_bytes, baseline);
+  drop(page);
+  drop(reader);
+  cancelled.assert_released();
+
+  let pressured = selected_source_fixture("json-corrected", Some("*.json"), b"pressured body", true);
+  let reader = pressured.reader();
+  let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = pressured.memory.snapshot().unwrap();
+  let blocker_bytes = (511 * 1024 * 1024u64).checked_sub(baseline.accounted_bytes).unwrap().checked_sub(1).unwrap();
+  let blocker = pressured.memory.reserve(MemoryOwner::ServerCaches, blocker_bytes, AdmissionClass::Workload).unwrap();
+  let error = match reader.read_file_body(&page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1024, 1).unwrap()) {
+    Ok(_) => panic!("selected file-body read escaped process-memory pressure"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::ResourceLimit);
+  assert_eq!(error.code(), "selected_file_body_memory");
+  drop(blocker);
+  assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline.reserved_bytes);
+  drop(page);
+  drop(reader);
+  pressured.assert_released();
+
+  let left = selected_source_fixture("json-corrected", Some("*.json"), b"left body", true);
+  let right = selected_source_fixture("json-corrected", Some("*.json"), b"right body", true);
+  let left_reader = left.reader();
+  let right_reader = right.reader();
+  let left_page = left_reader.scan_files("/docs", None).unwrap();
+  let right_page = right_reader.scan_files("/docs", None).unwrap();
+  let left_baseline = left.memory.snapshot().unwrap().reserved_bytes;
+  let error = match left_reader.read_file_body(&right_page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1024, 1).unwrap()) {
+    Ok(_) => panic!("selected file-body read accepted a row from another captured view"),
+    Err(error) => error,
+  };
+  assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(error.code(), "selected_file_body_row_authority");
+  assert_eq!(left.memory.snapshot().unwrap().reserved_bytes, left_baseline);
+  drop(right_page);
+  drop(left_page);
+  drop(right_reader);
+  drop(left_reader);
+  right.assert_released();
+  left.assert_released();
+}
+
+#[test]
+fn selected_file_body_rejects_chunk_count_declared_length_and_content_hash_drift() {
+  let cases = [
+    (SelectedFileBodyShape::RepeatedChunk, NativeSelectedFileBodyLimitsV1::new(1024, 1).unwrap(), "selected_file_body_chunks"),
+    (SelectedFileBodyShape::DeclaredSizeTooLarge, NativeSelectedFileBodyLimitsV1::new(1024, 4).unwrap(), "selected_file_body_length"),
+    (SelectedFileBodyShape::WrongContentHash, NativeSelectedFileBodyLimitsV1::new(1024, 4).unwrap(), "selected_file_body_content_hash"),
+  ];
+  for (body_shape, limits, expected_code) in cases {
+    let fixture = selected_source_fixture_with_scopes(
+      "json-corrected",
+      semantic_scope_definition(HashAlgorithm::Blake3_256, "/docs", Some("*.json")),
+      &[],
+      b"body with independently inconsistent record metadata",
+      true,
+      body_shape,
+    );
+    let reader = fixture.reader();
+    let page = reader.scan_files("/docs", None).unwrap();
+    let baseline = fixture.memory.snapshot().unwrap().reserved_bytes;
+
+    let error = match reader.read_file_body(&page.rows()[0], limits) {
+      Ok(_) => panic!("inconsistent selected FileRecord became readable: {body_shape:?}"),
+      Err(error) => error,
+    };
+
+    assert_eq!(
+      error.class(),
+      if expected_code == "selected_file_body_chunks" {
+        NativeSelectedNamespaceReadErrorClassV1::ResourceLimit
+      } else {
+        NativeSelectedNamespaceReadErrorClassV1::Corrupt
+      }
+    );
+    assert_eq!(error.code(), expected_code);
+    assert_eq!(fixture.memory.snapshot().unwrap().reserved_bytes, baseline);
+    drop(page);
+    drop(reader);
+    fixture.assert_released();
   }
 }
 
@@ -3388,6 +3546,14 @@ fn selected_source_missing_and_corrupt_chunks_are_corruption_not_missing() {
   let catalogs =
     reader.load_planner_catalogs("/docs", &[missing.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
   let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = missing.memory.snapshot().unwrap().reserved_bytes;
+  let body_error = match reader.read_file_body(&page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1024 * 1024, 16).unwrap()) {
+    Ok(_) => panic!("missing selected chunk became a direct file-body success"),
+    Err(error) => error,
+  };
+  assert_eq!(body_error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(body_error.code(), "selected_file_body_chunk_missing");
+  assert_eq!(missing.memory.snapshot().unwrap().reserved_bytes, baseline);
   let error = reader
     .evaluate_authoritative_source(
       &page.rows()[0],
@@ -3416,6 +3582,13 @@ fn selected_source_missing_and_corrupt_chunks_are_corruption_not_missing() {
   let catalogs =
     reader.load_planner_catalogs("/docs", &[corrupt.field_name.as_str()], default_native_selected_semantic_limits_v1()).unwrap();
   let page = reader.scan_files("/docs", None).unwrap();
+  let baseline = corrupt.memory.snapshot().unwrap().reserved_bytes;
+  let body_error = match reader.read_file_body(&page.rows()[0], NativeSelectedFileBodyLimitsV1::new(1024 * 1024, 16).unwrap()) {
+    Ok(_) => panic!("corrupt selected chunk became a direct file-body success"),
+    Err(error) => error,
+  };
+  assert_eq!(body_error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+  assert_eq!(corrupt.memory.snapshot().unwrap().reserved_bytes, baseline);
   let error = reader
     .evaluate_authoritative_source(
       &page.rows()[0],
@@ -3759,7 +3932,8 @@ fn selected_semantic_catalog_retains_fieldless_nearer_scopes_for_effective_resol
   let nearer = semantic_scope_definition(algorithm, "/docs", None);
   let primary_id = decode_scope_definition(&primary, algorithm).unwrap().scope_id;
   let nearer_id = decode_scope_definition(&nearer, algorithm).unwrap().scope_id;
-  let fixture = selected_source_fixture_with_scopes("metadata-hash-corrected", primary, &[nearer], b"{}", true);
+  let fixture =
+    selected_source_fixture_with_scopes("metadata-hash-corrected", primary, &[nearer], b"{}", true, SelectedFileBodyShape::Exact);
   let reader = fixture.reader();
 
   let selected = reader.load_planner_catalogs("/docs", &["@hash"], default_native_selected_semantic_limits_v1()).unwrap();
@@ -5979,6 +6153,15 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(native.matches("impl NativeSelectedSourceEvaluatorV1").count(), 1);
   assert_eq!(native.matches("_prepared_memory: MemoryReservation").count(), 1);
   assert_eq!(native.matches("impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1").count(), 1);
+  assert_eq!(native.matches("pub fn read_file_body(").count(), 1);
+  assert_eq!(native.matches("fn load_selected_file_body_chunk(").count(), 1);
+  let parser_body_start = native.find("impl NativeIndexParserBodySourceV1 for CapturedSelectedParserBodySourceV1").unwrap();
+  let parser_body_end = native[parser_body_start..].find("struct SelectedNamespaceIdentityStateV1").unwrap() + parser_body_start;
+  let parser_body = &native[parser_body_start..parser_body_end];
+  assert_eq!(parser_body.matches(".read_file_body(").count(), 1);
+  for forbidden in ["load_entity_at_header(", "decompress_bounded(", "chunk_hashes"] {
+    assert!(!parser_body.contains(forbidden), "selected parser body source regrew chunk-loading authority: {forbidden}");
+  }
   for (needle, expected) in
     [("fn resolve_path(", 1), ("fn visit_directory_children", 1), ("fn load_file_record(", 1), ("FileRecord::deserialize(", 1)]
   {
