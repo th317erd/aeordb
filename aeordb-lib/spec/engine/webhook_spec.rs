@@ -409,6 +409,17 @@ fn test_event_matches_empty_events_list() {
   assert!(!event_matches_webhook(&event, &webhook));
 }
 
+#[test]
+fn recipient_addressed_events_never_match_global_webhooks() {
+  let webhook = make_webhook(vec!["files_shared", "files_unshared"], None, true);
+  let direct = EngineEvent::for_user("files_shared", "root", "recipient", serde_json::json!({"path": "/private.txt"}));
+  let group =
+    EngineEvent::for_groups("files_unshared", "root", vec!["engineering".to_string()], serde_json::json!({"path": "/private.txt"}));
+
+  assert!(!event_matches_webhook(&direct, &webhook), "direct recipient event leaked into a global webhook");
+  assert!(!event_matches_webhook(&group, &webhook), "group recipient event leaked into a global webhook");
+}
+
 // --- spawn_webhook_dispatcher integration test ---
 
 #[tokio::test]

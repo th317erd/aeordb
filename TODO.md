@@ -1388,9 +1388,13 @@
           - [x] P7-5e2: filter legacy entries and affected relationships in lockstep under current per-connection authority, fail closed on malformed or empty projections, and remove exact global cardinality from scoped/non-root stream gaps.
           - [x] P7-5e3: adapt the bundled portal/client to rooted response envelopes and incremental active-directory SSE patches without reloading unrelated previews, then update public docs.
           - [x] P7-5e4: freeze producer/projector/client architecture uniqueness and pass narrow, affected, static, documentation, broad, and disposable live-server gates.
-          - [ ] P7-5e5: eliminate hidden-traffic influence on scoped/non-root `stream_gap` timing through visibility-aware bounded delivery or exact authorized gap reconstruction; suppressing `missed_events` alone is not timing isolation.
+          - [x] P7-5e5: eliminate hidden-traffic influence on scoped/non-root `stream_gap` timing through visibility-aware bounded delivery or exact authorized gap reconstruction; suppressing `missed_events` alone is not timing isolation.
+            - [x] P7-5e5a: freeze projected-queue isolation, authorized-overflow, lifecycle, malformed-event, deletion, and unshare contracts with red-first tests.
+            - [x] P7-5e5b: move `/system/events` and `/events/me` onto per-subscriber authorization-filtered queues with explicit item/byte bounds and subscriber-local gap accounting.
+            - [x] P7-5e5c: preserve deletion visibility through exact previous-root permission authority and unshare visibility through a typed prior-recipient witness without exposing either event to never-authorized subscribers.
+            - [x] P7-5e5d: close event/webhook architecture, narrow/affected/broad/resource/documentation, disconnect/shutdown, and disposable live-server gates.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
-      - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
+      - [x] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant. (Completed by P7-5e5c.)
       - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
     - [ ] P8: execute side-by-side migration preflight, copied-production rehearsal, native release qualification, canary, and explicitly authorized operator cutover.
       - [ ] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.

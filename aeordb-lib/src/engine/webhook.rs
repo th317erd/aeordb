@@ -75,6 +75,9 @@ pub fn compute_signature(secret: &str, payload: &[u8]) -> String {
 
 /// Check if an event matches a webhook's filters.
 pub fn event_matches_webhook(event: &EngineEvent, webhook: &WebhookConfig) -> bool {
+  if event.is_recipient_addressed() {
+    return false;
+  }
   if !webhook.active {
     return false;
   }

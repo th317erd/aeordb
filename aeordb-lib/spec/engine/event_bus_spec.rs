@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use aeordb::engine::{
-  EventBus, EngineEvent, RequestContext, EntryEventData, VersionEventData, HeartbeatData, EVENT_ENTRIES_CREATED, EVENT_ENTRIES_UPDATED,
-  EVENT_ENTRIES_DELETED, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED, EVENT_VERSIONS_RESTORED,
-  EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED, EVENT_PERMISSIONS_CHANGED, EVENT_IMPORTS_COMPLETED,
-  EVENT_INDEXES_UPDATED, EVENT_ERRORS, EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED, EVENT_PLUGINS_DEPLOYED,
-  EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS, EVENT_SERVER_READY,
+  EventBus, EngineEvent, ProjectedEvent, RequestContext, EntryEventData, VersionEventData, HeartbeatData, EVENT_ENTRIES_CREATED,
+  EVENT_ENTRIES_UPDATED, EVENT_ENTRIES_DELETED, EVENT_VERSIONS_CREATED, EVENT_VERSIONS_DELETED, EVENT_VERSIONS_PROMOTED,
+  EVENT_VERSIONS_RESTORED, EVENT_USERS_CREATED, EVENT_USERS_ACTIVATED, EVENT_USERS_DEACTIVATED, EVENT_PERMISSIONS_CHANGED,
+  EVENT_IMPORTS_COMPLETED, EVENT_INDEXES_UPDATED, EVENT_ERRORS, EVENT_TOKENS_EXCHANGED, EVENT_API_KEYS_CREATED, EVENT_API_KEYS_REVOKED,
+  EVENT_PLUGINS_DEPLOYED, EVENT_PLUGINS_REMOVED, EVENT_HEARTBEAT, EVENT_METRICS, EVENT_SERVER_READY, EVENT_FILES_UNSHARED,
 };
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -138,6 +138,132 @@ async fn test_event_bus_receiver_empty() {
   }
 }
 
+#[tokio::test]
+async fn projected_subscriber_hidden_events_do_not_consume_queue_capacity() {
+  let bus = EventBus::with_capacity(2);
+  let mut receiver =
+    bus.subscribe_projected(|event| (event.payload["visible"] == true).then(|| event.clone())).expect("subscribe projected receiver");
+
+  for sequence in 0..16 {
+    bus.emit(EngineEvent::new("hidden", "system", serde_json::json!({"sequence": sequence, "visible": false})));
+  }
+  bus.emit(EngineEvent::new("visible", "system", serde_json::json!({"visible": true})));
+
+  let delivery = tokio::time::timeout(std::time::Duration::from_millis(500), receiver.receive())
+    .await
+    .expect("projected delivery timed out")
+    .expect("projected delivery channel closed");
+  let ProjectedEvent::Event(event) = delivery else {
+    panic!("hidden traffic created a projected stream gap");
+  };
+  assert_eq!(event.event_type, "visible");
+}
+
+#[tokio::test]
+async fn projected_subscriber_gap_counts_only_authorized_discarded_events() {
+  let bus = EventBus::with_capacity(2);
+  let mut receiver =
+    bus.subscribe_projected(|event| (event.payload["visible"] == true).then(|| event.clone())).expect("subscribe projected receiver");
+
+  for sequence in 0..5 {
+    bus.emit(EngineEvent::new("visible", "system", serde_json::json!({"sequence": sequence, "visible": true})));
+  }
+  for sequence in 0..12 {
+    bus.emit(EngineEvent::new("hidden", "system", serde_json::json!({"sequence": sequence, "visible": false})));
+  }
+
+  let delivery = tokio::time::timeout(std::time::Duration::from_millis(500), receiver.receive())
+    .await
+    .expect("projected gap timed out")
+    .expect("projected delivery channel closed");
+  let ProjectedEvent::Gap { missed_events } = delivery else {
+    panic!("authorized overflow did not create a projected stream gap");
+  };
+  assert_eq!(missed_events, 5);
+}
+
+#[tokio::test]
+async fn projected_subscriber_enforces_byte_capacity_independently_of_item_capacity() {
+  let bus = EventBus::new();
+  let mut receiver = bus.subscribe_projected_with_limits(8, 128, |event| Some(event.clone())).expect("subscribe projected receiver");
+  bus.emit(EngineEvent::new("oversized", "system", serde_json::json!({"body": "x".repeat(1024)})));
+
+  let delivery = tokio::time::timeout(std::time::Duration::from_millis(500), receiver.receive())
+    .await
+    .expect("projected byte-bound gap timed out")
+    .expect("projected delivery channel closed");
+  let ProjectedEvent::Gap { missed_events } = delivery else {
+    panic!("projected byte bound did not create a stream gap");
+  };
+  assert_eq!(missed_events, 1);
+}
+
+#[tokio::test]
+async fn projected_subscriber_byte_overflow_wakes_an_already_waiting_receiver() {
+  let bus = EventBus::new();
+  let mut receiver = bus.subscribe_projected_with_limits(8, 128, |event| Some(event.clone())).expect("subscribe projected receiver");
+  let waiting_receive = tokio::spawn(async move { receiver.receive().await });
+  tokio::task::yield_now().await;
+
+  bus.emit(EngineEvent::new("oversized", "system", serde_json::json!({"body": "x".repeat(1024)})));
+
+  let delivery = tokio::time::timeout(std::time::Duration::from_millis(500), waiting_receive)
+    .await
+    .expect("projected byte overflow did not wake the receiver")
+    .expect("projected receiver task panicked")
+    .expect("projected delivery channel closed");
+  let ProjectedEvent::Gap { missed_events } = delivery else {
+    panic!("projected byte overflow did not create a stream gap");
+  };
+  assert_eq!(missed_events, 1);
+}
+
+#[tokio::test]
+async fn projected_subscriber_projection_panic_fails_closed_without_poisoning_delivery() {
+  let bus = EventBus::new();
+  let mut receiver = bus
+    .subscribe_projected(|event| {
+      assert_ne!(event.event_type, "malformed", "simulated projection failure");
+      Some(event.clone())
+    })
+    .expect("subscribe projected receiver");
+
+  bus.emit(EngineEvent::new("malformed", "system", serde_json::json!({})));
+  bus.emit(EngineEvent::new("valid", "system", serde_json::json!({})));
+
+  let delivery = tokio::time::timeout(std::time::Duration::from_millis(500), receiver.receive())
+    .await
+    .expect("valid projected delivery timed out")
+    .expect("projected delivery channel closed");
+  let ProjectedEvent::Event(event) = delivery else {
+    panic!("projection failure created an observable stream gap");
+  };
+  assert_eq!(event.event_type, "valid");
+}
+
+#[tokio::test]
+async fn projected_subscriber_drop_deregisters_projection() {
+  let bus = EventBus::new();
+  assert_eq!(bus.projected_subscriber_count(), 0);
+  let receiver = bus.subscribe_projected(|event| Some(event.clone())).expect("subscribe projected receiver");
+  assert_eq!(bus.projected_subscriber_count(), 1);
+  drop(receiver);
+  assert_eq!(bus.projected_subscriber_count(), 0);
+}
+
+#[test]
+fn projected_subscriber_registry_is_bounded_and_reuses_released_capacity() {
+  let bus = EventBus::with_projected_delivery_limits(2, 1024, 2);
+  let first = bus.subscribe_projected(|event| Some(event.clone())).expect("subscribe first projected receiver");
+  let _second = bus.subscribe_projected(|event| Some(event.clone())).expect("subscribe second projected receiver");
+  assert_eq!(bus.projected_subscriber_count(), 2);
+  assert!(bus.subscribe_projected(|event| Some(event.clone())).is_err(), "projected subscriber registry exceeded its fixed bound");
+
+  drop(first);
+  let _replacement = bus.subscribe_projected(|event| Some(event.clone())).expect("released subscriber capacity was not reusable");
+  assert_eq!(bus.projected_subscriber_count(), 2);
+}
+
 // --- EngineEvent tests ---
 
 #[tokio::test]
@@ -179,6 +305,22 @@ async fn test_engine_event_clone() {
   assert_eq!(event.event_id, cloned.event_id);
   assert_eq!(event.event_type, cloned.event_type);
   assert_eq!(event.timestamp, cloned.timestamp);
+}
+
+#[test]
+fn group_recipient_event_keeps_its_routing_witness_out_of_the_wire_envelope() {
+  let event = EngineEvent::for_groups(
+    EVENT_FILES_UNSHARED,
+    "root",
+    vec!["engineering".to_string(), "user:recipient".to_string()],
+    serde_json::json!({"path": "/shared/file.txt", "action": "refresh"}),
+  );
+
+  assert_eq!(event.recipient_groups(), Some(["engineering".to_string(), "user:recipient".to_string()].as_slice()));
+  assert!(event.recipient_user_id.is_none());
+  let serialized = serde_json::to_value(&event).unwrap();
+  assert!(serialized.get("recipient_groups").is_none(), "internal audience witness leaked into the wire envelope");
+  assert_eq!(serialized["event_type"], EVENT_FILES_UNSHARED);
 }
 
 // --- Payload data struct serialization tests ---

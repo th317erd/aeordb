@@ -710,6 +710,63 @@ async fn share_notifications_report_only_acknowledged_changed_paths() {
 }
 
 #[tokio::test]
+async fn unshare_emits_one_acknowledged_group_recipient_notification_without_audience_leakage() {
+  let jwt_manager = Arc::new(JwtManager::generate());
+  let (engine, _temp_dir) = create_temp_engine_for_tests();
+  let auth = root_bearer_token(&jwt_manager);
+  let target_user_id = create_test_user(&engine, "event_unshare_target");
+  let target_group = format!("user:{target_user_id}");
+  let path = "/shared/unshared.txt";
+  let ctx = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&ctx, path, b"shared", Some("text/plain")).unwrap();
+  PermissionStore::new(&engine).grant_paths(&ctx, vec![path.to_string()], vec![target_group.clone()], ".r..l...".to_string()).unwrap();
+  let (app, event_bus) = create_app_with_jwt_engine_and_event_bus(Arc::clone(&jwt_manager), Arc::clone(&engine));
+  let mut events = event_bus.subscribe();
+  let request_body = serde_json::to_vec(&serde_json::json!({
+    "path": path,
+    "group": target_group,
+    "path_pattern": "unshared.txt"
+  }))
+  .unwrap();
+
+  let response = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .method("DELETE")
+        .uri("/files/shares")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(request_body.clone()))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+
+  let event = tokio::time::timeout(Duration::from_secs(1), events.recv()).await.expect("missing unshare notification").unwrap();
+  assert_eq!(event.event_type, aeordb::engine::EVENT_FILES_UNSHARED);
+  assert_eq!(event.recipient_groups(), Some([format!("user:{target_user_id}")].as_slice()));
+  assert_eq!(event.payload, serde_json::json!({"path": path, "action": "refresh"}));
+  assert!(serde_json::to_value(&event).unwrap().get("recipient_groups").is_none());
+
+  let retry = app
+    .oneshot(
+      Request::builder()
+        .method("DELETE")
+        .uri("/files/shares")
+        .header("content-type", "application/json")
+        .header("authorization", &auth)
+        .body(Body::from(request_body))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(retry.status(), StatusCode::NOT_FOUND);
+  assert!(tokio::time::timeout(Duration::from_millis(100), events.recv()).await.is_err(), "failed unshare retry emitted an event");
+}
+
+#[tokio::test]
 async fn failed_compound_share_emits_no_recipient_notification() {
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, _temp_dir) = create_temp_engine_for_tests();

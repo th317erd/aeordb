@@ -1743,7 +1743,7 @@ fn wave_five_cleanup_uses_bounded_conditional_namespace_authority() {
   assert!(sse_routes.contains("SystemFamilyPolicyResolver"), "protected cleanup paths can leak through non-root SSE subscriptions");
   assert!(sse_routes.contains("PermissionResolver"), "ordinary SSE paths can bypass current user/group authority");
   assert!(sse_routes.contains("current_key_rules"), "long-lived SSE streams can retain stale API-key authority");
-  assert!(sse_routes.contains("event.recipient_user_id.is_some()"), "recipient-addressed events can leak through the global SSE stream");
+  assert!(sse_routes.contains("event.is_recipient_addressed()"), "recipient-addressed events can leak through the global SSE stream");
   assert!(sse_routes.contains("NonRootEventVisibility::RootOnly"), "administrative SSE payloads can leak to non-root subscribers");
   assert!(!sse_routes.contains("any_path_allowed_by_rules"), "one allowed batch member again exposes denied sibling paths");
 }
@@ -1755,7 +1755,10 @@ fn wave_five_authorized_mutation_events_retain_one_producer_projector_and_client
   let version_manager = include_str!("../../src/engine/version_manager.rs");
   let backup = include_str!("../../src/engine/backup.rs");
   let root_public_schema = include_str!("../../src/server/root_public_schema.rs");
+  let event_bus = include_str!("../../src/engine/event_bus.rs");
+  let engine_event = include_str!("../../src/engine/engine_event.rs");
   let sse_routes = include_str!("../../src/server/sse_routes.rs");
+  let share_routes = include_str!("../../src/server/share_routes.rs");
   let portal_routes = include_str!("../../src/server/portal_routes.rs");
   let server = include_str!("../../src/server/mod.rs");
   let file_event_contract = include_str!("../../src/portal/file-event-contract.mjs");
@@ -1772,6 +1775,15 @@ fn wave_five_authorized_mutation_events_retain_one_producer_projector_and_client
 
   assert_eq!(root_public_schema.matches("pub struct PublicAffectedRelationshipV1").count(), 1, "public relationship schema is duplicated");
   assert_eq!(sse_routes.matches("fn project_event_for_subscriber(").count(), 1, "SSE gained a second subscriber projector");
+  assert_eq!(sse_routes.matches("subscribe_projected(").count(), 2, "an SSE route bypasses subscriber-private projected delivery");
+  assert!(!sse_routes.contains("BroadcastStream"), "SSE again consumes the shared raw broadcast before authorization");
+  for queue_contract in ["maximum_retained_events", "maximum_retained_bytes", "ProjectedEvent::Gap", "projected_subscribers"] {
+    assert!(event_bus.contains(queue_contract), "subscriber-private delivery lost {queue_contract}");
+  }
+  assert!(sse_routes.contains("previous_root_authority_for_event"), "deleted relationships lost exact prior-audience authority");
+  assert!(sse_routes.contains("PublicAffectedRelationshipChangeV1::Deleted"), "non-deletion relationships can no longer be distinguished");
+  assert!(engine_event.contains("recipient_groups: Option<Vec<String>>"), "group-addressed events lost their typed internal witness");
+  assert!(share_routes.contains("EVENT_FILES_UNSHARED"), "acknowledged unshare no longer publishes private reconciliation");
   assert_eq!(
     sse_routes.matches("serde_json::from_value::<PublicAffectedRelationshipV1>").count(),
     1,

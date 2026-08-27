@@ -361,6 +361,16 @@ pub async fn unshare(
     Err(error) => return engine_error_response("Failed to update permissions", &error),
   }
 
+  state.event_bus.emit(crate::engine::engine_event::EngineEvent::for_groups(
+    crate::engine::engine_event::EVENT_FILES_UNSHARED,
+    &claims.sub,
+    vec![body.group.clone()],
+    serde_json::json!({
+      "path": normalized,
+      "action": "refresh",
+    }),
+  ));
+
   Json(serde_json::json!({
       "revoked": true,
       "group": body.group,

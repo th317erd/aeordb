@@ -15,8 +15,8 @@ use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
 use aeordb::engine::{
-  BufferedFile, DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_GC_STATUS, EVENT_METRICS,
-  EVENT_SERVER_READY, EVENT_STREAM_GAP,
+  BufferedFile, DirectoryOps, EngineEvent, EventBus, Group, PermissionStore, RequestContext, StorageEngine, User, EVENT_ENTRIES_CREATED,
+  EVENT_ENTRIES_DELETED, EVENT_FILES_UNSHARED, EVENT_GC_STATUS, EVENT_METRICS, EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use aeordb::engine::system_store;
 use aeordb::plugins::PluginManager;
@@ -34,12 +34,17 @@ fn test_app() -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBu
 fn test_app_with_event_capacity(
   event_capacity: usize,
 ) -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBus>, tempfile::TempDir) {
+  test_app_with_event_bus(Arc::new(EventBus::with_capacity(event_capacity)))
+}
+
+fn test_app_with_event_bus(
+  event_bus: Arc<EventBus>,
+) -> (axum::Router, Arc<JwtManager>, Arc<StorageEngine>, Arc<EventBus>, tempfile::TempDir) {
   let jwt_manager = Arc::new(JwtManager::generate());
   let (engine, temp_dir) = create_temp_engine_for_tests();
   let plugin_manager = Arc::new(PluginManager::new(engine.clone()));
   let rate_limiter = Arc::new(RateLimiter::default_config());
   let auth_provider: Arc<dyn aeordb::auth::AuthProvider> = Arc::new(FileAuthProvider::new(engine.clone()));
-  let event_bus = Arc::new(EventBus::with_capacity(event_capacity));
   let app = create_app_with_all(
     auth_provider,
     jwt_manager.clone(),
@@ -268,6 +273,27 @@ async fn test_sse_endpoint_with_empty_events_param() {
   assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn test_sse_projected_subscriber_limit_returns_503_and_disconnect_releases_capacity() {
+  let event_bus = Arc::new(EventBus::with_projected_delivery_limits(2, 1024, 1));
+  let (app, jwt_manager, _engine, event_bus, _temp) = test_app_with_event_bus(event_bus);
+  let auth = bearer_token(&jwt_manager);
+  let request = || Request::builder().method("GET").uri("/system/events").header("authorization", &auth).body(Body::empty()).unwrap();
+
+  let first_response = app.clone().oneshot(request()).await.unwrap();
+  assert_eq!(first_response.status(), StatusCode::OK);
+  assert_eq!(event_bus.projected_subscriber_count(), 1);
+
+  let rejected_response = app.clone().oneshot(request()).await.unwrap();
+  assert_eq!(rejected_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  assert_eq!(event_bus.projected_subscriber_count(), 1);
+
+  drop(first_response);
+  assert_eq!(event_bus.projected_subscriber_count(), 0);
+  let replacement_response = app.oneshot(request()).await.unwrap();
+  assert_eq!(replacement_response.status(), StatusCode::OK);
+}
+
 // ---------------------------------------------------------------------------
 // Event streaming tests (emit events, read SSE body)
 // ---------------------------------------------------------------------------
@@ -337,7 +363,7 @@ async fn read_next_sse_frame(body: &mut Body) -> String {
 }
 
 #[tokio::test]
-async fn test_global_sse_reports_broadcast_lag_as_a_stream_gap() {
+async fn test_global_sse_reports_projected_queue_overflow_as_an_exact_stream_gap() {
   let (app, jwt_manager, _engine, event_bus, _temp) = test_app_with_event_capacity(2);
   let auth = bearer_token(&jwt_manager);
   let request = Request::builder().method("GET").uri("/system/events").header("authorization", auth).body(Body::empty()).unwrap();
@@ -353,12 +379,12 @@ async fn test_global_sse_reports_broadcast_lag_as_a_stream_gap() {
 
   let gap = read_next_sse_frame(&mut body).await;
   assert!(gap.contains(&format!("event: {EVENT_STREAM_GAP}")), "missing stream-gap event: {gap}");
-  assert!(gap.contains("\"missed_events\":3"), "wrong lag evidence: {gap}");
+  assert!(gap.contains("\"missed_events\":5"), "wrong authorized discard evidence: {gap}");
   assert!(gap.contains("\"action\":\"refresh\""), "missing client recovery action: {gap}");
 }
 
 #[tokio::test]
-async fn test_user_sse_reports_broadcast_lag_without_global_event_cardinality() {
+async fn test_user_sse_reports_projected_queue_overflow_without_recipient_cardinality() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app_with_event_capacity(2);
   let user_id = create_test_user(&engine, "sse_lag_user");
   let auth = user_bearer_token(&jwt_manager, user_id);
@@ -375,6 +401,242 @@ async fn test_user_sse_reports_broadcast_lag_without_global_event_cardinality() 
   assert!(gap.contains(&format!("event: {EVENT_STREAM_GAP}")), "missing user stream-gap event: {gap}");
   assert!(!gap.contains("missed_events"), "recipient stream leaked global event cardinality: {gap}");
   assert!(gap.contains("\"action\":\"refresh\""), "missing user recovery action: {gap}");
+}
+
+#[tokio::test]
+async fn test_sse_hidden_global_traffic_cannot_create_a_scoped_stream_gap() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app_with_event_capacity(2);
+  let user_id = create_test_user(&engine, "sse_hidden_gap_user");
+  let visible_path = "/docs/visible-after-hidden.txt";
+  grant_user_read(&engine, user_id, visible_path);
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder().method("GET").uri("/system/events").header("authorization", auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+  let ready = read_next_sse_frame(&mut body).await;
+  assert!(ready.contains(EVENT_SERVER_READY));
+
+  for sequence in 0..8 {
+    event_bus.emit(EngineEvent::new(
+      EVENT_ENTRIES_CREATED,
+      "system",
+      serde_json::json!({"entries": [{"path": format!("/private/hidden-{sequence}.txt")}]}),
+    ));
+  }
+  event_bus.emit(EngineEvent::new(EVENT_ENTRIES_CREATED, "system", serde_json::json!({"entries": [{"path": visible_path}]})));
+
+  let visible = read_next_sse_frame(&mut body).await;
+  assert!(visible.contains(visible_path), "visible event did not survive hidden traffic: {visible}");
+  assert!(!visible.contains(EVENT_STREAM_GAP), "hidden traffic created a scoped stream gap: {visible}");
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "scoped stream retained extra evidence after the visible event"
+  );
+}
+
+#[tokio::test]
+async fn test_user_sse_other_recipient_traffic_cannot_create_a_stream_gap() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app_with_event_capacity(2);
+  let user_id = create_test_user(&engine, "sse_recipient_gap_user");
+  let other_user_id = create_test_user(&engine, "sse_other_recipient_gap_user");
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder().method("GET").uri("/events/me").header("authorization", auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  for sequence in 0..8 {
+    event_bus.emit(EngineEvent::for_user("notification", "system", &other_user_id.to_string(), serde_json::json!({"sequence": sequence})));
+  }
+  event_bus.emit(EngineEvent::for_user("notification", "system", &user_id.to_string(), serde_json::json!({"sequence": "visible"})));
+
+  let visible = read_next_sse_frame(&mut body).await;
+  assert!(visible.contains("\"sequence\":\"visible\""), "recipient event did not survive other-user traffic: {visible}");
+  assert!(!visible.contains(EVENT_STREAM_GAP), "other-user traffic created a recipient stream gap: {visible}");
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "recipient stream retained extra evidence after the addressed event"
+  );
+}
+
+#[tokio::test]
+async fn test_user_sse_delivers_group_addressed_events_only_to_current_members() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let member_user_id = create_test_user(&engine, "sse_group_recipient_member");
+  let nonmember_user_id = create_test_user(&engine, "sse_group_recipient_nonmember");
+  let member_request = Request::builder()
+    .method("GET")
+    .uri("/events/me")
+    .header("authorization", user_bearer_token(&jwt_manager, member_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let nonmember_request = Request::builder()
+    .method("GET")
+    .uri("/events/me")
+    .header("authorization", user_bearer_token(&jwt_manager, nonmember_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let member_response = app.clone().oneshot(member_request).await.unwrap();
+  let nonmember_response = app.oneshot(nonmember_request).await.unwrap();
+  assert_eq!(member_response.status(), StatusCode::OK);
+  assert_eq!(nonmember_response.status(), StatusCode::OK);
+  let mut member_body = member_response.into_body();
+  let mut nonmember_body = nonmember_response.into_body();
+
+  event_bus.emit(EngineEvent::for_groups(
+    EVENT_FILES_UNSHARED,
+    "root",
+    vec![format!("user:{member_user_id}")],
+    serde_json::json!({"path": "/shared/revoked.txt", "action": "refresh"}),
+  ));
+
+  let member_event = read_next_sse_frame(&mut member_body).await;
+  assert!(member_event.contains(EVENT_FILES_UNSHARED), "group member did not receive addressed event: {member_event}");
+  assert!(member_event.contains("/shared/revoked.txt"), "group member event lost its logical path: {member_event}");
+  assert!(!member_event.contains("recipient_groups"), "internal group routing witness leaked to the recipient: {member_event}");
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), nonmember_body.frame()).await.is_err(),
+    "nonmember received an event addressed to another group"
+  );
+}
+
+#[tokio::test]
+async fn test_acknowledged_unshare_route_reaches_the_removed_group_through_user_sse() {
+  let (app, jwt_manager, engine, _event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_unshare_route_recipient");
+  let path = "/shared/route-unshared.txt";
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), path, b"shared", Some("text/plain")).unwrap();
+  grant_user_read(&engine, user_id, path);
+
+  let recipient_request = Request::builder()
+    .method("GET")
+    .uri("/events/me")
+    .header("authorization", user_bearer_token(&jwt_manager, user_id))
+    .body(Body::empty())
+    .unwrap();
+  let recipient_response = app.clone().oneshot(recipient_request).await.unwrap();
+  assert_eq!(recipient_response.status(), StatusCode::OK);
+  let mut recipient_body = recipient_response.into_body();
+
+  let unshare_request = Request::builder()
+    .method("DELETE")
+    .uri("/files/shares")
+    .header("authorization", root_bearer_token(&jwt_manager))
+    .header("content-type", "application/json")
+    .body(Body::from(
+      serde_json::to_vec(&serde_json::json!({
+        "path": path,
+        "group": format!("user:{user_id}"),
+        "path_pattern": "route-unshared.txt"
+      }))
+      .unwrap(),
+    ))
+    .unwrap();
+  let unshare_response = app.oneshot(unshare_request).await.unwrap();
+  assert_eq!(unshare_response.status(), StatusCode::OK);
+
+  let unshare_event = read_next_sse_frame(&mut recipient_body).await;
+  assert!(unshare_event.contains(EVENT_FILES_UNSHARED), "unshare route did not reach the removed group: {unshare_event}");
+  assert!(unshare_event.contains(path), "unshare event lost its logical path: {unshare_event}");
+  assert!(!unshare_event.contains("recipient_group"), "internal removed-group witness leaked into the SSE frame: {unshare_event}");
+}
+
+#[tokio::test]
+async fn test_acknowledged_query_group_unshare_reaches_only_current_members() {
+  let (app, jwt_manager, engine, _event_bus, _temp) = test_app();
+  let member_user_id = create_test_user(&engine, "sse_query_unshare_member");
+  let nonmember_user_id = create_test_user(&engine, "sse_query_unshare_nonmember");
+  let group_name = "sse_query_unshare_group";
+  let group = Group::new(group_name, ".r..l...", "........", "user_id", "eq", &member_user_id.to_string()).unwrap();
+  system_store::store_group(&engine, &RequestContext::system(), &group).unwrap();
+  let path = "/shared/query-group-unshared.txt";
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), path, b"shared", Some("text/plain")).unwrap();
+  PermissionStore::new(&engine)
+    .grant_paths(&RequestContext::system(), vec![path.to_string()], vec![group_name.to_string()], ".r..l...".to_string())
+    .unwrap();
+
+  let member_request = Request::builder()
+    .method("GET")
+    .uri("/events/me")
+    .header("authorization", user_bearer_token(&jwt_manager, member_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let nonmember_request = Request::builder()
+    .method("GET")
+    .uri("/events/me")
+    .header("authorization", user_bearer_token(&jwt_manager, nonmember_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let member_response = app.clone().oneshot(member_request).await.unwrap();
+  let nonmember_response = app.clone().oneshot(nonmember_request).await.unwrap();
+  assert_eq!(member_response.status(), StatusCode::OK);
+  assert_eq!(nonmember_response.status(), StatusCode::OK);
+  let mut member_body = member_response.into_body();
+  let mut nonmember_body = nonmember_response.into_body();
+
+  let unshare_request = Request::builder()
+    .method("DELETE")
+    .uri("/files/shares")
+    .header("authorization", root_bearer_token(&jwt_manager))
+    .header("content-type", "application/json")
+    .body(Body::from(
+      serde_json::to_vec(&serde_json::json!({
+        "path": path,
+        "group": group_name,
+        "path_pattern": "query-group-unshared.txt"
+      }))
+      .unwrap(),
+    ))
+    .unwrap();
+  let unshare_response = app.oneshot(unshare_request).await.unwrap();
+  assert_eq!(unshare_response.status(), StatusCode::OK);
+
+  let member_event = read_next_sse_frame(&mut member_body).await;
+  assert!(member_event.contains(EVENT_FILES_UNSHARED), "query-group member did not receive the unshare event: {member_event}");
+  assert!(member_event.contains(path), "query-group unshare event lost its path: {member_event}");
+  assert!(!member_event.contains("recipient_group"), "query-group witness leaked into the SSE frame: {member_event}");
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), nonmember_body.frame()).await.is_err(),
+    "query-group nonmember received an unshare event"
+  );
+}
+
+#[tokio::test]
+async fn test_user_sse_recipient_events_remain_bounded_by_current_api_key_scope_and_lifecycle() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_recipient_user");
+  let rules = vec![
+    KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
+  let request = Request::builder().method("GET").uri("/events/me").header("authorization", auth).body(Body::empty()).unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::for_user("files_shared", "root", &user_id.to_string(), serde_json::json!({"path": "/private/hidden.txt"})));
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "recipient event bypassed the current API-key path scope"
+  );
+
+  event_bus.emit(EngineEvent::for_user("files_shared", "root", &user_id.to_string(), serde_json::json!({"path": "/allowed/visible.txt"})));
+  let visible = read_next_sse_frame(&mut body).await;
+  assert!(visible.contains("/allowed/visible.txt"), "in-scope recipient event was not delivered: {visible}");
+
+  assert!(system_store::revoke_api_key(&engine, &RequestContext::system(), key_id).unwrap());
+  event_bus.emit(EngineEvent::for_user(
+    "files_shared",
+    "root",
+    &user_id.to_string(),
+    serde_json::json!({"path": "/allowed/after-revoke.txt"}),
+  ));
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "recipient stream retained revoked API-key authority"
+  );
 }
 
 #[tokio::test]
@@ -1095,6 +1357,165 @@ async fn test_sse_stops_path_delivery_after_user_permission_revocation() {
   assert!(
     tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
     "revoked user permission continued receiving path events"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_deleted_relationship_uses_exact_previous_root_authority_without_leaking_to_never_authorized_users() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let prior_audience_user_id = create_test_user(&engine, "sse_prior_deletion_audience");
+  let never_authorized_user_id = create_test_user(&engine, "sse_never_deletion_audience");
+  let file_path = "/docs/prior-authority-deleted.txt";
+  let directory_path = "/docs/prior-authority-directory";
+  DirectoryOps::new(&engine)
+    .store_file_buffered(&RequestContext::system(), file_path, b"visible before deletion", Some("text/plain"))
+    .unwrap();
+  DirectoryOps::new(&engine).create_directory(&RequestContext::system(), directory_path).unwrap();
+  PermissionStore::new(&engine)
+    .grant_paths(
+      &RequestContext::system(),
+      vec![file_path.to_string(), directory_path.to_string()],
+      vec![format!("user:{prior_audience_user_id}")],
+      ".r..l...".to_string(),
+    )
+    .unwrap();
+  let previous_root_hash = engine.head_hash().unwrap();
+  PermissionStore::new(&engine)
+    .revoke_path(&RequestContext::system(), file_path, &format!("user:{prior_audience_user_id}"), Some("prior-authority-deleted.txt"))
+    .unwrap();
+  PermissionStore::new(&engine)
+    .revoke_path(&RequestContext::system(), directory_path, &format!("user:{prior_audience_user_id}"), Some("prior-authority-directory"))
+    .unwrap();
+  let root_hash = engine.head_hash().unwrap();
+
+  let prior_audience_request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", user_bearer_token(&jwt_manager, prior_audience_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let never_authorized_request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", user_bearer_token(&jwt_manager, never_authorized_user_id))
+    .body(Body::empty())
+    .unwrap();
+  let prior_audience_response = app.clone().oneshot(prior_audience_request).await.unwrap();
+  let never_authorized_response = app.oneshot(never_authorized_request).await.unwrap();
+  assert_eq!(prior_audience_response.status(), StatusCode::OK);
+  assert_eq!(never_authorized_response.status(), StatusCode::OK);
+  let mut prior_audience_body = prior_audience_response.into_body();
+  let mut never_authorized_body = never_authorized_response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    EVENT_ENTRIES_DELETED,
+    "root",
+    serde_json::json!({
+      "previous_root_hash": hex::encode(previous_root_hash),
+      "root_hash": hex::encode(root_hash),
+      "entries": [{"path": file_path}, {"path": directory_path}],
+      "affected_relationships": [
+        {"path": file_path, "entry_type": "file", "change": "deleted"},
+        {"path": directory_path, "entry_type": "directory", "change": "deleted"}
+      ],
+    }),
+  ));
+
+  let deleted = read_next_sse_frame(&mut prior_audience_body).await;
+  assert!(deleted.contains(file_path), "prior audience did not receive the deleted file relationship: {deleted}");
+  assert!(deleted.contains(directory_path), "prior audience did not receive the deleted directory relationship: {deleted}");
+  assert!(deleted.contains("\"entry_type\":\"file\""), "deleted file relationship lost its type witness: {deleted}");
+  assert!(deleted.contains("\"entry_type\":\"directory\""), "deleted directory relationship lost its type witness: {deleted}");
+  assert!(deleted.contains("\"change\":\"deleted\""), "deleted relationship lost its typed witness: {deleted}");
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), never_authorized_body.frame()).await.is_err(),
+    "never-authorized subscriber received a prior-root deletion"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_prior_audience_deletion_fails_closed_for_noncanonical_missing_and_unavailable_roots() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_invalid_prior_deletion_root");
+  let path = "/docs/invalid-prior-root.txt";
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), path, b"visible before deletion", Some("text/plain")).unwrap();
+  grant_user_read(&engine, user_id, path);
+  let previous_root_hash = hex::encode(engine.head_hash().unwrap());
+  let uppercase_previous_root_hash = previous_root_hash.to_ascii_uppercase();
+  assert_ne!(uppercase_previous_root_hash, previous_root_hash, "test root unexpectedly contained no hexadecimal letters");
+  PermissionStore::new(&engine)
+    .revoke_path(&RequestContext::system(), path, &format!("user:{user_id}"), Some("invalid-prior-root.txt"))
+    .unwrap();
+  let root_hash = hex::encode(engine.head_hash().unwrap());
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  for invalid_previous_root_hash in [Some(uppercase_previous_root_hash), Some("ff".repeat(engine.hash_algo().hash_length())), None] {
+    let mut payload = serde_json::json!({
+      "root_hash": root_hash,
+      "entries": [{"path": path}],
+      "affected_relationships": [{"path": path, "entry_type": "file", "change": "deleted"}],
+    });
+    if let Some(invalid_previous_root_hash) = invalid_previous_root_hash {
+      payload["previous_root_hash"] = serde_json::Value::String(invalid_previous_root_hash);
+    }
+    event_bus.emit(EngineEvent::new(EVENT_ENTRIES_DELETED, "root", payload));
+  }
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(200), body.frame()).await.is_err(),
+    "invalid previous-root authority produced a deletion event"
+  );
+}
+
+#[tokio::test]
+async fn test_sse_prior_audience_deletion_remains_bounded_by_current_api_key_rules() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_scoped_prior_deletion_user");
+  let path = "/docs/key-bounded-prior-root.txt";
+  DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), path, b"visible before deletion", Some("text/plain")).unwrap();
+  grant_user_read(&engine, user_id, path);
+  let previous_root_hash = engine.head_hash().unwrap();
+  PermissionStore::new(&engine)
+    .revoke_path(&RequestContext::system(), path, &format!("user:{user_id}"), Some("key-bounded-prior-root.txt"))
+    .unwrap();
+  let rules = vec![
+    KeyRule { glob: "/allowed/**".to_string(), permitted: "-r--l---".to_string() },
+    KeyRule { glob: "**".to_string(), permitted: "--------".to_string() },
+  ];
+  let (auth, _key_id) = create_scoped_key_and_token(&jwt_manager, &engine, user_id, rules);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_deleted")
+    .header("authorization", auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    EVENT_ENTRIES_DELETED,
+    "root",
+    serde_json::json!({
+      "previous_root_hash": hex::encode(previous_root_hash),
+      "root_hash": hex::encode(engine.head_hash().unwrap()),
+      "entries": [{"path": path}],
+      "affected_relationships": [{"path": path, "entry_type": "file", "change": "deleted"}],
+    }),
+  ));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(200), body.frame()).await.is_err(),
+    "previous-root permission bypassed the subscriber's current API-key rules"
   );
 }
 

@@ -208,6 +208,7 @@ async fn file_browser_uses_one_rooted_authorized_incremental_event_adapter() {
   let app_response = app.oneshot(Request::builder().method("GET").uri("/app.mjs").body(Body::empty()).unwrap()).await.unwrap();
   let app_body = String::from_utf8(body_bytes(app_response.into_body()).await).unwrap();
   assert!(app_body.contains("refreshActiveListingFromEvent"));
+  assert!(app_body.contains("addEventListener('files_unshared'"), "portal does not reconcile revoked shares from the private event stream");
   assert!(!app_body.contains("browser._fetchListing()"));
 }
 

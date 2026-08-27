@@ -194,11 +194,22 @@ function setPageParam(page) {
 
 // ---------------------------------------------------------------------------
 // Per-user SSE channel: receive notifications addressed to the current user.
-// JWT-gated; the server only delivers events whose recipient_user_id matches
-// the authenticated user.
+// JWT-gated; the server delivers direct events for the authenticated subject
+// and group events for the user's current memberships.
 // ---------------------------------------------------------------------------
 
 let _userEventSource = null;
+
+function reconcileSharedPathsFromRecipientEvent(preservePreview) {
+  const browser = document.querySelector('aeor-files aeordb-file-browser-portal-v1');
+  if (!browser)
+    return;
+
+  browser.refreshActiveListingFromEvent({
+    invalidateSharedPaths: true,
+    preservePreview,
+  });
+}
 
 function connectUserEventStream() {
   if (_userEventSource) return;
@@ -222,14 +233,24 @@ function connectUserEventStream() {
         // Invalidate the file browser's cached shared-with-me data and
         // re-fetch its listing so the new share appears immediately
         // without requiring a page reload.
-        const browser = document.querySelector('aeor-files aeordb-file-browser-portal-v1');
-        if (browser) {
-          browser.refreshActiveListingFromEvent({
-            invalidateSharedPaths: true,
-            preservePreview:       true,
-          });
-        }
-      } catch (_) {}
+        reconcileSharedPathsFromRecipientEvent(true);
+      } catch (error) {
+        console.error('Malformed files_shared SSE event', error);
+      }
+    });
+
+    _userEventSource.addEventListener('files_unshared', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const payload = data.payload || {};
+        const path = payload.path || 'a shared file';
+        if (window.aeorToast)
+          window.aeorToast(`Access to ${path} was revoked`, 'info');
+
+        reconcileSharedPathsFromRecipientEvent(false);
+      } catch (error) {
+        console.error('Malformed files_unshared SSE event', error);
+      }
     });
 
     _userEventSource.onerror = () => {

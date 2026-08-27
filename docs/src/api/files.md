@@ -918,6 +918,10 @@ File-specific revocation derives the permission document from the shared
 path's parent and therefore still works after the shared file itself has been
 deleted. Grant and revoke read-modify-write operations are serialized with
 namespace publication, so concurrent operations cannot overwrite one another.
+After an acknowledged revocation, current members of the removed group receive
+one private `files_unshared` event with `{ path, action: "refresh" }` through
+`/events/me`. The group routing witness is not serialized. Missing links,
+failed revocations, and retries that return `404` emit no notification.
 
 **Response:** `200 OK`
 

@@ -69,6 +69,13 @@ and other storage identities cannot cross this boundary. A malformed
 relationship array fails closed, and an event is omitted when its nonempty
 relationship set becomes empty after authorization.
 
+For a typed `deleted` relationship whose current permission document vanished
+with the mutation, AeorDB may evaluate that path against the event's exact,
+canonical `previous_root_hash`. This prior-audience rule applies only to the
+current user's current groups and only to deletions. Current API-key rules,
+`path_prefix`, and SystemFamily concealment remain hard outer bounds. Missing,
+non-canonical, unavailable, or corrupt previous-root authority fails closed.
+
 The stream rechecks mutable user/group and API-key authority as events arrive.
 Revoked, expired, removed, or identity-mismatched keys stop receiving events
 without requiring a reconnect. Recipient-addressed events are never published
@@ -105,7 +112,7 @@ Each event is a JSON object with:
 | Event Type | Description | Payload |
 |------------|-------------|---------|
 | `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
-| `stream_gap` | This connection fell behind the bounded event buffer and must refresh authoritative state | Direct root JWT: `{"missed_events": 3, "action": "refresh"}`; scoped/non-root: `{"action": "refresh"}` |
+| `stream_gap` | This connection fell behind its private post-authorization queue and must refresh authoritative state | Direct root JWT: `{"missed_events": 3, "action": "refresh"}`; scoped/non-root: `{"action": "refresh"}` |
 | `entries_created` | Files or directories were created; legacy overwrite producers may also use this type | Legacy `entries` plus the complete mutation acknowledgement below |
 | `entries_updated` | Entries were updated | Legacy `entries` plus the complete mutation acknowledgement below |
 | `entries_deleted` | Files or directories were deleted | Legacy `entries` plus the complete mutation acknowledgement below |
@@ -424,14 +431,22 @@ lockstep. A subscriber cannot infer a denied sibling from either array.
 ### Connection Behavior
 
 - The connection stays open indefinitely until the client disconnects.
-- If a client falls behind the bounded broadcast buffer, the server emits a
-  `stream_gap` event on that connection. A direct root JWT receives the exact
-  `missed_events` count. Scoped root keys and non-root streams receive only
-  `{"action":"refresh"}` so global event cardinality is not disclosed. The
-  client must refresh authoritative listing/query/state before applying more
-  incremental updates.
-- `stream_gap` is delivered regardless of the `events` filter because the
-  server cannot prove that every skipped event was irrelevant to that filter.
+- AeorDB admits at most 256 projected SSE subscriptions per event bus. A new
+  `/system/events` or `/events/me` request receives `503 Service Unavailable`
+  when that bound is full; disconnecting immediately releases its slot.
+- Each connection has a private item-and-byte-bounded queue populated only
+  after event type, recipient, path, key, user/group, and SystemFamily
+  projection succeeds. Hidden traffic and events addressed to other users do
+  not consume that queue and cannot create its `stream_gap`.
+- If a client falls behind its private queue, the server emits a `stream_gap`
+  event on that connection. A direct root JWT receives the exact count of
+  authorized events discarded for recovery, including queued events superseded
+  by the required refresh. Scoped root keys and non-root streams receive only
+  `{"action":"refresh"}`. The client must refresh authoritative
+  listing/query/state before applying more incremental updates.
+- `stream_gap` is a connection-control event and is delivered regardless of
+  the `events` filter. Its overflow evidence covers only events that already
+  passed that connection's filter and authorization projection.
 - Event IDs are unique correlation identifiers, not a replay cursor. AeorDB
   does not retain an SSE replay log and does not honor `Last-Event-ID` for
   recovery.
@@ -479,14 +494,19 @@ evtSource.onerror = (err) => {
 
 ## GET /events/me
 
-A per-user SSE channel that delivers ONLY events addressed to the authenticated user. The server filters the event bus and forwards an event only when its `recipient_user_id` matches the JWT's `sub` claim. Generic events with no recipient (heartbeats, system metrics, file uploads, etc.) are NOT delivered here — those go through `/system/events`.
+A per-user SSE channel that delivers only events addressed to the authenticated
+user. Direct events require `recipient_user_id` to match the JWT subject. Group
+events require the user to be a current member of at least one internal
+recipient group; that group witness is never serialized. Generic events with
+no recipient (heartbeats, system metrics, file uploads, etc.) are not delivered
+here—those go through `/system/events`.
 
 This channel is the security boundary for personal notifications: each user can only see events sent specifically to them, even if multiple users are subscribed simultaneously.
 
-The per-user stream emits the same `stream_gap` control event if its receiver
-falls behind, but does not disclose a global missed-event count. Clients must
-refresh their notification/share state before continuing with incremental
-events.
+The per-user stream has its own item-and-byte-bounded post-recipient queue. An
+event for another user or group cannot consume it or cause a gap. If authorized
+traffic overflows the queue, the stream emits `stream_gap` without a count;
+clients must refresh notification/share state before continuing.
 
 ### Request
 
@@ -503,6 +523,9 @@ evt.addEventListener('files_shared', (e) => {
   const payload = JSON.parse(e.data).payload;
   alert(`${payload.from} shared ${payload.path} with you`);
 });
+evt.addEventListener('files_unshared', () => {
+  refreshSharedWithMe();
+});
 ```
 
 ### Event Types Currently Routed Here
@@ -510,8 +533,10 @@ evt.addEventListener('files_shared', (e) => {
 | Event | Payload | Triggered By |
 |-------|---------|--------------|
 | `files_shared` | `{ path, permissions, from }` | A `POST /files/share` call where the recipient is in the `users` list. One event per (recipient, path). |
+| `files_unshared` | `{ path, action: "refresh" }` | An acknowledged `DELETE /files/shares`. Delivered to current members of the removed group; failed and no-op revocations emit nothing. |
 
-Additional per-user event types (group invitations, mentions, etc.) will be added on this channel — the recipient field is the routing boundary.
+Additional personal event types (group invitations, mentions, etc.) can use
+this channel. Direct-user or internal group audience is the routing boundary.
 
 ### Event Envelope
 
@@ -530,7 +555,10 @@ Additional per-user event types (group invitations, mentions, etc.) will be adde
 }
 ```
 
-`user_id` is the actor (who performed the action). `recipient_user_id` matches the authenticated subscriber.
+`user_id` is the actor (who performed the action). For direct events,
+`recipient_user_id` matches the authenticated subscriber. Group-addressed
+events omit both `recipient_user_id` and the internal group witness from the
+wire envelope.
 
 ---
 

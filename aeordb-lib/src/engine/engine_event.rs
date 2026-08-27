@@ -4,9 +4,10 @@ use uuid::Uuid;
 /// A single engine event with envelope metadata + typed payload.
 ///
 /// `user_id` is the actor who triggered the event.
-/// `recipient_user_id` (when present) is the user the event is ADDRESSED TO —
-/// used by the per-user SSE channel for things like file share notifications.
-/// Events without a recipient are global (broadcast to all subscribers).
+/// `recipient_user_id` (when present) is the user the event is addressed to.
+/// `recipient_groups` is an internal routing witness for current members of
+/// one or more groups and is never serialized. Events without either form of
+/// recipient are global.
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineEvent {
   pub event_id: String,
@@ -15,6 +16,8 @@ pub struct EngineEvent {
   pub user_id: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub recipient_user_id: Option<String>,
+  #[serde(skip)]
+  recipient_groups: Option<Vec<String>>,
   pub payload: serde_json::Value,
 }
 
@@ -26,6 +29,7 @@ impl EngineEvent {
       timestamp: chrono::Utc::now().timestamp_millis(),
       user_id: user_id.to_string(),
       recipient_user_id: None,
+      recipient_groups: None,
       payload,
     }
   }
@@ -39,8 +43,31 @@ impl EngineEvent {
       timestamp: chrono::Utc::now().timestamp_millis(),
       user_id: actor_user_id.to_string(),
       recipient_user_id: Some(recipient_user_id.to_string()),
+      recipient_groups: None,
       payload,
     }
+  }
+
+  /// Create an event addressed to the current members of one or more groups.
+  /// The audience witness remains internal and is not part of the wire event.
+  pub fn for_groups(event_type: &str, actor_user_id: &str, recipient_groups: Vec<String>, payload: serde_json::Value) -> Self {
+    EngineEvent {
+      event_id: Uuid::new_v4().to_string(),
+      event_type: event_type.to_string(),
+      timestamp: chrono::Utc::now().timestamp_millis(),
+      user_id: actor_user_id.to_string(),
+      recipient_user_id: None,
+      recipient_groups: Some(recipient_groups),
+      payload,
+    }
+  }
+
+  pub fn recipient_groups(&self) -> Option<&[String]> {
+    self.recipient_groups.as_deref()
+  }
+
+  pub fn is_recipient_addressed(&self) -> bool {
+    self.recipient_user_id.is_some() || self.recipient_groups.is_some()
   }
 }
 
@@ -170,6 +197,7 @@ pub const EVENT_PLUGINS_DEPLOYED: &str = "plugins_deployed";
 pub const EVENT_PLUGINS_REMOVED: &str = "plugins_removed";
 pub const EVENT_HEARTBEAT: &str = "heartbeat";
 pub const EVENT_FILES_SHARED: &str = "files_shared";
+pub const EVENT_FILES_UNSHARED: &str = "files_unshared";
 pub const EVENT_METRICS: &str = "metrics";
 pub const EVENT_GC_STARTED: &str = "gc_started";
 pub const EVENT_GC_COMPLETED: &str = "gc_completed";

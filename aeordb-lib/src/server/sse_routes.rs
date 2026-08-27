@@ -8,16 +8,17 @@ use axum::response::Response;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Extension;
 use futures_util::stream::Stream;
+use futures_util::stream::unfold;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_stream::once;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use super::state::AppState;
-use super::root_public_schema::PublicAffectedRelationshipV1;
+use super::legacy_v3_root_adapter::LegacyV3SelectedRootAdapterV1;
+use super::root_api::RequestedRootSelectorV1;
+use super::root_public_schema::{PublicAffectedRelationshipChangeV1, PublicAffectedRelationshipV1};
 use crate::auth::permission_middleware::require_active_api_key;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
@@ -28,7 +29,7 @@ use crate::engine::engine_event::{
   EVENT_INDEXES_UPDATED, EVENT_PERMISSIONS_CHANGED, EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-use crate::engine::{StorageEngine, SystemFamilyPolicyResolver};
+use crate::engine::{ProjectedEvent, StorageEngine, SystemFamilyPolicyResolver};
 use crate::server::responses::{engine_error_response, ErrorResponse};
 use crate::server::route_permissions::parse_user_id;
 
@@ -152,14 +153,7 @@ impl SseSubscriberAuthority {
     Some(record.rules)
   }
 
-  fn path_is_permitted(&self, path: &str, subscriber_rules: &[KeyRule]) -> bool {
-    if !subscriber_rules.is_empty() {
-      let permitted = match_rules(subscriber_rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, 'r'));
-      if !permitted {
-        return false;
-      }
-    }
-
+  fn path_is_permitted(&self, path: &str) -> bool {
     match self.identity {
       SseSubscriberIdentity::Share => true,
       SseSubscriberIdentity::User(user_id) if crate::engine::user::is_root(&user_id) => true,
@@ -184,6 +178,19 @@ fn path_is_visible_to_subscriber(
   authority: &SseSubscriberAuthority,
   family_policy: SystemFamilyPolicyResolver,
 ) -> bool {
+  if !path_satisfies_subscriber_outer_bounds(path, path_prefix, subscriber_rules, authority, family_policy) {
+    return false;
+  }
+  authority.path_is_permitted(path)
+}
+
+fn path_satisfies_subscriber_outer_bounds(
+  path: &str,
+  path_prefix: &Option<String>,
+  subscriber_rules: &[KeyRule],
+  authority: &SseSubscriberAuthority,
+  family_policy: SystemFamilyPolicyResolver,
+) -> bool {
   if path_prefix.as_ref().is_some_and(|prefix| !path.starts_with(prefix)) {
     return false;
   }
@@ -197,7 +204,75 @@ fn path_is_visible_to_subscriber(
       }
     }
   }
-  authority.path_is_permitted(path, subscriber_rules)
+  subscriber_rules.is_empty() || match_rules(subscriber_rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, 'r'))
+}
+
+fn previous_root_authority_for_event<'authority>(
+  event: &EngineEvent,
+  authority: &'authority SseSubscriberAuthority,
+) -> Option<(LegacyV3SelectedRootAdapterV1<'authority>, Vec<String>)> {
+  let SseSubscriberIdentity::User(user_id) = authority.identity else {
+    return None;
+  };
+  if crate::engine::user::is_root(&user_id) {
+    return None;
+  }
+  let Some(Value::String(previous_root_hash)) = event.payload.get("previous_root_hash") else {
+    tracing::error!(event_type = %event.event_type, "Refused prior-audience SSE projection without a previous root hash");
+    return None;
+  };
+  let expected_hexadecimal_length = authority.engine.hash_algo().hash_length().checked_mul(2)?;
+  if previous_root_hash.len() != expected_hexadecimal_length
+    || !previous_root_hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  {
+    tracing::error!(event_type = %event.event_type, "Refused prior-audience SSE projection with a non-canonical previous root hash");
+    return None;
+  }
+  let previous_root = match hex::decode(previous_root_hash) {
+    Ok(previous_root) if previous_root.iter().any(|byte| *byte != 0) => previous_root,
+    Ok(_) => {
+      tracing::error!(event_type = %event.event_type, "Refused prior-audience SSE projection with an invalid previous root hash");
+      return None;
+    }
+    Err(error) => {
+      tracing::error!(event_type = %event.event_type, %error, "Refused prior-audience SSE projection with a malformed previous root hash");
+      return None;
+    }
+  };
+  let selected = match LegacyV3SelectedRootAdapterV1::resolve(
+    authority.engine.as_ref(),
+    &RequestedRootSelectorV1::ExplicitRoot(previous_root),
+  ) {
+    Ok(selected) => selected,
+    Err(error) => {
+      tracing::error!(event_type = %event.event_type, %error, "Refused prior-audience SSE projection because the previous root was unavailable");
+      return None;
+    }
+  };
+  let current_groups = match authority.group_cache.get(&user_id, &authority.engine) {
+    Ok(groups) => groups,
+    Err(error) => {
+      tracing::error!(event_type = %event.event_type, %user_id, %error, "Refused prior-audience SSE projection after group authority lookup failed");
+      return None;
+    }
+  };
+  Some((selected, current_groups))
+}
+
+fn previous_root_authorizes_path(
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  current_groups: &[String],
+  path: &str,
+  event_type: &str,
+) -> bool {
+  match selected.authorize_path(path, CrudlifyOp::Read, current_groups) {
+    Ok(Some(_)) => true,
+    Ok(None) => false,
+    Err(error) => {
+      tracing::error!(event_type, path, %error, "Refused prior-audience SSE path after immutable permission lookup failed");
+      false
+    }
+  }
 }
 
 fn project_event_for_subscriber(
@@ -210,7 +285,7 @@ fn project_event_for_subscriber(
   // Recipient-addressed events belong exclusively to `/events/me`. They must
   // never also enter the global stream, even when the subscriber can read a
   // path carried by the payload.
-  if event.recipient_user_id.is_some() {
+  if event.is_recipient_addressed() {
     return None;
   }
   if event_filter.as_ref().is_some_and(|filter| !filter.contains(&event.event_type)) {
@@ -223,29 +298,24 @@ fn project_event_for_subscriber(
   let subscriber_rules = authority.current_key_rules()?;
 
   let mut had_path = false;
-  if let Some(Value::Array(entries)) = event.payload.get_mut("entries") {
-    let original_had_entries = !entries.is_empty();
-    entries.retain(|entry| {
-      let Some(Value::String(path)) = entry.get("path") else {
-        return authority.is_root() && subscriber_rules.is_empty() && path_prefix.is_none();
-      };
-      had_path = true;
-      path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy)
-    });
-    if original_had_entries && entries.is_empty() {
-      return None;
-    }
+  if event.payload.get("entries").is_some_and(|entries| !entries.is_array()) {
+    tracing::error!(event_type = %event.event_type, "Refused SSE mutation event whose entries were not an array");
+    return None;
   }
-
   if event.payload.get("affected_relationships").is_some_and(|relationships| !relationships.is_array()) {
     tracing::error!(event_type = %event.event_type, "Refused SSE mutation event whose affected relationships were not an array");
     return None;
   }
-  if let Some(Value::Array(relationships)) = event.payload.get_mut("affected_relationships") {
-    let original_had_relationships = !relationships.is_empty();
-    let mut projected_relationships = Vec::with_capacity(relationships.len());
-    for raw_relationship in relationships.drain(..) {
-      let relationship = match serde_json::from_value::<PublicAffectedRelationshipV1>(raw_relationship) {
+
+  let raw_relationships = event.payload.get("affected_relationships").and_then(Value::as_array).cloned();
+  let mut relationship_visibility = std::collections::HashMap::new();
+  let mut projected_relationships = Vec::new();
+  let mut previous_root_authority = None;
+  let mut previous_root_authority_loaded = false;
+  if let Some(relationships) = raw_relationships.as_ref() {
+    projected_relationships.reserve(relationships.len());
+    for raw_relationship in relationships {
+      let relationship = match serde_json::from_value::<PublicAffectedRelationshipV1>(raw_relationship.clone()) {
         Ok(relationship) => relationship,
         Err(error) => {
           tracing::error!(event_type = %event.event_type, %error, "Refused SSE mutation event with malformed affected relationship");
@@ -254,7 +324,31 @@ fn project_event_for_subscriber(
       };
       let path = &relationship.path;
       had_path = true;
-      if path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy) {
+      let currently_visible = path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy);
+      let visible = if currently_visible {
+        true
+      } else if relationship.change == PublicAffectedRelationshipChangeV1::Deleted {
+        if !previous_root_authority_loaded {
+          previous_root_authority = previous_root_authority_for_event(&event, authority);
+          previous_root_authority_loaded = true;
+        }
+        previous_root_authority.as_ref().is_some_and(|(selected, current_groups)| {
+          // Current API-key rules, path-prefix selection, and SystemFamily
+          // visibility remain outer bounds even when permission documents are
+          // evaluated at the exact previous root.
+          if !path_satisfies_subscriber_outer_bounds(path, path_prefix, &subscriber_rules, authority, family_policy) {
+            return false;
+          }
+          previous_root_authorizes_path(selected, current_groups, path, &event.event_type)
+        })
+      } else {
+        false
+      };
+      if relationship_visibility.insert(path.clone(), visible).is_some() {
+        tracing::error!(event_type = %event.event_type, path, "Refused SSE mutation event with duplicate affected relationships");
+        return None;
+      }
+      if visible {
         let projected = match serde_json::to_value(relationship) {
           Ok(projected) => projected,
           Err(error) => {
@@ -265,10 +359,30 @@ fn project_event_for_subscriber(
         projected_relationships.push(projected);
       }
     }
-    if original_had_relationships && projected_relationships.is_empty() {
+    if !relationships.is_empty() && projected_relationships.is_empty() {
       return None;
     }
-    *relationships = projected_relationships;
+    event.payload["affected_relationships"] = Value::Array(projected_relationships);
+  }
+
+  if let Some(Value::Array(entries)) = event.payload.get_mut("entries") {
+    let original_had_entries = !entries.is_empty();
+    entries.retain(|entry| {
+      let Some(Value::String(path)) = entry.get("path") else {
+        return authority.is_root() && subscriber_rules.is_empty() && path_prefix.is_none();
+      };
+      had_path = true;
+      if raw_relationships.is_some() {
+        return match relationship_visibility.get(path) {
+          Some(visible) => *visible,
+          None => false,
+        };
+      }
+      path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy)
+    });
+    if original_had_entries && entries.is_empty() {
+      return None;
+    }
   }
 
   if let Some(Value::String(path)) = event.payload.get("path") {
@@ -308,8 +422,7 @@ fn server_ready_event(state: &AppState) -> EngineEvent {
   )
 }
 
-fn stream_gap_to_sse(error: BroadcastStreamRecvError, disclose_missed_event_count: bool) -> Option<Result<Event, Infallible>> {
-  let BroadcastStreamRecvError::Lagged(missed_events) = error;
+fn stream_gap_to_sse(missed_events: u64, disclose_missed_event_count: bool) -> Option<Result<Event, Infallible>> {
   metrics::counter!("aeordb_sse_stream_gaps_total").increment(1);
   metrics::counter!("aeordb_sse_missed_events_total").increment(missed_events);
   let payload = if disclose_missed_event_count {
@@ -342,7 +455,6 @@ pub async fn event_stream(
   let authority = SseSubscriberAuthority::from_request(&state, &claims)?;
   let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())
     .map_err(|error| engine_error_response("Cannot establish SSE path policy", &error))?;
-  let rx = state.event_bus.subscribe();
 
   // Parse the comma-separated event type filter.
   let event_filter = parse_event_filter(params.events);
@@ -352,11 +464,20 @@ pub async fn event_stream(
   let ready_event = server_ready_event(&state);
   let initial_ready =
     project_event_for_subscriber(ready_event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse);
-
-  let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
-    Ok(event) => project_event_for_subscriber(event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse),
-    Err(error) => stream_gap_to_sse(error, disclose_missed_event_count),
-  });
+  let projected_event_filter = event_filter.clone();
+  let projected_path_prefix = path_prefix.clone();
+  let projected_authority = authority.clone();
+  let receiver = state
+    .event_bus
+    .subscribe_projected(move |event| {
+      project_event_for_subscriber(event.clone(), &projected_event_filter, &projected_path_prefix, &projected_authority, family_policy)
+    })
+    .map_err(|error| ErrorResponse::new(error.to_string()).with_status(StatusCode::SERVICE_UNAVAILABLE).into_response())?;
+  let live_stream = unfold(receiver, |mut receiver| async move { receiver.receive().await.map(|delivery| (delivery, receiver)) })
+    .filter_map(move |delivery| match delivery {
+      ProjectedEvent::Event(event) => event_to_sse(event),
+      ProjectedEvent::Gap { missed_events } => stream_gap_to_sse(missed_events, disclose_missed_event_count),
+    });
   let stream = once(initial_ready).filter_map(|event| event).chain(live_stream);
 
   Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(30)).text("ping")))
@@ -365,39 +486,58 @@ pub async fn event_stream(
 /// GET /events/me — per-user SSE channel for events addressed to the
 /// authenticated user. Used for things like file share notifications.
 ///
-/// Authorization: requires a valid JWT. The route only delivers events
-/// whose `recipient_user_id` matches the JWT's `sub` claim. Generic
-/// events with no recipient (system/heartbeat/etc.) are NOT delivered
-/// here — those go through /system/events.
-///
-/// This means the JWT proves identity AND scopes delivery to that user.
+/// Authorization: requires a valid user JWT. Direct recipients must match the
+/// JWT subject; group recipients require current membership. Active API-key
+/// rules and SystemFamily concealment remain outer bounds for path notices.
+/// Generic events with no recipient are not delivered here.
 pub async fn user_event_stream(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-  let rx = state.event_bus.subscribe();
-  let user_id = claims.sub.clone();
-
-  let stream = BroadcastStream::new(rx).filter_map(move |result| {
-    match result {
-      Ok(event) => {
-        // Only deliver events explicitly addressed to this user.
-        let recipient = match &event.recipient_user_id {
-          Some(r) => r,
-          None => return None,
-        };
-        if recipient != &user_id {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
+  let authority = SseSubscriberAuthority::from_request(&state, &claims)?;
+  let SseSubscriberIdentity::User(user_id) = authority.identity else {
+    return Err(ErrorResponse::new("Per-user events require a user identity").with_status(StatusCode::FORBIDDEN).into_response());
+  };
+  let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())
+    .map_err(|error| engine_error_response("Cannot establish recipient-event path policy", &error))?;
+  let user_subject = claims.sub.clone();
+  let projected_authority = authority.clone();
+  let receiver = state
+    .event_bus
+    .subscribe_projected(move |event| {
+      let current_key_rules = projected_authority.current_key_rules()?;
+      if let Some(path) = event.payload.get("path").and_then(Value::as_str) {
+        if !path_satisfies_subscriber_outer_bounds(path, &None, &current_key_rules, &projected_authority, family_policy) {
           return None;
         }
-
-        match serde_json::to_string(&event) {
-          Ok(json) => Some(Ok(Event::default().id(event.event_id.clone()).event(event.event_type.clone()).data(json))),
-          Err(_) => None,
-        }
+      } else if !current_key_rules.is_empty() {
+        tracing::error!(event_type = %event.event_type, "Refused scoped recipient SSE event without an authorizable path");
+        return None;
       }
-      Err(error) => stream_gap_to_sse(error, false),
-    }
-  });
 
-  Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(30)).text("ping"))
+      if event.recipient_user_id.as_ref() == Some(&user_subject) {
+        return Some(event.clone());
+      }
+      let recipient_groups = event.recipient_groups()?;
+      let current_groups = match projected_authority.group_cache.get(&user_id, &projected_authority.engine) {
+        Ok(groups) => groups,
+        Err(error) => {
+          tracing::error!(%user_id, %error, "Refused group-addressed SSE event after membership authority lookup failed");
+          return None;
+        }
+      };
+      if !recipient_groups.iter().any(|recipient_group| current_groups.contains(recipient_group)) {
+        return None;
+      }
+      Some(event.clone())
+    })
+    .map_err(|error| ErrorResponse::new(error.to_string()).with_status(StatusCode::SERVICE_UNAVAILABLE).into_response())?;
+  let stream = unfold(receiver, |mut receiver| async move { receiver.receive().await.map(|delivery| (delivery, receiver)) }).filter_map(
+    move |delivery| match delivery {
+      ProjectedEvent::Event(event) => event_to_sse(event),
+      ProjectedEvent::Gap { missed_events } => stream_gap_to_sse(missed_events, false),
+    },
+  );
+
+  Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(30)).text("ping")))
 }

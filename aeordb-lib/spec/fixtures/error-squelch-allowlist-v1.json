@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1512,
+  "maximum_occurrences": 1513,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -3964,13 +3964,23 @@
       "review": "candidate-format-probe"
     },
     {
-      "id": "esq-v1-7018683a5167fae5a816-00",
+      "id": "esq-v1-a51317a0cbc24a31bc01-00",
       "file": "aeordb-lib/src/engine/event_bus.rs",
-      "line": 26,
+      "line": 19,
+      "column": 5,
+      "enclosing_item": "lock_projected_state",
+      "kind": "logged_error_continues",
+      "pattern": "Err (poisoned) => { tracing :: error ! (state_name , \"Recovered poisoned projected event state\") ; state . clear_poison () ; poisoned . into_inner () }",
+      "review": "postcommit-derived-reconciliation"
+    },
+    {
+      "id": "esq-v1-bddc628f4c4c03dc06e2-00",
+      "file": "aeordb-lib/src/engine/event_bus.rs",
+      "line": 186,
       "column": 8,
       "enclosing_item": "impl EventBus::emit",
       "kind": "result_status_probe",
-      "pattern": "self . sender . send (event) . is_err ()",
+      "pattern": "self . inner . sender . send (event . clone ()) . is_err ()",
       "review": "derived-status-control"
     },
     {
@@ -12186,7 +12196,7 @@
     {
       "id": "esq-v1-ba747aba6f98f6f74c03-00",
       "file": "aeordb-lib/src/engine/webhook.rs",
-      "line": 91,
+      "line": 94,
       "column": 44,
       "enclosing_item": "event_matches_webhook",
       "kind": "default_on_error",
@@ -12196,7 +12206,7 @@
     {
       "id": "esq-v1-ea153cf7e971f16cf76a-00",
       "file": "aeordb-lib/src/engine/webhook.rs",
-      "line": 134,
+      "line": 137,
       "column": 5,
       "enclosing_item": "deliver_webhook",
       "kind": "logged_error_continues",
@@ -12206,7 +12216,7 @@
     {
       "id": "esq-v1-b4d5d951b361d39fa83e-00",
       "file": "aeordb-lib/src/engine/webhook.rs",
-      "line": 179,
+      "line": 182,
       "column": 44,
       "enclosing_item": "spawn_webhook_dispatcher",
       "kind": "default_on_error",
@@ -14816,7 +14826,7 @@
     {
       "id": "esq-v1-7ea95b84fa53c78b8832-00",
       "file": "aeordb-lib/src/server/share_routes.rs",
-      "line": 495,
+      "line": 505,
       "column": 20,
       "enclosing_item": "send_share_notifications",
       "kind": "default_on_error",
@@ -14826,7 +14836,7 @@
     {
       "id": "esq-v1-a610fe073ce7ff8b3183-00",
       "file": "aeordb-lib/src/server/share_routes.rs",
-      "line": 502,
+      "line": 512,
       "column": 7,
       "enclosing_item": "send_share_notifications",
       "kind": "broad_err_pattern",
@@ -14836,7 +14846,7 @@
     {
       "id": "esq-v1-1d27f2389068d71baa37-00",
       "file": "aeordb-lib/src/server/share_routes.rs",
-      "line": 519,
+      "line": 529,
       "column": 5,
       "enclosing_item": "send_share_notifications",
       "kind": "logged_error_continues",
@@ -14846,7 +14856,7 @@
     {
       "id": "esq-v1-c5929f1be14b572b3f6a-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 170,
+      "line": 164,
       "column": 11,
       "enclosing_item": "impl SseSubscriberAuthority::path_is_permitted",
       "kind": "logged_error_continues",
@@ -14854,21 +14864,21 @@
       "review": "http-terminal-or-postcommit-evidence"
     },
     {
-      "id": "esq-v1-2165b390e783a0a62e39-00",
+      "id": "esq-v1-8fe5c64211797068ef37-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 294,
+      "line": 271,
       "column": 5,
-      "enclosing_item": "event_to_sse",
-      "kind": "broad_err_pattern",
-      "pattern": "Err (_)",
-      "review": "http-terminal-error"
+      "enclosing_item": "previous_root_authorizes_path",
+      "kind": "logged_error_continues",
+      "pattern": "Err (error) => { tracing :: error ! (event_type , path , % error , \"Refused prior-audience SSE path after immutable permission lookup failed\") ; false }",
+      "review": "authorization-concealment"
     },
     {
-      "id": "esq-v1-6f677c83e87109945780-00",
+      "id": "esq-v1-2165b390e783a0a62e39-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 395,
-      "column": 11,
-      "enclosing_item": "user_event_stream",
+      "line": 408,
+      "column": 5,
+      "enclosing_item": "event_to_sse",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
       "review": "http-terminal-error"
