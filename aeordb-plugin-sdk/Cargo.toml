@@ -16,3 +16,7 @@ workspace = true
 [[test]]
 name = "response_spec"
 path = "spec/response_spec.rs"
+
+[[test]]
+name = "root_contract_spec"
+path = "spec/root_contract_spec.rs"

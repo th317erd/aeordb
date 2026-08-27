@@ -41,6 +41,7 @@ pub mod context;
 pub mod json;
 pub mod parser;
 pub mod query_builder;
+pub mod root;
 
 use std::collections::HashMap;
 
@@ -241,4 +242,8 @@ pub mod prelude {
   pub use super::parser::{ParserInput, FileMeta};
   pub use super::context::{PluginContext, FileData, DirEntry, FileMetadata, ExtractRequest, ExtractedText};
   pub use super::query_builder::{QueryResult, AggregateResult, SortDirection};
+  pub use super::root::{
+    PluginItemsResponseV1, PluginNamespaceReadInvocationV1, PluginResultsResponseV1, PluginRootMetadataV1, PluginRootSelectorV1,
+    PluginRootStateV1,
+  };
 }
