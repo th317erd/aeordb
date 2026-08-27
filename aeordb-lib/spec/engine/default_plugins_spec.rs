@@ -4,6 +4,7 @@ use aeordb::engine::RequestContext;
 use aeordb::plugins::plugin_manager::PluginManager;
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
+use aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1;
 use std::sync::Arc;
 
 fn load_default_plugin_wasm(plugin_dir: &str, wasm_name: &str) -> Vec<u8> {
@@ -50,6 +51,7 @@ fn invoke_plugin(pm: &PluginManager, engine: &Arc<StorageEngine>, plugin_name: &
     .invoke_wasm_plugin_with_context(
       &format!("default/{}", plugin_name),
       &serde_json::to_vec(&request).unwrap(),
+      PluginNamespaceReadInvocationV1::current(),
       engine.clone(),
       RequestContext::system(),
     )
@@ -64,6 +66,14 @@ fn response_body_json(response: &serde_json::Value) -> serde_json::Value {
 
   serde_json::from_slice(&body_bytes)
     .unwrap_or_else(|error| panic!("parse PluginResponse body as JSON: {}\n{}", error, String::from_utf8_lossy(&body_bytes)))
+}
+
+fn assert_live_root_metadata(root: &serde_json::Value) {
+  let hash = root["hash"].as_str().expect("plugin response should identify its exact root hash");
+  assert_eq!(hash.len(), 64);
+  assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+  assert_eq!(root["state"], "live");
+  assert_eq!(root["expires_at"], serde_json::Value::Null);
 }
 
 #[test]
@@ -91,6 +101,7 @@ fn extract_plugin_extracts_crlf_lines_without_buffering_whole_file_in_plugin() {
   assert_eq!(body["text"], "second\r\nthird\r\n");
   assert_eq!(body["mode"], "lines");
   assert_eq!(body["truncated"], false);
+  assert_live_root_metadata(&body["root"]);
 }
 
 #[test]
@@ -177,6 +188,7 @@ fn jq_plugin_filters_json_files_and_returns_all_outputs() {
 
   assert_eq!(response["status_code"], 200);
   assert_eq!(body["outputs"], serde_json::json!(["one", "three"]));
+  assert_live_root_metadata(&body["root"]);
 }
 
 #[test]

@@ -1379,9 +1379,10 @@
           - [x] P7-5c1: freeze disconnected bounded search admission and staged query/search APOS context contracts before changing public handler behavior.
           - [x] P7-5c2: route legacy-v3 query/search/aggregate/explain through one exact selected-root source with complete pre-observable authorization and canonical APOS only.
           - [x] P7-5c3: compose exact-root locator generation and same-root fetch continuity, then close architecture, affected, broad, and disposable live-server gates.
-        - [ ] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.
+        - [x] P7-5d: adapt embedded Rust and the existing eight plugin SDK/host imports, including a root-aware file-reading invocation envelope, without expanding the frozen import registry.
           - [x] P7-5d1: freeze root-selector, exact-root metadata, and rooted plugin result envelopes in the SDK before changing runtime behavior.
-          - [ ] P7-5d2: bind embedded/plugin invocation to one lazily resolved authorized root, adapt all eight imports without registry growth, and close fault/architecture/WASM gates.
+          - [x] P7-5d2: bind embedded/plugin invocation to one lazily resolved authorized root, adapt all eight imports without registry growth, and close fault/architecture/WASM gates.
+            - [x] Rebuild every affected first-party WASM guest against the new SDK, refresh tracked bundled artifacts, and prove fresh/reused-database live invocation surfaces exact root metadata.
         - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.

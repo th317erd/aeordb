@@ -2,6 +2,7 @@ use aeordb::engine::btree::{BTREE_CONVERSION_THRESHOLD, is_btree_format};
 use aeordb::engine::directory_entry::ChildEntry;
 use aeordb::engine::directory_ops::{DirectoryOps, directory_content_hash};
 use aeordb::engine::errors::EngineError;
+use aeordb::engine::file_record::CURRENT_FILE_RECORD_VERSION;
 use aeordb::engine::version_manager::VersionManager;
 use aeordb::engine::{BufferedFile, EntryType, RequestContext, StorageEngine};
 use aeordb::server::legacy_v3_root_adapter::{LegacyV3ResolvedPathV1, LegacyV3SelectedRootAdapterV1};
@@ -48,6 +49,31 @@ fn selected_root_retains_list_file_symlink_body_and_hash_after_head_advances() {
 
   assert_eq!(selected.file_by_hash(&selected_file.record_hash).unwrap().record.path, "/docs/report.txt");
   assert!(matches!(selected.file_by_hash(&current_file.record_hash), Err(EngineError::NotFound(_))));
+}
+
+#[test]
+fn selected_root_buffered_read_rejects_bodies_that_disagree_with_the_declared_file_size() {
+  let (_directory, engine) = create_engine();
+  let context = RequestContext::system();
+  let operations = DirectoryOps::new(&engine);
+
+  for (path, declared_size, expected_reason) in
+    [("/declared-too-small.txt", 1, "exceeds declared total size"), ("/declared-too-large.txt", 6, "does not match declared total size")]
+  {
+    operations.store_file_buffered(&context, path, b"12345", Some("text/plain")).unwrap();
+    let selected_root = engine.head_hash().unwrap();
+    let selected = LegacyV3SelectedRootAdapterV1::resolve(&engine, &RequestedRootSelectorV1::ExplicitRoot(selected_root)).unwrap();
+    let mut selected_file = selected.file(path).unwrap();
+    selected_file.record.total_size = declared_size;
+    let serialized = selected_file.record.serialize(engine.hash_algo().hash_length()).unwrap();
+    engine.store_entry_with_version(EntryType::FileRecord, &selected_file.record_hash, &serialized, CURRENT_FILE_RECORD_VERSION).unwrap();
+
+    let error = selected.read_file_body(path).expect_err("selected-root reads must reject dishonest FileRecord sizes");
+    assert!(
+      matches!(&error, EngineError::CorruptEntry { reason, .. } if reason.contains(expected_reason)),
+      "unexpected selected-root buffered read error: {error:?}",
+    );
+  }
 }
 
 #[test]
@@ -253,7 +279,7 @@ fn compatibility_adapter_is_the_single_head_capture_and_legacy_tree_walk_owner()
     "resolve_directory_at_version",
     "resolve_file_at_version",
     "resolve_symlink_at_version",
-    "from_chunk_hashes_including_deleted",
+    "from_chunk_hashes_including_deleted_with_expected_total_size",
     "file_by_hash",
   ] {
     assert!(source.contains(required), "compatibility adapter lost required exact-root authority {required}");
@@ -338,7 +364,7 @@ fn public_legacy_compatibility_handlers_have_one_adapter_and_no_mutable_fallback
   assert_eq!(fetch_routes.matches("parse_root_selector_v1(&").count(), 2);
   assert_eq!(download_routes.matches("parse_root_selector_v1(&").count(), 1);
   assert!(adapter.contains("extract_range_from_record_including_deleted"));
-  assert!(adapter.contains("from_chunk_hashes_including_deleted"));
+  assert!(adapter.contains("from_chunk_hashes_including_deleted_with_expected_total_size"));
 }
 
 #[test]

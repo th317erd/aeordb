@@ -142,4 +142,13 @@ fn plugin_import_registries_remain_exactly_eight_sdk_and_nine_runtime_symbols() 
   assert_eq!(runtime_imports.len(), 9);
   assert!(runtime_imports.contains("log_message"));
   assert!(sdk_imports.is_subset(&runtime_imports));
+
+  assert_eq!(
+    sdk.matches("let args = self.rooted_arguments(").count(),
+    6,
+    "all six direct context imports must carry the invocation selector"
+  );
+  assert_eq!(sdk.matches("with_root_invocation(path, self.root_invocation.clone())").count(), 2);
+  let builders = fs::read_to_string(manifest().join("src/query_builder.rs")).unwrap();
+  assert_eq!(builders.matches("append_root_invocation(&mut query, &self.root_invocation);").count(), 2);
 }

@@ -7259,7 +7259,17 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   let plugin_sdk = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../aeordb-plugin-sdk/src/context.rs")).unwrap();
   let root_operation = fs::read_to_string(source_root.join("engine/root_operation.rs")).unwrap();
   assert_eq!(wasm_runtime.matches(".func_wrap(\"aeordb\", \"").count(), 9);
-  assert_eq!(wasm_runtime.matches("  pub fn ").count(), 5);
+  assert_eq!(wasm_runtime.matches("  pub fn ").count(), 8);
+  for authority_bundle_constructor in [
+    "PluginAuthorizationCachesV1 {\n  pub fn new(",
+    "PluginAuthorityEnginesV1 {\n  pub fn new(",
+    "pub fn shared(engine: Arc<StorageEngine>)",
+  ] {
+    assert!(
+      wasm_runtime.contains(authority_bundle_constructor),
+      "runtime lost typed authority bundle constructor {authority_bundle_constructor}"
+    );
+  }
   assert_eq!(plugin_sdk.matches("  fn aeordb_").count(), 8);
   assert_eq!(root_operation.matches("const PLUGIN_HOST_SINGLE_ROOT:").count(), 1);
   assert_eq!(root_operation.matches("const PLUGIN_HOST_MUTATION:").count(), 1);

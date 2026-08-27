@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::PluginError;
+use crate::root::{PluginItemsResponseV1, PluginNamespaceReadInvocationV1, PluginRootMetadataV1};
 
 // ---------------------------------------------------------------------------
 // FFI declarations — only available when compiled for wasm32
@@ -33,6 +34,8 @@ extern "C" {
 /// Raw file data returned by `read_file`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileData {
+  /// Exact namespace root used by the host read.
+  pub root: PluginRootMetadataV1,
   /// Decoded file bytes.
   pub data: Vec<u8>,
   /// MIME content type.
@@ -71,6 +74,7 @@ impl ExtractRequest {
 /// Text extracted by the host without materializing the full file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedText {
+  pub root: PluginRootMetadataV1,
   pub text: String,
   pub content_type: String,
   pub source_size: u64,
@@ -96,6 +100,7 @@ pub struct DirEntry {
 /// Metadata about a stored file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
+  pub root: PluginRootMetadataV1,
   /// Full storage path.
   pub path: String,
   /// File size in bytes.
@@ -190,87 +195,109 @@ pub(crate) fn call_aggregate(args: &serde_json::Value) -> Result<serde_json::Val
 /// `PluginError::ExecutionFailed` on native targets.
 #[derive(Debug, Clone)]
 pub struct PluginContext {
-  _private: (),
+  root_invocation: PluginNamespaceReadInvocationV1,
 }
 
 impl PluginContext {
   /// Create a new context.  This is normally called by the macro-generated
   /// `handle` export — plugin authors rarely need to call this directly.
   pub fn new() -> Self {
-    Self { _private: () }
+    Self { root_invocation: PluginNamespaceReadInvocationV1::current() }
+  }
+
+  /// Bind a context to the host-owned invocation selector decoded by the
+  /// macro-generated entry point.
+  #[doc(hidden)]
+  pub fn from_invocation(root_invocation: PluginNamespaceReadInvocationV1) -> Self {
+    Self { root_invocation }
   }
 
   // -- File operations ----------------------------------------------------
 
   /// Read a file at the given path.
   pub fn read_file(&self, path: &str) -> Result<FileData, PluginError> {
-    let args = serde_json::json!({ "path": path });
+    let args = self.rooted_arguments(serde_json::json!({ "path": path }))?;
     let value = self.call("aeordb_read_file", &args)?;
     decode_file_data(value)
   }
 
   /// Extract a text range from a file without buffering the full file in the plugin host.
   pub fn extract_file(&self, path: &str, request: ExtractRequest) -> Result<ExtractedText, PluginError> {
-    let args = serde_json::json!({
+    let args = self.rooted_arguments(serde_json::json!({
         "path": path,
         "mode": request.mode,
         "start": request.start,
         "end": request.end,
         "max_bytes": request.max_bytes,
-    });
+    }))?;
     let value = self.call("aeordb_extract_file", &args)?;
-    serde_json::from_value(value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse extracted text: {}", e)))
+    let response: ExtractedText =
+      serde_json::from_value(value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse extracted text: {}", e)))?;
+    validate_root_metadata(&response.root)?;
+    Ok(response)
   }
 
   /// Write (create or overwrite) a file.
   pub fn write_file(&self, path: &str, data: &[u8], content_type: &str) -> Result<(), PluginError> {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    let args = serde_json::json!({
+    let args = self.rooted_arguments(serde_json::json!({
         "path": path,
         "data": encoded,
         "content_type": content_type,
-    });
+    }))?;
     self.call("aeordb_write_file", &args)?;
     Ok(())
   }
 
   /// Delete a file at the given path.
   pub fn delete_file(&self, path: &str) -> Result<(), PluginError> {
-    let args = serde_json::json!({ "path": path });
+    let args = self.rooted_arguments(serde_json::json!({ "path": path }))?;
     self.call("aeordb_delete_file", &args)?;
     Ok(())
   }
 
   /// Retrieve metadata for a file.
   pub fn file_metadata(&self, path: &str) -> Result<FileMetadata, PluginError> {
-    let args = serde_json::json!({ "path": path });
+    let args = self.rooted_arguments(serde_json::json!({ "path": path }))?;
     let value = self.call("aeordb_file_metadata", &args)?;
-    serde_json::from_value(value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse file metadata: {}", e)))
+    let response: FileMetadata =
+      serde_json::from_value(value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse file metadata: {}", e)))?;
+    validate_root_metadata(&response.root)?;
+    Ok(response)
   }
 
   /// List directory entries at the given path.
-  pub fn list_directory(&self, path: &str) -> Result<Vec<DirEntry>, PluginError> {
-    let args = serde_json::json!({ "path": path });
+  pub fn list_directory(&self, path: &str) -> Result<PluginItemsResponseV1<Vec<DirEntry>>, PluginError> {
+    let args = self.rooted_arguments(serde_json::json!({ "path": path }))?;
     let value = self.call("aeordb_list_directory", &args)?;
-
-    // The host may return { "entries": [...] } or a bare array.
-    let entries_value = value.get("entries").cloned().unwrap_or(value);
-
-    serde_json::from_value(entries_value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse directory listing: {}", e)))
+    let root = decode_root_metadata(&value)?;
+    let (items_value, has_more, total) = decode_rooted_collection_response(&value, "items", "entries", "directory listing")?;
+    let items = serde_json::from_value(items_value)
+      .map_err(|e| PluginError::SerializationFailed(format!("failed to parse directory listing: {}", e)))?;
+    Ok(PluginItemsResponseV1::new(root, items, has_more, total))
   }
 
   /// Start building a query against files at the given path.
   pub fn query(&self, path: &str) -> crate::query_builder::QueryBuilder {
-    crate::query_builder::QueryBuilder::new(path)
+    crate::query_builder::QueryBuilder::with_root_invocation(path, self.root_invocation.clone())
   }
 
   /// Start building an aggregation against files at the given path.
   pub fn aggregate(&self, path: &str) -> crate::query_builder::AggregateBuilder {
-    crate::query_builder::AggregateBuilder::new(path)
+    crate::query_builder::AggregateBuilder::with_root_invocation(path, self.root_invocation.clone())
   }
 
   // -- Internal -----------------------------------------------------------
+
+  fn rooted_arguments(&self, mut arguments: serde_json::Value) -> Result<serde_json::Value, PluginError> {
+    {
+      let object =
+        arguments.as_object_mut().ok_or_else(|| PluginError::SerializationFailed("host arguments must be a JSON object".to_string()))?;
+      self.root_invocation.insert_into_json_object(object);
+    }
+    Ok(arguments)
+  }
 
   /// Dispatch a host function call by name.
   #[cfg(target_arch = "wasm32")]
@@ -297,6 +324,38 @@ impl PluginContext {
   }
 }
 
+pub(crate) fn decode_rooted_collection_response(
+  response: &serde_json::Value,
+  current_collection_field: &str,
+  legacy_collection_field: &str,
+  response_name: &str,
+) -> Result<(serde_json::Value, bool, Option<u64>), PluginError> {
+  let collection = match response.get(current_collection_field) {
+    Some(collection) => collection.clone(),
+    None => match response.get(legacy_collection_field) {
+      Some(collection) => collection.clone(),
+      None => {
+        return Err(PluginError::SerializationFailed(format!(
+          "failed to parse {response_name}: missing {current_collection_field} collection"
+        )));
+      }
+    },
+  };
+  let has_more = match response.get("has_more") {
+    Some(value) => value
+      .as_bool()
+      .ok_or_else(|| PluginError::SerializationFailed(format!("failed to parse {response_name}: has_more must be a boolean")))?,
+    None => false,
+  };
+  let total = match response.get("total") {
+    Some(serde_json::Value::Null) | None => None,
+    Some(value) => {
+      Some(value.as_u64().ok_or_else(|| PluginError::SerializationFailed(format!("failed to parse {response_name}: total must be a u64")))?)
+    }
+  };
+  Ok((collection, has_more, total))
+}
+
 impl Default for PluginContext {
   fn default() -> Self {
     Self::new()
@@ -316,6 +375,7 @@ fn base64_decode(encoded: &str) -> Result<Vec<u8>, PluginError> {
 
 #[derive(Deserialize)]
 struct HostFileData {
+  root: PluginRootMetadataV1,
   data: String,
   content_type: String,
   size: u64,
@@ -324,6 +384,7 @@ struct HostFileData {
 fn decode_file_data(value: serde_json::Value) -> Result<FileData, PluginError> {
   let response: HostFileData =
     serde_json::from_value(value).map_err(|error| PluginError::SerializationFailed(format!("failed to parse file response: {error}")))?;
+  validate_root_metadata(&response.root)?;
   let data = base64_decode(&response.data)?;
   let actual_size = u64::try_from(data.len())
     .map_err(|_| PluginError::SerializationFailed("decoded file size exceeds the supported u64 range".to_string()))?;
@@ -333,7 +394,22 @@ fn decode_file_data(value: serde_json::Value) -> Result<FileData, PluginError> {
       response.size, actual_size
     )));
   }
-  Ok(FileData { data, content_type: response.content_type, size: response.size })
+  Ok(FileData { root: response.root, data, content_type: response.content_type, size: response.size })
+}
+
+fn decode_root_metadata(value: &serde_json::Value) -> Result<PluginRootMetadataV1, PluginError> {
+  let root = value
+    .get("root")
+    .cloned()
+    .ok_or_else(|| PluginError::SerializationFailed("host response is missing exact root metadata".to_string()))?;
+  let root: PluginRootMetadataV1 =
+    serde_json::from_value(root).map_err(|error| PluginError::SerializationFailed(format!("failed to parse root metadata: {error}")))?;
+  validate_root_metadata(&root)?;
+  Ok(root)
+}
+
+fn validate_root_metadata(root: &PluginRootMetadataV1) -> Result<(), PluginError> {
+  root.validate().map_err(|error| PluginError::SerializationFailed(format!("invalid exact root metadata: {error}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +419,14 @@ fn decode_file_data(value: serde_json::Value) -> Result<FileData, PluginError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn retained_root() -> PluginRootMetadataV1 {
+    PluginRootMetadataV1 { hash: "ab".repeat(32), state: crate::root::PluginRootStateV1::Retained, expires_at: None }
+  }
+
+  fn retained_root_json() -> serde_json::Value {
+    serde_json::to_value(retained_root()).unwrap()
+  }
 
   #[test]
   fn test_plugin_context_new() {
@@ -355,6 +439,18 @@ mod tests {
   fn test_plugin_context_default() {
     let context = PluginContext::default();
     let _ = format!("{:?}", context);
+  }
+
+  #[test]
+  fn historical_context_serializes_its_selector_into_host_arguments_and_builders() {
+    let root_hash = "cd".repeat(32);
+    let invocation = PluginNamespaceReadInvocationV1::root_hash(root_hash.clone()).unwrap();
+    let context = PluginContext::from_invocation(invocation);
+
+    let arguments = context.rooted_arguments(serde_json::json!({"path": "/docs/value.txt"})).unwrap();
+    assert_eq!(arguments["root_hash"], root_hash);
+    assert_eq!(context.query("/docs").to_json()["root_hash"], root_hash);
+    assert_eq!(context.aggregate("/docs").to_json()["root_hash"], root_hash);
   }
 
   // On native targets every host call should return an error.
@@ -437,11 +533,36 @@ mod tests {
     }
   }
 
+  #[test]
+  fn rooted_collection_response_accepts_current_and_legacy_collection_fields() {
+    let current = serde_json::json!({ "items": [1], "entries": [2], "has_more": true, "total": 3 });
+    let (items, has_more, total) = decode_rooted_collection_response(&current, "items", "entries", "directory listing").unwrap();
+    assert_eq!(items, serde_json::json!([1]));
+    assert!(has_more);
+    assert_eq!(total, Some(3));
+
+    let legacy = serde_json::json!({ "entries": [2], "total": null });
+    let (items, has_more, total) = decode_rooted_collection_response(&legacy, "items", "entries", "directory listing").unwrap();
+    assert_eq!(items, serde_json::json!([2]));
+    assert!(!has_more);
+    assert_eq!(total, None);
+  }
+
+  #[test]
+  fn rooted_collection_response_rejects_missing_or_malformed_pagination_fields() {
+    for malformed in
+      [serde_json::json!({}), serde_json::json!({ "items": [], "has_more": "false" }), serde_json::json!({ "items": [], "total": -1 })]
+    {
+      let error = decode_rooted_collection_response(&malformed, "items", "entries", "directory listing").unwrap_err();
+      assert!(matches!(error, PluginError::SerializationFailed(_)));
+    }
+  }
+
   // -- Serialization round-trips ------------------------------------------
 
   #[test]
   fn test_file_data_serialization() {
-    let file_data = FileData { data: vec![1, 2, 3], content_type: "application/octet-stream".to_string(), size: 3 };
+    let file_data = FileData { root: retained_root(), data: vec![1, 2, 3], content_type: "application/octet-stream".to_string(), size: 3 };
     let json = serde_json::to_value(&file_data).unwrap();
     assert_eq!(json["content_type"], "application/octet-stream");
     assert_eq!(json["size"], 3);
@@ -468,6 +589,7 @@ mod tests {
   #[test]
   fn test_extracted_text_serialization() {
     let extracted = ExtractedText {
+      root: retained_root(),
       text: "hello".to_string(),
       content_type: "text/plain".to_string(),
       source_size: 100,
@@ -512,6 +634,7 @@ mod tests {
   #[test]
   fn test_file_metadata_serialization() {
     let metadata = FileMetadata {
+      root: retained_root(),
       path: "/docs/file.txt".to_string(),
       size: 4096,
       content_type: Some("text/plain".to_string()),
@@ -531,6 +654,7 @@ mod tests {
   #[test]
   fn test_file_metadata_optional_content_type() {
     let json = serde_json::json!({
+        "root": retained_root_json(),
         "path": "/bin/data",
         "size": 512,
         "content_type": null,
@@ -567,7 +691,7 @@ mod tests {
 
   #[test]
   fn file_data_host_response_requires_every_contract_field() {
-    for malformed in [
+    for mut malformed in [
       serde_json::json!({"content_type": "text/plain", "size": 0}),
       serde_json::json!({"data": "", "size": 0}),
       serde_json::json!({"data": "", "content_type": "text/plain"}),
@@ -575,6 +699,7 @@ mod tests {
       serde_json::json!({"data": "", "content_type": 7, "size": 0}),
       serde_json::json!({"data": "", "content_type": "text/plain", "size": "0"}),
     ] {
+      malformed["root"] = retained_root_json();
       let error = decode_file_data(malformed).expect_err("malformed host file response must not fabricate defaults");
       assert!(matches!(error, PluginError::SerializationFailed(_)), "unexpected error: {error}");
     }
@@ -583,6 +708,7 @@ mod tests {
   #[test]
   fn file_data_host_response_rejects_declared_size_mismatch() {
     let error = decode_file_data(serde_json::json!({
+      "root": retained_root_json(),
       "data": "aGVsbG8=",
       "content_type": "text/plain",
       "size": 4,

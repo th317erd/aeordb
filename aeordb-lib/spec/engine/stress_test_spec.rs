@@ -15,6 +15,7 @@ use aeordb::engine::{
 use aeordb::plugins::plugin_manager::PluginManager;
 use aeordb::plugins::types::PluginType;
 use aeordb::server::create_temp_engine_for_tests;
+use aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
@@ -365,7 +366,13 @@ fn test_stress_wasm_query_vs_direct_query() {
       "metadata": {"function_name": "echo", "path": "/test/query/plugin/echo"}
   });
   let response = pm
-    .invoke_wasm_plugin_with_context("test/query/plugin", &serde_json::to_vec(&request).unwrap(), engine.clone(), RequestContext::system())
+    .invoke_wasm_plugin_with_context(
+      "test/query/plugin",
+      &serde_json::to_vec(&request).unwrap(),
+      PluginNamespaceReadInvocationV1::current(),
+      engine.clone(),
+      RequestContext::system(),
+    )
     .unwrap();
 
   let resp: serde_json::Value = serde_json::from_slice(&response).unwrap();
@@ -1044,7 +1051,13 @@ fn test_stress_wasm_plugin_under_load() {
         "metadata": {"function_name": "echo", "path": "/test/stress/plugin/echo"}
     });
     let request_bytes = serde_json::to_vec(&request).unwrap();
-    match pm.invoke_wasm_plugin_with_context("test/stress/plugin", &request_bytes, engine.clone(), RequestContext::system()) {
+    match pm.invoke_wasm_plugin_with_context(
+      "test/stress/plugin",
+      &request_bytes,
+      PluginNamespaceReadInvocationV1::current(),
+      engine.clone(),
+      RequestContext::system(),
+    ) {
       Ok(response) => {
         let resp: serde_json::Value = serde_json::from_slice(&response).unwrap_or_default();
         if resp["status_code"] == 200 {
@@ -1076,8 +1089,13 @@ fn test_stress_wasm_plugin_under_load() {
         "metadata": {"function_name": "read", "path": "/test/stress/plugin/read"}
     });
     let request_bytes = serde_json::to_vec(&request).unwrap();
-    if let Ok(response) = pm.invoke_wasm_plugin_with_context("test/stress/plugin", &request_bytes, engine.clone(), RequestContext::system())
-    {
+    if let Ok(response) = pm.invoke_wasm_plugin_with_context(
+      "test/stress/plugin",
+      &request_bytes,
+      PluginNamespaceReadInvocationV1::current(),
+      engine.clone(),
+      RequestContext::system(),
+    ) {
       let resp: serde_json::Value = serde_json::from_slice(&response).unwrap_or_default();
       if resp["status_code"] == 200 {
         read_successes += 1;

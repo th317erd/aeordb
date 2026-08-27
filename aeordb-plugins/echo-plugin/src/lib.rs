@@ -34,6 +34,7 @@ fn echo_handle(ctx: PluginContext, request: PluginRequest) -> Result<PluginRespo
                         "size": file.size,
                         "content_type": file.content_type,
                         "data_len": file.data.len(),
+                        "root": file.root,
                     }),
                 )
                 .map_err(|e| PluginError::SerializationFailed(e.to_string())),
@@ -100,8 +101,13 @@ fn echo_handle(ctx: PluginContext, request: PluginRequest) -> Result<PluginRespo
             let path = std::str::from_utf8(&request.arguments)
                 .map_err(|e| PluginError::ExecutionFailed(e.to_string()))?;
             match ctx.list_directory(path) {
-                Ok(entries) => {
-                    PluginResponse::json(200, &serde_json::json!({"entries": entries}))
+                Ok(response) => {
+                    PluginResponse::json(200, &serde_json::json!({
+                        "entries": response.items,
+                        "has_more": response.has_more,
+                        "total": response.total,
+                        "root": response.root,
+                    }))
                         .map_err(|e| PluginError::SerializationFailed(e.to_string()))
                 }
                 Err(e) => Ok(PluginResponse::error(500, &e.to_string())),

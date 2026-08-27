@@ -1,14 +1,16 @@
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
+use aeordb_plugin_sdk::PluginRequest;
+use aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1;
 use chrono::{DateTime, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::types::{PluginMetadata, PluginType};
-use super::wasm_runtime::{DEFAULT_MEMORY_LIMIT_BYTES, WasmPluginRuntime};
-use crate::engine::cache::{Cache, CleanCache};
-use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
+use super::wasm_runtime::{DEFAULT_MEMORY_LIMIT_BYTES, PluginAuthorizationCachesV1, PluginAuthorityEnginesV1, WasmPluginRuntime};
+use crate::engine::cache::CleanCache;
 use crate::engine::directory_ops::BufferedFileTransform;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::{DirectoryOps, EngineError, NamespaceMutationKind, RequestContext, StorageEngine};
@@ -830,19 +832,27 @@ impl PluginManager {
   /// Instantiate and invoke a deployed WASM plugin with engine context.
   ///
   /// Same as `invoke_wasm_plugin` but provides the `StorageEngine` and
-  /// `RequestContext` to the WASM runtime, enabling the 7 database host
+  /// `RequestContext` to the WASM runtime, enabling the 8 database host
   /// functions to perform real operations. Used for query plugins.
-  #[tracing::instrument(skip(self, request_bytes, engine, ctx), fields(path = %path, request_size = request_bytes.len()))]
+  #[tracing::instrument(skip(self, request_bytes, root_invocation, engine, ctx), fields(path = %path, request_size = request_bytes.len()))]
   pub fn invoke_wasm_plugin_with_context(
     &self,
     path: &str,
     request_bytes: &[u8],
+    root_invocation: PluginNamespaceReadInvocationV1,
     engine: std::sync::Arc<StorageEngine>,
     ctx: RequestContext,
   ) -> Result<Vec<u8>, PluginManagerError> {
     let group_cache = engine.group_cache.clone();
     let api_key_cache = engine.api_key_cache.clone();
-    self.invoke_wasm_plugin_with_auth(path, request_bytes, engine, ctx, group_cache, api_key_cache)
+    self.invoke_wasm_plugin_with_auth(
+      path,
+      request_bytes,
+      root_invocation,
+      engine,
+      ctx,
+      PluginAuthorizationCachesV1::new(group_cache, api_key_cache),
+    )
   }
 
   /// Instantiate and invoke a deployed WASM plugin with authenticated engine context.
@@ -850,33 +860,39 @@ impl PluginManager {
   /// Provides the same permission caches used by HTTP middleware so host
   /// functions can enforce per-path authorization for paths supplied inside
   /// plugin request bodies.
-  #[tracing::instrument(skip(self, request_bytes, engine, ctx, group_cache, api_key_cache), fields(path = %path, request_size = request_bytes.len()))]
+  #[tracing::instrument(skip(self, request_bytes, root_invocation, engine, ctx, authorization_caches), fields(path = %path, request_size = request_bytes.len()))]
   pub fn invoke_wasm_plugin_with_auth(
     &self,
     path: &str,
     request_bytes: &[u8],
+    root_invocation: PluginNamespaceReadInvocationV1,
     engine: std::sync::Arc<StorageEngine>,
     ctx: RequestContext,
-    group_cache: Arc<Cache<GroupLoader>>,
-    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+    authorization_caches: PluginAuthorizationCachesV1,
   ) -> Result<Vec<u8>, PluginManagerError> {
-    self.invoke_wasm_plugin_with_authority_engines(path, request_bytes, engine.clone(), engine, ctx, group_cache, api_key_cache)
+    self.invoke_wasm_plugin_with_authority_engines(
+      path,
+      request_bytes,
+      root_invocation,
+      PluginAuthorityEnginesV1::shared(engine),
+      ctx,
+      authorization_caches,
+    )
   }
 
   /// Invoke a plugin when API-key authority belongs to a different engine.
-  #[tracing::instrument(skip(self, request_bytes, engine, api_key_engine, ctx, group_cache, api_key_cache), fields(path = %path, request_size = request_bytes.len()))]
+  #[tracing::instrument(skip(self, request_bytes, root_invocation, authority_engines, ctx, authorization_caches), fields(path = %path, request_size = request_bytes.len()))]
   pub fn invoke_wasm_plugin_with_authority_engines(
     &self,
     path: &str,
     request_bytes: &[u8],
-    engine: std::sync::Arc<StorageEngine>,
-    api_key_engine: std::sync::Arc<StorageEngine>,
+    root_invocation: PluginNamespaceReadInvocationV1,
+    authority_engines: PluginAuthorityEnginesV1,
     ctx: RequestContext,
-    group_cache: Arc<Cache<GroupLoader>>,
-    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+    authorization_caches: PluginAuthorizationCachesV1,
   ) -> Result<Vec<u8>, PluginManagerError> {
     self
-      .invoke_wasm_plugin_with_auth_accounted(path, request_bytes, engine, api_key_engine, ctx, group_cache, api_key_cache)
+      .invoke_wasm_plugin_with_auth_accounted(path, request_bytes, root_invocation, authority_engines, ctx, authorization_caches)
       .map(AccountedPluginOutput::into_bytes)
   }
 
@@ -884,19 +900,21 @@ impl PluginManager {
     &self,
     path: &str,
     request_bytes: &[u8],
-    engine: std::sync::Arc<StorageEngine>,
-    api_key_engine: std::sync::Arc<StorageEngine>,
+    root_invocation: PluginNamespaceReadInvocationV1,
+    authority_engines: PluginAuthorityEnginesV1,
     ctx: RequestContext,
-    group_cache: Arc<Cache<GroupLoader>>,
-    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+    authorization_caches: PluginAuthorizationCachesV1,
   ) -> Result<AccountedPluginOutput, PluginManagerError> {
     let start = std::time::Instant::now();
+
+    let request_bytes = bind_plugin_request_root(request_bytes, &root_invocation)?;
 
     let (record, memory) = self.load_plugin_for_invocation(path, request_bytes.len(), DEFAULT_MEMORY_LIMIT_BYTES)?;
     let runtime = self.get_cached_runtime(path, &record.checksum, &record.wasm_bytes)?;
 
-    let result =
-      runtime.call_handle_with_authority_engines(request_bytes, engine, api_key_engine, ctx, group_cache, api_key_cache).map_err(|error| {
+    let result = runtime
+      .call_handle_with_authority_engines(request_bytes.as_ref(), root_invocation, authority_engines, ctx, authorization_caches)
+      .map_err(|error| {
         tracing::error!(path = %path, error = %error, "WASM execution failed");
         metrics::counter!(crate::metrics::definitions::PLUGIN_ERRORS_TOTAL, "error_type" => "execution_failed").increment(1);
         PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error))
@@ -945,6 +963,19 @@ impl PluginManager {
       .map_err(|error| PluginManagerError::ExecutionFailed(format!("WASM execution failed: {}", error)))?;
     Self::retain_plugin_output(memory, bytes)
   }
+}
+
+fn bind_plugin_request_root<'request>(
+  request_bytes: &'request [u8],
+  root_invocation: &PluginNamespaceReadInvocationV1,
+) -> Result<Cow<'request, [u8]>, PluginManagerError> {
+  let Ok(mut request) = serde_json::from_slice::<PluginRequest>(request_bytes) else {
+    return Ok(Cow::Borrowed(request_bytes));
+  };
+  request.root = root_invocation.clone();
+  serde_json::to_vec(&request)
+    .map(Cow::Owned)
+    .map_err(|error| PluginManagerError::ExecutionFailed(format!("failed to bind plugin root invocation: {error}")))
 }
 
 fn plugin_memory_error(error: MemoryCoordinatorError) -> PluginManagerError {

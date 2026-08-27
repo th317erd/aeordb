@@ -115,7 +115,11 @@ mod tests {
 
   #[test]
   fn parse_request_reads_plugin_arguments() {
-    let request = PluginRequest { arguments: br#"{"name":"gamma","count":4}"#.to_vec(), metadata: Default::default() };
+    let request = PluginRequest {
+      arguments: br#"{"name":"gamma","count":4}"#.to_vec(),
+      metadata: Default::default(),
+      root: crate::root::PluginNamespaceReadInvocationV1::current(),
+    };
     let payload: Payload = parse_request(&request).unwrap();
     assert_eq!(payload.count, 4);
   }

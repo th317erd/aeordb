@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1514,
+  "maximum_occurrences": 1512,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -2656,7 +2656,7 @@
     {
       "id": "esq-v1-cfabfeb146337f5a001a-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 919,
+      "line": 929,
       "column": 9,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "error_conversion",
@@ -2666,7 +2666,7 @@
     {
       "id": "esq-v1-8f3ed42be42648ae9ab9-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 936,
+      "line": 946,
       "column": 124,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "default_on_error",
@@ -2676,7 +2676,7 @@
     {
       "id": "esq-v1-21f60add84ba0112c257-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 947,
+      "line": 957,
       "column": 25,
       "enclosing_item": "impl EngineFileStream < 'a >::collect_to_vec",
       "kind": "default_on_error",
@@ -2686,7 +2686,7 @@
     {
       "id": "esq-v1-f1631d6072ba20ad2e02-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1033,
+      "line": 1043,
       "column": 23,
       "enclosing_item": "stream_hash_inventory_bytes",
       "kind": "result_to_option",
@@ -2696,7 +2696,7 @@
     {
       "id": "esq-v1-bd50e1a9421ebb829b1c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1061,
+      "line": 1071,
       "column": 23,
       "enclosing_item": "read_chunk_reserved",
       "kind": "default_on_error",
@@ -2706,7 +2706,7 @@
     {
       "id": "esq-v1-79b8ae4468fa9cb70fa9-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1067,
+      "line": 1077,
       "column": 30,
       "enclosing_item": "read_chunk_reserved",
       "kind": "error_conversion",
@@ -2716,7 +2716,7 @@
     {
       "id": "esq-v1-358240da98139c85062f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1093,
+      "line": 1103,
       "column": 24,
       "enclosing_item": "read_chunk_reserved",
       "kind": "result_to_option",
@@ -2726,7 +2726,7 @@
     {
       "id": "esq-v1-f133421ac0293e4d77f1-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1218,
+      "line": 1228,
       "column": 25,
       "enclosing_item": "impl DirectoryMutationPlanner::upsert_child",
       "kind": "default_on_error",
@@ -2736,7 +2736,7 @@
     {
       "id": "esq-v1-3febd40c5a921c46e0fd-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1239,
+      "line": 1249,
       "column": 22,
       "enclosing_item": "impl DirectoryMutationPlanner::remove_child",
       "kind": "default_on_error",
@@ -2746,7 +2746,7 @@
     {
       "id": "esq-v1-44a7e04d19a1157afec0-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1435,
+      "line": 1445,
       "column": 17,
       "enclosing_item": "impl DirectoryMutationPlanner::finalize",
       "kind": "default_on_error",
@@ -2756,7 +2756,7 @@
     {
       "id": "esq-v1-647400b3c56fd35d1a37-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1487,
+      "line": 1497,
       "column": 7,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2766,7 +2766,7 @@
     {
       "id": "esq-v1-fec633a963999cc4bbbe-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1572,
+      "line": 1582,
       "column": 11,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2776,7 +2776,7 @@
     {
       "id": "esq-v1-464c6678effe0d43dc24-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1576,
+      "line": 1586,
       "column": 9,
       "enclosing_item": "impl DirectoryMutationFanout < '_ >::publish",
       "kind": "logged_error_continues",
@@ -2786,7 +2786,7 @@
     {
       "id": "esq-v1-1dbe127dc1453310f45f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1688,
+      "line": 1698,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_namespace_mutation",
       "kind": "error_conversion",
@@ -2796,7 +2796,7 @@
     {
       "id": "esq-v1-e68210dbf3155e3f8134-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1712,
+      "line": 1722,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_optional_namespace_mutation",
       "kind": "error_conversion",
@@ -2806,7 +2806,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1934,
+      "line": 1944,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2816,7 +2816,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-01",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1945,
+      "line": 1955,
       "column": 27,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2826,7 +2826,7 @@
     {
       "id": "esq-v1-4772f14e72268cde34eb-02",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 1963,
+      "line": 1973,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "result_to_option",
@@ -2836,7 +2836,7 @@
     {
       "id": "esq-v1-2bafbe596c439a91de1c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 2239,
+      "line": 2249,
       "column": 33,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "default_on_error",
@@ -2846,7 +2846,7 @@
     {
       "id": "esq-v1-25bdcf384e2da6d6d6f2-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 2263,
+      "line": 2273,
       "column": 23,
       "enclosing_item": "impl DirectoryOps < 'a >::apply_sync_receipt",
       "kind": "default_on_error",
@@ -2856,7 +2856,7 @@
     {
       "id": "esq-v1-1e9d7ebbd60ed62357cb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3208,
+      "line": 3218,
       "column": 46,
       "enclosing_item": "impl DirectoryOps < 'a >::list_directory",
       "kind": "default_on_error",
@@ -2866,7 +2866,7 @@
     {
       "id": "esq-v1-35a885337f68f9d467c8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3306,
+      "line": 3316,
       "column": 46,
       "enclosing_item": "impl DirectoryOps < 'a >::visit_live_directory_children_with_mode",
       "kind": "default_on_error",
@@ -2876,7 +2876,7 @@
     {
       "id": "esq-v1-ddaf162496826bd2621d-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3639,
+      "line": 3649,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::create_directory",
       "kind": "default_on_error",
@@ -2886,7 +2886,7 @@
     {
       "id": "esq-v1-c6203fc4c82a25ca0cb8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3709,
+      "line": 3719,
       "column": 25,
       "enclosing_item": "impl DirectoryOps < 'a >::migrate_file_record_to_current_version_inner",
       "kind": "result_to_option",
@@ -2896,7 +2896,7 @@
     {
       "id": "esq-v1-7c1cc635d0b4d2a5c311-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3838,
+      "line": 3848,
       "column": 8,
       "enclosing_item": "impl DirectoryOps < 'a >::auto_snapshot_throttled",
       "kind": "result_status_probe",
@@ -2906,7 +2906,7 @@
     {
       "id": "esq-v1-43252b5e53ae66d08444-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3871,
+      "line": 3881,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::auto_snapshot_throttled",
       "kind": "logged_error_continues",
@@ -2916,7 +2916,7 @@
     {
       "id": "esq-v1-091284cb537f519fd859-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3949,
+      "line": 3959,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "broad_err_pattern",
@@ -2926,7 +2926,7 @@
     {
       "id": "esq-v1-c20a9327c3f637070ef4-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3962,
+      "line": 3972,
       "column": 16,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "default_on_error",
@@ -2936,7 +2936,7 @@
     {
       "id": "esq-v1-ff4fdd4be6b6b81d6572-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3968,
+      "line": 3978,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_file_child",
       "kind": "default_on_error",
@@ -2946,7 +2946,7 @@
     {
       "id": "esq-v1-3e42bb88d2d698f9a3fb-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 3996,
+      "line": 4006,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "broad_err_pattern",
@@ -2956,7 +2956,7 @@
     {
       "id": "esq-v1-f3579da5fa92c4b8bf2c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4006,
+      "line": 4016,
       "column": 16,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "default_on_error",
@@ -2966,7 +2966,7 @@
     {
       "id": "esq-v1-8916fd6e7b3bfaeb376e-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4012,
+      "line": 4022,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_workspace_symlink_child",
       "kind": "default_on_error",
@@ -2976,7 +2976,7 @@
     {
       "id": "esq-v1-e63a84394c77b1f940d4-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4152,
+      "line": 4162,
       "column": 13,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree_unrouted",
       "kind": "logged_error_continues",
@@ -2986,7 +2986,7 @@
     {
       "id": "esq-v1-83dc8eb0728ea5914678-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4165,
+      "line": 4175,
       "column": 24,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree_unrouted",
       "kind": "default_on_error",
@@ -2996,7 +2996,7 @@
     {
       "id": "esq-v1-8d343ac677040b35b2e0-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4167,
+      "line": 4177,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::rebuild_directory_tree_unrouted",
       "kind": "default_on_error",
@@ -3006,7 +3006,7 @@
     {
       "id": "esq-v1-138d8f1368bc877683d6-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4355,
+      "line": 4365,
       "column": 9,
       "enclosing_item": "impl DirectoryOps < 'a >::collect_existing_directory_children_for_repair",
       "kind": "broad_err_pattern",
@@ -3016,7 +3016,7 @@
     {
       "id": "esq-v1-dd0bbde8cd3df6dca2a3-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4381,
+      "line": 4391,
       "column": 20,
       "enclosing_item": "impl DirectoryOps < 'a >::insert_repair_child",
       "kind": "default_on_error",
@@ -3026,7 +3026,7 @@
     {
       "id": "esq-v1-c0f0dbcc192ff7824702-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4399,
+      "line": 4409,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_child_from_file_record",
       "kind": "broad_err_pattern",
@@ -3036,7 +3036,7 @@
     {
       "id": "esq-v1-7a9a444ef10a1ed7a5b8-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4447,
+      "line": 4457,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::repair_child_from_symlink_record",
       "kind": "broad_err_pattern",
@@ -3046,7 +3046,7 @@
     {
       "id": "esq-v1-d5bfbebee29ca0c70251-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4592,
+      "line": 4602,
       "column": 19,
       "enclosing_item": "impl DirectoryOps < 'a >::store_rebuilt_directory",
       "kind": "default_on_error",
@@ -3056,7 +3056,7 @@
     {
       "id": "esq-v1-835fa8153524a50be6a7-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4637,
+      "line": 4647,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::store_file_with_indexing",
       "kind": "logged_error_continues",
@@ -3066,7 +3066,7 @@
     {
       "id": "esq-v1-e1620627b6cc2666bdef-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 4665,
+      "line": 4675,
       "column": 7,
       "enclosing_item": "impl DirectoryOps < 'a >::store_file_with_full_pipeline",
       "kind": "logged_error_continues",
@@ -3076,7 +3076,7 @@
     {
       "id": "esq-v1-15cd8cb7b9bc18b8708f-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5013,
+      "line": 5023,
       "column": 15,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_parent_directories",
       "kind": "default_on_error",
@@ -3086,7 +3086,7 @@
     {
       "id": "esq-v1-399f75a57038761b9e31-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5036,
+      "line": 5046,
       "column": 22,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_remove_from_parent_directory",
       "kind": "default_on_error",
@@ -3096,7 +3096,7 @@
     {
       "id": "esq-v1-834a5a4e5bbd8e0df4dc-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5090,
+      "line": 5100,
       "column": 15,
       "enclosing_item": "impl DirectoryOps < 'a >::plan_remove_from_parent_directory",
       "kind": "default_on_error",
@@ -3106,7 +3106,7 @@
     {
       "id": "esq-v1-718d438102254aa2e3c2-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5163,
+      "line": 5173,
       "column": 17,
       "enclosing_item": "impl DirectoryOps < 'a >::store_symlink",
       "kind": "default_on_error",
@@ -3116,7 +3116,7 @@
     {
       "id": "esq-v1-18d183645adb5f604d20-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5759,
+      "line": 5769,
       "column": 18,
       "enclosing_item": "impl DirectoryOps < 'a >::copy_paths",
       "kind": "default_on_error",
@@ -3126,7 +3126,7 @@
     {
       "id": "esq-v1-3bc49429e037c6ff65ef-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 5915,
+      "line": 5925,
       "column": 23,
       "enclosing_item": "impl DirectoryOps < 'a >::execute_copy_mappings",
       "kind": "default_on_error",
@@ -3136,7 +3136,7 @@
     {
       "id": "esq-v1-9c97b40cb3549e4785dc-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 6112,
+      "line": 6122,
       "column": 17,
       "enclosing_item": "impl DirectoryOps < 'a >::rename_symlink",
       "kind": "default_on_error",
@@ -3146,7 +3146,7 @@
     {
       "id": "esq-v1-7afda66a35a8678d385c-00",
       "file": "aeordb-lib/src/engine/directory_ops.rs",
-      "line": 6155,
+      "line": 6165,
       "column": 23,
       "enclosing_item": "copy_workspace_bytes",
       "kind": "result_to_option",
@@ -12306,7 +12306,7 @@
     {
       "id": "esq-v1-02fce1dd85e08bb1ee78-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 117,
+      "line": 119,
       "column": 3,
       "enclosing_item": "bundled_version_can_replace",
       "kind": "success_only_conditional",
@@ -12316,7 +12316,7 @@
     {
       "id": "esq-v1-c16eb1a365bbbccd971f-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 122,
+      "line": 124,
       "column": 30,
       "enclosing_item": "bundled_version_can_replace",
       "kind": "default_on_error",
@@ -12326,7 +12326,7 @@
     {
       "id": "esq-v1-1a7fd70efbe7f412daa4-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 253,
+      "line": 255,
       "column": 21,
       "enclosing_item": "impl PluginCache::new",
       "kind": "result_to_option",
@@ -12336,7 +12336,7 @@
     {
       "id": "esq-v1-ddd925560207c03c458a-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 266,
+      "line": 268,
       "column": 25,
       "enclosing_item": "impl PluginCache::compiled_weight",
       "kind": "result_to_option",
@@ -12346,7 +12346,7 @@
     {
       "id": "esq-v1-985fc1ca4881275328a0-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 564,
+      "line": 566,
       "column": 24,
       "enclosing_item": "impl PluginManager::deploy_plugin_record",
       "kind": "default_on_error",
@@ -12356,7 +12356,7 @@
     {
       "id": "esq-v1-306659fda84dde33631e-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 569,
+      "line": 571,
       "column": 25,
       "enclosing_item": "impl PluginManager::deploy_plugin_record",
       "kind": "default_on_error",
@@ -12366,7 +12366,7 @@
     {
       "id": "esq-v1-0010d2736371d448b739-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 641,
+      "line": 643,
       "column": 28,
       "enclosing_item": "impl PluginManager::list_plugins_accounted",
       "kind": "error_conversion",
@@ -12376,7 +12376,7 @@
     {
       "id": "esq-v1-27192090ec5a4817ee98-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 646,
+      "line": 648,
       "column": 29,
       "enclosing_item": "impl PluginManager::list_plugins_accounted",
       "kind": "result_to_option",
@@ -12386,7 +12386,7 @@
     {
       "id": "esq-v1-6f0334f75cca691a35f0-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 699,
+      "line": 701,
       "column": 5,
       "enclosing_item": "impl PluginManager::invalidate_cached_runtime_after_ack",
       "kind": "logged_error_continues",
@@ -12396,7 +12396,7 @@
     {
       "id": "esq-v1-b5cf5082ac1820a2e199-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 710,
+      "line": 712,
       "column": 25,
       "enclosing_item": "impl PluginManager::validate_and_reserve_deployment",
       "kind": "result_to_option",
@@ -12406,7 +12406,7 @@
     {
       "id": "esq-v1-b5cf5082ac1820a2e199-01",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 722,
+      "line": 724,
       "column": 25,
       "enclosing_item": "impl PluginManager::validate_and_reserve_deployment",
       "kind": "result_to_option",
@@ -12416,7 +12416,7 @@
     {
       "id": "esq-v1-95edb6f742146bb411fb-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 748,
+      "line": 750,
       "column": 25,
       "enclosing_item": "impl PluginManager::reserve_invocation_memory",
       "kind": "result_to_option",
@@ -12426,7 +12426,7 @@
     {
       "id": "esq-v1-9b87fec8a4fbff53718e-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 770,
+      "line": 772,
       "column": 24,
       "enclosing_item": "impl PluginManager::load_plugin_for_invocation",
       "kind": "error_conversion",
@@ -12436,7 +12436,7 @@
     {
       "id": "esq-v1-6ee9f51cf31624121260-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 785,
+      "line": 787,
       "column": 25,
       "enclosing_item": "impl PluginManager::retain_plugin_output",
       "kind": "result_to_option",
@@ -12444,9 +12444,19 @@
       "review": "checked-arithmetic-composition"
     },
     {
+      "id": "esq-v1-f5e9708403a86969221e-00",
+      "file": "aeordb-lib/src/plugins/plugin_manager.rs",
+      "line": 972,
+      "column": 3,
+      "enclosing_item": "bind_plugin_request_root",
+      "kind": "success_only_conditional",
+      "pattern": "let Ok (mut request) = serde_json :: from_slice :: < PluginRequest > (request_bytes) else { return Ok (Cow :: Borrowed (request_bytes)) ; } ;",
+      "review": "parser-alternative-probe"
+    },
+    {
       "id": "esq-v1-e1e984f483f36a89aef1-00",
       "file": "aeordb-lib/src/plugins/plugin_manager.rs",
-      "line": 974,
+      "line": 1005,
       "column": 23,
       "enclosing_item": "plugin_metadata_retained_bytes",
       "kind": "result_to_option",
@@ -12456,7 +12466,7 @@
     {
       "id": "esq-v1-3853cb2944ced50cedd0-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 197,
+      "line": 257,
       "column": 24,
       "enclosing_item": "impl WasmPluginRuntime::call_handle_inner",
       "kind": "default_on_error",
@@ -12466,7 +12476,7 @@
     {
       "id": "esq-v1-e6535baca2e59a43f0e0-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 207,
+      "line": 267,
       "column": 5,
       "enclosing_item": "impl WasmPluginRuntime::call_handle_inner",
       "kind": "error_conversion",
@@ -12476,7 +12486,7 @@
     {
       "id": "esq-v1-5270dc237295cbc3990e-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 244,
+      "line": 304,
       "column": 5,
       "enclosing_item": "impl WasmPluginRuntime::call_handle_inner",
       "kind": "error_conversion",
@@ -12484,19 +12494,9 @@
       "review": "boundary-validation-failure"
     },
     {
-      "id": "esq-v1-75e1c30b47d6909a3606-00",
-      "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 288,
-      "column": 28,
-      "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
-      "kind": "default_on_error",
-      "pattern": "record . content_type . unwrap_or_default ()",
-      "review": "plugin-compatibility-default"
-    },
-    {
       "id": "esq-v1-b37c3456cdaea6747d02-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 537,
+      "line": 586,
       "column": 24,
       "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
       "kind": "default_on_error",
@@ -12506,7 +12506,7 @@
     {
       "id": "esq-v1-e71a829162e2a726ee01-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 545,
+      "line": 594,
       "column": 21,
       "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
       "kind": "default_on_error",
@@ -12516,7 +12516,7 @@
     {
       "id": "esq-v1-1eb59b079bff42bb4261-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 619,
+      "line": 684,
       "column": 28,
       "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
       "kind": "default_on_error",
@@ -12526,7 +12526,7 @@
     {
       "id": "esq-v1-846ca41490fcbdcb4ffa-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 766,
+      "line": 864,
       "column": 14,
       "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
       "kind": "result_status_probe",
@@ -12536,7 +12536,7 @@
     {
       "id": "esq-v1-951e0116a2e0600e57db-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 775,
+      "line": 873,
       "column": 14,
       "enclosing_item": "impl WasmPluginRuntime::register_host_functions",
       "kind": "result_status_probe",
@@ -12546,7 +12546,7 @@
     {
       "id": "esq-v1-2c92ac8b8dabe5ae450c-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 909,
+      "line": 1007,
       "column": 5,
       "enclosing_item": "authorize_plugin_path",
       "kind": "error_conversion",
@@ -12556,7 +12556,7 @@
     {
       "id": "esq-v1-4e210b6ac8368c181036-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 935,
+      "line": 1196,
       "column": 3,
       "enclosing_item": "is_unrestricted_plugin_context",
       "kind": "default_on_error",
@@ -12566,7 +12566,7 @@
     {
       "id": "esq-v1-7b11cf1f645973af62ba-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 959,
+      "line": 1220,
       "column": 7,
       "enclosing_item": "extract_file_text",
       "kind": "default_on_error",
@@ -12576,7 +12576,7 @@
     {
       "id": "esq-v1-8aeefeb24d8c213f50d0-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 962,
+      "line": 1223,
       "column": 27,
       "enclosing_item": "extract_file_text",
       "kind": "result_to_option",
@@ -12586,7 +12586,7 @@
     {
       "id": "esq-v1-a435a91f09d7472fd6a7-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1007,
+      "line": 1269,
       "column": 3,
       "enclosing_item": "read_guest_json",
       "kind": "error_conversion",
@@ -12594,19 +12594,19 @@
       "review": "boundary-validation-failure"
     },
     {
-      "id": "esq-v1-69e534b067f664bc0e88-00",
+      "id": "esq-v1-7ab1cacd91a50bd4d059-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1039,
+      "line": 1301,
       "column": 6,
       "enclosing_item": "write_response_bytes",
       "kind": "result_status_probe",
-      "pattern": "memory . write (caller , HOST_RESPONSE_OFFSET , & bytes) . is_err ()",
+      "pattern": "memory . write (caller , HOST_RESPONSE_OFFSET , bytes) . is_err ()",
       "review": "local-status-control"
     },
     {
       "id": "esq-v1-28b1367a19b252579ee7-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1048,
+      "line": 1310,
       "column": 3,
       "enclosing_item": "write_error_response",
       "kind": "success_only_conditional",
@@ -12616,7 +12616,7 @@
     {
       "id": "esq-v1-31d81c832a8969235e41-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1064,
+      "line": 1326,
       "column": 22,
       "enclosing_item": "parse_query_from_json",
       "kind": "default_on_error",
@@ -12626,7 +12626,7 @@
     {
       "id": "esq-v1-5c67859f3536e3d6f614-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1072,
+      "line": 1334,
       "column": 23,
       "enclosing_item": "parse_query_from_json",
       "kind": "default_on_error",
@@ -12636,7 +12636,7 @@
     {
       "id": "esq-v1-70f0d32c00177cec9881-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1080,
+      "line": 1342,
       "column": 16,
       "enclosing_item": "parse_query_from_json",
       "kind": "default_on_error",
@@ -12646,7 +12646,7 @@
     {
       "id": "esq-v1-cd68758630974ccb9a0e-00",
       "file": "aeordb-lib/src/plugins/wasm_runtime.rs",
-      "line": 1111,
+      "line": 1373,
       "column": 3,
       "enclosing_item": "optional_json_usize",
       "kind": "error_conversion",
@@ -13856,7 +13856,7 @@
     {
       "id": "esq-v1-ac5eb94ac598596890d4-00",
       "file": "aeordb-lib/src/server/legacy_v3_root_adapter.rs",
-      "line": 684,
+      "line": 779,
       "column": 11,
       "enclosing_item": "impl LegacyV3SelectedRootAdapterV1 < 'engine >::selected_index_values",
       "kind": "logged_error_continues",
@@ -13866,7 +13866,7 @@
     {
       "id": "esq-v1-3cac543e6aff4700654c-00",
       "file": "aeordb-lib/src/server/legacy_v3_root_adapter.rs",
-      "line": 1293,
+      "line": 1393,
       "column": 5,
       "enclosing_item": "listing_glob_matches",
       "kind": "default_on_error",
@@ -14136,7 +14136,7 @@
     {
       "id": "esq-v1-f432cc2cf2d62db95a79-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 114,
+      "line": 115,
       "column": 21,
       "enclosing_item": "deploy_plugin",
       "kind": "default_on_error",
@@ -14146,7 +14146,7 @@
     {
       "id": "esq-v1-d4b3709e9c20ad81ff54-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 116,
+      "line": 117,
       "column": 28,
       "enclosing_item": "deploy_plugin",
       "kind": "default_on_error",
@@ -14156,7 +14156,7 @@
     {
       "id": "esq-v1-327957f6a3f600305865-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 153,
+      "line": 154,
       "column": 5,
       "enclosing_item": "deploy_plugin",
       "kind": "logged_error_continues",
@@ -14166,7 +14166,7 @@
     {
       "id": "esq-v1-806f51340508f6434db7-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 214,
+      "line": 215,
       "column": 24,
       "enclosing_item": "invoke_plugin",
       "kind": "default_on_error",
@@ -14176,7 +14176,7 @@
     {
       "id": "esq-v1-afa920b57f720d3afa0f-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 215,
+      "line": 216,
       "column": 30,
       "enclosing_item": "invoke_plugin",
       "kind": "default_on_error",
@@ -14186,7 +14186,7 @@
     {
       "id": "esq-v1-5e990c1df6f4a7d96af7-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 233,
+      "line": 234,
       "column": 11,
       "enclosing_item": "invoke_plugin",
       "kind": "default_on_error",
@@ -14196,7 +14196,7 @@
     {
       "id": "esq-v1-0fd033b3bf62a2a0a6b7-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 237,
+      "line": 238,
       "column": 9,
       "enclosing_item": "invoke_plugin",
       "kind": "broad_err_pattern",
@@ -14206,7 +14206,7 @@
     {
       "id": "esq-v1-6a194cc7e947d5bd513b-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 240,
+      "line": 241,
       "column": 11,
       "enclosing_item": "invoke_plugin",
       "kind": "default_on_error",
@@ -14216,7 +14216,7 @@
     {
       "id": "esq-v1-3298c98af162a61acfad-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 256,
+      "line": 257,
       "column": 5,
       "enclosing_item": "invoke_plugin",
       "kind": "logged_error_continues",
@@ -14226,7 +14226,7 @@
     {
       "id": "esq-v1-d9ea56c9033fa6764335-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 275,
+      "line": 276,
       "column": 11,
       "enclosing_item": "list_plugins",
       "kind": "default_on_error",
@@ -14236,7 +14236,7 @@
     {
       "id": "esq-v1-bc005f5cf216b8bd6466-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 281,
+      "line": 282,
       "column": 9,
       "enclosing_item": "list_plugins",
       "kind": "logged_error_continues",
@@ -14246,7 +14246,7 @@
     {
       "id": "esq-v1-c0dc55b9776bd4fc5036-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 294,
+      "line": 295,
       "column": 5,
       "enclosing_item": "list_plugins",
       "kind": "logged_error_continues",
@@ -14256,7 +14256,7 @@
     {
       "id": "esq-v1-0c8f02c8c7805b0cc003-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 308,
+      "line": 309,
       "column": 5,
       "enclosing_item": "remove_plugin",
       "kind": "logged_error_continues",
@@ -14266,7 +14266,7 @@
     {
       "id": "esq-v1-58a22e70e4a91ce4c257-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 355,
+      "line": 356,
       "column": 5,
       "enclosing_item": "auth_token",
       "kind": "broad_err_pattern",
@@ -14276,7 +14276,7 @@
     {
       "id": "esq-v1-58a22e70e4a91ce4c257-01",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 413,
+      "line": 414,
       "column": 5,
       "enclosing_item": "auth_token",
       "kind": "broad_err_pattern",
@@ -14286,7 +14286,7 @@
     {
       "id": "esq-v1-e38a7a6870ad23d69c39-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 553,
+      "line": 554,
       "column": 7,
       "enclosing_item": "create_api_key",
       "kind": "broad_err_pattern",
@@ -14296,7 +14296,7 @@
     {
       "id": "esq-v1-ae3ef61a4ee4e6f7755c-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 641,
+      "line": 642,
       "column": 26,
       "enclosing_item": "api_key_metadata",
       "kind": "default_on_error",
@@ -14306,7 +14306,7 @@
     {
       "id": "esq-v1-c88c8e4e6d92d711808a-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 682,
+      "line": 683,
       "column": 5,
       "enclosing_item": "revoke_api_key",
       "kind": "broad_err_pattern",
@@ -14316,7 +14316,7 @@
     {
       "id": "esq-v1-63e1fc0a45575406cf07-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 705,
+      "line": 706,
       "column": 5,
       "enclosing_item": "revoke_api_key",
       "kind": "logged_error_continues",
@@ -14326,7 +14326,7 @@
     {
       "id": "esq-v1-183eb1ef5e33d29f71b2-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 802,
+      "line": 803,
       "column": 27,
       "enclosing_item": "request_magic_link",
       "kind": "default_on_error",
@@ -14336,7 +14336,7 @@
     {
       "id": "esq-v1-62986dff5320954c7a18-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 809,
+      "line": 810,
       "column": 6,
       "enclosing_item": "request_magic_link",
       "kind": "result_status_probe",
@@ -14346,7 +14346,7 @@
     {
       "id": "esq-v1-22c1505745877ec9cde1-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 828,
+      "line": 829,
       "column": 11,
       "enclosing_item": "request_magic_link",
       "kind": "logged_error_continues",
@@ -14356,7 +14356,7 @@
     {
       "id": "esq-v1-9a14a7c5e41fa268f025-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 848,
+      "line": 849,
       "column": 7,
       "enclosing_item": "request_magic_link",
       "kind": "logged_error_continues",
@@ -14366,7 +14366,7 @@
     {
       "id": "esq-v1-cadba6a08b7c263b4af0-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 877,
+      "line": 878,
       "column": 3,
       "enclosing_item": "configured_magic_link_base_url",
       "kind": "result_to_option",
@@ -14376,7 +14376,7 @@
     {
       "id": "esq-v1-4c998d9538ce325e5e9c-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 884,
+      "line": 885,
       "column": 3,
       "enclosing_item": "configured_magic_link_url_template",
       "kind": "result_to_option",
@@ -14386,7 +14386,7 @@
     {
       "id": "esq-v1-c852d899f01f81be06a5-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 1043,
+      "line": 1044,
       "column": 5,
       "enclosing_item": "verify_magic_link",
       "kind": "logged_error_continues",
@@ -14396,7 +14396,7 @@
     {
       "id": "esq-v1-f2002f465f5ca18520ee-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 1129,
+      "line": 1130,
       "column": 7,
       "enclosing_item": "refresh_token",
       "kind": "broad_err_pattern",
@@ -14406,7 +14406,7 @@
     {
       "id": "esq-v1-d03d908f29111e655ee3-00",
       "file": "aeordb-lib/src/server/routes.rs",
-      "line": 1248,
+      "line": 1249,
       "column": 3,
       "enclosing_item": "metrics_endpoint",
       "kind": "default_on_error",
@@ -15354,19 +15354,9 @@
       "review": "optional-data-default"
     },
     {
-      "id": "esq-v1-6b14375335d16e4a6451-00",
-      "file": "aeordb-plugin-sdk/src/context.rs",
-      "line": 258,
-      "column": 25,
-      "enclosing_item": "impl PluginContext::list_directory",
-      "kind": "default_on_error",
-      "pattern": "value . get (\"entries\") . cloned () . unwrap_or (value)",
-      "review": "plugin-compatibility-default"
-    },
-    {
       "id": "esq-v1-2763e4d601dedb4fba8e-00",
       "file": "aeordb-plugin-sdk/src/context.rs",
-      "line": 328,
+      "line": 389,
       "column": 21,
       "enclosing_item": "decode_file_data",
       "kind": "error_conversion",
@@ -15376,7 +15366,7 @@
     {
       "id": "esq-v1-8d9ee173f14909cb1d59-00",
       "file": "aeordb-plugin-sdk/src/lib.rs",
-      "line": 99,
+      "line": 104,
       "column": 9,
       "enclosing_item": "impl PluginResponse::error",
       "kind": "broad_err_pattern",
@@ -15386,7 +15376,7 @@
     {
       "id": "esq-v1-1b9b2b802c9b139ac3e7-00",
       "file": "aeordb-plugin-sdk/src/lib.rs",
-      "line": 111,
+      "line": 116,
       "column": 5,
       "enclosing_item": "encode_plugin_response",
       "kind": "broad_err_pattern",
@@ -15404,16 +15394,6 @@
       "review": "plugin-error-envelope"
     },
     {
-      "id": "esq-v1-5fc0239e64588290e0df-00",
-      "file": "aeordb-plugin-sdk/src/query_builder.rs",
-      "line": 288,
-      "column": 25,
-      "enclosing_item": "impl QueryBuilder::execute",
-      "kind": "default_on_error",
-      "pattern": "response . get (\"results\") . cloned () . unwrap_or (response)",
-      "review": "plugin-compatibility-default"
-    },
-    {
       "id": "esq-v1-89c717ff5429f37aba1d-00",
       "file": "aeordb-plugins/echo-plugin/src/lib.rs",
       "line": 7,
@@ -15426,7 +15406,7 @@
     {
       "id": "esq-v1-12fe114f970d2d2a9f85-00",
       "file": "aeordb-plugins/echo-plugin/src/lib.rs",
-      "line": 51,
+      "line": 52,
       "column": 23,
       "enclosing_item": "echo_handle",
       "kind": "default_on_error",

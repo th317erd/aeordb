@@ -11,7 +11,9 @@ use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::{Cache, GroupLoader, PathPermissions, PermissionLink, RequestContext, User};
 use aeordb::plugins::plugin_manager::PluginManager;
 use aeordb::plugins::types::PluginType;
+use aeordb::plugins::{PluginAuthorizationCachesV1, PluginAuthorityEnginesV1};
 use aeordb::server::create_temp_engine_for_tests;
+use aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1;
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -67,7 +69,7 @@ fn invoke_raw(pm: &PluginManager, engine: &Arc<StorageEngine>, function_name: &s
   let request_bytes = serde_json::to_vec(&request).unwrap();
 
   let response_bytes = pm
-    .invoke_wasm_plugin_with_context("test/echo/plugin", &request_bytes, engine.clone(), ctx)
+    .invoke_wasm_plugin_with_context("test/echo/plugin", &request_bytes, PluginNamespaceReadInvocationV1::current(), engine.clone(), ctx)
     .expect("invoke_wasm_plugin_with_context failed");
 
   // The response is a serialized PluginResponse (status_code, body, content_type, headers).
@@ -95,10 +97,10 @@ fn invoke_raw_with_context(
     .invoke_wasm_plugin_with_auth(
       "test/echo/plugin",
       &request_bytes,
+      PluginNamespaceReadInvocationV1::current(),
       engine.clone(),
       ctx,
-      Arc::new(Cache::new(GroupLoader)),
-      Arc::new(Cache::new(aeordb::engine::ApiKeyLoader)),
+      PluginAuthorizationCachesV1::new(Arc::new(Cache::new(GroupLoader)), Arc::new(Cache::new(aeordb::engine::ApiKeyLoader))),
     )
     .expect("invoke_wasm_plugin_with_auth failed");
 
@@ -127,11 +129,10 @@ fn invoke_raw_with_authority_engines(
     .invoke_wasm_plugin_with_authority_engines(
       "test/echo/plugin",
       &request_bytes,
-      data_engine.clone(),
-      api_key_engine.clone(),
+      PluginNamespaceReadInvocationV1::current(),
+      PluginAuthorityEnginesV1::new(data_engine.clone(), api_key_engine.clone()),
       context,
-      data_engine.group_cache.clone(),
-      api_key_engine.api_key_cache.clone(),
+      PluginAuthorizationCachesV1::new(data_engine.group_cache.clone(), api_key_engine.api_key_cache.clone()),
     )
     .expect("invoke_wasm_plugin_with_authority_engines failed");
 
@@ -207,6 +208,14 @@ fn extract_body_json(response: &serde_json::Value) -> serde_json::Value {
   serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!({"raw": String::from_utf8_lossy(&body_bytes).to_string()}))
 }
 
+fn assert_live_root_metadata(root: &serde_json::Value) {
+  let hash = root["hash"].as_str().expect("plugin response should identify its exact root hash");
+  assert_eq!(hash.len(), 64);
+  assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+  assert_eq!(root["state"], "live");
+  assert_eq!(root["expires_at"], serde_json::Value::Null);
+}
+
 /// Extract the body from a PluginResponse JSON value as a raw string.
 fn extract_body_string(response: &serde_json::Value) -> String {
   let body_bytes: Vec<u8> = response["body"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_u64().map(|b| b as u8)).collect();
@@ -247,6 +256,7 @@ fn test_echo_plugin_reads_file() {
   assert_eq!(body["size"], 20); // "Hello from the host!".len()
   assert_eq!(body["content_type"], "text/plain");
   assert_eq!(body["data_len"], 20);
+  assert_live_root_metadata(&body["root"]);
 }
 
 #[test]
@@ -299,7 +309,7 @@ fn read_file_host_function_rejects_oversized_response_before_buffering() {
     .unwrap();
 
   let response = manager
-    .invoke_wasm_plugin_with_context("test/read-large", b"{}", engine.clone(), ctx)
+    .invoke_wasm_plugin_with_context("test/read-large", b"{}", PluginNamespaceReadInvocationV1::current(), engine.clone(), ctx)
     .expect("oversized host response should be a bounded plugin error");
   let error: serde_json::Value = serde_json::from_slice(&response).expect("host must return a structured size error");
   assert!(error["error"].as_str().is_some_and(|message| message.contains("aeordb_extract_file")), "unexpected host response: {error}");
@@ -344,14 +354,16 @@ fn list_directory_host_function_pages_a_large_btree_without_truncating_silently(
     ops.store_file_buffered(&ctx, &format!("/paged/file_{index:05}.txt"), b"x", Some("text/plain")).expect("store B-tree directory member");
   }
 
-  let page = manager.invoke_wasm_plugin_with_context("test/paged-list", b"{}", engine.clone(), ctx.clone()).expect("bounded host listing");
+  let page = manager
+    .invoke_wasm_plugin_with_context("test/paged-list", b"{}", PluginNamespaceReadInvocationV1::current(), engine.clone(), ctx.clone())
+    .expect("bounded host listing");
   let page: serde_json::Value = serde_json::from_slice(&page).unwrap();
   let names: Vec<&str> = page["entries"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
   assert_eq!(names, ["file_00010.txt", "file_00011.txt", "file_00012.txt"]);
   assert_eq!(page["has_more"], true);
 
   let error = manager
-    .invoke_wasm_plugin_with_context("test/unbounded-list", b"{}", engine.clone(), ctx)
+    .invoke_wasm_plugin_with_context("test/unbounded-list", b"{}", PluginNamespaceReadInvocationV1::current(), engine.clone(), ctx)
     .expect("oversized listing should be a bounded host error");
   let error: serde_json::Value = serde_json::from_slice(&error).unwrap();
   assert!(error["error"].as_str().is_some_and(|message| message.contains("bounded limit and offset")), "unexpected host response: {error}");
@@ -385,7 +397,13 @@ fn list_directory_host_function_rejects_present_malformed_pagination() {
     manager.deploy_plugin(&format!("malformed-list-{index}"), &plugin_path, PluginType::Wasm, wasm).unwrap();
 
     let response = manager
-      .invoke_wasm_plugin_with_context(&plugin_path, b"{}", engine.clone(), RequestContext::system())
+      .invoke_wasm_plugin_with_context(
+        &plugin_path,
+        b"{}",
+        PluginNamespaceReadInvocationV1::current(),
+        engine.clone(),
+        RequestContext::system(),
+      )
       .expect("malformed host arguments must produce a bounded response");
     let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
     assert!(response["error"].as_str().is_some_and(|message| message.contains(field)), "malformed {field} was defaulted: {response}");
@@ -432,10 +450,10 @@ fn query_host_function_reports_permission_authority_failures_instead_of_filterin
     .invoke_wasm_plugin_with_auth(
       "test/permission-query",
       b"{}",
+      PluginNamespaceReadInvocationV1::current(),
       engine.clone(),
       context,
-      group_cache,
-      Arc::new(Cache::new(aeordb::engine::ApiKeyLoader)),
+      PluginAuthorizationCachesV1::new(group_cache, Arc::new(Cache::new(aeordb::engine::ApiKeyLoader))),
     )
     .expect("the plugin host must return structured authorization failure evidence");
   let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
@@ -784,8 +802,9 @@ fn test_echo_plugin_empty_metadata() {
   });
   let request_bytes = serde_json::to_vec(&request).unwrap();
 
-  let response_bytes =
-    pm.invoke_wasm_plugin_with_context("test/echo/plugin", &request_bytes, engine.clone(), ctx).expect("invoke should succeed");
+  let response_bytes = pm
+    .invoke_wasm_plugin_with_context("test/echo/plugin", &request_bytes, PluginNamespaceReadInvocationV1::current(), engine.clone(), ctx)
+    .expect("invoke should succeed");
 
   let response: serde_json::Value = serde_json::from_slice(&response_bytes).unwrap();
   assert_eq!(response["status_code"], 200);

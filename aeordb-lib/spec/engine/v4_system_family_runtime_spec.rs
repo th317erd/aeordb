@@ -359,7 +359,11 @@ fn production_sources_do_not_restore_legacy_generic_path_policy() {
   assert!(!share_routes.contains("PathPermissions::deserialize(&data)"));
   assert!(!share_routes.contains("grants_index_cache.get(&(), &state.engine) {\n    Ok(index) => index,\n    Err(_)"));
   let wasm_runtime = fs::read_to_string(source_root.join("plugins/wasm_runtime.rs")).unwrap();
-  assert!(wasm_runtime.contains("list_directory_window_strict"));
+  assert!(wasm_runtime.contains("LegacyV3SelectedRootAdapterV1"));
+  assert!(wasm_runtime.contains("selected.visit_directory_strict(&path"));
+  assert!(!wasm_runtime.contains("selected.list_directory(&path)"));
+  assert!(wasm_runtime.contains("generic_data_path_is_visible"));
+  assert!(!wasm_runtime.contains("list_directory_window_strict"));
   assert!(!wasm_runtime.contains("dir_ops.list_directory_window(&path"));
   let sync_routes = fs::read_to_string(source_root.join("server/sync_routes.rs")).unwrap();
   assert!(!sync_routes.contains("has_descendant_grants(&user_id, \"/\").unwrap_or(false)"));

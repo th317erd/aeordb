@@ -514,6 +514,10 @@ name = "wasm_query_e2e_spec"
 path = "spec/engine/wasm_query_e2e_spec.rs"
 
 [[test]]
+name = "plugin_root_runtime_spec"
+path = "spec/engine/plugin_root_runtime_spec.rs"
+
+[[test]]
 name = "stress_test_spec"
 path = "spec/engine/stress_test_spec.rs"
 

@@ -25,6 +25,7 @@ use crate::auth::magic_link::MagicLinkConsumeResult;
 use crate::auth::api_key::{ApiKeyRevokePolicy, ApiKeyRevokeResult};
 use crate::auth::refresh::{DEFAULT_REFRESH_EXPIRY_SECONDS, RefreshTokenRecord, RefreshTokenRotationResult};
 use crate::engine::system_store;
+use crate::plugins::{PluginAuthorizationCachesV1, PluginAuthorityEnginesV1};
 
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
   let disk = crate::engine::health::check_disk(&state.db_path);
@@ -182,6 +183,7 @@ pub async fn invoke_plugin(
       meta.insert("plugin_path".to_string(), plugin_path.clone());
       meta
     },
+    root: aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1::current(),
   };
   let request_bytes = match serde_json::to_vec(&plugin_request) {
     Ok(bytes) => bytes,
@@ -200,11 +202,10 @@ pub async fn invoke_plugin(
   match state.plugin_manager.invoke_wasm_plugin_with_auth_accounted(
     &plugin_path,
     &request_bytes,
-    state.engine.clone(),
-    state.auth_engine.clone(),
+    aeordb_plugin_sdk::root::PluginNamespaceReadInvocationV1::current(),
+    PluginAuthorityEnginesV1::new(state.engine.clone(), state.auth_engine.clone()),
     ctx,
-    state.group_cache.clone(),
-    state.api_key_cache.clone(),
+    PluginAuthorizationCachesV1::new(state.group_cache.clone(), state.api_key_cache.clone()),
   ) {
     Ok(accounted_output) => {
       // Try to deserialize as a PluginResponse envelope.

@@ -93,6 +93,21 @@ impl PluginNamespaceReadInvocationV1 {
   pub const fn is_current(&self) -> bool {
     matches!(self.selector, PluginRootSelectorV1::CurrentHead)
   }
+
+  pub(crate) fn insert_into_json_object(&self, target: &mut serde_json::Map<String, serde_json::Value>) {
+    match &self.selector {
+      PluginRootSelectorV1::CurrentHead => {}
+      PluginRootSelectorV1::RootHash(value) => {
+        target.insert("root_hash".to_string(), serde_json::Value::String(value.clone()));
+      }
+      PluginRootSelectorV1::Snapshot(value) => {
+        target.insert("snapshot".to_string(), serde_json::Value::String(value.clone()));
+      }
+      PluginRootSelectorV1::Version(value) => {
+        target.insert("version".to_string(), serde_json::Value::String(value.clone()));
+      }
+    }
+  }
 }
 
 impl Serialize for PluginNamespaceReadInvocationV1 {

@@ -43,9 +43,8 @@ fn jq_handle(ctx: PluginContext, request: PluginRequest) -> Result<PluginRespons
   };
 
   match run_filter(&filter, input) {
-    Ok(outputs) => {
-      PluginResponse::json(200, &json::json!({ "outputs": outputs })).map_err(|error| PluginError::SerializationFailed(error.to_string()))
-    }
+    Ok(outputs) => PluginResponse::json(200, &json::json!({ "outputs": outputs, "root": file.root }))
+      .map_err(|error| PluginError::SerializationFailed(error.to_string())),
     Err(error) => Ok(PluginResponse::error(500, error)),
   }
 }

@@ -9,8 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use crate::engine::btree::{BTreeWalkMode, btree_list_from_node_with_mode, is_btree_format};
-use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
+use crate::engine::btree::{
+  BTREE_CONVERSION_THRESHOLD, BTreeWalkMode, btree_list_from_node_with_mode, btree_visit_from_node_with_mode, is_btree_format,
+};
+use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries, visit_bounded_child_entries};
 use crate::engine::directory_ops::{EngineFileStream, file_content_hash, file_identity_hash, file_path_hash};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -104,6 +106,20 @@ pub struct LegacyV3SelectedRootAdapterV1<'engine> {
   engine: &'engine StorageEngine,
   root_metadata: ReadViewRootMetadataV1,
   root: RootResponseV1,
+}
+
+/// Invocation-owned proof that one selector was resolved and admitted. Its
+/// private fields prevent callers from fabricating a reusable selected root.
+#[derive(Clone, Debug)]
+pub(crate) struct LegacyV3ResolvedRootHandleV1 {
+  root_metadata: ReadViewRootMetadataV1,
+  root: RootResponseV1,
+}
+
+impl LegacyV3ResolvedRootHandleV1 {
+  pub(crate) const fn root(&self) -> &RootResponseV1 {
+    &self.root
+  }
 }
 
 impl fmt::Debug for LegacyV3SelectedRootAdapterV1<'_> {
@@ -229,6 +245,14 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
     &self.root_metadata.hash
   }
 
+  pub(crate) fn resolved_root_handle(&self) -> LegacyV3ResolvedRootHandleV1 {
+    LegacyV3ResolvedRootHandleV1 { root_metadata: self.root_metadata.clone(), root: self.root.clone() }
+  }
+
+  pub(crate) fn from_resolved_root_handle(engine: &'engine StorageEngine, handle: &LegacyV3ResolvedRootHandleV1) -> Self {
+    Self { engine, root_metadata: handle.root_metadata.clone(), root: handle.root.clone() }
+  }
+
   pub const fn root_metadata(&self) -> &ReadViewRootMetadataV1 {
     &self.root_metadata
   }
@@ -248,11 +272,15 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
 
   pub fn read_file_body(&self, path: &str) -> EngineResult<Vec<u8>> {
     let selected_file = self.file(path)?;
-    EngineFileStream::from_chunk_hashes_including_deleted(selected_file.record.chunk_hashes, self.engine)?.collect_to_vec()
+    self.file_stream(&selected_file)?.collect_to_vec()
   }
 
   pub fn file_stream(&self, selected_file: &LegacyV3SelectedFileV1) -> EngineResult<EngineFileStream<'engine>> {
-    EngineFileStream::from_chunk_hashes_including_deleted(selected_file.record.chunk_hashes.clone(), self.engine)
+    EngineFileStream::from_chunk_hashes_including_deleted_with_expected_total_size(
+      selected_file.record.chunk_hashes.clone(),
+      self.engine,
+      selected_file.record.total_size,
+    )
   }
 
   pub fn extract_range(&self, selected_file: &LegacyV3SelectedFileV1, request: &RangeExtractionRequest) -> EngineResult<ExtractedRange> {
@@ -282,6 +310,73 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
 
   pub fn list_directory(&self, path: &str) -> EngineResult<Vec<LegacyV3SelectedDirectoryEntryV1>> {
     Ok(self.directory(path)?.entries)
+  }
+
+  /// Visit an exact selected directory in key order without materializing a
+  /// complete B-tree. Returning `false` stops before any later branch is read.
+  pub(crate) fn visit_directory_strict<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(LegacyV3SelectedDirectoryEntryV1) -> EngineResult<bool>,
+  {
+    let normalized_path = normalize_path(path);
+    let resolved = resolve_directory_at_version(self.engine, self.selected_root(), &normalized_path)?;
+    if resolved.value.is_empty() {
+      return Ok(true);
+    }
+
+    if is_btree_format(&resolved.value) {
+      let mut previous_name: Option<String> = None;
+      let mut visit_child = |child: &ChildEntry| {
+        if let Some(previous_name) = previous_name.as_deref() {
+          match child.name.as_str().cmp(previous_name) {
+            std::cmp::Ordering::Less => {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!(
+                  "selected directory '{normalized_path}' contains out-of-order child name '{}' after '{previous_name}'",
+                  child.name,
+                ),
+              });
+            }
+            std::cmp::Ordering::Equal => {
+              return Err(EngineError::CorruptEntry {
+                offset: 0,
+                reason: format!("selected directory '{normalized_path}' contains duplicate child name '{}'", child.name),
+              });
+            }
+            std::cmp::Ordering::Greater => {}
+          }
+        }
+        previous_name = Some(child.name.clone());
+        visitor(self.selected_directory_entry(&normalized_path, child.clone())?)
+      };
+      let result = btree_visit_from_node_with_mode(
+        &resolved.value,
+        self.engine,
+        self.engine.hash_algo().hash_length(),
+        true,
+        BTreeWalkMode::Strict,
+        &mut visit_child,
+      )?;
+      return Ok(result.visitor_completion.is_exhausted());
+    }
+
+    let mut names = HashSet::new();
+    visit_bounded_child_entries(
+      &resolved.value,
+      self.engine.hash_algo().hash_length(),
+      resolved.header.entry_version,
+      BTREE_CONVERSION_THRESHOLD,
+      |child| {
+        if !names.insert(child.name.clone()) {
+          return Err(EngineError::CorruptEntry {
+            offset: 0,
+            reason: format!("selected directory '{normalized_path}' contains duplicate child name '{}'", child.name),
+          });
+        }
+        visitor(self.selected_directory_entry(&normalized_path, child)?)
+      },
+    )
   }
 
   /// Preserve the legacy recursive-listing contract while keeping every tree
@@ -938,7 +1033,7 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
         reason: format!("stored selected permission authority at {path} exceeds the {LEGACY_PERMISSION_DOCUMENT_MAX_BYTES_V1}-byte limit"),
       });
     }
-    let bytes = EngineFileStream::from_chunk_hashes_including_deleted(selected_file.record.chunk_hashes, self.engine)?.collect_to_vec()?;
+    let bytes = self.file_stream(&selected_file)?.collect_to_vec()?;
     if bytes.len() as u64 > LEGACY_PERMISSION_DOCUMENT_MAX_BYTES_V1 {
       return Err(EngineError::CorruptEntry {
         offset: 0,
@@ -1184,7 +1279,12 @@ impl QueryReadSourceV1 for LegacyV3SelectedRootAdapterV1<'_> {
   }
 
   fn read_file_body(&self, file: &QuerySourceFileV1) -> EngineResult<Vec<u8>> {
-    EngineFileStream::from_chunk_hashes_including_deleted(file.record.chunk_hashes.clone(), self.engine)?.collect_to_vec()
+    EngineFileStream::from_chunk_hashes_including_deleted_with_expected_total_size(
+      file.record.chunk_hashes.clone(),
+      self.engine,
+      file.record.total_size,
+    )?
+    .collect_to_vec()
   }
 }
 

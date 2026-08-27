@@ -161,6 +161,14 @@ async fn body_json(body: Body) -> serde_json::Value {
   serde_json::from_slice(&bytes).expect("valid JSON response body")
 }
 
+fn assert_live_root_metadata(root: &serde_json::Value) {
+  let hash = root["hash"].as_str().expect("plugin response should identify its exact root hash");
+  assert_eq!(hash.len(), 64);
+  assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+  assert_eq!(root["state"], "live");
+  assert_eq!(root["expires_at"], serde_json::Value::Null);
+}
+
 /// Compile a minimal valid WASM module.
 fn minimal_wasm_bytes() -> Vec<u8> {
   let wat = r#"
@@ -503,6 +511,7 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   assert_eq!(extract_response.status(), StatusCode::OK);
   let extract_json = body_json(extract_response.into_body()).await;
   assert_eq!(extract_json["text"], "two\r\n");
+  assert_live_root_metadata(&extract_json["root"]);
 
   let jq_request = Request::builder()
     .method("POST")
@@ -521,6 +530,7 @@ async fn test_bundled_plugins_install_on_startup_and_invoke_over_http() {
   assert_eq!(jq_response.status(), StatusCode::OK);
   let jq_json = body_json(jq_response.into_body()).await;
   assert_eq!(jq_json["outputs"], serde_json::json!(["hello", "world"]));
+  assert_live_root_metadata(&jq_json["root"]);
 }
 
 #[tokio::test]

@@ -31,6 +31,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::PluginError;
+use crate::root::{PluginNamespaceReadInvocationV1, PluginResultsResponseV1, PluginRootMetadataV1};
 
 // ---------------------------------------------------------------------------
 // Internal query node representation
@@ -138,6 +139,8 @@ pub struct QueryResult {
 /// Aggregation result returned by the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregateResult {
+  /// Exact namespace root used by the host aggregation.
+  pub root: PluginRootMetadataV1,
   /// Per-group aggregation results.
   #[serde(default)]
   pub groups: Vec<serde_json::Value>,
@@ -165,6 +168,7 @@ pub struct AggregateResult {
 /// ```
 pub struct QueryBuilder {
   path: String,
+  root_invocation: PluginNamespaceReadInvocationV1,
   nodes: Vec<QueryNode>,
   limit_value: Option<usize>,
   offset_value: Option<usize>,
@@ -174,7 +178,11 @@ pub struct QueryBuilder {
 impl QueryBuilder {
   /// Create a new query builder targeting the given path.
   pub fn new(path: impl Into<String>) -> Self {
-    Self { path: path.into(), nodes: Vec::new(), limit_value: None, offset_value: None, sort_fields: Vec::new() }
+    Self::with_root_invocation(path, PluginNamespaceReadInvocationV1::current())
+  }
+
+  pub(crate) fn with_root_invocation(path: impl Into<String>, root_invocation: PluginNamespaceReadInvocationV1) -> Self {
+    Self { path: path.into(), root_invocation, nodes: Vec::new(), limit_value: None, offset_value: None, sort_fields: Vec::new() }
   }
 
   /// Start a field-level condition.  Call an operator method on the returned
@@ -276,18 +284,21 @@ impl QueryBuilder {
       query["order_by"] = serde_json::json!(sort);
     }
 
+    append_root_invocation(&mut query, &self.root_invocation);
+
     query
   }
 
   /// Execute the query by calling the host `aeordb_query` function.
-  pub fn execute(self) -> Result<Vec<QueryResult>, PluginError> {
+  pub fn execute(self) -> Result<PluginResultsResponseV1<Vec<QueryResult>>, PluginError> {
     let json = self.to_json();
     let response = crate::context::call_query(&json)?;
-
-    // The host may return { "results": [...] } or a bare array.
-    let results_value = response.get("results").cloned().unwrap_or(response);
-
-    serde_json::from_value(results_value).map_err(|e| PluginError::SerializationFailed(format!("failed to parse query results: {}", e)))
+    let root = decode_root_metadata(&response)?;
+    let (results_value, has_more, total) =
+      crate::context::decode_rooted_collection_response(&response, "results", "items", "query results")?;
+    let results = serde_json::from_value(results_value)
+      .map_err(|e| PluginError::SerializationFailed(format!("failed to parse query results: {}", e)))?;
+    Ok(PluginResultsResponseV1::new(root, results, has_more, total))
   }
 
   // -- Internal -----------------------------------------------------------
@@ -506,6 +517,7 @@ enum AggregateOperation {
 /// ```
 pub struct AggregateBuilder {
   path: String,
+  root_invocation: PluginNamespaceReadInvocationV1,
   operations: Vec<AggregateOperation>,
   group_by_fields: Vec<String>,
   where_nodes: Vec<QueryNode>,
@@ -515,7 +527,18 @@ pub struct AggregateBuilder {
 impl AggregateBuilder {
   /// Create a new aggregation builder targeting the given path.
   pub fn new(path: impl Into<String>) -> Self {
-    Self { path: path.into(), operations: Vec::new(), group_by_fields: Vec::new(), where_nodes: Vec::new(), limit_value: None }
+    Self::with_root_invocation(path, PluginNamespaceReadInvocationV1::current())
+  }
+
+  pub(crate) fn with_root_invocation(path: impl Into<String>, root_invocation: PluginNamespaceReadInvocationV1) -> Self {
+    Self {
+      path: path.into(),
+      root_invocation,
+      operations: Vec::new(),
+      group_by_fields: Vec::new(),
+      where_nodes: Vec::new(),
+      limit_value: None,
+    }
   }
 
   /// Request a count aggregation.
@@ -613,6 +636,8 @@ impl AggregateBuilder {
       query["limit"] = serde_json::json!(limit);
     }
 
+    append_root_invocation(&mut query, &self.root_invocation);
+
     query
   }
 
@@ -620,7 +645,10 @@ impl AggregateBuilder {
   pub fn execute(self) -> Result<AggregateResult, PluginError> {
     let json = self.to_json();
     let response = crate::context::call_aggregate(&json)?;
-    serde_json::from_value(response).map_err(|e| PluginError::SerializationFailed(format!("failed to parse aggregate result: {}", e)))
+    let response: AggregateResult =
+      serde_json::from_value(response).map_err(|e| PluginError::SerializationFailed(format!("failed to parse aggregate result: {}", e)))?;
+    response.root.validate().map_err(|error| PluginError::SerializationFailed(format!("invalid exact root metadata: {error}")))?;
+    Ok(response)
   }
 }
 
@@ -642,6 +670,24 @@ impl std::fmt::Debug for AggregateBuilder {
 fn base64_encode(data: &[u8]) -> String {
   use base64::Engine as _;
   base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn append_root_invocation(target: &mut serde_json::Value, invocation: &PluginNamespaceReadInvocationV1) {
+  let Some(target) = target.as_object_mut() else {
+    return;
+  };
+  invocation.insert_into_json_object(target);
+}
+
+fn decode_root_metadata(value: &serde_json::Value) -> Result<PluginRootMetadataV1, PluginError> {
+  let root = value
+    .get("root")
+    .cloned()
+    .ok_or_else(|| PluginError::SerializationFailed("host response is missing exact root metadata".to_string()))?;
+  let root: PluginRootMetadataV1 =
+    serde_json::from_value(root).map_err(|error| PluginError::SerializationFailed(format!("failed to parse root metadata: {error}")))?;
+  root.validate().map_err(|error| PluginError::SerializationFailed(format!("invalid exact root metadata: {error}")))?;
+  Ok(root)
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,6 +1128,7 @@ mod tests {
   #[test]
   fn test_aggregate_result_deserialization() {
     let json = serde_json::json!({
+        "root": {"hash": "ab".repeat(32), "state": "retained", "expires_at": null},
         "groups": [
             {"status": "active", "count": 42},
             {"status": "inactive", "count": 8}
@@ -1095,7 +1142,9 @@ mod tests {
 
   #[test]
   fn test_aggregate_result_defaults() {
-    let json = serde_json::json!({});
+    let json = serde_json::json!({
+      "root": {"hash": "ab".repeat(32), "state": "retained", "expires_at": null},
+    });
     let result: AggregateResult = serde_json::from_value(json).unwrap();
     assert!(result.groups.is_empty());
     assert!(result.total_count.is_none());

@@ -880,6 +880,16 @@ impl<'a> EngineFileStream<'a> {
     Self::new(chunk_hashes, engine, true)
   }
 
+  /// Like [`from_chunk_hashes_including_deleted`], but also validates that a
+  /// buffered collection yields exactly the size declared by its FileRecord.
+  pub(crate) fn from_chunk_hashes_including_deleted_with_expected_total_size(
+    chunk_hashes: Vec<Vec<u8>>,
+    engine: &'a StorageEngine,
+    expected_total_size: u64,
+  ) -> EngineResult<Self> {
+    Self::new_with_expected_total_size(chunk_hashes, engine, true, Some(expected_total_size))
+  }
+
   pub(crate) fn new(chunk_hashes: Vec<Vec<u8>>, engine: &'a StorageEngine, include_deleted: bool) -> EngineResult<Self> {
     Self::new_with_expected_total_size(chunk_hashes, engine, include_deleted, None)
   }

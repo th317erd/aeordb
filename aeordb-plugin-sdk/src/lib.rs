@@ -60,6 +60,10 @@ pub struct PluginRequest {
   pub arguments: Vec<u8>,
   /// Arbitrary key-value metadata about the invocation context.
   pub metadata: HashMap<String, String>,
+  /// Host-owned namespace root selector for every database operation made by
+  /// this invocation. Current-head invocations serialize without extra fields.
+  #[serde(flatten)]
+  pub root: root::PluginNamespaceReadInvocationV1,
 }
 
 /// Response returned by a plugin after handling a request.
@@ -214,7 +218,7 @@ macro_rules! aeordb_query_plugin {
         }
       };
 
-      let ctx = $crate::context::PluginContext::new();
+      let ctx = $crate::context::PluginContext::from_invocation(request.root.clone());
 
       let response = match $handler_fn(ctx, request) {
         Ok(resp) => resp,

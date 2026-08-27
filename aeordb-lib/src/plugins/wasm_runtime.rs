@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aeordb_plugin_sdk::root::{PluginNamespaceReadInvocationV1, PluginRootSelectorV1};
 use base64::Engine as _;
 use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, MemoryType, Module, Store, StoreLimits, StoreLimitsBuilder};
 
@@ -10,16 +11,49 @@ use crate::engine::api_key_rules::{check_operation_permitted, is_ancestor_of_any
 use crate::engine::cache::Cache;
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader};
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
+use crate::engine::v4::read_view_authorization::PathAuthorizationDecisionV1;
 use crate::engine::query_engine::{
   parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryStrategy, SortDirection, SortField,
 };
-use crate::engine::range_extract::{extract_range_by_path, RangeExtractionRequest, RangeMode};
+use crate::engine::range_extract::{RangeExtractionRequest, RangeMode};
 use crate::engine::request_context::RequestContext;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::SystemFamilyPolicyResolver;
+use crate::server::legacy_v3_root_adapter::{LegacyV3ResolvedRootHandleV1, LegacyV3SelectedRootAdapterV1};
+use crate::server::root_api::{RequestedRootSelectorV1, RootSelectorFieldsV1, parse_root_selector_v1};
 
 /// Default maximum memory in bytes (16 MB).
 pub(crate) const DEFAULT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Permission caches shared with the authenticated request boundary.
+#[derive(Clone)]
+pub struct PluginAuthorizationCachesV1 {
+  group_cache: Arc<Cache<GroupLoader>>,
+  api_key_cache: Arc<Cache<ApiKeyLoader>>,
+}
+
+impl PluginAuthorizationCachesV1 {
+  pub fn new(group_cache: Arc<Cache<GroupLoader>>, api_key_cache: Arc<Cache<ApiKeyLoader>>) -> Self {
+    Self { group_cache, api_key_cache }
+  }
+}
+
+/// Data and API-key authority engines for one plugin invocation.
+#[derive(Clone)]
+pub struct PluginAuthorityEnginesV1 {
+  engine: Arc<StorageEngine>,
+  api_key_engine: Arc<StorageEngine>,
+}
+
+impl PluginAuthorityEnginesV1 {
+  pub fn new(engine: Arc<StorageEngine>, api_key_engine: Arc<StorageEngine>) -> Self {
+    Self { engine, api_key_engine }
+  }
+
+  pub fn shared(engine: Arc<StorageEngine>) -> Self {
+    Self { api_key_engine: engine.clone(), engine }
+  }
+}
 
 /// Default fuel budget for execution metering.
 const DEFAULT_FUEL_LIMIT: u64 = 10_000_000;
@@ -89,6 +123,10 @@ struct HostState {
   group_cache: Option<Arc<Cache<GroupLoader>>>,
   /// API key cache for scoped-key path checks.
   api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
+  /// Host-owned selector for every database import in this invocation.
+  root_invocation: Option<PluginNamespaceReadInvocationV1>,
+  /// Lazily resolved exact root, captured only after current authorization.
+  resolved_root: Option<LegacyV3ResolvedRootHandleV1>,
   /// Enforces the configured ceiling for imported and module-defined memory.
   limits: StoreLimits,
 }
@@ -131,50 +169,72 @@ impl WasmPluginRuntime {
   ///     packed i64: high 32 bits = response pointer, low 32 bits = response length.
   ///   - The host reads the response bytes from the guest's memory.
   pub fn call_handle(&self, request_bytes: &[u8]) -> Result<Vec<u8>, WasmRuntimeError> {
-    self.call_handle_inner(request_bytes, None, None, None, None, None)
+    self.call_handle_inner(request_bytes, None, None, None, None)
   }
 
   /// Invoke the plugin's exported `handle` function with engine access.
   ///
   /// Same as `call_handle` but provides the `StorageEngine` and `RequestContext`
-  /// to the host state, enabling the 7 database host functions to perform real
+  /// to the host state, enabling the 8 database host functions to perform real
   /// operations. Used by query plugins (not parsers).
   pub fn call_handle_with_context(
     &self,
     request_bytes: &[u8],
+    root_invocation: PluginNamespaceReadInvocationV1,
     engine: Arc<StorageEngine>,
     ctx: RequestContext,
-    group_cache: Arc<Cache<GroupLoader>>,
-    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+    authorization_caches: PluginAuthorizationCachesV1,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
-    self.call_handle_with_authority_engines(request_bytes, engine.clone(), engine, ctx, group_cache, api_key_cache)
+    self.call_handle_with_authority_engines(
+      request_bytes,
+      root_invocation,
+      PluginAuthorityEnginesV1::shared(engine),
+      ctx,
+      authorization_caches,
+    )
   }
 
   /// Invoke with separate data and API-key authority engines.
   pub fn call_handle_with_authority_engines(
     &self,
     request_bytes: &[u8],
-    engine: Arc<StorageEngine>,
-    api_key_engine: Arc<StorageEngine>,
+    root_invocation: PluginNamespaceReadInvocationV1,
+    authority_engines: PluginAuthorityEnginesV1,
     ctx: RequestContext,
-    group_cache: Arc<Cache<GroupLoader>>,
-    api_key_cache: Arc<Cache<ApiKeyLoader>>,
+    authorization_caches: PluginAuthorizationCachesV1,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
-    self.call_handle_inner(request_bytes, Some(engine), Some(api_key_engine), Some(ctx), Some(group_cache), Some(api_key_cache))
+    self.call_handle_inner(request_bytes, Some(authority_engines), Some(ctx), Some(authorization_caches), Some(root_invocation))
   }
 
   fn call_handle_inner(
     &self,
     request_bytes: &[u8],
-    engine: Option<Arc<StorageEngine>>,
-    api_key_engine: Option<Arc<StorageEngine>>,
+    authority_engines: Option<PluginAuthorityEnginesV1>,
     request_context: Option<RequestContext>,
-    group_cache: Option<Arc<Cache<GroupLoader>>>,
-    api_key_cache: Option<Arc<Cache<ApiKeyLoader>>>,
+    authorization_caches: Option<PluginAuthorizationCachesV1>,
+    root_invocation: Option<PluginNamespaceReadInvocationV1>,
   ) -> Result<Vec<u8>, WasmRuntimeError> {
+    let (engine, api_key_engine) = match authority_engines {
+      Some(authority_engines) => (Some(authority_engines.engine), Some(authority_engines.api_key_engine)),
+      None => (None, None),
+    };
+    let (group_cache, api_key_cache) = match authorization_caches {
+      Some(authorization_caches) => (Some(authorization_caches.group_cache), Some(authorization_caches.api_key_cache)),
+      None => (None, None),
+    };
     let mut store = Store::new(
       &self.engine,
-      HostState { memory: None, engine, api_key_engine, request_context, group_cache, api_key_cache, limits: self.store_limits() },
+      HostState {
+        memory: None,
+        engine,
+        api_key_engine,
+        request_context,
+        group_cache,
+        api_key_cache,
+        root_invocation,
+        resolved_root: None,
+        limits: self.store_limits(),
+      },
     );
     store.limiter(|state| &mut state.limits);
     store.set_fuel(self.fuel_limit).map_err(|error| WasmRuntimeError::Trap(error.to_string()))?;
@@ -270,22 +330,21 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        let prepared = match prepare_plugin_read(&mut caller, &args_json, &path, CrudlifyOp::Read) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
         };
-
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &error.to_string());
-        }
-
-        let dir_ops = DirectoryOps::new(&engine);
-        let record = match dir_ops.get_metadata(&path) {
-          Ok(Some(record)) => record,
-          Ok(None) => return write_error_response(&mut caller, &format!("File not found: {path}")),
+        let selected = prepared.selected();
+        let selected_file = match selected.file(&path) {
+          Ok(selected_file) => selected_file,
+          Err(EngineError::NotFound(_)) => return write_error_response(&mut caller, &format!("File not found: {path}")),
           Err(error) => return write_error_response(&mut caller, &format!("Metadata failed: {error}")),
         };
-        let content_type = record.content_type.unwrap_or_default();
+        let record = &selected_file.record;
+        let content_type = match &record.content_type {
+          Some(content_type) => content_type.clone(),
+          None => String::new(),
+        };
         let response_capacity = host_response_capacity(&caller);
         let encoded_length = record
           .total_size
@@ -305,7 +364,7 @@ impl WasmPluginRuntime {
           );
         }
 
-        let data = match dir_ops.read_file_buffered(&path) {
+        let data = match selected.file_stream(&selected_file).and_then(|stream| stream.collect_to_vec()) {
           Ok(data) => data,
           Err(error) => return write_error_response(&mut caller, &format!("Read failed: {error}")),
         };
@@ -317,6 +376,7 @@ impl WasmPluginRuntime {
           "data": encoded,
           "content_type": content_type,
           "size": size,
+          "root": prepared.root.root(),
         });
 
         write_json_response(&mut caller, &response)
@@ -341,26 +401,24 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        let data_b64 = match args_json.get("data").and_then(|v| v.as_str()) {
-          Some(d) => d,
-          None => return write_error_response(&mut caller, "Missing 'data' argument"),
-        };
-
-        let content_type = args_json.get("content_type").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-        let data = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
-          Ok(d) => d,
-          Err(e) => return write_error_response(&mut caller, &format!("Base64 decode failed: {}", e)),
-        };
-
         let (engine, ctx) = match get_engine_and_context(&caller) {
           Ok(pair) => pair,
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Create) {
-          return write_error_response(&mut caller, &error.to_string());
+        if let Err(error) = authorize_plugin_mutation(&caller, &args_json, &path, CrudlifyOp::Create) {
+          return write_error_response(&mut caller, &error);
         }
+
+        let data_b64 = match args_json.get("data").and_then(|v| v.as_str()) {
+          Some(d) => d,
+          None => return write_error_response(&mut caller, "Missing 'data' argument"),
+        };
+        let content_type = args_json.get("content_type").and_then(|v| v.as_str()).map(str::to_string);
+        let data = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
+          Ok(d) => d,
+          Err(e) => return write_error_response(&mut caller, &format!("Base64 decode failed: {e}")),
+        };
 
         let dir_ops = DirectoryOps::new(&engine);
         let size = data.len();
@@ -396,22 +454,22 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &error.to_string());
-        }
-
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        let prepared = match prepare_plugin_read(&mut caller, &args_json, &path, CrudlifyOp::Read) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
         };
+        let selected = prepared.selected();
 
         let safe_text_bytes = host_response_capacity(&caller).saturating_sub(1024) / 6;
         if safe_text_bytes == 0 {
           return write_error_response(&mut caller, "Guest memory has no capacity for an extract response");
         }
 
-        match extract_file_text(&engine, &path, &args_json, safe_text_bytes) {
-          Ok(response) => write_json_response(&mut caller, &response),
+        match extract_file_text(&selected, &path, &args_json, safe_text_bytes) {
+          Ok(mut response) => {
+            response["root"] = serde_json::json!(prepared.root.root());
+            write_json_response(&mut caller, &response)
+          }
           Err(e) => write_error_response(&mut caller, &e),
         }
       })
@@ -439,8 +497,8 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Delete) {
-          return write_error_response(&mut caller, &error.to_string());
+        if let Err(error) = authorize_plugin_mutation(&caller, &args_json, &path, CrudlifyOp::Delete) {
+          return write_error_response(&mut caller, &error);
         }
 
         let dir_ops = DirectoryOps::new(&engine);
@@ -472,29 +530,26 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        let prepared = match prepare_plugin_read(&mut caller, &args_json, &path, CrudlifyOp::Read) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
         };
+        let selected = prepared.selected();
 
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::Read) {
-          return write_error_response(&mut caller, &error.to_string());
-        }
-
-        let dir_ops = DirectoryOps::new(&engine);
-
-        match dir_ops.get_metadata(&path) {
-          Ok(Some(record)) => {
+        match selected.file(&path) {
+          Ok(selected_file) => {
+            let record = selected_file.record;
             let response = serde_json::json!({
               "path": record.path,
               "size": record.total_size,
               "content_type": record.content_type,
               "created_at": record.created_at,
               "updated_at": record.updated_at,
+              "root": prepared.root.root(),
             });
             write_json_response(&mut caller, &response)
           }
-          Ok(None) => write_error_response(&mut caller, &format!("File not found: {}", path)),
+          Err(EngineError::NotFound(_)) => write_error_response(&mut caller, &format!("File not found: {path}")),
           Err(e) => write_error_response(&mut caller, &format!("Metadata failed: {}", e)),
         }
       })
@@ -517,21 +572,15 @@ impl WasmPluginRuntime {
           None => return write_error_response(&mut caller, "Missing 'path' argument"),
         };
 
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
+        let prepared = match prepare_plugin_read(&mut caller, &args_json, &path, CrudlifyOp::List) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
         };
-
-        if let Err(error) = authorize_plugin_path(&caller, &path, CrudlifyOp::List) {
-          return write_error_response(&mut caller, &error.to_string());
-        }
-
-        let dir_ops = DirectoryOps::new(&engine);
-        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+        let selected = prepared.selected();
+        let family_policy = match SystemFamilyPolicyResolver::new(prepared.engine.hash_algo()) {
           Ok(policy) => policy,
           Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
         };
-        let normalized_directory = crate::engine::path_utils::normalize_path(&path);
         let response_capacity = host_response_capacity(&caller);
         let offset = match optional_json_usize(&args_json, "offset") {
           Ok(value) => value.unwrap_or(0),
@@ -544,45 +593,64 @@ impl WasmPluginRuntime {
         };
         let limit = requested_limit.unwrap_or(capacity_limit).min(capacity_limit);
 
-        match dir_ops.list_directory_window_strict(&path, offset, limit) {
-          Ok(window) => {
-            let mut response_bytes = 64usize;
-            let mut entries = Vec::with_capacity(window.entries.len());
-            let mut capacity_truncated = false;
-            for child in &window.entries {
-              let child_path =
-                if normalized_directory == "/" { format!("/{}", child.name) } else { format!("{}/{}", normalized_directory, child.name) };
-              match family_policy.generic_data_path_is_visible(&child_path) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                  return write_error_response(&mut caller, &format!("System family policy failed for '{}': {}", child_path, error));
-                }
-              }
-              let estimated = child.name.len().saturating_mul(6).saturating_add(96);
-              if response_bytes.saturating_add(estimated) > response_capacity {
-                capacity_truncated = true;
-                break;
-              }
-              response_bytes = response_bytes.saturating_add(estimated);
-              let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() { "directory" } else { "file" };
-              entries.push(serde_json::json!({
-                "name": child.name,
-                "type": entry_type,
-                "size": child.total_size,
-              }));
-            }
-            let has_more = window.has_more || capacity_truncated;
+        let mut response_bytes = 64usize;
+        let mut entries = Vec::with_capacity(limit);
+        let mut capacity_truncated = false;
+        let mut authorized_offset = 0usize;
+        let visit_result = selected.visit_directory_strict(&path, |child| {
+          let child_path = child.path.clone();
+          if !family_policy.generic_data_path_is_visible(&child_path)? {
+            return Ok(true);
+          }
+          let operation = if child.entry_type == EntryType::DirectoryIndex.to_u8() { CrudlifyOp::List } else { CrudlifyOp::Read };
+          match authorize_plugin_path(&caller, &child_path, operation) {
+            Ok(()) => {}
+            Err(PluginPathAuthorizationError::Denied(_)) => return Ok(true),
+            Err(error) => return Err(error.into_engine_error()),
+          }
+          match authorize_selected_plugin_path(&caller, &selected, &child_path, operation) {
+            Ok(decision) if decision.is_direct() => {}
+            Ok(_) | Err(PluginPathAuthorizationError::Denied(_)) => return Ok(true),
+            Err(error) => return Err(error.into_engine_error()),
+          }
+          if authorized_offset < offset {
+            authorized_offset = authorized_offset.saturating_add(1);
+            return Ok(true);
+          }
+          if entries.len() >= limit {
+            return Ok(false);
+          }
+          let estimated = child.name.len().saturating_mul(6).saturating_add(96);
+          if response_bytes.saturating_add(estimated) > response_capacity {
+            capacity_truncated = true;
+            return Ok(false);
+          }
+          response_bytes = response_bytes.saturating_add(estimated);
+          let entry_type = if child.entry_type == EntryType::DirectoryIndex.to_u8() { "directory" } else { "file" };
+          entries.push(serde_json::json!({
+            "name": child.name,
+            "type": entry_type,
+            "size": child.total_size,
+          }));
+          Ok(true)
+        });
+        match visit_result {
+          Ok(exhausted) => {
+            let has_more = !exhausted || capacity_truncated;
             if requested_limit.is_none() && has_more {
               return write_error_response(
                 &mut caller,
                 "Directory response is too large for guest memory; request a bounded limit and offset",
               );
             }
-            let response = serde_json::json!({"entries": entries, "has_more": has_more});
+            let response = serde_json::json!({
+              "entries": entries,
+              "has_more": has_more,
+              "root": prepared.root.root(),
+            });
             write_json_response(&mut caller, &response)
           }
-          Err(e) => write_error_response(&mut caller, &format!("List failed: {}", e)),
+          Err(error) => write_error_response(&mut caller, &format!("List failed: {error}")),
         }
       })
       .map_err(|error| WasmRuntimeError::InstantiationFailed(error.to_string()))?;
@@ -599,36 +667,42 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-        };
-
         // Parse the query from JSON
         let mut query = match parse_query_from_json(&args_json) {
           Ok(q) => q,
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        if let Err(error) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
-          return write_error_response(&mut caller, &error.to_string());
-        }
+        let prepared = match prepare_plugin_read(&mut caller, &args_json, &query.path, CrudlifyOp::List) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
+        };
+        let selected = prepared.selected();
 
         let response_capacity = host_response_capacity(&caller);
         let response_item_limit = (response_capacity.saturating_sub(512) / 256).max(1);
         query.limit = Some(query.limit.unwrap_or(response_item_limit).min(response_item_limit));
 
-        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+        let family_policy = match SystemFamilyPolicyResolver::new(prepared.engine.hash_algo()) {
           Ok(policy) => policy,
           Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
         };
-        let query_engine = QueryEngine::new(&engine);
+        let request_budget = match prepared.engine.start_query_request_budget() {
+          Ok(request_budget) => request_budget,
+          Err(error) => return write_error_response(&mut caller, &format!("Query admission failed: {error}")),
+        };
+        let query_engine = QueryEngine::with_read_source_and_budget(&prepared.engine, &selected, request_budget);
         match query_engine.execute_paginated_filtered(&query, |result| {
           if !family_policy.generic_data_path_is_visible(&result.file_record.path)? {
             return Ok(false);
           }
           match authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read) {
-            Ok(()) => Ok(true),
+            Ok(()) => {}
+            Err(PluginPathAuthorizationError::Denied(_)) => return Ok(false),
+            Err(error) => return Err(error.into_engine_error()),
+          }
+          match authorize_selected_plugin_path(&caller, &selected, &result.file_record.path, CrudlifyOp::Read) {
+            Ok(decision) => Ok(decision.is_direct()),
             Err(PluginPathAuthorizationError::Denied(_)) => Ok(false),
             Err(error) => Err(error.into_engine_error()),
           }
@@ -666,6 +740,7 @@ impl WasmPluginRuntime {
             let mut response = serde_json::json!({
               "items": result_items,
               "has_more": paginated.has_more || capacity_truncated,
+              "root": prepared.root.root(),
             });
 
             if is_unrestricted_plugin_context(&caller) {
@@ -693,11 +768,6 @@ impl WasmPluginRuntime {
           Err(e) => return write_error_response(&mut caller, &e),
         };
 
-        let engine = match caller.data().engine.as_ref() {
-          Some(e) => Arc::clone(e),
-          None => return write_error_response(&mut caller, "Database access not available in this plugin context"),
-        };
-
         // Parse the query from JSON (must include aggregate section)
         let query = match parse_query_from_json(&args_json) {
           Ok(q) => q,
@@ -707,6 +777,9 @@ impl WasmPluginRuntime {
         if let Err(error) = authorize_plugin_path(&caller, &query.path, CrudlifyOp::List) {
           return write_error_response(&mut caller, &error.to_string());
         }
+        if let Err(error) = validate_guest_root_invocation(&caller, &args_json) {
+          return write_error_response(&mut caller, &error);
+        }
 
         if query.aggregate.is_none() {
           return write_error_response(&mut caller, "Missing 'aggregate' section in query");
@@ -714,16 +787,41 @@ impl WasmPluginRuntime {
         if !is_unrestricted_plugin_context(&caller) {
           return write_error_response(&mut caller, "Aggregate host function requires root or system context");
         }
+        let prepared = match prepare_plugin_read_after_current_authorization(&mut caller, &query.path, CrudlifyOp::List) {
+          Ok(prepared) => prepared,
+          Err(error) => return write_error_response(&mut caller, &error),
+        };
+        let selected = prepared.selected();
 
-        let family_policy = match SystemFamilyPolicyResolver::new(engine.hash_algo()) {
+        let family_policy = match SystemFamilyPolicyResolver::new(prepared.engine.hash_algo()) {
           Ok(policy) => policy,
           Err(error) => return write_error_response(&mut caller, &format!("System family policy failed: {error}")),
         };
-        let query_engine = QueryEngine::new(&engine);
-        match query_engine.execute_aggregate_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path))
-        {
+        let request_budget = match prepared.engine.start_query_request_budget() {
+          Ok(request_budget) => request_budget,
+          Err(error) => return write_error_response(&mut caller, &format!("Query admission failed: {error}")),
+        };
+        let query_engine = QueryEngine::with_read_source_and_budget(&prepared.engine, &selected, request_budget);
+        match query_engine.execute_aggregate_filtered(&query, |result| {
+          if !family_policy.generic_data_path_is_visible(&result.file_record.path)? {
+            return Ok(false);
+          }
+          match authorize_plugin_path(&caller, &result.file_record.path, CrudlifyOp::Read) {
+            Ok(()) => {}
+            Err(PluginPathAuthorizationError::Denied(_)) => return Ok(false),
+            Err(error) => return Err(error.into_engine_error()),
+          }
+          match authorize_selected_plugin_path(&caller, &selected, &result.file_record.path, CrudlifyOp::Read) {
+            Ok(decision) => Ok(decision.is_direct()),
+            Err(PluginPathAuthorizationError::Denied(_)) => Ok(false),
+            Err(error) => Err(error.into_engine_error()),
+          }
+        }) {
           Ok(result) => match serde_json::to_value(&result) {
-            Ok(v) => write_json_response(&mut caller, &v),
+            Ok(mut value) => {
+              value["root"] = serde_json::json!(prepared.root.root());
+              write_json_response(&mut caller, &value)
+            }
             Err(e) => write_error_response(&mut caller, &format!("Serialization failed: {}", e)),
           },
           Err(e) => write_error_response(&mut caller, &format!("Aggregate failed: {}", e)),
@@ -922,6 +1020,169 @@ fn authorize_plugin_path(caller: &Caller<'_, HostState>, path: &str, operation: 
   }
 }
 
+struct PreparedPluginReadV1 {
+  engine: Arc<StorageEngine>,
+  root: LegacyV3ResolvedRootHandleV1,
+}
+
+impl PreparedPluginReadV1 {
+  fn selected(&self) -> LegacyV3SelectedRootAdapterV1<'_> {
+    LegacyV3SelectedRootAdapterV1::from_resolved_root_handle(&self.engine, &self.root)
+  }
+}
+
+fn guest_root_invocation(args_json: &serde_json::Value) -> Result<PluginNamespaceReadInvocationV1, String> {
+  let source = args_json.as_object().ok_or_else(|| "Host arguments must be a JSON object".to_string())?;
+  let mut selector = serde_json::Map::new();
+  for field in ["root_hash", "snapshot", "version"] {
+    if let Some(value) = source.get(field) {
+      selector.insert(field.to_string(), value.clone());
+    }
+  }
+  serde_json::from_value(serde_json::Value::Object(selector)).map_err(|error| format!("Invalid plugin root selector: {error}"))
+}
+
+fn validate_guest_root_invocation(caller: &Caller<'_, HostState>, args_json: &serde_json::Value) -> Result<(), String> {
+  let guest = guest_root_invocation(args_json)?;
+  let host = caller
+    .data()
+    .root_invocation
+    .as_ref()
+    .ok_or_else(|| "Root-aware database access is not available in this plugin context".to_string())?;
+  if &guest != host {
+    return Err("Guest root selector does not match the host-owned plugin invocation".to_string());
+  }
+  Ok(())
+}
+
+fn requested_root_selector(
+  invocation: &PluginNamespaceReadInvocationV1,
+  engine: &StorageEngine,
+) -> Result<RequestedRootSelectorV1, String> {
+  let fields = match invocation.selector() {
+    PluginRootSelectorV1::CurrentHead => RootSelectorFieldsV1::default(),
+    PluginRootSelectorV1::RootHash(value) => RootSelectorFieldsV1 { root_hash: Some(value.clone()), snapshot: None, version: None },
+    PluginRootSelectorV1::Snapshot(value) => RootSelectorFieldsV1 { root_hash: None, snapshot: Some(value.clone()), version: None },
+    PluginRootSelectorV1::Version(value) => RootSelectorFieldsV1 { root_hash: None, snapshot: None, version: Some(value.clone()) },
+  };
+  parse_root_selector_v1(&fields, engine.hash_algo()).map_err(|error| format!("{}: {}", error.code(), error.message()))
+}
+
+fn reject_historical_share_invocation(caller: &Caller<'_, HostState>) -> Result<(), String> {
+  let Some(context) = caller.data().request_context.as_ref() else {
+    return Err("Request context not available in this plugin context".to_string());
+  };
+  let Some(invocation) = caller.data().root_invocation.as_ref() else {
+    return Err("Root-aware database access is not available in this plugin context".to_string());
+  };
+  if context.user_id.starts_with("share:") && !invocation.is_current() {
+    return Err("Share plugin invocations are restricted to the current root".to_string());
+  }
+  Ok(())
+}
+
+fn resolve_plugin_root(caller: &mut Caller<'_, HostState>) -> Result<LegacyV3ResolvedRootHandleV1, String> {
+  if let Some(root) = caller.data().resolved_root.as_ref() {
+    return Ok(root.clone());
+  }
+  let engine = caller.data().engine.as_ref().cloned().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
+  let invocation = caller
+    .data()
+    .root_invocation
+    .as_ref()
+    .cloned()
+    .ok_or_else(|| "Root-aware database access is not available in this plugin context".to_string())?;
+  let selector = requested_root_selector(&invocation, &engine)?;
+  let selected = LegacyV3SelectedRootAdapterV1::resolve(&engine, &selector).map_err(|error| error.to_string())?;
+  let root = selected.resolved_root_handle();
+  caller.data_mut().resolved_root = Some(root.clone());
+  Ok(root)
+}
+
+fn authorize_selected_plugin_path(
+  caller: &Caller<'_, HostState>,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  path: &str,
+  operation: CrudlifyOp,
+) -> Result<PathAuthorizationDecisionV1, PluginPathAuthorizationError> {
+  let context = caller
+    .data()
+    .request_context
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Request context not available in this plugin context".to_string()))?;
+  if context.user_id == "system" || context.key_id.is_some() || context.user_id.starts_with("share:") {
+    return Ok(PathAuthorizationDecisionV1::direct());
+  }
+  let user_id = match uuid::Uuid::parse_str(&context.user_id) {
+    Ok(user_id) => user_id,
+    Err(error) => return Err(PluginPathAuthorizationError::Denied(format!("Invalid user identity: {error}"))),
+  };
+  if user_id.is_nil() {
+    return Ok(PathAuthorizationDecisionV1::direct());
+  }
+  let engine = caller
+    .data()
+    .engine
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Database access not available in this plugin context".to_string()))?;
+  let group_cache = caller
+    .data()
+    .group_cache
+    .as_ref()
+    .ok_or_else(|| PluginPathAuthorizationError::Context("Group cache not available in this plugin context".to_string()))?;
+  let groups = group_cache.get(&user_id, engine).map_err(PluginPathAuthorizationError::Operational)?;
+  selected
+    .authorize_path(path, operation, &groups)
+    .map_err(PluginPathAuthorizationError::Operational)?
+    .ok_or_else(|| PluginPathAuthorizationError::Denied(format!("Permission denied: {}", path)))
+}
+
+fn prepare_plugin_read(
+  caller: &mut Caller<'_, HostState>,
+  args_json: &serde_json::Value,
+  path: &str,
+  operation: CrudlifyOp,
+) -> Result<PreparedPluginReadV1, String> {
+  authorize_plugin_path(caller, path, operation).map_err(|error| error.to_string())?;
+  validate_guest_root_invocation(caller, args_json)?;
+  prepare_plugin_read_after_current_authorization(caller, path, operation)
+}
+
+fn prepare_plugin_read_after_current_authorization(
+  caller: &mut Caller<'_, HostState>,
+  path: &str,
+  operation: CrudlifyOp,
+) -> Result<PreparedPluginReadV1, String> {
+  reject_historical_share_invocation(caller)?;
+  let engine = caller.data().engine.as_ref().cloned().ok_or_else(|| "Database access not available in this plugin context".to_string())?;
+  let root = resolve_plugin_root(caller)?;
+  let selected = LegacyV3SelectedRootAdapterV1::from_resolved_root_handle(&engine, &root);
+  let decision = authorize_selected_plugin_path(caller, &selected, path, operation).map_err(|error| error.to_string())?;
+  if matches!(operation, CrudlifyOp::Read) && !decision.is_direct() {
+    return Err(format!("Permission denied: {path}"));
+  }
+  Ok(PreparedPluginReadV1 { engine, root })
+}
+
+fn authorize_plugin_mutation(
+  caller: &Caller<'_, HostState>,
+  args_json: &serde_json::Value,
+  path: &str,
+  operation: CrudlifyOp,
+) -> Result<(), String> {
+  authorize_plugin_path(caller, path, operation).map_err(|error| error.to_string())?;
+  validate_guest_root_invocation(caller, args_json)?;
+  let invocation = caller
+    .data()
+    .root_invocation
+    .as_ref()
+    .ok_or_else(|| "Root-aware database access is not available in this plugin context".to_string())?;
+  if !invocation.is_current() {
+    return Err("Plugin mutations require the current root".to_string());
+  }
+  Ok(())
+}
+
 fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
   let Some(ctx) = caller.data().request_context.as_ref() else {
     return false;
@@ -936,7 +1197,7 @@ fn is_unrestricted_plugin_context(caller: &Caller<'_, HostState>) -> bool {
 }
 
 fn extract_file_text(
-  engine: &StorageEngine,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   path: &str,
   args_json: &serde_json::Value,
   safe_text_bytes: usize,
@@ -965,7 +1226,8 @@ fn extract_file_text(
     ),
   };
 
-  let extracted = extract_range_by_path(engine, path, &request).map_err(|error| error.to_string())?;
+  let selected_file = selected.file(path).map_err(|error| error.to_string())?;
+  let extracted = selected.extract_range(&selected_file, &request).map_err(|error| error.to_string())?;
 
   Ok(serde_json::json!({
     "text": extracted.content,
@@ -1036,7 +1298,7 @@ fn write_response_bytes(caller: &mut Caller<'_, HostState>, bytes: &[u8]) -> i64
     None => return 0,
   };
 
-  if memory.write(caller, HOST_RESPONSE_OFFSET, &bytes).is_err() {
+  if memory.write(caller, HOST_RESPONSE_OFFSET, bytes).is_err() {
     return 0;
   }
 
