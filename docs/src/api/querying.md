@@ -6,8 +6,8 @@ The query engine supports indexed field queries with boolean combinators, pagina
 
 | Method | Path | Description | Auth | Status Codes |
 |--------|------|-------------|------|-------------|
-| POST | `/files/query` | Execute a query | Yes | 200, 400, 404, 500 |
-| POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 500 |
+| POST | `/files/query` | Execute a query | Yes | 200, 400, 404, 410, 500, 503 |
+| POST | `/files/search` | Global cross-directory search | Yes | 200, 400, 404, 410, 500, 503 |
 
 ---
 
@@ -45,12 +45,16 @@ Execute a query against indexed fields within a directory path.
 |-------|------|----------|-------------|
 | `path` | string | Yes | Directory path to query within |
 | `where` | object/array | Yes | Query filter (see below) |
+| `root_hash` | string | No | Exact lowercase namespace-root hash; mutually exclusive with `snapshot` and `version` |
+| `snapshot` | string | No | Named snapshot selector; mutually exclusive with `root_hash` and `version` |
+| `version` | string | No | Exact namespace-root hash through the legacy version alias; mutually exclusive with `root_hash` and `snapshot` |
 | `limit` | integer | No | Max results to return (server default applies if omitted) |
+| `page` | integer | No | One-based page origin; mutually exclusive with `offset`, `after`, and `before` |
 | `offset` | integer | No | Skip this many results |
 | `order_by` | array | No | Sort fields with direction |
-| `after` | string | No | Cursor for forward pagination |
-| `before` | string | No | Cursor for backward pagination |
-| `include_total` | boolean | No | Include `total_count` in response (default: false) |
+| `after` | string | No | Canonical APOS cursor for forward pagination; requires explicit `root_hash` |
+| `before` | string | No | Canonical APOS cursor for backward pagination; requires explicit `root_hash` |
+| `include_total` | boolean | No | Include `total` in response (default: false) |
 | `select` | array | No | Project specific fields in results |
 | `aggregate` | object | No | Run aggregations instead of returning results |
 | `include_matches` | boolean | No | Include request-time hit locators for returned results (default: false) |
@@ -61,6 +65,40 @@ Execute a query against indexed fields within a directory path.
 | `explain` | string/boolean | No | `"plan"`, `"analyze"`, or `true` for query plan |
 
 Hit locators are opt-in. They are generated only for the current page after authorization filtering, not during index lookup.
+
+### Root Selection and Authorization
+
+Query, search, aggregation, and EXPLAIN execute against one captured namespace
+root. If no selector is supplied, AeorDB captures current HEAD once. A supplied
+`root_hash`, `snapshot`, or `version` is exact and never falls back to a newer
+HEAD when it is unavailable.
+
+Successful responses include the selected root as:
+
+```json
+{
+  "root": {
+    "hash": "9f26...",
+    "state": "retained",
+    "expires_at": null
+  }
+}
+```
+
+Current path, key, user/group, share, and protected-family authorization is
+evaluated before selected-root indexes, counts, pages, aggregates, EXPLAIN, or
+locator bodies become observable. Historical permission documents may further
+restrict current access but cannot expand it. Share-link credentials are
+current-HEAD only.
+
+Legacy-v3 persisted `.idx` files do not identify the namespace root they cover,
+so exact-root query and search rebuild their working indexes from the selected
+configuration, FileRecords, and bodies instead of trusting those files as
+result authority. The v3 root-level parser registry is detached from namespace
+HEAD; if a non-JSON content query would require proving that this registry did
+not select a plugin, AeorDB fails closed with `503
+HISTORICAL_VIEW_UNAVAILABLE` rather than guessing parser semantics or returning
+stale results. Root-bound JSON and metadata fields are unaffected.
 
 ---
 
@@ -178,7 +216,10 @@ Invert a condition:
 
 ### Nested Boolean Logic
 
-Combinators can be nested up to **32 levels deep**. Queries exceeding this depth are rejected with a `400` error. Additionally, a single query can return at most **100,000 results** -- requests that would exceed this ceiling are truncated.
+Combinators can be nested up to **32 levels deep**. Queries exceeding this
+depth are rejected with a `400` error. A page can return at most **1,000
+results**; larger requested limits are rejected instead of being silently
+truncated. The default limit is 100.
 
 ```json
 {
@@ -217,6 +258,11 @@ An array at the top level is sugar for AND:
 
 ```json
 {
+  "root": {
+    "hash": "9f26...",
+    "state": "live",
+    "expires_at": null
+  },
   "items": [
     {
       "path": "/users/alice.json",
@@ -229,29 +275,26 @@ An array at the top level is sugar for AND:
     }
   ],
   "has_more": true,
-  "total_count": 150,
-  "next_cursor": "eyJwYXRoIjoiL3VzZXJzL2JvYi5qc29uIn0=",
-  "prev_cursor": "eyJwYXRoIjoiL3VzZXJzL2Fhcm9uLmpzb24ifQ==",
-  "meta": {
-    "reindexing": 0.67,
-    "reindexing_eta": 1775968398803,
-    "reindexing_indexed": 670,
-    "reindexing_total": 1000,
-    "reindexing_stale_since": 1775968300000
-  }
+  "total": 150,
+  "next_cursor": "QVBPUwE...",
+  "prev_cursor": "QVBPUwE...",
+  "limit": 20,
+  "offset": 0
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `root` | object | Exact selected namespace root: `hash`, `state`, and nullable `expires_at` |
 | `items` | array | Matching file metadata with scores |
 | `has_more` | boolean | Whether more results exist beyond the current page |
-| `total_count` | integer | Total matching results (only if `include_total: true`) |
-| `next_cursor` | string | Cursor for the next page (if `has_more` is true) |
-| `prev_cursor` | string | Cursor for the previous page |
-| `default_limit_hit` | boolean | Present and true when the server's default limit was applied |
+| `total` | integer | Total matching results (only if `include_total: true`) |
+| `next_cursor` | string | Canonical APOS cursor for the next page (if `has_more` is true) |
+| `prev_cursor` | string | Canonical APOS cursor for the previous page |
+| `limit` | integer | Effective page limit |
+| `offset` | integer | Effective absolute offset for page/offset origins; omitted for APOS origins |
+| `default_limit_hit` | boolean | Present and true when an omitted limit truncated the response |
 | `default_limit` | integer | The server's default limit value (present with `default_limit_hit`) |
-| `meta` | object | Reindex progress metadata (present only during active reindex) |
 
 ### Result Fields
 
@@ -266,6 +309,8 @@ Each result object contains:
 | `updated_at` | integer | Last update timestamp (ms) |
 | `score` | float | Relevance score (1.0 = exact match) |
 | `matched_by` | array | List of field names that matched |
+| `file_key` | string | Selected-root file identity, present when `include_matches` is true |
+| `record_revision` | string | Exact selected-root FileRecord revision, present when `include_matches` is true |
 | `content_hash` | string | Whole-file content hash, present when `include_matches` is true and the record has a hash |
 | `matches` | array | Hit locators, present when `include_matches` is true |
 | `matches_truncated` | boolean | True if more locators were available than returned |
@@ -280,6 +325,8 @@ For JSON files, matching indexed fields are reported as `field-value` locators w
 ```json
 {
   "path": "/users/alice.json",
+  "file_key": "0f4a...",
+  "record_revision": "8c21...",
   "content_hash": "b3c1...",
   "matches": [
     {
@@ -318,7 +365,12 @@ For JSON files, matching indexed fields are reported as `field-value` locators w
 
 Metadata matches such as `@filename` use `source.type = "metadata"`. Plain-text or unstructured UTF-8 file matches use `source.type = "stored-file"` and include byte, character, line, and column ranges plus `byte_range` and `line_range` fetch hints.
 
-Use `POST /files/fetch` range mode to fetch the returned ranges. Pass `if_content_hash` or `if_updated_at` from the search result to avoid fetching a stale range after the file changes.
+Use `POST /files/fetch` range mode to fetch the returned ranges. Copy the
+query/search response's `root.hash` into the fetch request's `root_hash`, and
+pass the result's `content_hash` as `if_content_hash`. The `file_key`,
+`record_revision`, and `content_hash` identify the exact selected-root hit;
+the content assertion detects a mismatched follow-up. Omitting `root_hash`
+would fetch the same path from current HEAD instead of guaranteeing continuity.
 
 ---
 
@@ -355,14 +407,23 @@ Sort results by one or more fields:
 
 ### Cursor-Based
 
-Use `after` or `before` with cursor values from a previous response:
+`next_cursor` and `prev_cursor` are canonical unpadded base64url APOS v1
+records. They are bound to the route, exact root, complete logical order,
+FileKey, and RecordRevision; they are not legacy JSON cursors. Use `after` or
+`before` with the exact `root.hash` returned by the previous response:
 
 ```json
 {
+  "root_hash": "9f26...",
   "limit": 20,
-  "after": "eyJwYXRoIjoiL3VzZXJzL2JvYi5qc29uIn0="
+  "after": "QVBPUwE..."
 }
 ```
+
+Exactly one origin may be supplied: one-based `page`, zero-based `offset`,
+`after`, or `before`. Any origin may be combined with `limit`. APOS root,
+route, or order drift is rejected; AeorDB does not decode or fall back to the
+old JSON/base64 cursor format.
 
 ---
 
@@ -385,10 +446,12 @@ Return only specific fields in each result. Use `@`-prefixed names for built-in 
 | `@created_at` | `created_at` |
 | `@updated_at` | `updated_at` |
 | `@matched_by` | `matched_by` |
+| `@file_key` | `file_key` |
+| `@record_revision` | `record_revision` |
 | `@content_hash` | `content_hash` |
 | `@matches` | `matches` |
 
-Envelope fields (`has_more`, `next_cursor`, `total_count`, `meta`) are never stripped by projection.
+Envelope fields (`root`, `has_more`, `next_cursor`, `total`, `limit`, and `offset`) are never stripped by projection.
 
 ---
 
@@ -424,13 +487,19 @@ Run aggregate computations instead of returning individual results.
 
 ### Response
 
-The response shape depends on whether `group_by` is used. Aggregation results are returned as a JSON object.
+The response shape depends on whether `group_by` is used. Aggregation results
+are returned as a JSON object with the same exact `root` metadata. Group pages
+use aggregate-group APOS tokens bound to the canonical group tuple rather than
+to a fictitious file.
 
 ---
 
 ## Explain Mode
 
-Inspect the query execution plan without running the full query. Useful for debugging index usage and performance.
+Inspect the authorization-filtered logical execution plan. Logical EXPLAIN
+describes requested fields, operations, driver/coverage/work classes, and
+exact-recheck requirements without exposing hidden paths, values, counts, or
+physical offsets, pages, manifests, NVT state, or raw cardinality.
 
 ```json
 {
@@ -442,8 +511,8 @@ Inspect the query execution plan without running the full query. Useful for debu
 
 | Value | Description |
 |-------|-------------|
-| `true` or `"plan"` | Show the query plan |
-| `"analyze"` | Execute the query and include timing information |
+| `true` or `"plan"` | Show the logical plan without returning query results |
+| `"analyze"` | Execute the authorized query and include its result envelope and bounded execution summary |
 
 ---
 
@@ -567,8 +636,14 @@ Search across all indexed directories in the database.
 | `query` | string | No | Broad search — searched against all trigram, phonetic, soundex, and dmetaphone indexed fields |
 | `where` | object | No | Structured query filter (same syntax as `/files/query`) |
 | `path` | string | No | Scope search to a subtree (default: `/` = everything) |
+| `root_hash` | string | No | Exact lowercase namespace-root hash; mutually exclusive with `snapshot` and `version` |
+| `snapshot` | string | No | Named snapshot selector; mutually exclusive with `root_hash` and `version` |
+| `version` | string | No | Exact namespace-root hash through the legacy version alias; mutually exclusive with `root_hash` and `snapshot` |
 | `limit` | integer | No | Max results (default: 50, max: 1000) |
+| `page` | integer | No | One-based page origin; mutually exclusive with `offset`, `after`, and `before` |
 | `offset` | integer | No | Skip results |
+| `after` | string | No | Canonical APOS cursor for forward pagination; requires explicit `root_hash` |
+| `before` | string | No | Canonical APOS cursor for backward pagination; requires explicit `root_hash` |
 | `include_matches` | boolean | No | Include request-time hit locators for returned results (default: false) |
 | `max_matches_per_result` | integer | No | Maximum hit locators per result (default: 5, max: 50) |
 | `snippet_chars` | integer | No | Maximum snippet characters per locator (default: 160, max: 4096) |
@@ -612,10 +687,18 @@ curl -X POST http://localhost:6830/files/search \
 
 ### Response
 
-Same format as `/files/query`, plus a `source` field per result indicating which directory's index matched. The locator fields below are present only when `include_matches` is true:
+The search envelope uses `results` and always includes `total_count`, plus the
+same exact `root`, page metadata, and canonical APOS cursors as query. Each
+result has a `source` field indicating which directory's index matched. The
+locator fields below are present only when `include_matches` is true:
 
 ```json
 {
+  "root": {
+    "hash": "9f26...",
+    "state": "live",
+    "expires_at": null
+  },
   "results": [
     {
       "path": "/users/alice.json",
@@ -626,6 +709,8 @@ Same format as `/files/query`, plus a `source` field per result indicating which
       "content_type": "application/json",
       "created_at": 1775968398000,
       "updated_at": 1775968398000,
+      "file_key": "0f4a...",
+      "record_revision": "8c21...",
       "content_hash": "b3c1...",
       "matches": [],
       "matches_truncated": false,

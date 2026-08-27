@@ -253,7 +253,7 @@ fn test_explain_plan_shows_query_tree_structure() {
 }
 
 #[test]
-fn test_explain_plan_shows_index_info() {
+fn test_explain_plan_reports_logical_index_coverage_without_physical_details() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);
   let qe = QueryEngine::new(&engine);
@@ -275,15 +275,13 @@ fn test_explain_plan_shows_index_info() {
 
   let result = qe.execute_explain(&query).unwrap();
   let tree = result.plan.get("query_tree").unwrap();
-  let indexes = tree["indexes"].as_array().unwrap();
-  assert!(!indexes.is_empty(), "should have index information");
-
-  let idx = &indexes[0];
-  assert!(idx.get("strategy").is_some());
-  assert!(idx.get("type").is_some());
-  assert!(idx.get("entries").is_some());
-  assert!(idx.get("order_preserving").is_some());
-  assert!(idx.get("values_stored").is_some());
+  assert_eq!(tree["field"], "age");
+  assert_eq!(tree["operation"], "eq");
+  assert_eq!(tree["coverage"], "index_union");
+  assert_eq!(tree["recheck"], false);
+  for forbidden_physical_field in ["indexes", "strategy", "entries", "order_preserving", "values_stored"] {
+    assert!(tree.get(forbidden_physical_field).is_none(), "EXPLAIN leaked {forbidden_physical_field}: {tree}");
+  }
 }
 
 #[test]

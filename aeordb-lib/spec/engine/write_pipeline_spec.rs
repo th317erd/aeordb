@@ -2,7 +2,7 @@ use aeordb::engine::directory_ops::DirectoryOps;
 use aeordb::engine::errors::EngineError;
 use aeordb::engine::index_config::{IndexFieldConfig, PathIndexConfig};
 use aeordb::engine::index_store::IndexManager;
-use aeordb::engine::json_parser::parse_json_fields;
+use aeordb::engine::json_parser::{parse_json_fields, parse_json_top_level_field};
 use aeordb::engine::storage_engine::StorageEngine;
 use aeordb::engine::RequestContext;
 
@@ -243,6 +243,23 @@ fn test_json_parser_missing_field_skipped() {
 
   assert_eq!(fields.len(), 1); // only "name" found
   assert_eq!(fields[0].0, "name");
+}
+
+#[test]
+fn test_streaming_top_level_json_field_skips_large_unrelated_values_and_preserves_last_duplicate() {
+  let padding = "x".repeat(1024 * 1024);
+  let document = format!(r#"{{"name":"first","padding":"{padding}","name":"last"}}"#);
+  let value = parse_json_top_level_field(document.as_bytes(), "name").unwrap();
+  assert_eq!(value.as_deref(), Some(b"last".as_slice()));
+}
+
+#[test]
+fn test_streaming_top_level_json_field_handles_missing_non_object_and_malformed_documents() {
+  assert_eq!(parse_json_top_level_field(br#"{"name":"Alice"}"#, "missing").unwrap(), None);
+  assert_eq!(parse_json_top_level_field(br#"[1,{"name":"Alice"}]"#, "name").unwrap(), None);
+  assert_eq!(parse_json_top_level_field(br#""scalar""#, "name").unwrap(), None);
+  assert!(parse_json_top_level_field(br#"{"name":"Alice"} trailing"#, "name").is_err());
+  assert!(parse_json_top_level_field(&[0xff, 0xfe], "name").is_err());
 }
 
 // --- Additional edge case / failure tests ---

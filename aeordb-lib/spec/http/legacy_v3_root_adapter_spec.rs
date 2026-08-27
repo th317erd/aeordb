@@ -258,6 +258,15 @@ fn compatibility_adapter_is_the_single_head_capture_and_legacy_tree_walk_owner()
   ] {
     assert!(source.contains(required), "compatibility adapter lost required exact-root authority {required}");
   }
+  for forbidden in ["query_index_file_path", "load_query_index_path", "FieldIndex::deserialize"] {
+    assert!(
+      !source.contains(forbidden),
+      "compatibility adapter trusted a persisted index without selected-root coverage through {forbidden}"
+    );
+  }
+  for required in ["fn build_selected_index(", "self.build_selected_index(path, field_name, strategy, budget)"] {
+    assert!(source.contains(required), "compatibility adapter lost authoritative selected-root index construction through {required}");
+  }
 }
 
 #[test]
@@ -330,4 +339,55 @@ fn public_legacy_compatibility_handlers_have_one_adapter_and_no_mutable_fallback
   assert_eq!(download_routes.matches("parse_root_selector_v1(&").count(), 1);
   assert!(adapter.contains("extract_range_from_record_including_deleted"));
   assert!(adapter.contains("from_chunk_hashes_including_deleted"));
+}
+
+#[test]
+fn public_query_and_search_locators_use_exact_selected_revisions_without_mutable_body_fallback() {
+  let source = |relative_path: &str| {
+    std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path))
+      .unwrap_or_else(|error| panic!("cannot read {relative_path}: {error}"))
+  };
+  let operation_region = |source: &str, start: &str, end: &str| {
+    let (_, tail) = source.split_once(start).unwrap_or_else(|| panic!("missing operation start {start}"));
+    let (body, _) = tail.split_once(end).unwrap_or_else(|| panic!("missing operation end {end}"));
+    format!("{start}{body}")
+  };
+  let engine_routes = source("src/server/engine_routes.rs");
+  let locator_source = source("src/server/search_locators.rs");
+  let query_engine = source("src/engine/query_engine.rs");
+  let locator_helpers = operation_region(&engine_routes, "fn enrich_query_items_with_locators", "fn required_dispatch_value");
+  let query_handler = operation_region(&engine_routes, "pub async fn query_endpoint", "// Rename / move");
+  let search_handler = operation_region(&engine_routes, "pub async fn global_search_endpoint", "#[cfg(test)]");
+  let selected_locator_reader =
+    operation_region(&locator_source, "pub(crate) fn try_generate_selected_locators_with_budget", "struct LocatorAttempt");
+
+  for required in [
+    "exact_selected_locator_file",
+    "selected.file_by_hash(record_revision)",
+    "selected_file.record_hash != record_revision",
+    "selected_file.record.path != path",
+    "try_generate_selected_locators_with_budget",
+    "\"file_key\"",
+    "\"record_revision\"",
+  ] {
+    assert!(locator_helpers.contains(required), "selected locator bridge lost exact identity check {required}");
+  }
+  for forbidden in ["DirectoryOps", "get_metadata(", "try_generate_locators_with_budget(", "read_file_buffered(", "read_file_streaming("] {
+    assert!(!locator_helpers.contains(forbidden), "selected locator bridge retained mutable body fallback {forbidden}");
+  }
+  for (name, handler, enrichment) in
+    [("query", &query_handler, "enrich_query_items_with_locators"), ("search", &search_handler, "enrich_search_items_with_locators")]
+  {
+    assert!(handler.contains("locators.include_matches"), "{name} handler lost explicit locator opt-in");
+    assert!(handler.contains(enrichment), "{name} handler lost selected-root locator enrichment");
+    for forbidden in ["DirectoryOps", "get_metadata(", "try_generate_locators_with_budget("] {
+      assert!(!handler.contains(forbidden), "{name} handler retained mutable locator fallback {forbidden}");
+    }
+  }
+  assert!(selected_locator_reader.contains("LocatorReadFileV1::Selected"));
+  assert!(!selected_locator_reader.contains("LocatorReadFileV1::Current"));
+  assert!(
+    query_engine.contains("file.record_hash,\n          file.record,"),
+    "fuzzy query results must expose the exact selected FileRecord revision rather than their index candidate key"
+  );
 }

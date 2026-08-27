@@ -306,6 +306,54 @@ pub fn resolve_position_bound_v1<A>(
   Ok(ResolvedPositionBoundV1 { row })
 }
 
+pub fn validate_resolved_position_row_v1(
+  position: &LogicalPositionV1,
+  selected_root: &[u8],
+  order: &CompiledRouteOrderV1,
+  row: &LogicalOrderRowOwnedV1,
+) -> PositionResolutionResultV1<()> {
+  if position.route != order.route() {
+    return Err(PositionResolutionErrorV1::invalid(
+      "invalid_position_cursor",
+      "logical position route does not match the requested result universe",
+    ));
+  }
+  if position.namespace_root() != selected_root {
+    return Err(PositionResolutionErrorV1::root_mismatch(
+      "position_root_mismatch",
+      "logical position root does not match the authorized selected root",
+    ));
+  }
+  if position.order_fingerprint() != order.fingerprint() {
+    return Err(PositionResolutionErrorV1::order_mismatch(
+      "position_order_mismatch",
+      "logical position order does not match the requested route order",
+    ));
+  }
+  if usize::from(position.component_count) != order.component_count() {
+    return Err(PositionResolutionErrorV1::invalid(
+      "invalid_position_cursor",
+      "logical position component count differs from its compiled route order",
+    ));
+  }
+  validate_token_identity(position, selected_root, order)?;
+  validate_logical_order_row_v1(order, row.as_borrowed())
+    .map_err(|error| PositionResolutionErrorV1::corrupt("database_corruption", error.to_string()))?;
+  if row.file_key_tie.as_slice() != position.file_key_tie() || row.record_revision_tie.as_slice() != position.record_revision_tie() {
+    return Err(PositionResolutionErrorV1::invalid(
+      "invalid_position_cursor",
+      "logical position identity differs from its authorized selected-root row",
+    ));
+  }
+  if !recomputed_identity_is_valid(row, selected_root, order) {
+    return Err(PositionResolutionErrorV1::corrupt(
+      "database_corruption",
+      "authorized selected-root row has invalid canonical identity ties",
+    ));
+  }
+  validate_recomputed_components(position, row)
+}
+
 fn validate_token_identity(
   position: &LogicalPositionV1,
   selected_root: &[u8],

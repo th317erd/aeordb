@@ -75,6 +75,7 @@ Search with locators for follow-up range fetch:
 ```json
 {
   "path": "/docs/",
+  "root_hash": "9f26...",
   "query": "database write pattern",
   "include_matches": true,
   "max_matches_per_result": 5,
@@ -82,7 +83,36 @@ Search with locators for follow-up range fetch:
 }
 ```
 
-Use returned `fetch_hint`, `ranges`, `content_hash`, and `updated_at` with `POST /files/fetch` to retrieve only the relevant parts of large files.
+Successful query/search responses include the exact selected root as
+`root.hash`. Locator-bearing results include `file_key`, `record_revision`,
+`content_hash`, `matches[].range`, and `matches[].fetch`. Use those identities
+with `POST /files/fetch` to retrieve only the relevant parts of large files.
+Legacy-v3 non-JSON searches can return `503 HISTORICAL_VIEW_UNAVAILABLE` when
+their parser semantics depend on the detached root-level parser registry;
+retrying against a different root must not be used to disguise that exactness
+failure.
+
+For an exact byte-range locator, the follow-up shape is:
+
+```json
+{
+  "root_hash": "<query-or-search root.hash>",
+  "items": [{
+    "path": "<result path>",
+    "if_content_hash": "<result content_hash>",
+    "range": {
+      "mode": "bytes",
+      "start": 6,
+      "end": 12
+    }
+  }]
+}
+```
+
+Do not omit `root_hash`: doing so reads current HEAD and can return different
+bytes from the same path after a mutation. Query/search APOS cursors are
+canonical unpadded base64url tokens; `after` or `before` must be sent with the
+exact explicit `root_hash` returned by the preceding response.
 
 ## Range Fetch
 

@@ -29,8 +29,8 @@ pub const DEFAULT_INDEX_CACHE_CLEAN_TTL: Duration = Duration::from_secs(5 * 60);
 /// Bounded headroom for NVT rebuild and nested converter/NVT serialization
 /// allocations that coexist with the final publication buffer.
 const INDEX_FLUSH_TRANSIENT_OVERHEAD_BYTES: u64 = 64 * 1024;
-const INDEX_LOAD_FIXED_OVERHEAD_BYTES: u64 = 8 * 1024 * 1024;
-const INDEX_LOAD_SERIALIZED_AMPLIFICATION: u64 = 8;
+pub(crate) const INDEX_LOAD_FIXED_OVERHEAD_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const INDEX_LOAD_SERIALIZED_AMPLIFICATION: u64 = 8;
 
 pub(crate) trait IndexLoadMemoryAccount {
   fn grow_index_load(&mut self, bytes: u64, context: &str) -> EngineResult<()>;

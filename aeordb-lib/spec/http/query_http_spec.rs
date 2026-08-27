@@ -172,6 +172,122 @@ async fn test_query_exact_match() {
 }
 
 #[tokio::test]
+async fn test_unavailable_selected_parser_and_mapper_fallbacks_are_typed() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let operations = DirectoryOps::new(&engine);
+  let context = RequestContext::system();
+
+  store_index_config(
+    &engine,
+    "/plugin-parser",
+    &PathIndexConfig {
+      parser: Some("missing-parser".to_string()),
+      parser_memory_limit: None,
+      logging: false,
+      glob: None,
+      indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+    },
+  );
+  operations.store_file_buffered(&context, "/plugin-parser/a.json", br#"{"name":"Alice"}"#, Some("application/json")).unwrap();
+
+  store_index_config(
+    &engine,
+    "/plugin-mapper",
+    &PathIndexConfig {
+      parser: None,
+      parser_memory_limit: None,
+      logging: false,
+      glob: None,
+      indexes: vec![IndexFieldConfig {
+        name: "name".to_string(),
+        index_type: "string".to_string(),
+        source: Some(serde_json::json!({"plugin": "missing-mapper"})),
+        min: None,
+        max: None,
+      }],
+    },
+  );
+  operations.store_file_buffered(&context, "/plugin-mapper/a.json", br#"{"name":"Alice"}"#, Some("application/json")).unwrap();
+
+  operations
+    .store_file_buffered(&context, "/.aeordb-config/parsers.json", br#"{"text/plain":"missing-text-parser"}"#, Some("application/json"))
+    .unwrap();
+  store_index_config(
+    &engine,
+    "/registry-parser",
+    &PathIndexConfig {
+      parser: None,
+      parser_memory_limit: None,
+      logging: false,
+      glob: None,
+      indexes: vec![IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None }],
+    },
+  );
+  operations.store_file_buffered(&context, "/registry-parser/a.txt", b"Alice", Some("text/plain")).unwrap();
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  for path in ["/plugin-parser", "/plugin-mapper", "/registry-parser"] {
+    let (status, response) = query_request(
+      app.clone(),
+      &auth,
+      serde_json::json!({
+        "path": path,
+        "where": {"field": "name", "op": "eq", "value": "Alice"}
+      }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "path {path}: {response}");
+    assert_eq!(response["code"], "HISTORICAL_VIEW_UNAVAILABLE", "path {path}: {response}");
+  }
+}
+
+#[tokio::test]
+async fn test_selected_authoritative_fallback_honors_source_paths_globs_and_nearest_configuration() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let operations = DirectoryOps::new(&engine);
+  let context = RequestContext::system();
+  store_index_config(
+    &engine,
+    "/tenant",
+    &PathIndexConfig {
+      parser: None,
+      parser_memory_limit: None,
+      logging: false,
+      glob: Some("**/*.json".to_string()),
+      indexes: vec![IndexFieldConfig {
+        name: "profile_name".to_string(),
+        index_type: "string".to_string(),
+        source: Some(serde_json::json!(["profile", "name"])),
+        min: None,
+        max: None,
+      }],
+    },
+  );
+  store_index_config(
+    &engine,
+    "/tenant/private",
+    &PathIndexConfig { parser: None, parser_memory_limit: None, logging: false, glob: None, indexes: Vec::new() },
+  );
+  operations.store_file_buffered(&context, "/tenant/a.json", br#"{"profile":{"name":"Alice"}}"#, Some("application/json")).unwrap();
+  operations.store_file_buffered(&context, "/tenant/private/b.json", br#"{"profile":{"name":"Alice"}}"#, Some("application/json")).unwrap();
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+  let (status, response) = query_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/tenant",
+      "where": {"field": "profile_name", "op": "eq", "value": "Alice"}
+    }),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK, "body: {response}");
+  assert_eq!(response["items"].as_array().unwrap().len(), 1, "body: {response}");
+  assert_eq!(response["items"][0]["path"], "/tenant/a.json");
+}
+
+#[tokio::test]
 async fn test_query_include_matches_returns_range_locators_and_identity() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_users(&engine);
@@ -196,6 +312,8 @@ async fn test_query_include_matches_returns_range_locators_and_identity() {
   assert_eq!(items.len(), 1);
   let item = &items[0];
   assert_eq!(item["path"], "/myapp/users/alice.json");
+  assert!(item["file_key"].as_str().unwrap_or("").len() >= 32, "missing file_key: {}", item);
+  assert!(item["record_revision"].as_str().unwrap_or("").len() >= 32, "missing record_revision: {}", item);
   assert!(item["content_hash"].as_str().unwrap_or("").len() >= 32, "missing content_hash: {}", item);
   assert_eq!(item["matches_truncated"], false);
   assert_eq!(item["locator_status"], "complete");
@@ -1643,9 +1761,12 @@ async fn test_virtual_field_file_name_alias_explain_uses_canonical_index() {
   let json = body_json(response.into_body()).await;
   let query_tree = &json["plan"]["query_tree"];
   assert_eq!(query_tree["field"], "@file_name");
-  assert_eq!(query_tree["index_field"], "@filename");
-  assert_eq!(query_tree["indexes"].as_array().unwrap().len(), 1, "alias explain should resolve canonical @filename index");
-  assert_eq!(query_tree["indexes"][0]["strategy"], "string");
+  assert_eq!(query_tree["operation"], "eq");
+  assert_eq!(query_tree["coverage"], "index_union");
+  assert_eq!(query_tree["recheck"], false);
+  for forbidden_physical_field in ["index_field", "index_source", "strategy", "indexes"] {
+    assert!(query_tree.get(forbidden_physical_field).is_none(), "EXPLAIN leaked {forbidden_physical_field}: {query_tree}");
+  }
 }
 
 #[tokio::test]
@@ -1728,9 +1849,16 @@ async fn test_put_file_with_root_glob_virtual_index_is_visible_to_scoped_query()
   assert_eq!(explain_response.status(), StatusCode::OK);
   let explain_json = body_json(explain_response.into_body()).await;
   let query_tree = &explain_json["plan"]["query_tree"];
-  assert_eq!(query_tree["index_field"], "@filename");
-  assert_eq!(query_tree["index_source"], "/");
-  assert_eq!(query_tree["indexes"].as_array().unwrap().len(), 2);
+  assert_eq!(query_tree["field"], "@file_name");
+  assert_eq!(query_tree["operation"], "eq");
+  // Root-level legacy index configuration is registry-detached rather than
+  // immutable selected-root authority. The selected adapter must therefore
+  // report its exact FileRecord fallback instead of claiming index coverage.
+  assert_eq!(query_tree["coverage"], "authoritative_scan");
+  assert_eq!(query_tree["recheck"], false);
+  for forbidden_physical_field in ["index_field", "index_source", "strategy", "indexes"] {
+    assert!(query_tree.get(forbidden_physical_field).is_none(), "EXPLAIN leaked {forbidden_physical_field}: {query_tree}");
+  }
 
   let query_body = serde_json::json!({
     "path": "/docs",
@@ -1767,7 +1895,10 @@ async fn test_put_file_with_root_glob_virtual_index_is_visible_to_scoped_query()
   let similar_results = similar_json["items"].as_array().unwrap();
   assert_eq!(similar_results.len(), 1);
   assert_eq!(similar_results[0]["path"], "/docs/scoped.txt");
-  assert!(similar_results[0]["matched_by"].as_array().unwrap().iter().any(|field| field.as_str() == Some("trigram")));
+  assert!(
+    similar_results[0]["matched_by"].as_array().unwrap().is_empty(),
+    "the exact selected-root fallback must not claim the registry-detached trigram strategy",
+  );
 }
 
 #[tokio::test]

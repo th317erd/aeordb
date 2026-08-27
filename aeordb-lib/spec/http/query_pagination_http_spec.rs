@@ -203,6 +203,7 @@ async fn test_query_with_cursor() {
   let (_, json1) = query_post(app1, &auth, &body1).await;
   assert_eq!(json1["has_more"], true);
   let next_cursor = json1["next_cursor"].as_str().unwrap();
+  let root_hash = json1["root"]["hash"].as_str().unwrap();
 
   // Page 2
   let app2 = rebuild_app(&jwt_manager, &engine);
@@ -211,10 +212,12 @@ async fn test_query_with_cursor() {
     "where": [{ "field": "age", "op": "gt", "value": 0 }],
     "order_by": [{ "field": "@path", "direction": "asc" }],
     "limit": 5,
+    "root_hash": root_hash,
     "after": next_cursor
   });
-  let (_, json2) = query_post(app2, &auth, &body2).await;
-  assert_eq!(json2["items"].as_array().unwrap().len(), 5);
+  let (status, json2) = query_post(app2, &auth, &body2).await;
+  assert_eq!(status, StatusCode::OK, "body: {json2}");
+  assert_eq!(json2["items"].as_array().unwrap().len(), 5, "body: {json2}");
 
   // No overlap
   let paths1: Vec<&str> = json1["items"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
@@ -227,7 +230,7 @@ async fn test_query_with_cursor() {
 #[tokio::test]
 async fn test_query_default_limit_in_response() {
   let (_, jwt_manager, engine, _dir) = test_app();
-  setup_people(&engine, 30);
+  setup_people(&engine, 105);
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
@@ -239,9 +242,9 @@ async fn test_query_default_limit_in_response() {
   let (status, json) = query_post(app, &auth, &body).await;
   assert_eq!(status, StatusCode::OK);
 
-  assert_eq!(json["has_more"], true);
-  assert_eq!(json["default_limit_hit"], true);
-  assert!(json["default_limit"].is_number());
+  assert_eq!(json["has_more"], true, "body: {json}");
+  assert_eq!(json["default_limit_hit"], true, "body: {json}");
+  assert!(json["default_limit"].is_number(), "body: {json}");
   assert_eq!(json["items"].as_array().unwrap().len(), json["default_limit"].as_u64().unwrap() as usize);
 }
 

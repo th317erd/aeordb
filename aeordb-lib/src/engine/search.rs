@@ -1,10 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::index_store::IndexManager;
 use crate::engine::path_utils::{normalize_path, parent_path};
 use crate::engine::query_engine::{
-  FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryResult, ExplainMode, QueryStrategy, DEFAULT_QUERY_LIMIT,
+  FieldQuery, Query, QueryEngine, QueryNode, QueryOp, QueryReadSourceV1, QueryResult, ExplainMode, QueryStrategy, DEFAULT_QUERY_LIMIT,
 };
 use crate::engine::query_runtime::QueryRequestBudget;
 use crate::engine::storage_engine::StorageEngine;
@@ -12,6 +11,8 @@ use crate::engine::storage_engine::StorageEngine;
 /// A single result from a global search, enriched with source metadata.
 #[derive(Debug)]
 pub struct SearchResult {
+  /// Exact selected FileRecord revision for root-aware pagination and fetch continuity.
+  pub record_revision: Vec<u8>,
   /// Full file path.
   pub path: String,
   /// Relevance score (higher is better).
@@ -80,48 +81,47 @@ pub(crate) fn global_search_with_budget(
   offset: Option<usize>,
   request_budget: &QueryRequestBudget,
 ) -> EngineResult<SearchResults> {
-  let index_manager = IndexManager::new(engine);
+  let query_engine = QueryEngine::with_request_budget(engine, request_budget.clone());
+  global_search_with_query_engine(&query_engine, base_path, query, where_clause, limit, offset, &mut |_result| Ok(true))
+}
 
-  // Discover all directories that have indexes. Include indexed ancestors so a
-  // root glob index can satisfy a search scoped to `/some/subtree`.
-  let indexed_dirs = discover_indexed_directories_for_base(&index_manager, base_path)?;
+pub(crate) fn global_search_all_with_source_and_budget<F>(
+  engine: &StorageEngine,
+  read_source: &dyn QueryReadSourceV1,
+  base_path: &str,
+  query: Option<&str>,
+  where_clause: Option<&QueryNode>,
+  request_budget: &QueryRequestBudget,
+  mut filter: F,
+) -> EngineResult<Vec<SearchResult>>
+where
+  F: FnMut(&SearchResult) -> EngineResult<bool>,
+{
+  let query_engine = QueryEngine::with_read_source_and_budget(engine, read_source, request_budget.clone());
+  collect_global_search_results(&query_engine, base_path, query, where_clause, &mut filter)
+}
 
-  if indexed_dirs.is_empty() {
-    return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
-  }
-
-  // Collect raw results across every directory.
-  let mut all_results: Vec<SearchResult> = Vec::new();
-
-  if let Some(query_str) = query {
-    // Broad search: search fuzzy-capable indexes in every directory.
-    broad_search(engine, &index_manager, &indexed_dirs, query_str, request_budget, &mut all_results)?;
-  } else if let Some(query_node) = where_clause {
-    // Structured search: delegate to QueryEngine per directory.
-    structured_search(engine, &indexed_dirs, query_node, request_budget, &mut all_results)?;
-  } else {
-    // Neither query nor where_clause provided -- nothing to search.
-    return Ok(SearchResults { results: Vec::new(), has_more: false, total_count: Some(0) });
-  }
-
-  let normalized_base_path = normalize_path(base_path);
-  all_results.retain(|result| path_is_under_base(&result.path, &normalized_base_path));
-
-  // Deduplicate by path, keeping the highest score for each.
-  deduplicate_by_path(&mut all_results);
-
-  // Sort by score descending (ties broken by path for determinism).
-  all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.path.cmp(&b.path)));
-
+fn global_search_with_query_engine(
+  query_engine: &QueryEngine<'_>,
+  base_path: &str,
+  query: Option<&str>,
+  where_clause: Option<&QueryNode>,
+  limit: Option<usize>,
+  offset: Option<usize>,
+  filter: &mut dyn FnMut(&SearchResult) -> EngineResult<bool>,
+) -> EngineResult<SearchResults> {
+  let all_results = collect_global_search_results(query_engine, base_path, query, where_clause, filter)?;
   let total_count = all_results.len();
-  let effective_offset = offset.unwrap_or(0);
-  let effective_limit = limit.unwrap_or(DEFAULT_QUERY_LIMIT);
+  let mut effective_offset = 0;
+  if let Some(requested_offset) = offset {
+    effective_offset = requested_offset;
+  }
+  let effective_limit = match limit {
+    Some(limit) => limit,
+    None => DEFAULT_QUERY_LIMIT,
+  };
 
-  let page: Vec<SearchResult> = all_results
-    .into_iter()
-    .skip(effective_offset)
-    .take(effective_limit + 1) // fetch one extra to detect has_more
-    .collect();
+  let page: Vec<SearchResult> = all_results.into_iter().skip(effective_offset).take(effective_limit.saturating_add(1)).collect();
 
   let has_more = page.len() > effective_limit;
   let results: Vec<SearchResult> = page.into_iter().take(effective_limit).collect();
@@ -129,13 +129,87 @@ pub(crate) fn global_search_with_budget(
   Ok(SearchResults { results, has_more, total_count: Some(total_count) })
 }
 
-fn discover_indexed_directories_for_base(index_manager: &IndexManager, base_path: &str) -> EngineResult<Vec<String>> {
-  let mut dirs: BTreeSet<String> = index_manager.discover_indexed_directories(base_path)?.into_iter().collect();
+fn collect_global_search_results(
+  query_engine: &QueryEngine<'_>,
+  base_path: &str,
+  query: Option<&str>,
+  where_clause: Option<&QueryNode>,
+  filter: &mut dyn FnMut(&SearchResult) -> EngineResult<bool>,
+) -> EngineResult<Vec<SearchResult>> {
+  // Discover all directories that have indexes. Include indexed ancestors so a
+  // root glob index can satisfy a search scoped to `/some/subtree`.
+  let indexed_dirs = discover_indexed_directories_for_base(query_engine, base_path)?;
+
+  if indexed_dirs.is_empty() {
+    return Ok(Vec::new());
+  }
+
+  // Collect raw results across every directory.
+  let mut all_results: Vec<SearchResult> = Vec::new();
+
+  if let Some(query_str) = query {
+    // Broad search: search fuzzy-capable indexes in every directory.
+    broad_search(query_engine, &indexed_dirs, query_str, &mut all_results)?;
+    if let Some(query_node) = where_clause {
+      let mut structured_results = Vec::new();
+      structured_search(query_engine, &indexed_dirs, query_node, &mut structured_results)?;
+      structured_results.sort_by(|left, right| left.path.cmp(&right.path));
+      all_results.retain(|result| {
+        let index = structured_results.partition_point(|structured| structured.path.as_str() < result.path.as_str());
+        match structured_results.get(index) {
+          Some(structured) => structured.path == result.path,
+          None => false,
+        }
+      });
+    }
+  } else if let Some(query_node) = where_clause {
+    // Structured search: delegate to QueryEngine per directory.
+    structured_search(query_engine, &indexed_dirs, query_node, &mut all_results)?;
+  } else {
+    // Neither query nor where_clause provided -- nothing to search.
+    return Ok(Vec::new());
+  }
+
+  let normalized_base_path = normalize_path(base_path);
+  all_results.retain(|result| path_is_under_base(&result.path, &normalized_base_path));
+  let mut filter_error = None;
+  all_results.retain(|result| {
+    if filter_error.is_some() {
+      return true;
+    }
+    match filter(result) {
+      Ok(include) => include,
+      Err(error) => {
+        filter_error = Some(error);
+        true
+      }
+    }
+  });
+  if let Some(error) = filter_error {
+    return Err(error);
+  }
+  validate_search_result_scores(&all_results)?;
+
+  // Deduplicate by path, keeping the highest score for each.
+  deduplicate_by_path(&mut all_results);
+
+  // Sort by score descending (ties broken by path for determinism).
+  all_results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+
+  Ok(all_results)
+}
+
+fn discover_indexed_directories_for_base(query_engine: &QueryEngine<'_>, base_path: &str) -> EngineResult<Vec<String>> {
+  let mut dirs: BTreeSet<String> = query_engine.discover_source_indexed_directories(base_path)?.into_iter().collect();
   let normalized = normalize_path(base_path);
+  // The base scope is always a legal authoritative-evaluation candidate. This
+  // matters when a selected legacy root cannot retain a detached derived index
+  // directory, and for virtual fields whose exact values live in FileRecords.
+  dirs.insert(normalized.clone());
   let mut current = Some(normalized);
 
   while let Some(dir) = current {
-    if !index_manager.list_indexes(&dir)?.is_empty() {
+    if !query_engine.list_source_indexes(&dir)?.is_empty() {
       dirs.insert(dir.clone());
     }
     if dir == "/" {
@@ -176,18 +250,9 @@ fn path_is_under_base(path: &str, base_path: &str) -> bool {
 ///
 /// This re-uses the battle-tested scoring path in QueryEngine rather than
 /// re-implementing trigram/phonetic lookup from scratch.
-fn broad_search(
-  engine: &StorageEngine,
-  index_manager: &IndexManager,
-  indexed_dirs: &[String],
-  query_str: &str,
-  request_budget: &QueryRequestBudget,
-  out: &mut Vec<SearchResult>,
-) -> EngineResult<()> {
-  let query_engine = QueryEngine::with_request_budget(engine, request_budget.clone());
-
+fn broad_search(query_engine: &QueryEngine<'_>, indexed_dirs: &[String], query_str: &str, out: &mut Vec<SearchResult>) -> EngineResult<()> {
   for dir in indexed_dirs {
-    let indexes = index_manager.list_indexes(dir)?;
+    let indexes = query_engine.list_source_indexes(dir)?;
     if indexes.is_empty() {
       continue;
     }
@@ -244,13 +309,11 @@ fn broad_search(
 
 /// Run a structured `QueryNode` in every discovered indexed directory.
 fn structured_search(
-  engine: &StorageEngine,
+  query_engine: &QueryEngine<'_>,
   indexed_dirs: &[String],
   query_node: &QueryNode,
-  request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchResult>,
 ) -> EngineResult<()> {
-  let query_engine = QueryEngine::with_request_budget(engine, request_budget.clone());
   let matched_fields = query_node_field_names(query_node);
 
   for dir in indexed_dirs {
@@ -339,6 +402,7 @@ fn discover_fuzzy_fields(index_names: &[String]) -> Vec<String> {
 
 /// Convert a `QueryResult` from the query engine into a `SearchResult`.
 fn query_result_to_search_result(qr: QueryResult, source_dir: &str, fallback_matched_by: &[String]) -> SearchResult {
+  let record_revision = qr.file_hash;
   let mut matched_by = qr.matched_by;
   if matched_by.is_empty() {
     if fallback_matched_by.is_empty() {
@@ -349,6 +413,7 @@ fn query_result_to_search_result(qr: QueryResult, source_dir: &str, fallback_mat
   }
 
   SearchResult {
+    record_revision,
     path: qr.file_record.path,
     score: qr.score,
     matched_by,
@@ -397,6 +462,13 @@ fn deduplicate_by_path(results: &mut Vec<SearchResult>) {
   for idx in to_remove.into_iter().rev() {
     results.swap_remove(idx);
   }
+}
+
+fn validate_search_result_scores(results: &[SearchResult]) -> EngineResult<()> {
+  if let Some(result) = results.iter().find(|result| !result.score.is_finite()) {
+    return Err(EngineError::InvalidInput(format!("search score for '{}' is not finite", result.path)));
+  }
+  Ok(())
 }
 
 fn append_unique(target: &mut Vec<String>, values: Vec<String>) {
@@ -452,6 +524,7 @@ mod tests {
     let mut results = vec![
       SearchResult {
         path: "/a".to_string(),
+        record_revision: vec![1; 32],
         score: 0.5,
         matched_by: vec!["trigram".to_string()],
         matched_fields: vec!["name".to_string()],
@@ -463,6 +536,7 @@ mod tests {
       },
       SearchResult {
         path: "/a".to_string(),
+        record_revision: vec![2; 32],
         score: 0.9,
         matched_by: vec!["soundex".to_string()],
         matched_fields: vec!["name".to_string()],
@@ -474,6 +548,7 @@ mod tests {
       },
       SearchResult {
         path: "/b".to_string(),
+        record_revision: vec![3; 32],
         score: 0.7,
         matched_by: vec!["trigram".to_string()],
         matched_fields: vec!["title".to_string()],
@@ -495,6 +570,7 @@ mod tests {
   fn test_deduplicate_by_path_no_duplicates() {
     let mut results = vec![SearchResult {
       path: "/x".to_string(),
+      record_revision: vec![4; 32],
       score: 1.0,
       matched_by: vec![],
       matched_fields: vec![],
@@ -513,5 +589,23 @@ mod tests {
     let mut results: Vec<SearchResult> = vec![];
     deduplicate_by_path(&mut results);
     assert!(results.is_empty());
+  }
+
+  #[test]
+  fn test_search_score_validation_rejects_non_finite_values() {
+    let results = vec![SearchResult {
+      path: "/invalid".to_string(),
+      record_revision: vec![5; 32],
+      score: f64::NAN,
+      matched_by: vec![],
+      matched_fields: vec![],
+      source_dir: "/".to_string(),
+      size: 0,
+      content_type: None,
+      created_at: 0,
+      updated_at: 0,
+    }];
+    let error = validate_search_result_scores(&results).unwrap_err();
+    assert!(matches!(error, EngineError::InvalidInput(message) if message.contains("finite")));
   }
 }

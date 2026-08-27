@@ -649,7 +649,7 @@ fn test_default_query_limit_constant() {
 }
 
 #[test]
-fn test_sort_unknown_virtual_field_is_noop() {
+fn test_sort_unknown_virtual_field_is_rejected() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_30_people(&dir);
   let qe = QueryEngine::new(&engine);
@@ -657,10 +657,9 @@ fn test_sort_unknown_virtual_field_is_noop() {
   let mut query = make_query_all_people();
   query.limit = Some(30);
   query.order_by = vec![SortField { field: "@nonexistent".to_string(), direction: SortDirection::Asc }];
-  let paginated = qe.execute_paginated(&query).unwrap();
+  let error = qe.execute_paginated(&query).unwrap_err();
 
-  // Unknown virtual fields compare as Equal, so order is unspecified but no error
-  assert_eq!(paginated.results.len(), 30);
+  assert!(error.to_string().contains("@nonexistent"), "unknown virtual sort error omitted the field name: {error}");
 }
 
 #[test]

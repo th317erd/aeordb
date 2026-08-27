@@ -16,13 +16,13 @@ use super::legacy_v3_root_adapter::{
   LegacyV3ResolvedPathV1, LegacyV3SelectedDirectoryEntryV1, LegacyV3SelectedPathV1, LegacyV3SelectedRootAdapterV1,
 };
 use super::root_api::{
-  RequestedRootSelectorV1, RootApiErrorV1, RootRequestAdapterV1, RootSelectorFieldsV1, RootServiceModeV1, RouteRootRequestPlanV1,
-  parse_root_selector_v1, root_error_response_v1, root_response_headers_v1,
+  RequestedRootSelectorV1, RootApiErrorV1, RootRequestAdapterV1, RootResponseV1, RootSelectorFieldsV1, RootServiceModeV1,
+  RouteRootRequestPlanV1, parse_root_selector_v1, root_error_response_v1, root_response_headers_v1,
 };
 use super::route_permissions::{reject_share_key, require_generic_data_path, RoutePermissionChecker};
 use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
 use super::search_locators::{
-  broad_query_terms, terms_from_query_node, try_generate_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
+  broad_query_terms, terms_from_query_node, try_generate_selected_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
 };
 use super::state::AppState;
 use crate::auth::TokenClaims;
@@ -40,11 +40,27 @@ use crate::engine::ChunkReadLocation;
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::query_engine::{
-  parse_where_clause, AggregateQuery, ExplainMode, Query, QueryEngine, QueryMeta, QueryNode, QueryResult, QueryStrategy, SortDirection,
-  SortField, DEFAULT_QUERY_LIMIT,
+  AggregateQuery, AggregateResult, ExplainMode, FieldQuery, Fuzziness, FuzzyAlgorithm, FuzzyOptions, GroupResult, Query, QueryEngine,
+  QueryNode, QueryOp, QueryResult, QueryStrategy, SortDirection, SortField,
 };
+use crate::engine::v4::config_value::CanonicalConfigValueV1;
+use crate::engine::v4::hash::digest_parts;
+use crate::engine::v4::position::{CompiledRouteOrderV1, PositionComparatorV1, PositionRouteV1, PositionSortDirectionV1};
+use crate::engine::v4::position_order::{
+  AggregateOrderFieldV1, LogicalOrderComponentOwnedV1, LogicalOrderRowOwnedV1, PositionOrderFieldV1, PositionWindowOriginV1,
+  compare_logical_order_rows_v1, compile_aggregate_group_order_v1, compile_global_search_order_v1, compile_query_order_v1,
+  encode_logical_order_row_position_v1, validate_logical_order_row_v1,
+};
+use crate::engine::v4::position_resolver::{PositionResolutionErrorClassV1, PositionResolutionErrorV1, validate_resolved_position_row_v1};
+use crate::engine::v4::query_planner::{QueryExpressionV1, QueryFuzzyAlgorithmV1, QueryPredicateOperationV1, QueryPredicateV1};
 use crate::engine::system_family_policy::GenericDataPathSelection;
 use crate::engine::SystemFamilyPolicyResolver;
+use super::root_public_schema::{
+  AdmittedPublicQueryRequestV1, PublicAggregateRequestV1, PublicCollectionMetadataV1, PublicExplainModeV1, PublicItemsResponseV1,
+  PublicLocatorRequestV1, PublicPositionContextV1, PublicQueryRequestV1, PublicResultsResponseV1, PublicSchemaErrorV1,
+  PublicSearchRequestV1, PublicSortDirectionV1, PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1, PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1,
+  admit_public_query_request_v1, admit_public_search_request_v1, finalize_public_query_request_v1, finalize_public_search_request_v1,
+};
 
 /// Check if a file path is deleted and the user lacks delete permission.
 /// Deleted files are invisible/inaccessible to users without 'd' permission.
@@ -1366,13 +1382,18 @@ fn filter_results_by_direct_read(
   Ok(())
 }
 
+struct LocatorEnrichmentContextV1<'request, 'engine> {
+  engine: &'request StorageEngine,
+  selected: &'request LegacyV3SelectedRootAdapterV1<'engine>,
+  options: &'request LocatorOptions,
+  request_budget: &'request crate::engine::query_runtime::QueryRequestBudget,
+}
+
 fn enrich_query_items_with_locators(
-  engine: &StorageEngine,
+  context: &LocatorEnrichmentContextV1<'_, '_>,
   query_results: &[QueryResult],
   items: &mut [serde_json::Value],
   terms: &[LocatorTerm],
-  options: &LocatorOptions,
-  request_budget: &crate::engine::query_runtime::QueryRequestBudget,
 ) -> EngineResult<()> {
   for item in items {
     let Some(path) = json_item_path(item).map(str::to_string) else {
@@ -1381,22 +1402,20 @@ fn enrich_query_items_with_locators(
     let Some(result) = query_results.iter().find(|result| result.file_record.path == path) else {
       return Err(EngineError::CorruptEntry { offset: 0, reason: format!("query result JSON has no source FileRecord for '{path}'") });
     };
-    add_locator_fields(engine, item, &result.file_record, terms, options, request_budget)?;
+    let selected_file = exact_selected_locator_file(context.selected, &path, &result.file_hash)?;
+    add_selected_locator_fields(context.engine, context.selected, item, &selected_file, terms, context.options, context.request_budget)?;
   }
   Ok(())
 }
 
 fn enrich_search_items_with_locators(
-  engine: &StorageEngine,
+  context: &LocatorEnrichmentContextV1<'_, '_>,
   search_results: &[SearchResult],
   items: &mut [serde_json::Value],
   query: Option<&str>,
   query_node: Option<&QueryNode>,
-  options: &LocatorOptions,
-  request_budget: &crate::engine::query_runtime::QueryRequestBudget,
 ) -> EngineResult<()> {
   let structured_terms = query_node.map(terms_from_query_node);
-  let ops = DirectoryOps::new(engine);
 
   for item in items {
     let Some(path) = json_item_path(item).map(str::to_string) else {
@@ -1409,19 +1428,57 @@ fn enrich_search_items_with_locators(
       Some(query_text) => broad_query_terms(query_text, &search_result.matched_fields),
       None => structured_terms.clone().unwrap_or_default(),
     };
-    let file_record = ops.get_metadata(&path)?.ok_or_else(|| EngineError::CorruptEntry {
-      offset: 0,
-      reason: format!("search result '{path}' disappeared before locator generation"),
-    })?;
-    add_locator_fields(engine, item, &file_record, &terms, options, request_budget)?;
+    let selected_file = exact_selected_locator_file(context.selected, &path, &search_result.record_revision)?;
+    add_selected_locator_fields(context.engine, context.selected, item, &selected_file, &terms, context.options, context.request_budget)?;
   }
   Ok(())
 }
 
-fn add_locator_fields(
+fn exact_selected_locator_file(
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  path: &str,
+  record_revision: &[u8],
+) -> EngineResult<super::legacy_v3_root_adapter::LegacyV3SelectedFileV1> {
+  let selected_file = match selected.file_by_hash(record_revision) {
+    Ok(selected_file) => selected_file,
+    Err(EngineError::NotFound(_)) => {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("authorized locator result '{path}' references a revision absent from the selected root"),
+      });
+    }
+    Err(error) => return Err(error),
+  };
+  if selected_file.record_hash != record_revision {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("authorized locator result '{path}' resolved to a different selected FileRecord revision"),
+    });
+  }
+  if selected_file.record.path != path {
+    return Err(EngineError::CorruptEntry {
+      offset: 0,
+      reason: format!("authorized locator result '{path}' resolved to selected path '{}'", selected_file.record.path),
+    });
+  }
+  Ok(selected_file)
+}
+
+fn locator_options_from_public(request: &PublicLocatorRequestV1) -> LocatorOptions {
+  LocatorOptions {
+    include_matches: request.include_matches,
+    max_matches_per_result: request.maximum_matches_per_result,
+    snippet_chars: request.snippet_characters,
+    match_context_lines: request.match_context_lines,
+    max_locator_scan_bytes: request.maximum_scan_bytes,
+  }
+}
+
+fn add_selected_locator_fields(
   engine: &StorageEngine,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
   item: &mut serde_json::Value,
-  file_record: &FileRecord,
+  selected_file: &super::legacy_v3_root_adapter::LegacyV3SelectedFileV1,
   terms: &[LocatorTerm],
   options: &LocatorOptions,
   request_budget: &crate::engine::query_runtime::QueryRequestBudget,
@@ -1430,11 +1487,15 @@ fn add_locator_fields(
     return Err(EngineError::CorruptEntry { offset: 0, reason: "locator enrichment target is not a JSON object".to_string() });
   };
 
+  let file_record = &selected_file.record;
+  let file_key = digest_parts(engine.hash_algo(), &[b"file:", file_record.path.as_bytes()]);
+  object.insert("file_key".to_string(), serde_json::json!(hex::encode(file_key)));
+  object.insert("record_revision".to_string(), serde_json::json!(hex::encode(&selected_file.record_hash)));
   if !file_record.content_hash.is_empty() {
     object.insert("content_hash".to_string(), serde_json::json!(file_record.content_hash_hex()));
   }
 
-  let generation = try_generate_locators_with_budget(engine, file_record, terms, options, request_budget)?;
+  let generation = try_generate_selected_locators_with_budget(engine, selected, selected_file, terms, options, request_budget)?;
   let matches = serde_json::to_value(&generation.matches)
     .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("locator response serialization failed: {error}") })?;
   object.insert("matches".to_string(), matches);
@@ -2443,6 +2504,8 @@ fn map_select_fields(select: &[String]) -> Vec<String> {
       "@content_type" => "content_type".to_string(),
       "@created_at" => "created_at".to_string(),
       "@updated_at" => "updated_at".to_string(),
+      "@file_key" => "file_key".to_string(),
+      "@record_revision" => "record_revision".to_string(),
       "@content_hash" => "content_hash".to_string(),
       "@matched_by" => "matched_by".to_string(),
       "@matches" => "matches".to_string(),
@@ -2492,280 +2555,1108 @@ fn filter_object(value: &mut serde_json::Value, allowed: &std::collections::Hash
   }
 }
 
+fn public_schema_error_response(error: PublicSchemaErrorV1) -> Response {
+  let status = match error.code() {
+    "QUERY_REQUEST_TOO_LARGE" | "SEARCH_REQUEST_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
+    _ => StatusCode::BAD_REQUEST,
+  };
+  ErrorResponse::new(error.context()).with_code(error.code()).with_status(status).into_response()
+}
+
+fn canonical_query_value_bytes(value: &CanonicalConfigValueV1) -> Result<Vec<u8>, String> {
+  match value {
+    CanonicalConfigValueV1::Null => Ok(Vec::new()),
+    CanonicalConfigValueV1::Boolean(value) => Ok(vec![u8::from(*value)]),
+    CanonicalConfigValueV1::Signed(value) => Ok(value.to_be_bytes().to_vec()),
+    CanonicalConfigValueV1::Unsigned(value) => Ok(value.to_be_bytes().to_vec()),
+    CanonicalConfigValueV1::FloatBits(value) => Ok(value.to_be_bytes().to_vec()),
+    CanonicalConfigValueV1::String(value) => Ok(value.as_bytes().to_vec()),
+    CanonicalConfigValueV1::Bytes(_) | CanonicalConfigValueV1::Array(_) | CanonicalConfigValueV1::Map(_) => {
+      Err("legacy-v3 query literals must be JSON scalars".to_string())
+    }
+  }
+}
+
+fn canonical_query_string(value: CanonicalConfigValueV1, operation: &str) -> Result<String, String> {
+  match value {
+    CanonicalConfigValueV1::String(value) => Ok(value),
+    _ => Err(format!("{operation} requires a string query literal")),
+  }
+}
+
+fn public_query_predicate_to_legacy(predicate: QueryPredicateV1) -> Result<FieldQuery, String> {
+  let operation = match predicate.operation {
+    QueryPredicateOperationV1::Eq(value) => QueryOp::Eq(canonical_query_value_bytes(&value)?),
+    QueryPredicateOperationV1::In(values) => {
+      let mut encoded = Vec::new();
+      encoded.try_reserve_exact(values.len()).map_err(|error| format!("cannot reserve query literals: {error}"))?;
+      for value in values {
+        encoded.push(canonical_query_value_bytes(&value)?);
+      }
+      QueryOp::In(encoded)
+    }
+    QueryPredicateOperationV1::Gt(value) => QueryOp::Gt(canonical_query_value_bytes(&value)?),
+    QueryPredicateOperationV1::Lt(value) => QueryOp::Lt(canonical_query_value_bytes(&value)?),
+    QueryPredicateOperationV1::Between(first, second) => {
+      QueryOp::Between(canonical_query_value_bytes(&first)?, canonical_query_value_bytes(&second)?)
+    }
+    QueryPredicateOperationV1::Contains(value) => QueryOp::Contains(canonical_query_string(value, "contains")?),
+    QueryPredicateOperationV1::Similar { value, threshold } => QueryOp::Similar(canonical_query_string(value, "similar")?, threshold),
+    QueryPredicateOperationV1::Phonetic(value) => QueryOp::Phonetic(canonical_query_string(value, "phonetic")?),
+    QueryPredicateOperationV1::Fuzzy { value, algorithm, edits } => {
+      let algorithm = match algorithm {
+        QueryFuzzyAlgorithmV1::DamerauLevenshtein => FuzzyAlgorithm::DamerauLevenshtein,
+        QueryFuzzyAlgorithmV1::JaroWinkler => FuzzyAlgorithm::JaroWinkler,
+      };
+      let fuzziness = match edits {
+        Some(edits) => Fuzziness::Fixed(usize::from(edits)),
+        None => Fuzziness::Auto,
+      };
+      QueryOp::Fuzzy(canonical_query_string(value, "fuzzy")?, FuzzyOptions { fuzziness, algorithm })
+    }
+    QueryPredicateOperationV1::Match(value) => QueryOp::Match(canonical_query_string(value, "match")?),
+  };
+  Ok(FieldQuery { field_name: predicate.field_name, operation })
+}
+
+fn public_query_expression_to_legacy(expression: QueryExpressionV1) -> Result<QueryNode, String> {
+  match expression {
+    QueryExpressionV1::Field(predicate) => public_query_predicate_to_legacy(predicate).map(QueryNode::Field),
+    QueryExpressionV1::And(children) => {
+      children.into_iter().map(public_query_expression_to_legacy).collect::<Result<Vec<_>, _>>().map(QueryNode::And)
+    }
+    QueryExpressionV1::Or(children) => {
+      children.into_iter().map(public_query_expression_to_legacy).collect::<Result<Vec<_>, _>>().map(QueryNode::Or)
+    }
+    QueryExpressionV1::Not(child) => public_query_expression_to_legacy(*child).map(Box::new).map(QueryNode::Not),
+  }
+}
+
+fn public_sort_direction(direction: PublicSortDirectionV1) -> (SortDirection, PositionSortDirectionV1) {
+  match direction {
+    PublicSortDirectionV1::Asc => (SortDirection::Asc, PositionSortDirectionV1::Ascending),
+    PublicSortDirectionV1::Desc => (SortDirection::Desc, PositionSortDirectionV1::Descending),
+  }
+}
+
+fn compile_legacy_public_query_order(
+  query_engine: &QueryEngine<'_>,
+  admitted: &AdmittedPublicQueryRequestV1,
+  hash_algorithm: crate::engine::HashAlgorithm,
+) -> EngineResult<crate::engine::v4::position::CompiledRouteOrderV1> {
+  let mut comparators = Vec::new();
+  comparators
+    .try_reserve_exact(admitted.order_by.len())
+    .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve selected query order comparators: {error}")))?;
+  for field in &admitted.order_by {
+    comparators.push(query_engine.source_order_comparator(&admitted.path, &field.field)?);
+  }
+
+  if admitted.aggregate.is_some() {
+    let fields = admitted
+      .order_by
+      .iter()
+      .zip(&comparators)
+      .map(|(field, comparator)| {
+        let (_, direction) = public_sort_direction(field.direction);
+        AggregateOrderFieldV1 { field: field.field.as_str(), direction, comparator: *comparator }
+      })
+      .collect::<Vec<_>>();
+    return compile_aggregate_group_order_v1(hash_algorithm, &fields)
+      .map_err(|error| EngineError::InvalidInput(format!("invalid aggregate order: {error}")));
+  }
+
+  let fields = admitted
+    .order_by
+    .iter()
+    .zip(&comparators)
+    .map(|(field, comparator)| {
+      let (_, direction) = public_sort_direction(field.direction);
+      PositionOrderFieldV1 { field: field.field.as_str(), direction, comparator: *comparator }
+    })
+    .collect::<Vec<_>>();
+  compile_query_order_v1(hash_algorithm, &fields).map_err(|error| EngineError::InvalidInput(format!("invalid query order: {error}")))
+}
+
+fn current_query_scope_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  path: &str,
+) -> EngineResult<bool> {
+  if SystemFamilyPolicyResolver::new(state.engine.hash_algo())?.generic_data_path_selection(path)? != GenericDataPathSelection::Include {
+    return Ok(false);
+  }
+  if let Some(rules) = key_rules {
+    if crate::engine::api_key_rules::is_ancestor_of_any_rule(rules, path) {
+      return Ok(true);
+    }
+    return Ok(match_rules(rules, path).is_some_and(|rule| check_operation_permitted(&rule.permitted, 'r')));
+  }
+  if claims.sub.starts_with("share:") {
+    return Ok(false);
+  }
+  let user_id = Uuid::parse_str(&claims.sub).map_err(|error| EngineError::InvalidInput(format!("invalid user identity: {error}")))?;
+  if is_root(&user_id) {
+    return Ok(true);
+  }
+  let resolver = crate::engine::permission_resolver::PermissionResolver::new(&state.engine, &state.group_cache);
+  if resolver.check_path_permission(&user_id, path, CrudlifyOp::Read)? {
+    return Ok(true);
+  }
+  resolver.has_descendant_grants(&user_id, path)
+}
+
+fn query_result_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  result: &QueryResult,
+) -> EngineResult<bool> {
+  if !current_path_read_is_authorized(state, claims, key_rules, &result.file_record.path)? {
+    return Ok(false);
+  }
+  selected_path_is_authorized(state, claims, selected, &result.file_record.path, CrudlifyOp::Read)
+}
+
+type BoxedResponseResultV1<Value> = Result<Value, Box<Response>>;
+
+fn boxed_response_v1(response: Response) -> Box<Response> {
+  Box::new(response)
+}
+
+fn public_query_window(query: &PublicQueryRequestV1) -> BoxedResponseResultV1<(usize, usize)> {
+  let limit = usize::try_from(query.pagination.limit).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(format!("Pagination limit does not fit this server: {error}"))
+        .with_code("INVALID_PAGINATION")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response(),
+    )
+  })?;
+  let offset = match query.pagination.origin {
+    PositionWindowOriginV1::Start => 0,
+    PositionWindowOriginV1::AbsoluteRank(rank) => usize::try_from(rank).map_err(|error| {
+      boxed_response_v1(
+        ErrorResponse::new(format!("Pagination offset does not fit this server: {error}"))
+          .with_code("INVALID_PAGINATION")
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response(),
+      )
+    })?,
+    PositionWindowOriginV1::After | PositionWindowOriginV1::Before => 0,
+  };
+  Ok((limit, offset))
+}
+
+fn public_search_window(search: &PublicSearchRequestV1) -> BoxedResponseResultV1<(usize, usize)> {
+  let limit = usize::try_from(search.pagination.limit).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(format!("Pagination limit does not fit this server: {error}"))
+        .with_code("INVALID_PAGINATION")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response(),
+    )
+  })?;
+  let offset = match search.pagination.origin {
+    PositionWindowOriginV1::Start => 0,
+    PositionWindowOriginV1::AbsoluteRank(rank) => usize::try_from(rank).map_err(|error| {
+      boxed_response_v1(
+        ErrorResponse::new(format!("Pagination offset does not fit this server: {error}"))
+          .with_code("INVALID_PAGINATION")
+          .with_status(StatusCode::BAD_REQUEST)
+          .into_response(),
+      )
+    })?,
+    PositionWindowOriginV1::After | PositionWindowOriginV1::Before => 0,
+  };
+  Ok((limit, offset))
+}
+
+fn public_position_resolution_error(error: PositionResolutionErrorV1) -> Response {
+  let (status, code) = match error.class() {
+    PositionResolutionErrorClassV1::InvalidPosition => (StatusCode::BAD_REQUEST, "INVALID_POSITION_CURSOR"),
+    PositionResolutionErrorClassV1::RootMismatch => (StatusCode::BAD_REQUEST, "POSITION_ROOT_MISMATCH"),
+    PositionResolutionErrorClassV1::OrderMismatch => (StatusCode::BAD_REQUEST, "POSITION_ORDER_MISMATCH"),
+    PositionResolutionErrorClassV1::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "HISTORICAL_VIEW_UNAVAILABLE"),
+    PositionResolutionErrorClassV1::ResourceLimit | PositionResolutionErrorClassV1::Cancelled => {
+      (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE")
+    }
+    PositionResolutionErrorClassV1::Corrupt => (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_CORRUPTION"),
+  };
+  ErrorResponse::new(error.context()).with_code(code).with_status(status).into_response()
+}
+
+fn encode_query_position(
+  query_engine: &QueryEngine<'_>,
+  order: &CompiledRouteOrderV1,
+  selected_root: &[u8],
+  query_path: &str,
+  order_by: &[SortField],
+  result: &QueryResult,
+) -> BoxedResponseResultV1<String> {
+  let row = query_engine
+    .logical_query_order_row(order, query_path, order_by, result)
+    .map_err(|error| boxed_response_v1(engine_error_response("Query position construction failed", &error)))?;
+  let encoded = encode_logical_order_row_position_v1(order, selected_root, row.as_borrowed()).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })?;
+  String::from_utf8(encoded).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })
+}
+
+struct PublicQueryPageContextV1<'request, 'engine> {
+  query_engine: &'request QueryEngine<'engine>,
+  order: &'request CompiledRouteOrderV1,
+  selected_root: &'request [u8],
+  root: &'request RootResponseV1,
+  request: &'request PublicQueryRequestV1,
+  query: &'request Query,
+  limit: usize,
+}
+
+struct PublicQueryPageResultV1 {
+  response: serde_json::Value,
+  total_results: u64,
+  results_returned: u64,
+}
+
+fn public_query_page_v1(
+  context: PublicQueryPageContextV1<'_, '_>,
+  results: &[QueryResult],
+) -> BoxedResponseResultV1<PublicQueryPageResultV1> {
+  let bound_index = match context.request.position.as_ref() {
+    Some(position) => {
+      let found = results.iter().position(|result| {
+        digest_parts(context.order.hash_algorithm(), &[b"file:", result.file_record.path.as_bytes()]) == position.file_key_tie()
+          && result.file_hash == position.record_revision_tie()
+      });
+      let Some(index) = found else {
+        return Err(boxed_response_v1(
+          ErrorResponse::new("logical position identity is absent from the authorized selected-root query universe")
+            .with_code("INVALID_POSITION_CURSOR")
+            .with_status(StatusCode::BAD_REQUEST)
+            .into_response(),
+        ));
+      };
+      let row = context
+        .query_engine
+        .logical_query_order_row(context.order, &context.request.path, &context.query.order_by, &results[index])
+        .map_err(|error| boxed_response_v1(engine_error_response("Query position resolution failed", &error)))?;
+      validate_resolved_position_row_v1(position, context.selected_root, context.order, &row)
+        .map_err(|error| boxed_response_v1(public_position_resolution_error(error)))?;
+      Some(index)
+    }
+    None => None,
+  };
+  let total_result_count = results.len();
+  let (page_start, page_end, has_more) = match context.request.pagination.origin {
+    PositionWindowOriginV1::Start => {
+      let page_end = context.limit.min(total_result_count);
+      (0, page_end, page_end < total_result_count)
+    }
+    PositionWindowOriginV1::AbsoluteRank(rank) => {
+      let page_start = usize::try_from(rank)
+        .map_err(|error| {
+          boxed_response_v1(
+            ErrorResponse::new(format!("Pagination rank does not fit this server: {error}"))
+              .with_code("INVALID_PAGINATION")
+              .with_status(StatusCode::BAD_REQUEST)
+              .into_response(),
+          )
+        })?
+        .min(total_result_count);
+      let page_end = page_start.saturating_add(context.limit).min(total_result_count);
+      (page_start, page_end, page_end < total_result_count)
+    }
+    PositionWindowOriginV1::After => {
+      let page_start = match bound_index.and_then(|index| index.checked_add(1)) {
+        Some(index) => index.min(total_result_count),
+        None => total_result_count,
+      };
+      let page_end = page_start.saturating_add(context.limit).min(total_result_count);
+      (page_start, page_end, page_end < total_result_count)
+    }
+    PositionWindowOriginV1::Before => {
+      let page_end = match bound_index {
+        Some(index) => index.min(total_result_count),
+        None => 0,
+      };
+      let page_start = page_end.saturating_sub(context.limit);
+      (page_start, page_end, page_start > 0)
+    }
+  };
+  let page = &results[page_start..page_end];
+  let next_cursor = if page_end < total_result_count {
+    match page.last() {
+      Some(result) => Some(encode_query_position(
+        context.query_engine,
+        context.order,
+        context.selected_root,
+        &context.request.path,
+        &context.query.order_by,
+        result,
+      )?),
+      None => None,
+    }
+  } else {
+    None
+  };
+  let prev_cursor = if page_start > 0 {
+    match page.first() {
+      Some(result) => Some(encode_query_position(
+        context.query_engine,
+        context.order,
+        context.selected_root,
+        &context.request.path,
+        &context.query.order_by,
+        result,
+      )?),
+      None => None,
+    }
+  } else {
+    None
+  };
+  let items = page
+    .iter()
+    .map(|result| {
+      serde_json::json!({
+        "path": result.file_record.path,
+        "size": result.file_record.total_size,
+        "content_type": result.file_record.content_type,
+        "created_at": result.file_record.created_at,
+        "updated_at": result.file_record.updated_at,
+        "score": result.score,
+        "matched_by": result.matched_by,
+      })
+    })
+    .collect::<Vec<_>>();
+  let total_results = u64::try_from(total_result_count).map_err(|error| {
+    boxed_response_v1(engine_error_response(
+      "Query response accounting failed",
+      &EngineError::ResourceExhausted(format!("query result count exceeds u64: {error}")),
+    ))
+  })?;
+  let results_returned = u64::try_from(page.len()).map_err(|error| {
+    boxed_response_v1(engine_error_response(
+      "Query response accounting failed",
+      &EngineError::ResourceExhausted(format!("query page count exceeds u64: {error}")),
+    ))
+  })?;
+  let metadata = PublicCollectionMetadataV1 {
+    has_more: Some(has_more),
+    next_cursor,
+    prev_cursor,
+    total: context.request.include_total.then_some(total_results),
+    limit: Some(context.request.pagination.limit),
+    offset: match context.request.pagination.origin {
+      PositionWindowOriginV1::Start => Some(0),
+      PositionWindowOriginV1::AbsoluteRank(rank) => Some(rank),
+      PositionWindowOriginV1::After | PositionWindowOriginV1::Before => None,
+    },
+    default_limit_hit: (context.request.default_limit_applied && has_more).then_some(true),
+    default_limit: (context.request.default_limit_applied && has_more).then_some(context.request.pagination.limit),
+    ..PublicCollectionMetadataV1::default()
+  };
+  let envelope = PublicItemsResponseV1::new(context.root.clone(), items, metadata);
+  let response = serialize_response_value(&envelope, "Query response").map_err(boxed_response_v1)?;
+  Ok(PublicQueryPageResultV1 { response, total_results, results_returned })
+}
+
+fn search_position_row(order: &CompiledRouteOrderV1, result: &SearchResult) -> EngineResult<LogicalOrderRowOwnedV1> {
+  if !result.score.is_finite() {
+    return Err(EngineError::InvalidInput("search score is not finite".to_string()));
+  }
+  let score = if result.score == 0.0 { 0.0 } else { result.score };
+  let row = LogicalOrderRowOwnedV1 {
+    route: PositionRouteV1::GlobalSearch,
+    components: vec![
+      LogicalOrderComponentOwnedV1::present(PositionComparatorV1::FiniteF64, score.to_le_bytes().to_vec()),
+      LogicalOrderComponentOwnedV1::present(PositionComparatorV1::Utf8Binary, result.path.as_bytes().to_vec()),
+    ],
+    file_key_tie: digest_parts(order.hash_algorithm(), &[b"file:", result.path.as_bytes()]),
+    record_revision_tie: result.record_revision.clone(),
+  };
+  validate_logical_order_row_v1(order, row.as_borrowed())
+    .map_err(|error| EngineError::InvalidInput(format!("invalid selected search position row: {error}")))?;
+  Ok(row)
+}
+
+fn encode_search_position(order: &CompiledRouteOrderV1, selected_root: &[u8], result: &SearchResult) -> BoxedResponseResultV1<String> {
+  let row = search_position_row(order, result)
+    .map_err(|error| boxed_response_v1(engine_error_response("Search position construction failed", &error)))?;
+  let encoded = encode_logical_order_row_position_v1(order, selected_root, row.as_borrowed()).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })?;
+  String::from_utf8(encoded).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })
+}
+
+fn aggregate_position_row(
+  query_engine: &QueryEngine<'_>,
+  order: &CompiledRouteOrderV1,
+  query_path: &str,
+  order_by: &[SortField],
+  selected_root: &[u8],
+  group: &GroupResult,
+) -> EngineResult<LogicalOrderRowOwnedV1> {
+  let mut components = Vec::new();
+  components
+    .try_reserve_exact(order_by.len().max(1).saturating_add(1))
+    .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve aggregate position components: {error}")))?;
+  if order_by.is_empty() {
+    components.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::U64, group.count.to_le_bytes().to_vec()));
+  } else {
+    for sort in order_by {
+      let comparator = query_engine.source_order_comparator(query_path, &sort.field)?;
+      let value = if sort.field == "@count" || sort.field == "count" {
+        Some(serde_json::json!(group.count))
+      } else {
+        aggregate_group_order_value(group, &sort.field)
+      };
+      components.push(json_position_component(comparator, value.as_ref())?);
+    }
+  }
+  components.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::BytesBinary, group.canonical_group_tuple().to_vec()));
+  let row = LogicalOrderRowOwnedV1 {
+    route: PositionRouteV1::AggregateGroups,
+    components,
+    file_key_tie: digest_parts(order.hash_algorithm(), &[group.canonical_group_tuple()]),
+    record_revision_tie: selected_root.to_vec(),
+  };
+  validate_logical_order_row_v1(order, row.as_borrowed())
+    .map_err(|error| EngineError::InvalidInput(format!("invalid selected aggregate position row: {error}")))?;
+  Ok(row)
+}
+
+fn aggregate_group_order_value(group: &GroupResult, field: &str) -> Option<serde_json::Value> {
+  if let Some(value) = group.key.get(field) {
+    return Some(value.clone());
+  }
+  if let Some(value) = group.sum.get(field) {
+    return Some(serde_json::Value::from(*value));
+  }
+  if let Some(value) = group.avg.get(field) {
+    return Some(serde_json::Value::from(*value));
+  }
+  if let Some(value) = group.min.get(field) {
+    return Some(value.clone());
+  }
+  group.max.get(field).cloned()
+}
+
+fn json_position_component(
+  comparator: PositionComparatorV1,
+  value: Option<&serde_json::Value>,
+) -> EngineResult<LogicalOrderComponentOwnedV1> {
+  let Some(value) = value else {
+    return Ok(LogicalOrderComponentOwnedV1::missing());
+  };
+  if value.is_null() {
+    return Ok(LogicalOrderComponentOwnedV1::typed_null());
+  }
+  let payload = match comparator {
+    PositionComparatorV1::BytesBinary => match value {
+      serde_json::Value::String(value) => value.as_bytes().to_vec(),
+      value => serde_json::to_vec(value).map_err(|error| EngineError::InvalidInput(error.to_string()))?,
+    },
+    PositionComparatorV1::Utf8Binary => value
+      .as_str()
+      .ok_or_else(|| EngineError::InvalidInput("aggregate UTF-8 order value is not a string".to_string()))?
+      .as_bytes()
+      .to_vec(),
+    PositionComparatorV1::U64 => value
+      .as_u64()
+      .ok_or_else(|| EngineError::InvalidInput("aggregate u64 order value is not unsigned".to_string()))?
+      .to_le_bytes()
+      .to_vec(),
+    PositionComparatorV1::I64 | PositionComparatorV1::TimestampMs => value
+      .as_i64()
+      .ok_or_else(|| EngineError::InvalidInput("aggregate signed order value is not an integer".to_string()))?
+      .to_le_bytes()
+      .to_vec(),
+    PositionComparatorV1::FiniteF64 => {
+      let value = value.as_f64().ok_or_else(|| EngineError::InvalidInput("aggregate float order value is not numeric".to_string()))?;
+      if !value.is_finite() {
+        return Err(EngineError::InvalidInput("aggregate float order value is not finite".to_string()));
+      }
+      (if value == 0.0 { 0.0 } else { value }).to_le_bytes().to_vec()
+    }
+    PositionComparatorV1::Boolean => {
+      vec![u8::from(value.as_bool().ok_or_else(|| EngineError::InvalidInput("aggregate Boolean order value is not Boolean".to_string()))?)]
+    }
+  };
+  Ok(LogicalOrderComponentOwnedV1::present(comparator, payload))
+}
+
+fn encode_aggregate_position(
+  query_engine: &QueryEngine<'_>,
+  order: &CompiledRouteOrderV1,
+  query_path: &str,
+  order_by: &[SortField],
+  selected_root: &[u8],
+  group: &GroupResult,
+) -> BoxedResponseResultV1<String> {
+  let row = aggregate_position_row(query_engine, order, query_path, order_by, selected_root, group)
+    .map_err(|error| boxed_response_v1(engine_error_response("Aggregate position construction failed", &error)))?;
+  let encoded = encode_logical_order_row_position_v1(order, selected_root, row.as_borrowed()).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })?;
+  String::from_utf8(encoded).map_err(|error| {
+    boxed_response_v1(
+      ErrorResponse::new(error.to_string())
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response(),
+    )
+  })
+}
+
+struct PublicAggregatePageContextV1<'request, 'engine> {
+  query_engine: &'request QueryEngine<'engine>,
+  order: &'request CompiledRouteOrderV1,
+  selected_root: &'request [u8],
+  root: &'request RootResponseV1,
+  request: &'request PublicQueryRequestV1,
+  query: &'request Query,
+  limit: usize,
+}
+
+struct PublicAggregatePageResultV1 {
+  response: serde_json::Value,
+  candidate_results: u64,
+  results_returned: u64,
+}
+
+fn public_aggregate_page_v1(
+  context: PublicAggregatePageContextV1<'_, '_>,
+  mut result: AggregateResult,
+) -> BoxedResponseResultV1<PublicAggregatePageResultV1> {
+  let candidate_results = match result.count {
+    Some(count) => count,
+    None => match result.groups.as_ref() {
+      Some(groups) => groups.iter().fold(0u64, |total, group| total.saturating_add(group.count)),
+      None => 0,
+    },
+  };
+  let mut results_returned = u64::from(result.count.is_some());
+  let mut next_cursor = None;
+  let mut prev_cursor = None;
+  if let Some(groups) = result.groups.take() {
+    let mut ordered = Vec::new();
+    ordered.try_reserve_exact(groups.len()).map_err(|error| {
+      boxed_response_v1(engine_error_response(
+        "Aggregate pagination failed",
+        &EngineError::ResourceExhausted(format!("cannot reserve aggregate position rows: {error}")),
+      ))
+    })?;
+    for group in groups {
+      let row = aggregate_position_row(
+        context.query_engine,
+        context.order,
+        &context.request.path,
+        &context.query.order_by,
+        context.selected_root,
+        &group,
+      )
+      .map_err(|error| boxed_response_v1(engine_error_response("Aggregate position construction failed", &error)))?;
+      ordered.push((group, row));
+    }
+    let mut sort_error = None;
+    ordered.sort_by(|left, right| match compare_logical_order_rows_v1(context.order, left.1.as_borrowed(), right.1.as_borrowed()) {
+      Ok(ordering) => ordering,
+      Err(error) => {
+        sort_error = Some(error);
+        std::cmp::Ordering::Equal
+      }
+    });
+    if let Some(error) = sort_error {
+      return Err(boxed_response_v1(engine_error_response(
+        "Aggregate ordering failed",
+        &EngineError::InvalidInput(format!("invalid aggregate logical order: {error}")),
+      )));
+    }
+    let bound_index = match context.request.position.as_ref() {
+      Some(position) => {
+        let found = ordered.iter().position(|(_, row)| {
+          row.file_key_tie.as_slice() == position.file_key_tie() && row.record_revision_tie.as_slice() == position.record_revision_tie()
+        });
+        let Some(index) = found else {
+          return Err(boxed_response_v1(
+            ErrorResponse::new("logical position identity is absent from the authorized selected-root aggregate universe")
+              .with_code("INVALID_POSITION_CURSOR")
+              .with_status(StatusCode::BAD_REQUEST)
+              .into_response(),
+          ));
+        };
+        validate_resolved_position_row_v1(position, context.selected_root, context.order, &ordered[index].1)
+          .map_err(|error| boxed_response_v1(public_position_resolution_error(error)))?;
+        Some(index)
+      }
+      None => None,
+    };
+    let total_group_count = ordered.len();
+    let (page_start, page_end, has_more) = match context.request.pagination.origin {
+      PositionWindowOriginV1::Start => {
+        let page_end = context.limit.min(total_group_count);
+        (0, page_end, page_end < total_group_count)
+      }
+      PositionWindowOriginV1::AbsoluteRank(rank) => {
+        let page_start = usize::try_from(rank)
+          .map_err(|error| {
+            boxed_response_v1(
+              ErrorResponse::new(format!("Pagination rank does not fit this server: {error}"))
+                .with_code("INVALID_PAGINATION")
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response(),
+            )
+          })?
+          .min(total_group_count);
+        let page_end = page_start.saturating_add(context.limit).min(total_group_count);
+        (page_start, page_end, page_end < total_group_count)
+      }
+      PositionWindowOriginV1::After => {
+        let page_start = match bound_index.and_then(|index| index.checked_add(1)) {
+          Some(index) => index.min(total_group_count),
+          None => total_group_count,
+        };
+        let page_end = page_start.saturating_add(context.limit).min(total_group_count);
+        (page_start, page_end, page_end < total_group_count)
+      }
+      PositionWindowOriginV1::Before => {
+        let page_end = match bound_index {
+          Some(index) => index.min(total_group_count),
+          None => 0,
+        };
+        let page_start = page_end.saturating_sub(context.limit);
+        (page_start, page_end, page_start > 0)
+      }
+    };
+    if page_end < total_group_count {
+      if let Some((group, _)) = ordered.get(page_end.saturating_sub(1)) {
+        next_cursor = Some(encode_aggregate_position(
+          context.query_engine,
+          context.order,
+          &context.request.path,
+          &context.query.order_by,
+          context.selected_root,
+          group,
+        )?);
+      }
+    }
+    if page_start > 0 {
+      if let Some((group, _)) = ordered.get(page_start) {
+        prev_cursor = Some(encode_aggregate_position(
+          context.query_engine,
+          context.order,
+          &context.request.path,
+          &context.query.order_by,
+          context.selected_root,
+          group,
+        )?);
+      }
+    }
+    results_returned = u64::try_from(page_end.saturating_sub(page_start)).map_err(|error| {
+      boxed_response_v1(engine_error_response(
+        "Aggregate response accounting failed",
+        &EngineError::ResourceExhausted(format!("aggregate page count exceeds u64: {error}")),
+      ))
+    })?;
+    result.groups = Some(ordered.drain(page_start..page_end).map(|(group, _)| group).collect());
+    result.has_more = has_more;
+  } else if context.request.position.is_some() {
+    return Err(boxed_response_v1(
+      ErrorResponse::new("aggregate position is absent from an ungrouped result universe")
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response(),
+    ));
+  }
+  let mut response = serialize_response_value(&result, "Aggregation response").map_err(boxed_response_v1)?;
+  response["root"] = serialize_response_value(context.root, "Query root response").map_err(boxed_response_v1)?;
+  if let Some(cursor) = next_cursor {
+    response["next_cursor"] = serde_json::Value::String(cursor);
+  }
+  if let Some(cursor) = prev_cursor {
+    response["prev_cursor"] = serde_json::Value::String(cursor);
+  }
+  response["limit"] = serde_json::json!(context.request.pagination.limit);
+  if !context.request.select.is_empty() {
+    let mapped = map_select_fields(&context.request.select);
+    apply_projection(&mut response, &mapped);
+  }
+  Ok(PublicAggregatePageResultV1 { response, candidate_results, results_returned })
+}
+
+fn search_result_is_authorized(
+  state: &AppState,
+  claims: &TokenClaims,
+  key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
+  selected: &LegacyV3SelectedRootAdapterV1<'_>,
+  result: &SearchResult,
+) -> EngineResult<bool> {
+  if !current_path_read_is_authorized(state, claims, key_rules, &result.path)? {
+    return Ok(false);
+  }
+  selected_path_is_authorized(state, claims, selected, &result.path, CrudlifyOp::Read)
+}
+
+fn public_aggregate_query(aggregate: &PublicAggregateRequestV1) -> AggregateQuery {
+  AggregateQuery {
+    count: aggregate.count,
+    sum: aggregate.sum.clone(),
+    avg: aggregate.avg.clone(),
+    min: aggregate.min.clone(),
+    max: aggregate.max.clone(),
+    group_by: aggregate.group_by.clone(),
+  }
+}
+
 /// POST /query -- execute an index query and return matching file metadata.
 /// Supports both legacy array format and nested boolean object format.
 /// Always returns paginated envelope: { results, has_more, next_cursor?, prev_cursor?, total? }
 pub async fn query_endpoint(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
   active_key_rules: Option<Extension<ActiveKeyRules>>,
-  Json(body): Json<QueryRequest>,
+  body: Body,
 ) -> Response {
-  if let Err(response) = require_generic_data_path(&state, &body.path) {
-    return response;
+  if let Err(error) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return error.into_response();
   }
-  let family_policy = match SystemFamilyPolicyResolver::new(state.engine.hash_algo()) {
-    Ok(policy) => policy,
-    Err(error) => return engine_error_response("Failed to load generic data policy", &error),
-  };
-
-  // Parse the where clause into a QueryNode tree.
-  let query_node = match parse_where_clause(&body.r#where) {
-    Ok(node) => node,
-    Err(message) => {
-      return ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response();
+  let bytes = match axum::body::to_bytes(body, PUBLIC_QUERY_MAXIMUM_REQUEST_BYTES_V1).await {
+    Ok(bytes) => bytes,
+    Err(error) => {
+      return ErrorResponse::new(format!("Query request body exceeds its bounded admission limit: {error}"))
+        .with_code("QUERY_REQUEST_TOO_LARGE")
+        .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+        .into_response();
     }
   };
-
-  // Check for empty where clause (AND with no children).
-  let is_empty = matches!(&query_node, QueryNode::And(children) if children.is_empty());
-
-  // Parse order_by
-  let order_by: Vec<SortField> = body
-    .order_by
-    .as_ref()
-    .map(|fields| {
-      fields
-        .iter()
-        .map(|f| SortField {
-          field: f.field.clone(),
-          direction: match f.direction.as_deref() {
-            Some("desc") => SortDirection::Desc,
-            _ => SortDirection::Asc,
-          },
-        })
-        .collect()
-    })
-    .unwrap_or_default();
-
-  // Determine explain mode
-  let explain_mode = match body.explain.as_ref() {
-    Some(v) if v == "analyze" || v == &serde_json::json!("analyze") => ExplainMode::Analyze,
-    Some(v) if v.as_bool().unwrap_or(false) || v == "plan" || v == &serde_json::json!("plan") => ExplainMode::Plan,
-    _ => ExplainMode::Off,
+  let admitted = match admit_public_query_request_v1(&bytes, state.engine.hash_algo()) {
+    Ok(admitted) => admitted,
+    Err(error) => return public_schema_error_response(error),
   };
+  if let Err(response) = require_generic_data_path(&state, &admitted.path) {
+    return response;
+  }
+
+  let key_rules = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  match current_query_scope_is_authorized(&state, &claims, key_rules, &admitted.path) {
+    Ok(true) => {}
+    Ok(false) => return selected_permission_denial(&admitted.path, key_rules.is_some()),
+    Err(error) => return engine_error_response("Failed to authorize current query scope", &error),
+  }
+  if let Err(error) = reject_historical_share_selector(&claims, &admitted.selector) {
+    return error.into_response();
+  }
+  let selected = match resolve_legacy_root(&state.engine, &admitted.selector) {
+    Ok(selected) => selected,
+    Err(error) => return error.into_response(),
+  };
+  match selected_path_is_authorized(&state, &claims, &selected, &admitted.path, CrudlifyOp::Read) {
+    Ok(true) => {}
+    Ok(false) => return selected_permission_denial(&admitted.path, key_rules.is_some()),
+    Err(error) => return engine_error_response("Failed to authorize selected query scope", &error),
+  }
+
   let request_budget = match state.engine.start_query_request_budget() {
     Ok(request_budget) => request_budget,
     Err(error) => return engine_error_response("Query admission failed", &error),
   };
-
-  // Handle EXPLAIN mode -- short-circuits normal response path
-  if explain_mode != ExplainMode::Off {
-    let agg = body.aggregate.as_ref().map(|agg_data| AggregateQuery {
-      count: agg_data.count,
-      sum: agg_data.sum.clone(),
-      avg: agg_data.avg.clone(),
-      min: agg_data.min.clone(),
-      max: agg_data.max.clone(),
-      group_by: agg_data.group_by.clone(),
-    });
-
-    let query = Query {
-      path: body.path.clone(),
-      field_queries: Vec::new(),
-      node: if is_empty { None } else { Some(query_node.clone()) },
-      limit: body.limit,
-      offset: body.offset,
-      order_by: order_by.clone(),
-      after: body.after.clone(),
-      before: body.before.clone(),
-      include_total: body.include_total.unwrap_or(false),
-      strategy: QueryStrategy::Full,
-      aggregate: agg,
-      explain: explain_mode,
-    };
-
-    let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-    match query_engine.execute_explain_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
-      Ok(result) => {
-        let response = match serialize_response_value(&result, "Explain response") {
-          Ok(response) => response,
-          Err(response) => return response,
-        };
-        return (StatusCode::OK, Json(response)).into_response();
-      }
-      Err(error) => return engine_error_response("Explain failed", &error),
-    }
+  let query_engine = QueryEngine::with_read_source_and_budget(&state.engine, &selected, request_budget.clone());
+  let compiled_order = match compile_legacy_public_query_order(&query_engine, &admitted, state.engine.hash_algo()) {
+    Ok(compiled_order) => compiled_order,
+    Err(error) => return engine_error_response("Query order admission failed", &error),
+  };
+  let position_route = if admitted.aggregate.is_some() { PositionRouteV1::AggregateGroups } else { PositionRouteV1::Query };
+  let body = match finalize_public_query_request_v1(
+    admitted,
+    state.engine.hash_algo(),
+    PublicPositionContextV1 { route: position_route, order_fingerprint: compiled_order.fingerprint() },
+  ) {
+    Ok(body) => body,
+    Err(error) => return public_schema_error_response(error),
+  };
+  let (limit, offset) = match public_query_window(&body) {
+    Ok(window) => window,
+    Err(response) => return *response,
+  };
+  let query_node = match public_query_expression_to_legacy(body.expression.clone()) {
+    Ok(query_node) => query_node,
+    Err(message) => return ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response(),
+  };
+  let mut order_by = body
+    .order_by
+    .iter()
+    .map(|field| {
+      let (direction, _) = public_sort_direction(field.direction);
+      SortField { field: field.field.clone(), direction }
+    })
+    .collect::<Vec<_>>();
+  if order_by.is_empty() && body.aggregate.is_none() {
+    order_by.push(SortField { field: "@path".to_string(), direction: SortDirection::Asc });
   }
-
-  // If aggregate query, use execute_aggregate
-  if let Some(ref agg_data) = body.aggregate {
-    let agg_query = AggregateQuery {
-      count: agg_data.count,
-      sum: agg_data.sum.clone(),
-      avg: agg_data.avg.clone(),
-      min: agg_data.min.clone(),
-      max: agg_data.max.clone(),
-      group_by: agg_data.group_by.clone(),
-    };
-
-    let query = Query {
-      path: body.path.clone(),
-      field_queries: Vec::new(),
-      node: if is_empty { None } else { Some(query_node) },
-      limit: body.limit,
-      offset: body.offset,
-      order_by,
-      after: body.after.clone(),
-      before: body.before.clone(),
-      include_total: body.include_total.unwrap_or(false),
-      strategy: QueryStrategy::Full,
-      aggregate: Some(agg_query),
-      explain: ExplainMode::Off,
-    };
-
-    let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-    match query_engine.execute_aggregate_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
-      Ok(result) => {
-        let mut response_value = match serialize_response_value(&result, "Aggregation response") {
-          Ok(response) => response,
-          Err(response) => return response,
-        };
-        // Apply projection if select is specified
-        if let Some(ref select) = body.select {
-          if !select.is_empty() {
-            let mapped = map_select_fields(select);
-            apply_projection(&mut response_value, &mapped);
-          }
-        }
-        return (StatusCode::OK, Json(response_value)).into_response();
-      }
-      Err(EngineError::NotFound(msg)) => {
-        return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response();
-      }
-      Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
-        return engine_error_response("Aggregation failed", &error);
-      }
-      Err(e) => {
-        return ErrorResponse::new(format!("Aggregation failed: {}", e)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response();
-      }
-    }
-  }
-
+  let explain = match body.explain {
+    PublicExplainModeV1::Off => ExplainMode::Off,
+    PublicExplainModeV1::Plan => ExplainMode::Plan,
+    PublicExplainModeV1::Analyze => ExplainMode::Analyze,
+  };
+  let aggregate = body.aggregate.as_ref().map(public_aggregate_query);
+  let execution_limit = if aggregate.as_ref().is_some_and(|aggregate| !aggregate.group_by.is_empty()) && explain == ExplainMode::Off {
+    usize::MAX
+  } else {
+    limit
+  };
   let query = Query {
     path: body.path.clone(),
     field_queries: Vec::new(),
-    node: if is_empty { None } else { Some(query_node.clone()) },
-    limit: body.limit,
-    offset: body.offset,
+    node: Some(query_node.clone()),
+    limit: Some(execution_limit),
+    offset: Some(offset),
     order_by,
-    after: body.after.clone(),
-    before: body.before.clone(),
-    include_total: body.include_total.unwrap_or(false),
+    after: None,
+    before: None,
+    include_total: body.include_total,
     strategy: QueryStrategy::Full,
-    aggregate: None,
-    explain: ExplainMode::Off,
+    aggregate,
+    explain: explain.clone(),
   };
 
-  let query_engine = QueryEngine::with_request_budget(&state.engine, request_budget.clone());
-  match query_engine.execute_paginated_filtered(&query, |result| family_policy.generic_data_path_is_visible(&result.file_record.path)) {
-    Ok(paginated) => {
-      let response_items: Vec<serde_json::Value> = paginated
-        .results
-        .iter()
-        .map(|result| {
-          serde_json::json!({
-            "path": result.file_record.path,
-            "size": result.file_record.total_size,
-            "content_type": result.file_record.content_type,
-            "created_at": result.file_record.created_at,
-            "updated_at": result.file_record.updated_at,
-            "score": result.score,
-            "matched_by": result.matched_by,
-          })
-        })
-        .collect();
-
-      // Filter query results by API key rules — denied paths are silently omitted
-      let mut response_items = if let Some(Extension(ref rules)) = active_key_rules {
-        if !rules.0.is_empty() {
-          let mut items = response_items;
-          items.retain(|item| {
-            let path = item["path"].as_str().unwrap_or("");
-            let normalized = if path.starts_with('/') { path.to_string() } else { format!("/{}", path) };
-            match match_rules(&rules.0, &normalized) {
-              Some(rule) => check_operation_permitted(&rule.permitted, 'r'),
-              None => false,
-            }
-          });
-          items
-        } else {
-          response_items
-        }
-      } else {
-        response_items
+  if explain != ExplainMode::Off {
+    if explain == ExplainMode::Plan && body.position.is_some() {
+      return ErrorResponse::new("plan-only EXPLAIN has no authorized result position to resolve")
+        .with_code("INVALID_POSITION_CURSOR")
+        .with_status(StatusCode::BAD_REQUEST)
+        .into_response();
+    }
+    if explain == ExplainMode::Analyze && body.aggregate.is_none() {
+      let mut plan_query = query.clone();
+      plan_query.explain = ExplainMode::Plan;
+      let plan = match query_engine
+        .execute_explain_filtered(&plan_query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+      {
+        Ok(plan) => plan,
+        Err(error) => return engine_error_response("Explain planning failed", &error),
       };
-
-      // Filter query results by user/group permissions. Query is exempt from
-      // path-level middleware, so authorization happens here: a user only
-      // sees files they have direct Read on (grants + grant inheritance).
-      // Root short-circuits; share keys are handled by the key_rules branch
-      // above.
-      if !claims.sub.starts_with("share:") {
-        if let Err(error) = filter_results_by_direct_read(&mut response_items, &claims.sub, &state.engine, &state.group_cache) {
-          return engine_error_response("Failed to filter query permissions", &error);
-        }
+      let execution_start = std::time::Instant::now();
+      let results = match query_engine
+        .execute_all_ordered_filtered(&query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+      {
+        Ok(results) => results,
+        Err(error) => return engine_error_response("Explain execution failed", &error),
+      };
+      let page = match public_query_page_v1(
+        PublicQueryPageContextV1 {
+          query_engine: &query_engine,
+          order: &compiled_order,
+          selected_root: selected.selected_root(),
+          root: selected.root(),
+          request: &body,
+          query: &query,
+          limit,
+        },
+        &results,
+      ) {
+        Ok(page) => page,
+        Err(response) => return *response,
+      };
+      let mut item_response = page.response;
+      if !body.select.is_empty() {
+        let mapped = map_select_fields(&body.select);
+        apply_projection(&mut item_response, &mapped);
       }
+      if let Some(object) = item_response.as_object_mut() {
+        object.remove("root");
+      }
+      let mut response = match serialize_response_value(&plan, "Explain response") {
+        Ok(response) => response,
+        Err(response) => return response,
+      };
+      response["execution"] = serde_json::json!({
+        "total_duration_ms": execution_start.elapsed().as_secs_f64() * 1000.0,
+        "candidates_generated": page.total_results,
+        "results_returned": page.results_returned,
+      });
+      response["items"] = item_response;
+      response["root"] = match serialize_response_value(selected.root(), "Query root response") {
+        Ok(root) => root,
+        Err(response) => return response,
+      };
+      return (StatusCode::OK, Json(response)).into_response();
+    }
+    if explain == ExplainMode::Analyze {
+      let mut plan_query = query.clone();
+      plan_query.explain = ExplainMode::Plan;
+      let plan = match query_engine
+        .execute_explain_filtered(&plan_query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+      {
+        Ok(plan) => plan,
+        Err(error) => return engine_error_response("Explain planning failed", &error),
+      };
+      let execution_start = std::time::Instant::now();
+      let mut aggregate_query = query.clone();
+      aggregate_query.explain = ExplainMode::Off;
+      aggregate_query.limit = Some(usize::MAX);
+      aggregate_query.offset = Some(0);
+      let result = match query_engine
+        .execute_aggregate_filtered(&aggregate_query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+      {
+        Ok(result) => result,
+        Err(error) => return engine_error_response("Explain aggregate execution failed", &error),
+      };
+      let page = match public_aggregate_page_v1(
+        PublicAggregatePageContextV1 {
+          query_engine: &query_engine,
+          order: &compiled_order,
+          selected_root: selected.selected_root(),
+          root: selected.root(),
+          request: &body,
+          query: &aggregate_query,
+          limit,
+        },
+        result,
+      ) {
+        Ok(page) => page,
+        Err(response) => return *response,
+      };
+      let mut item_response = page.response;
+      if let Some(object) = item_response.as_object_mut() {
+        object.remove("root");
+      }
+      let mut response = match serialize_response_value(&plan, "Explain response") {
+        Ok(response) => response,
+        Err(response) => return response,
+      };
+      response["execution"] = serde_json::json!({
+        "total_duration_ms": execution_start.elapsed().as_secs_f64() * 1000.0,
+        "candidates_generated": page.candidate_results,
+        "results_returned": page.results_returned,
+      });
+      response["items"] = item_response;
+      response["root"] = match serialize_response_value(selected.root(), "Query root response") {
+        Ok(root) => root,
+        Err(response) => return response,
+      };
+      return (StatusCode::OK, Json(response)).into_response();
+    }
+    return match query_engine
+      .execute_explain_filtered(&query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+    {
+      Ok(result) => {
+        let mut response = match serialize_response_value(&result, "Explain response") {
+          Ok(response) => response,
+          Err(response) => return response,
+        };
+        response["root"] = match serialize_response_value(selected.root(), "Query root response") {
+          Ok(root) => root,
+          Err(response) => return response,
+        };
+        (StatusCode::OK, Json(response)).into_response()
+      }
+      Err(error) => engine_error_response("Explain failed", &error),
+    };
+  }
 
-      let locator_options = LocatorOptions::from_request(&body.locators);
-      if locator_options.include_matches {
-        let locator_terms = if is_empty { Vec::new() } else { terms_from_query_node(&query_node) };
-        if let Err(error) = enrich_query_items_with_locators(
-          state.engine.as_ref(),
-          &paginated.results,
-          &mut response_items,
-          &locator_terms,
-          &locator_options,
-          &request_budget,
+  if body.aggregate.is_some() {
+    return match query_engine
+      .execute_aggregate_filtered(&query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+    {
+      Ok(result) => {
+        let page = match public_aggregate_page_v1(
+          PublicAggregatePageContextV1 {
+            query_engine: &query_engine,
+            order: &compiled_order,
+            selected_root: selected.selected_root(),
+            root: selected.root(),
+            request: &body,
+            query: &query,
+            limit,
+          },
+          result,
         ) {
+          Ok(page) => page,
+          Err(response) => return *response,
+        };
+        (StatusCode::OK, Json(page.response)).into_response()
+      }
+      Err(EngineError::NotFound(message)) => ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response(),
+      Err(error) => engine_error_response("Aggregation failed", &error),
+    };
+  }
+
+  match query_engine
+    .execute_all_ordered_filtered(&query, |result| query_result_is_authorized(&state, &claims, key_rules, &selected, result))
+  {
+    Ok(results) => {
+      let page = match public_query_page_v1(
+        PublicQueryPageContextV1 {
+          query_engine: &query_engine,
+          order: &compiled_order,
+          selected_root: selected.selected_root(),
+          root: selected.root(),
+          request: &body,
+          query: &query,
+          limit,
+        },
+        &results,
+      ) {
+        Ok(page) => page,
+        Err(response) => return *response,
+      };
+      let mut response = page.response;
+      if body.locators.include_matches {
+        let Some(items) = response.get_mut("items").and_then(serde_json::Value::as_array_mut) else {
+          return engine_error_response(
+            "Query locator generation failed",
+            &EngineError::CorruptEntry { offset: 0, reason: "query response is missing its items collection".to_string() },
+          );
+        };
+        let terms = terms_from_query_node(&query_node);
+        let locator_options = locator_options_from_public(&body.locators);
+        let locator_context = LocatorEnrichmentContextV1 {
+          engine: &state.engine,
+          selected: &selected,
+          options: &locator_options,
+          request_budget: &request_budget,
+        };
+        if let Err(error) = enrich_query_items_with_locators(&locator_context, &results, items, &terms) {
           return engine_error_response("Query locator generation failed", &error);
         }
       }
-
-      let mut response = serde_json::json!({
-        "items": response_items,
-        "has_more": paginated.has_more,
-      });
-
-      if let Some(total) = paginated.total_count {
-        response["total"] = serde_json::json!(total);
+      if !body.select.is_empty() {
+        let mapped = map_select_fields(&body.select);
+        apply_projection(&mut response, &mapped);
       }
-      if let Some(ref cursor) = paginated.next_cursor {
-        response["next_cursor"] = serde_json::json!(cursor);
-      }
-      if let Some(ref cursor) = paginated.prev_cursor {
-        response["prev_cursor"] = serde_json::json!(cursor);
-      }
-      if paginated.default_limit_hit {
-        response["default_limit_hit"] = serde_json::json!(true);
-        response["default_limit"] = serde_json::json!(DEFAULT_QUERY_LIMIT);
-      }
-
-      // Add reindex meta if a reindex is active for the query path
-      let meta = state.task_queue.as_ref().and_then(|queue| {
-        queue.get_reindex_progress_for_path(&body.path).map(|info| QueryMeta {
-          reindexing: Some(info.progress),
-          reindexing_eta: info.eta_ms,
-          reindexing_indexed: Some(info.indexed_count),
-          reindexing_total: Some(info.total_count),
-          reindexing_stale_since: info.stale_since,
-        })
-      });
-      if let Some(ref meta) = meta {
-        response["meta"] = match serialize_response_value(meta, "Query metadata response") {
-          Ok(meta) => meta,
-          Err(response) => return response,
-        };
-      }
-
-      // Apply projection if select is specified
-      if let Some(ref select) = body.select {
-        if !select.is_empty() {
-          let mapped = map_select_fields(select);
-          apply_projection(&mut response, &mapped);
-        }
-      }
-
       (StatusCode::OK, Json(response)).into_response()
     }
     Err(EngineError::NotFound(message)) => ErrorResponse::new(message).with_status(StatusCode::NOT_FOUND).into_response(),
@@ -2775,9 +3666,12 @@ pub async fn query_endpoint(
         .with_status(StatusCode::BAD_REQUEST)
         .into_response()
     }
-    Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
-      engine_error_response("Query failed", &error)
-    }
+    Err(
+      error @ (EngineError::ShuttingDown
+      | EngineError::Cancelled(_)
+      | EngineError::ResourceExhausted(_)
+      | EngineError::HistoricalViewUnavailable(_)),
+    ) => engine_error_response("Query failed", &error),
     Err(error) => {
       tracing::error!("Query execution failed: {}", error);
       ErrorResponse::new(format!("Query failed: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
@@ -3143,43 +4037,167 @@ pub struct GlobalSearchRequest {
 pub async fn global_search_endpoint(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
-  Json(payload): Json<GlobalSearchRequest>,
+  Extension(root_plan): Extension<RouteRootRequestPlanV1>,
+  active_key_rules: Option<Extension<ActiveKeyRules>>,
+  body: Body,
 ) -> Response {
-  if payload.query.is_none() && payload.where_clause.is_none() {
-    return ErrorResponse::new("At least one of 'query' or 'where' is required").with_status(StatusCode::BAD_REQUEST).into_response();
+  if let Err(error) = require_legacy_root_plan(root_plan, RootRequestAdapterV1::ResolveSingleRoot) {
+    return error.into_response();
   }
-
-  let query_node = match payload.where_clause.as_ref() {
-    Some(value) => match parse_where_clause(value) {
-      Ok(node) => Some(node),
-      Err(msg) => return ErrorResponse::new(msg).with_status(StatusCode::BAD_REQUEST).into_response(),
-    },
-    None => None,
+  let bytes = match axum::body::to_bytes(body, PUBLIC_SEARCH_MAXIMUM_REQUEST_BYTES_V1).await {
+    Ok(bytes) => bytes,
+    Err(error) => {
+      return ErrorResponse::new(format!("Search request body exceeds its bounded admission limit: {error}"))
+        .with_code("SEARCH_REQUEST_TOO_LARGE")
+        .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+        .into_response();
+    }
   };
-
-  let base_path = payload.path.as_deref().unwrap_or("/");
-  if let Err(response) = require_generic_data_path(&state, base_path) {
+  let admitted = match admit_public_search_request_v1(&bytes, state.engine.hash_algo()) {
+    Ok(admitted) => admitted,
+    Err(error) => return public_schema_error_response(error),
+  };
+  if let Err(response) = require_generic_data_path(&state, &admitted.path) {
     return response;
   }
-  let limit = payload.limit.map(|l| l.min(1000));
-  let offset = payload.offset;
+
+  let key_rules = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
+  match current_query_scope_is_authorized(&state, &claims, key_rules, &admitted.path) {
+    Ok(true) => {}
+    Ok(false) => return selected_permission_denial(&admitted.path, key_rules.is_some()),
+    Err(error) => return engine_error_response("Failed to authorize current search scope", &error),
+  }
+  if let Err(error) = reject_historical_share_selector(&claims, &admitted.selector) {
+    return error.into_response();
+  }
+  let selected = match resolve_legacy_root(&state.engine, &admitted.selector) {
+    Ok(selected) => selected,
+    Err(error) => return error.into_response(),
+  };
+  match selected_path_is_authorized(&state, &claims, &selected, &admitted.path, CrudlifyOp::Read) {
+    Ok(true) => {}
+    Ok(false) => return selected_permission_denial(&admitted.path, key_rules.is_some()),
+    Err(error) => return engine_error_response("Failed to authorize selected search scope", &error),
+  }
+
+  let compiled_order = match compile_global_search_order_v1(state.engine.hash_algo()) {
+    Ok(compiled_order) => compiled_order,
+    Err(error) => return engine_error_response("Search order admission failed", &EngineError::InvalidInput(error.to_string())),
+  };
+  let payload = match finalize_public_search_request_v1(
+    admitted,
+    state.engine.hash_algo(),
+    PublicPositionContextV1 { route: PositionRouteV1::GlobalSearch, order_fingerprint: compiled_order.fingerprint() },
+  ) {
+    Ok(payload) => payload,
+    Err(error) => return public_schema_error_response(error),
+  };
+  let (limit, _) = match public_search_window(&payload) {
+    Ok(window) => window,
+    Err(response) => return *response,
+  };
+  let query_node = match payload.expression.clone().map(public_query_expression_to_legacy).transpose() {
+    Ok(query_node) => query_node,
+    Err(message) => return ErrorResponse::new(message).with_status(StatusCode::BAD_REQUEST).into_response(),
+  };
   let request_budget = match state.engine.start_query_request_budget() {
     Ok(request_budget) => request_budget,
     Err(error) => return engine_error_response("Search admission failed", &error),
   };
 
-  match crate::engine::search::global_search_with_budget(
+  match crate::engine::search::global_search_all_with_source_and_budget(
     &state.engine,
-    base_path,
+    &selected,
+    &payload.path,
     payload.query.as_deref(),
     query_node.as_ref(),
-    limit,
-    offset,
     &request_budget,
+    |result| search_result_is_authorized(&state, &claims, key_rules, &selected, result),
   ) {
     Ok(results) => {
-      let mut items: Vec<serde_json::Value> = results
-        .results
+      let bound_index = match payload.position.as_ref() {
+        Some(position) => {
+          let found = results.iter().position(|result| {
+            digest_parts(state.engine.hash_algo(), &[b"file:", result.path.as_bytes()]) == position.file_key_tie()
+              && result.record_revision == position.record_revision_tie()
+          });
+          let Some(index) = found else {
+            return ErrorResponse::new("logical position identity is absent from the authorized selected-root search universe")
+              .with_code("INVALID_POSITION_CURSOR")
+              .with_status(StatusCode::BAD_REQUEST)
+              .into_response();
+          };
+          let row = match search_position_row(&compiled_order, &results[index]) {
+            Ok(row) => row,
+            Err(error) => return engine_error_response("Search position resolution failed", &error),
+          };
+          if let Err(error) = validate_resolved_position_row_v1(position, selected.selected_root(), &compiled_order, &row) {
+            return public_position_resolution_error(error);
+          }
+          Some(index)
+        }
+        None => None,
+      };
+      let total_results = results.len();
+      let (page_start, page_end, has_more) = match payload.pagination.origin {
+        PositionWindowOriginV1::Start => {
+          let page_end = limit.min(total_results);
+          (0, page_end, page_end < total_results)
+        }
+        PositionWindowOriginV1::AbsoluteRank(rank) => {
+          let page_start = match usize::try_from(rank) {
+            Ok(rank) => rank.min(total_results),
+            Err(error) => {
+              return ErrorResponse::new(format!("Pagination rank does not fit this server: {error}"))
+                .with_code("INVALID_PAGINATION")
+                .with_status(StatusCode::BAD_REQUEST)
+                .into_response();
+            }
+          };
+          let page_end = page_start.saturating_add(limit).min(total_results);
+          (page_start, page_end, page_end < total_results)
+        }
+        PositionWindowOriginV1::After => {
+          let page_start = match bound_index.and_then(|index| index.checked_add(1)) {
+            Some(index) => index.min(total_results),
+            None => total_results,
+          };
+          let page_end = page_start.saturating_add(limit).min(total_results);
+          (page_start, page_end, page_end < total_results)
+        }
+        PositionWindowOriginV1::Before => {
+          let page_end = match bound_index {
+            Some(index) => index.min(total_results),
+            None => 0,
+          };
+          let page_start = page_end.saturating_sub(limit);
+          (page_start, page_end, page_start > 0)
+        }
+      };
+      let page = &results[page_start..page_end];
+      let next_cursor = if page_end < total_results {
+        match page.last() {
+          Some(result) => match encode_search_position(&compiled_order, selected.selected_root(), result) {
+            Ok(cursor) => Some(cursor),
+            Err(response) => return *response,
+          },
+          None => None,
+        }
+      } else {
+        None
+      };
+      let prev_cursor = if page_start > 0 {
+        match page.first() {
+          Some(result) => match encode_search_position(&compiled_order, selected.selected_root(), result) {
+            Ok(cursor) => Some(cursor),
+            Err(response) => return *response,
+          },
+          None => None,
+        }
+      } else {
+        None
+      };
+      let mut items: Vec<serde_json::Value> = page
         .iter()
         .map(|r| {
           serde_json::json!({
@@ -3194,47 +4212,50 @@ pub async fn global_search_endpoint(
           })
         })
         .collect();
-
-      if let Err(error) = filter_generic_data_items(&state.engine, &mut items) {
-        return engine_error_response("Failed to classify search results", &error);
-      }
-
-      // Filter search results by user/group permissions. Search is exempt
-      // from path-level middleware, so authorization happens here: a user
-      // only sees files they have direct Read on (grants + inheritance).
-      if !claims.sub.starts_with("share:") {
-        if let Err(error) = filter_results_by_direct_read(&mut items, &claims.sub, &state.engine, &state.group_cache) {
-          return engine_error_response("Failed to filter search permissions", &error);
-        }
-      }
-
-      let locator_options = LocatorOptions::from_request(&payload.locators);
-      if locator_options.include_matches {
-        if let Err(error) = enrich_search_items_with_locators(
-          state.engine.as_ref(),
-          &results.results,
-          &mut items,
-          payload.query.as_deref(),
-          query_node.as_ref(),
-          &locator_options,
-          &request_budget,
-        ) {
+      if payload.locators.include_matches {
+        let locator_options = locator_options_from_public(&payload.locators);
+        let locator_context = LocatorEnrichmentContextV1 {
+          engine: &state.engine,
+          selected: &selected,
+          options: &locator_options,
+          request_budget: &request_budget,
+        };
+        if let Err(error) =
+          enrich_search_items_with_locators(&locator_context, &results, &mut items, payload.query.as_deref(), query_node.as_ref())
+        {
           return engine_error_response("Search locator generation failed", &error);
         }
       }
-
-      let mut response = serde_json::json!({
-        "results": items,
-        "has_more": results.has_more,
-      });
-      if let Some(total) = results.total_count {
-        response["total_count"] = serde_json::json!(total);
-      }
-      (StatusCode::OK, Json(response)).into_response()
+      let total_count = match u64::try_from(total_results) {
+        Ok(total_count) => total_count,
+        Err(error) => {
+          return engine_error_response(
+            "Search pagination failed",
+            &EngineError::ResourceExhausted(format!("search result count does not fit u64: {error}")),
+          );
+        }
+      };
+      let metadata = PublicCollectionMetadataV1 {
+        has_more: Some(has_more),
+        next_cursor,
+        prev_cursor,
+        total_count: Some(total_count),
+        limit: Some(payload.pagination.limit),
+        offset: match payload.pagination.origin {
+          PositionWindowOriginV1::Start => Some(0),
+          PositionWindowOriginV1::AbsoluteRank(rank) => Some(rank),
+          PositionWindowOriginV1::After | PositionWindowOriginV1::Before => None,
+        },
+        ..PublicCollectionMetadataV1::default()
+      };
+      (StatusCode::OK, Json(PublicResultsResponseV1::new(selected.root().clone(), items, metadata))).into_response()
     }
-    Err(error @ (EngineError::ShuttingDown | EngineError::Cancelled(_) | EngineError::ResourceExhausted(_))) => {
-      engine_error_response("Search failed", &error)
-    }
+    Err(
+      error @ (EngineError::ShuttingDown
+      | EngineError::Cancelled(_)
+      | EngineError::ResourceExhausted(_)
+      | EngineError::HistoricalViewUnavailable(_)),
+    ) => engine_error_response("Search failed", &error),
     Err(error) => {
       tracing::error!("Global search failed: {}", error);
       ErrorResponse::new(format!("Search failed: {}", error)).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()

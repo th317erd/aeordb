@@ -1775,9 +1775,17 @@ fn legacy_index_writer_bypasses_are_closed_to_reviewed_compatibility_adapters() 
     assert_eq!(source_occurrences_by_file(&engine_root, needle), expected, "unreviewed maintenance facade caller for {needle}");
   }
 
-  for reader in ["query_engine.rs", "search.rs"] {
-    let source = fs::read_to_string(engine_root.join(reader)).unwrap();
-    assert!(source.contains("IndexManager::new"), "{reader} no longer names the retained v3 query adapter");
+  let query_engine = fs::read_to_string(engine_root.join("query_engine.rs")).unwrap();
+  assert_eq!(query_engine.matches("IndexManager::new").count(), 2, "query engine no longer solely owns the retained v3 query adapter");
+  let search = fs::read_to_string(engine_root.join("search.rs")).unwrap();
+  assert!(!search.contains("IndexManager::new"), "search bypassed the shared current-or-selected query reader");
+  assert!(search.contains("QueryEngine::with_request_budget"), "search no longer routes current reads through the shared query engine");
+  assert!(
+    search.contains("QueryEngine::with_read_source_and_budget"),
+    "search no longer routes selected-root reads through the shared query engine"
+  );
+
+  for (reader, source) in [("query_engine.rs", query_engine), ("search.rs", search)] {
     for mutation in
       ["update_index(", "save_index(", "create_index(", "delete_index(", "delete_indexes_not_in_config(", "remove_file_from_index"]
     {

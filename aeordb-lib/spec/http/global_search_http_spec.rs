@@ -258,6 +258,8 @@ async fn test_broad_search_include_matches_returns_locators_and_identity() {
   let alice_result =
     results.iter().find(|result| result["path"].as_str() == Some("/people/alice.json")).expect("Alice result should be present");
 
+  assert!(alice_result["file_key"].as_str().unwrap_or("").len() >= 32, "missing file_key: {}", alice_result);
+  assert!(alice_result["record_revision"].as_str().unwrap_or("").len() >= 32, "missing record_revision: {}", alice_result);
   assert!(alice_result["content_hash"].as_str().unwrap_or("").len() >= 32, "missing content_hash: {}", alice_result);
   assert_eq!(alice_result["matches_truncated"], false);
   assert_eq!(alice_result["locator_status"], "complete");
@@ -444,7 +446,7 @@ async fn test_structured_search_uses_root_glob_index_for_scoped_virtual_field_qu
   let results = json["results"].as_array().unwrap();
   assert_eq!(results.len(), 1, "root glob index should satisfy scoped virtual-field search: {}", json);
   assert_eq!(results[0]["path"].as_str().unwrap(), "/docs/notes.txt");
-  assert_eq!(results[0]["source"].as_str().unwrap(), "/");
+  assert_eq!(results[0]["source"].as_str().unwrap(), "/docs");
   assert!(results[0]["matched_by"].as_array().unwrap().iter().any(|field| field.as_str() == Some("@filename")));
 }
 
@@ -707,14 +709,13 @@ async fn test_path_defaults_to_root() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_limit_clamped_to_max_1000() {
+async fn test_limit_above_maximum_is_rejected() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_multi_directory(&engine);
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  // Request limit > 1000 — should not error, server clamps it
-  let (status, _json) = search_request(
+  let (status, json) = search_request(
     app,
     &auth,
     serde_json::json!({
@@ -724,7 +725,8 @@ async fn test_limit_clamped_to_max_1000() {
   )
   .await;
 
-  assert_eq!(status, StatusCode::OK, "limit above max should be clamped, not rejected");
+  assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+  assert_eq!(json["code"], "INVALID_PAGINATION");
 }
 
 // ===========================================================================
@@ -1105,15 +1107,13 @@ async fn test_offset_beyond_results_returns_empty() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_empty_query_string() {
+async fn test_empty_query_string_is_rejected() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_multi_directory(&engine);
   let app = rebuild_app(&jwt_manager, &engine);
   let auth = bearer_token(&jwt_manager);
 
-  // Empty string query — technically valid (query is provided), but should
-  // not crash; behavior may be empty results or all results
-  let (status, _json) = search_request(
+  let (status, json) = search_request(
     app,
     &auth,
     serde_json::json!({
@@ -1122,8 +1122,8 @@ async fn test_empty_query_string() {
   )
   .await;
 
-  // Should not error — either 200 with empty or 200 with results
-  assert_eq!(status, StatusCode::OK, "empty query string should not cause an error");
+  assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+  assert_eq!(json["code"], "INVALID_SEARCH_REQUEST");
 }
 
 // ===========================================================================

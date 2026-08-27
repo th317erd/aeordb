@@ -169,6 +169,42 @@ async fn test_select_virtual_fields() {
 }
 
 #[tokio::test]
+async fn test_select_locator_identity_virtual_fields() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  setup_users(&engine);
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = bearer_token(&jwt_manager);
+
+  let body = serde_json::json!({
+    "path": "/myapp/users",
+    "where": { "field": "age", "op": "gt", "value": 20 },
+    "include_matches": true,
+    "select": ["@file_key", "@record_revision", "@content_hash", "@matches"]
+  });
+  let request = Request::builder()
+    .method("POST")
+    .uri("/files/query")
+    .header("content-type", "application/json")
+    .header("authorization", &auth)
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap();
+
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let json = body_json(response.into_body()).await;
+  let results = json["items"].as_array().unwrap();
+  assert!(!results.is_empty());
+  for result in results {
+    let object = result.as_object().unwrap();
+    assert!(object.contains_key("file_key"), "locator projection dropped file_key: {result}");
+    assert!(object.contains_key("record_revision"), "locator projection dropped record_revision: {result}");
+    assert!(object.contains_key("content_hash"), "locator projection dropped content_hash: {result}");
+    assert!(object.contains_key("matches"), "locator projection dropped matches: {result}");
+    assert!(!object.contains_key("path"), "projection retained an unselected path: {result}");
+  }
+}
+
+#[tokio::test]
 async fn test_select_no_filter_without_select() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_users(&engine);

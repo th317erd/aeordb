@@ -14,13 +14,19 @@ use crate::engine::index_store::{FieldIndex, IndexLoadMemoryAccount, IndexManage
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::nvt_ops::NVTMask;
-use crate::engine::path_utils::{normalize_path, parent_path};
+use crate::engine::path_utils::{file_name, normalize_path, parent_path};
 use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntimeReservation};
 use crate::engine::scalar_converter::{
-  ScalarConverter, TrigramConverter, CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64, CONVERTER_TYPE_I64,
-  CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
+  ScalarConverter, TrigramConverter, CONVERTER_TYPE_HASH, CONVERTER_TYPE_U8, CONVERTER_TYPE_U16, CONVERTER_TYPE_U32, CONVERTER_TYPE_U64,
+  CONVERTER_TYPE_I64, CONVERTER_TYPE_F64, CONVERTER_TYPE_STRING, CONVERTER_TYPE_TIMESTAMP,
 };
 use crate::engine::storage_engine::StorageEngine;
+use crate::engine::v4::hash::digest_parts;
+use crate::engine::v4::position::{
+  CompiledRouteOrderV1, PositionComparatorV1, PositionComponentStateV1, PositionComponentWriteV1, PositionRouteV1,
+  append_logical_position_component_v1, logical_position_component_encoded_length_v1,
+};
+use crate::engine::v4::position_order::{LogicalOrderComponentOwnedV1, LogicalOrderRowOwnedV1, validate_logical_order_row_v1};
 
 // ---------------------------------------------------------------------------
 // Type aliases for the query + aggregation pipelines
@@ -54,7 +60,7 @@ type GroupFieldEntries = Vec<(String, FieldValueBytes, u8)>;
 type GroupBucket = (HashMap<String, serde_json::Value>, Vec<Vec<u8>>);
 
 /// All GROUP BY buckets keyed by composite group key string.
-type GroupBuckets = HashMap<String, GroupBucket>;
+type GroupBuckets = HashMap<Vec<u8>, GroupBucket>;
 
 /// Candidate set returned by fuzzy/trigram indexes: the set of matching file
 /// hashes plus their raw stored values (used during the recheck phase to
@@ -578,6 +584,14 @@ pub struct GroupResult {
   /// Maximum values of requested fields within this group.
   #[serde(skip_serializing_if = "HashMap::is_empty")]
   pub max: HashMap<String, serde_json::Value>,
+  #[serde(skip)]
+  canonical_group_tuple: Vec<u8>,
+}
+
+impl GroupResult {
+  pub(crate) fn canonical_group_tuple(&self) -> &[u8] {
+    &self.canonical_group_tuple
+  }
 }
 
 /// A single query result containing the matched file and relevance metadata.
@@ -664,7 +678,7 @@ struct QueryTemporaryMemoryLease {
   _runtime_reservation: QueryRuntimeReservation,
 }
 
-struct QueryMemoryBudget {
+pub(crate) struct QueryMemoryBudget {
   coordinator: Arc<MemoryCoordinator>,
   reservation: Option<MemoryReservation>,
   request_budget: QueryRequestBudget,
@@ -706,7 +720,7 @@ impl QueryMemoryBudget {
     Ok(())
   }
 
-  fn record_work(&mut self, units: usize) -> EngineResult<()> {
+  pub(crate) fn record_work(&mut self, units: usize) -> EngineResult<()> {
     const CANCELLATION_QUANTUM: usize = 256;
     self.work_since_cancellation_check = self.work_since_cancellation_check.saturating_add(units);
     if self.work_since_cancellation_check >= CANCELLATION_QUANTUM {
@@ -830,7 +844,7 @@ impl QueryMemoryBudget {
     self.reserve_growth(bytes, "query result slot admission failed")
   }
 
-  fn reserve_file_record_load(&mut self, value_length: u32) -> EngineResult<()> {
+  pub(crate) fn reserve_file_record_load(&mut self, value_length: u32) -> EngineResult<()> {
     let bytes = u64::from(value_length)
       .checked_mul(3)
       .and_then(|bytes| bytes.checked_add(512))
@@ -838,7 +852,7 @@ impl QueryMemoryBudget {
     self.reserve_growth(bytes, "query FileRecord admission failed")
   }
 
-  fn reserve_listing(&mut self, entries: u64) -> EngineResult<()> {
+  pub(crate) fn reserve_listing(&mut self, entries: u64) -> EngineResult<()> {
     let bytes = entries.checked_mul(512).ok_or_else(|| EngineError::ResourceExhausted("query listing estimate overflow".to_string()))?;
     self.reserve_growth(bytes, "query listing admission failed")
   }
@@ -1122,6 +1136,91 @@ fn decode_cursor(cursor: &str) -> EngineResult<serde_json::Value> {
 pub struct QueryEngine<'a> {
   engine: &'a StorageEngine,
   request_budget: Option<QueryRequestBudget>,
+  read_source: Option<&'a dyn QueryReadSourceV1>,
+}
+
+#[derive(Debug)]
+pub(crate) struct QuerySourceFileV1 {
+  pub record_hash: Vec<u8>,
+  pub record_value_length: u32,
+  pub record: FileRecord,
+}
+
+pub(crate) trait QueryReadSourceV1 {
+  fn selected_root(&self) -> &[u8];
+
+  fn list_indexes(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<String>>;
+
+  fn load_index(&self, path: &str, field_name: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Option<FieldIndex>>;
+
+  fn load_index_by_strategy(
+    &self,
+    path: &str,
+    field_name: &str,
+    strategy: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<Option<FieldIndex>>;
+
+  fn load_indexes_for_field(&self, path: &str, field_name: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<FieldIndex>>;
+
+  fn discover_indexed_directories(&self, base_path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<String>>;
+
+  fn file_by_hash(&self, record_hash: &[u8], budget: &mut QueryMemoryBudget) -> EngineResult<Option<QuerySourceFileV1>>;
+
+  fn list_file_records(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<QuerySourceFileV1>>;
+
+  fn read_file_body(&self, file: &QuerySourceFileV1) -> EngineResult<Vec<u8>>;
+}
+
+enum QueryIndexSourceV1<'a> {
+  Current(IndexManager<'a>),
+  Selected(&'a dyn QueryReadSourceV1),
+}
+
+impl QueryIndexSourceV1<'_> {
+  fn list_indexes(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<String>> {
+    match self {
+      Self::Current(index_manager) => index_manager.list_indexes(path),
+      Self::Selected(source) => source.list_indexes(path, budget),
+    }
+  }
+
+  fn load_index_with_memory_account(
+    &self,
+    path: &str,
+    field_name: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<Option<FieldIndex>> {
+    match self {
+      Self::Current(index_manager) => index_manager.load_index_with_memory_account(path, field_name, budget),
+      Self::Selected(source) => source.load_index(path, field_name, budget),
+    }
+  }
+
+  fn load_index_by_strategy_with_memory_account(
+    &self,
+    path: &str,
+    field_name: &str,
+    strategy: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<Option<FieldIndex>> {
+    match self {
+      Self::Current(index_manager) => index_manager.load_index_by_strategy_with_memory_account(path, field_name, strategy, budget),
+      Self::Selected(source) => source.load_index_by_strategy(path, field_name, strategy, budget),
+    }
+  }
+
+  fn load_indexes_for_field_with_memory_account(
+    &self,
+    path: &str,
+    field_name: &str,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<Vec<FieldIndex>> {
+    match self {
+      Self::Current(index_manager) => index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget),
+      Self::Selected(source) => source.load_indexes_for_field(path, field_name, budget),
+    }
+  }
 }
 
 fn decode_virtual_query_string<'a>(field_name: &str, query_bytes: &'a [u8]) -> EngineResult<&'a str> {
@@ -1131,17 +1230,135 @@ fn decode_virtual_query_string<'a>(field_name: &str, query_bytes: &'a [u8]) -> E
 
 impl<'a> QueryEngine<'a> {
   pub fn new(engine: &'a StorageEngine) -> Self {
-    QueryEngine { engine, request_budget: None }
+    QueryEngine { engine, request_budget: None, read_source: None }
   }
 
   pub(crate) fn with_request_budget(engine: &'a StorageEngine, request_budget: QueryRequestBudget) -> Self {
-    QueryEngine { engine, request_budget: Some(request_budget) }
+    QueryEngine { engine, request_budget: Some(request_budget), read_source: None }
+  }
+
+  pub(crate) fn with_read_source_and_budget(
+    engine: &'a StorageEngine,
+    read_source: &'a dyn QueryReadSourceV1,
+    request_budget: QueryRequestBudget,
+  ) -> Self {
+    QueryEngine { engine, request_budget: Some(request_budget), read_source: Some(read_source) }
+  }
+
+  fn index_source(&self) -> QueryIndexSourceV1<'a> {
+    match self.read_source {
+      Some(source) => QueryIndexSourceV1::Selected(source),
+      None => QueryIndexSourceV1::Current(IndexManager::new(self.engine)),
+    }
   }
 
   fn request_budget(&self) -> EngineResult<QueryRequestBudget> {
     match &self.request_budget {
       Some(request_budget) => Ok(request_budget.clone()),
       None => self.engine.start_query_request_budget(),
+    }
+  }
+
+  fn scoped_engine(&self, request_budget: QueryRequestBudget) -> QueryEngine<'a> {
+    match self.read_source {
+      Some(read_source) => QueryEngine::with_read_source_and_budget(self.engine, read_source, request_budget),
+      None => QueryEngine::with_request_budget(self.engine, request_budget),
+    }
+  }
+
+  pub(crate) fn list_source_indexes(&self, path: &str) -> EngineResult<Vec<String>> {
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, None, self.request_budget()?)?;
+    self.index_source().list_indexes(path, &mut budget)
+  }
+
+  pub(crate) fn discover_source_indexed_directories(&self, base_path: &str) -> EngineResult<Vec<String>> {
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, None, self.request_budget()?)?;
+    match self.read_source {
+      Some(read_source) => read_source.discover_indexed_directories(base_path, &mut budget),
+      None => IndexManager::new(self.engine).discover_indexed_directories(base_path),
+    }
+  }
+
+  pub(crate) fn source_order_comparator(
+    &self,
+    path: &str,
+    field_name: &str,
+  ) -> EngineResult<crate::engine::v4::position::PositionComparatorV1> {
+    use crate::engine::v4::position::PositionComparatorV1;
+
+    let virtual_comparator = match field_name {
+      "@score" => Some(PositionComparatorV1::FiniteF64),
+      "@path" | "@filename" | "@file_name" | "@extension" | "@content_type" => Some(PositionComparatorV1::Utf8Binary),
+      "@hash" => Some(PositionComparatorV1::BytesBinary),
+      "@size" | "@count" | "count" => Some(PositionComparatorV1::U64),
+      "@created_at" | "@updated_at" => Some(PositionComparatorV1::TimestampMs),
+      _ => None,
+    };
+    if let Some(comparator) = virtual_comparator {
+      return Ok(comparator);
+    }
+
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, None, self.request_budget()?)?;
+    let indexes = self.index_source().load_indexes_for_field_with_memory_account(path, field_name, &mut budget)?;
+    let index = indexes.into_iter().find(|index| index.converter.is_order_preserving()).ok_or_else(|| {
+      EngineError::NotFound(format!("Cannot sort by field '{field_name}' because no selected order-preserving index exists"))
+    })?;
+    position_comparator_for_converter(index.converter.type_tag())
+      .map_err(|error| EngineError::InvalidInput(format!("Selected order field '{field_name}' uses an unsupported comparator: {error}")))
+  }
+
+  pub(crate) fn selected_root_hash(&self) -> EngineResult<Vec<u8>> {
+    match self.read_source {
+      Some(source) => Ok(source.selected_root().to_vec()),
+      None => self.engine.head_hash(),
+    }
+  }
+
+  fn source_file_by_hash(&self, record_hash: &[u8], budget: &mut QueryMemoryBudget) -> EngineResult<Option<QuerySourceFileV1>> {
+    if let Some(source) = self.read_source {
+      return source.file_by_hash(record_hash, budget);
+    }
+    let Some(preflight_header) = self.engine.get_entry_header(record_hash)? else {
+      return Ok(None);
+    };
+    if preflight_header.entry_type != EntryType::FileRecord {
+      return Ok(None);
+    }
+    budget.reserve_file_record_load(preflight_header.value_length)?;
+    let Some((header, _key, value)) = self.engine.get_entry(record_hash)? else {
+      return Ok(None);
+    };
+    let record = FileRecord::deserialize(&value, self.engine.hash_algo().hash_length(), header.entry_version)?;
+    Ok(Some(QuerySourceFileV1 { record_hash: record_hash.to_vec(), record_value_length: preflight_header.value_length, record }))
+  }
+
+  fn source_file_records(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<QuerySourceFileV1>> {
+    if let Some(source) = self.read_source {
+      return source.list_file_records(path, budget);
+    }
+    budget.reserve_listing(self.engine.counters().snapshot().files)?;
+    let listing = match list_directory_recursive_strict(self.engine, path, -1, None, None) {
+      Ok(entries) => entries,
+      Err(EngineError::NotFound(_)) => return Ok(Vec::new()),
+      Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in listing {
+      budget.record_work(1)?;
+      if entry.entry_type != EntryType::FileRecord.to_u8() {
+        continue;
+      }
+      if let Some(file) = self.source_file_by_hash(&entry.hash, budget)? {
+        files.push(file);
+      }
+    }
+    Ok(files)
+  }
+
+  fn source_file_body(&self, file: &QuerySourceFileV1) -> EngineResult<Vec<u8>> {
+    match self.read_source {
+      Some(source) => source.read_file_body(file),
+      None => DirectoryOps::new(self.engine).read_file_buffered(&file.record.path),
     }
   }
 
@@ -1203,6 +1420,98 @@ impl<'a> QueryEngine<'a> {
     F: FnMut(&QueryResult) -> EngineResult<bool>,
   {
     self.execute_paginated_with_optional_filter(query, None, &mut filter)
+  }
+
+  pub(crate) fn execute_all_ordered_filtered<F>(&self, query: &Query, mut filter: F) -> EngineResult<Vec<QueryResult>>
+  where
+    F: FnMut(&QueryResult) -> EngineResult<bool>,
+  {
+    let _operation = self.engine.query_operation_guard()?;
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, None, self.request_budget()?)?;
+    let mut results = self.execute_internal(query, &mut budget)?;
+    retain_query_results(&mut results, &mut filter)?;
+    self.sort_results(&mut results, &query.order_by, &query.path, &mut budget)?;
+    budget.retain_results(&mut results)?;
+    Ok(results)
+  }
+
+  pub(crate) fn logical_query_order_row(
+    &self,
+    order: &CompiledRouteOrderV1,
+    query_path: &str,
+    order_by: &[SortField],
+    result: &QueryResult,
+  ) -> EngineResult<LogicalOrderRowOwnedV1> {
+    let file_key = digest_parts(self.engine.hash_algo(), &[b"file:", result.file_record.path.as_bytes()]);
+    let requested_component_count = order
+      .component_count()
+      .checked_sub(1)
+      .ok_or_else(|| EngineError::InvalidInput("compiled query order is missing its canonical path tie".to_string()))?;
+    if order_by.len() < requested_component_count {
+      return Err(EngineError::InvalidInput("query execution order omits a compiled public sort field".to_string()));
+    }
+    let mut components = Vec::new();
+    components
+      .try_reserve_exact(requested_component_count.saturating_add(1))
+      .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve logical query order components: {error}")))?;
+    for sort in order_by.iter().take(requested_component_count) {
+      components.push(self.logical_query_order_component(query_path, sort, result, &file_key)?);
+    }
+    components.push(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::Utf8Binary, result.file_record.path.as_bytes().to_vec()));
+    let row = LogicalOrderRowOwnedV1 {
+      route: PositionRouteV1::Query,
+      components,
+      file_key_tie: file_key,
+      record_revision_tie: result.file_hash.clone(),
+    };
+    validate_logical_order_row_v1(order, row.as_borrowed())
+      .map_err(|error| EngineError::InvalidInput(format!("invalid selected query position row: {error}")))?;
+    Ok(row)
+  }
+
+  fn logical_query_order_component(
+    &self,
+    query_path: &str,
+    sort: &SortField,
+    result: &QueryResult,
+    file_key: &[u8],
+  ) -> EngineResult<LogicalOrderComponentOwnedV1> {
+    let comparator = self.source_order_comparator(query_path, &sort.field)?;
+    let record = &result.file_record;
+    let virtual_component = match sort.field.as_str() {
+      "@score" => Some(finite_f64_position_component(result.score)?),
+      "@path" => Some(LogicalOrderComponentOwnedV1::present(comparator, record.path.as_bytes().to_vec())),
+      "@filename" | "@file_name" => {
+        Some(LogicalOrderComponentOwnedV1::present(comparator, query_file_name(&record.path).as_bytes().to_vec()))
+      }
+      "@extension" => Some(LogicalOrderComponentOwnedV1::present(comparator, query_file_extension(&record.path).as_bytes().to_vec())),
+      "@content_type" => Some(match &record.content_type {
+        Some(content_type) => LogicalOrderComponentOwnedV1::present(comparator, content_type.as_bytes().to_vec()),
+        None => LogicalOrderComponentOwnedV1::typed_null(),
+      }),
+      "@hash" => Some(if record.content_hash.is_empty() {
+        LogicalOrderComponentOwnedV1::missing()
+      } else {
+        LogicalOrderComponentOwnedV1::present(comparator, record.content_hash.clone())
+      }),
+      "@size" => Some(LogicalOrderComponentOwnedV1::present(comparator, record.total_size.to_le_bytes().to_vec())),
+      "@created_at" => Some(LogicalOrderComponentOwnedV1::present(comparator, record.created_at.to_le_bytes().to_vec())),
+      "@updated_at" => Some(LogicalOrderComponentOwnedV1::present(comparator, record.updated_at.to_le_bytes().to_vec())),
+      _ => None,
+    };
+    if let Some(component) = virtual_component {
+      return Ok(component);
+    }
+
+    let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, None, self.request_budget()?)?;
+    let indexes = self.index_source().load_indexes_for_field_with_memory_account(query_path, &sort.field, &mut budget)?;
+    let index = indexes.into_iter().find(|index| index.converter.is_order_preserving()).ok_or_else(|| {
+      EngineError::NotFound(format!("Cannot sort by field '{}' because no selected order-preserving index exists", sort.field))
+    })?;
+    let Some(value) = index.values.get(file_key) else {
+      return Ok(LogicalOrderComponentOwnedV1::missing());
+    };
+    legacy_position_component(comparator, index.converter.type_tag(), value)
   }
 
   pub fn execute_paginated_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<PaginatedResult> {
@@ -1274,7 +1583,7 @@ impl<'a> QueryEngine<'a> {
     let default_limit_hit = !explicit_limit && has_more;
 
     // Build cursors
-    let version_hash = self.engine.head_hash()?;
+    let version_hash = self.selected_root_hash()?;
 
     let next_cursor = if has_more { all_results.last().map(|last| encode_cursor(last, &query.order_by, &version_hash)) } else { None };
 
@@ -1316,7 +1625,7 @@ impl<'a> QueryEngine<'a> {
     let _operation = self.engine.query_operation_guard()?;
     let request_budget = self.request_budget()?;
     let mut budget = QueryMemoryBudget::new_with_cancellation(self.engine, cancellation, request_budget.clone())?;
-    let index_manager = IndexManager::new(self.engine);
+    let index_manager = self.index_source();
 
     // Build the plan by analyzing the query structure
     let plan = self.build_plan(query, &index_manager, &mut budget)?;
@@ -1331,12 +1640,12 @@ impl<'a> QueryEngine<'a> {
     let start = std::time::Instant::now();
 
     let (results_json, candidate_count, result_count) = if query.aggregate.is_some() {
-      let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
+      let scoped_engine = self.scoped_engine(request_budget.clone());
       let agg_result = scoped_engine.execute_aggregate_with_optional_filter(query, cancellation, filter)?;
       let count = agg_result.count.unwrap_or(0);
       (Some(serde_json::to_value(&agg_result).unwrap_or_default()), count as usize, count as usize)
     } else {
-      let scoped_engine = QueryEngine::with_request_budget(self.engine, request_budget.clone());
+      let scoped_engine = self.scoped_engine(request_budget.clone());
       let paginated = scoped_engine.execute_paginated_with_optional_filter(query, cancellation, filter)?;
       let total = paginated.total_count.unwrap_or(paginated.results.len() as u64);
       let returned = paginated.results.len();
@@ -1366,7 +1675,12 @@ impl<'a> QueryEngine<'a> {
   }
 
   /// Build a query execution plan without running the query.
-  fn build_plan(&self, query: &Query, index_manager: &IndexManager, budget: &mut QueryMemoryBudget) -> EngineResult<serde_json::Value> {
+  fn build_plan(
+    &self,
+    query: &Query,
+    index_manager: &QueryIndexSourceV1<'_>,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<serde_json::Value> {
     let mut plan = serde_json::Map::new();
 
     // Analyze the query node tree
@@ -1416,7 +1730,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     node: &QueryNode,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<serde_json::Value> {
     match node {
@@ -1435,31 +1749,16 @@ impl<'a> QueryEngine<'a> {
         };
 
         let index_field_name = canonical_virtual_field_name(&fq.field_name).unwrap_or(fq.field_name.as_str());
-        let mut index_source = path.to_string();
         let mut indexes = index_manager.load_indexes_for_field_with_memory_account(path, index_field_name, budget)?;
         if indexes.is_empty() && canonical_virtual_field_name(&fq.field_name).is_some() {
           for ancestor in virtual_index_ancestor_paths(path) {
             let ancestor_indexes = index_manager.load_indexes_for_field_with_memory_account(&ancestor, index_field_name, budget)?;
             if !ancestor_indexes.is_empty() {
-              index_source = ancestor;
               indexes = ancestor_indexes;
               break;
             }
           }
         }
-        let index_info: Vec<serde_json::Value> = indexes
-          .iter()
-          .map(|idx| {
-            serde_json::json!({
-              "strategy": idx.converter.strategy(),
-              "type": idx.converter.name(),
-              "entries": idx.entries.len(),
-              "order_preserving": idx.converter.is_order_preserving(),
-              "values_stored": idx.values.len(),
-            })
-          })
-          .collect();
-
         let needs_recheck = matches!(
           &fq.operation,
           QueryOp::Contains(_) | QueryOp::Similar(_, _) | QueryOp::Phonetic(_) | QueryOp::Fuzzy(_, _) | QueryOp::Match(_)
@@ -1468,10 +1767,8 @@ impl<'a> QueryEngine<'a> {
         Ok(serde_json::json!({
           "type": "field",
           "field": fq.field_name,
-          "index_field": index_field_name,
-          "index_source": index_source,
           "operation": op_name,
-          "indexes": index_info,
+          "coverage": if indexes.is_empty() { "authoritative_scan" } else { "index_union" },
           "recheck": needs_recheck,
         }))
       }
@@ -1511,7 +1808,7 @@ impl<'a> QueryEngine<'a> {
       }
     };
 
-    let index_manager = IndexManager::new(self.engine);
+    let index_manager = self.index_source();
 
     // Check for fuzzy operations that can use indexed recheck. Virtual fields
     // without an index keep their scan fallback for backwards compatibility.
@@ -1526,24 +1823,15 @@ impl<'a> QueryEngine<'a> {
     };
 
     // Load FileRecords for candidates.
-    let hash_length = self.engine.hash_algo().hash_length();
     budget.reserve_result_slots(result_hashes.len())?;
     let mut results = Vec::with_capacity(result_hashes.len());
 
     for file_hash in result_hashes {
       budget.record_work(1)?;
-      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+      let Some(file) = self.source_file_by_hash(&file_hash, budget)? else {
         continue;
       };
-      budget.reserve_file_record_load(preflight_header.value_length)?;
-      match self.engine.get_entry(&file_hash) {
-        Ok(Some((header, _key, value))) => {
-          let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-          results.push(QueryResult::new(file_hash, file_record, 1.0, vec![]));
-        }
-        Ok(None) => continue, // stale index entry, skip
-        Err(error) => return Err(error),
-      }
+      results.push(QueryResult::new(file.record_hash, file.record, 1.0, vec![]));
     }
 
     Ok(results)
@@ -1563,7 +1851,7 @@ impl<'a> QueryEngine<'a> {
       return Ok(());
     }
 
-    let index_manager = IndexManager::new(self.engine);
+    let index_manager = self.index_source();
 
     // For each sort field, prepare the sort data
     struct SortData {
@@ -1571,6 +1859,8 @@ impl<'a> QueryEngine<'a> {
       is_virtual: bool,
       field: String,
       direction: SortDirection,
+      comparator: PositionComparatorV1,
+      converter_type: u8,
     }
 
     let mut sort_fields: Vec<SortData> = Vec::new();
@@ -1578,7 +1868,14 @@ impl<'a> QueryEngine<'a> {
     for sf in order_by {
       budget.record_work(1)?;
       if sf.field.starts_with('@') {
-        sort_fields.push(SortData { values: HashMap::new(), is_virtual: true, field: sf.field.clone(), direction: sf.direction.clone() });
+        sort_fields.push(SortData {
+          values: HashMap::new(),
+          is_virtual: true,
+          field: sf.field.clone(),
+          direction: sf.direction.clone(),
+          comparator: self.source_order_comparator(path, &sf.field)?,
+          converter_type: 0,
+        });
       } else {
         let indexes = index_manager.load_indexes_for_field_with_memory_account(path, &sf.field, budget)?;
         let index = indexes.into_iter().find(|idx| idx.converter.is_order_preserving()).ok_or_else(|| {
@@ -1589,7 +1886,30 @@ impl<'a> QueryEngine<'a> {
           ))
         })?;
 
-        sort_fields.push(SortData { values: index.values, is_virtual: false, field: sf.field.clone(), direction: sf.direction.clone() });
+        let converter_type = index.converter.type_tag();
+        sort_fields.push(SortData {
+          values: index.values,
+          is_virtual: false,
+          field: sf.field.clone(),
+          direction: sf.direction.clone(),
+          comparator: position_comparator_for_converter(converter_type)?,
+          converter_type,
+        });
+      }
+    }
+
+    for sort in &sort_fields {
+      if sort.is_virtual {
+        if sort.field == "@score" && results.iter().any(|result| !result.score.is_finite()) {
+          return Err(EngineError::InvalidInput("query score is not finite".to_string()));
+        }
+        continue;
+      }
+      for result in results.iter() {
+        let file_key = digest_parts(self.engine.hash_algo(), &[b"file:", result.file_record.path.as_bytes()]);
+        if let Some(value) = sort.values.get(&file_key) {
+          legacy_position_component(sort.comparator, sort.converter_type, value)?;
+        }
       }
     }
 
@@ -1597,32 +1917,36 @@ impl<'a> QueryEngine<'a> {
 
     results.sort_by(|a, b| {
       for sd in &sort_fields {
-        let cmp = if sd.is_virtual {
-          match sd.field.as_str() {
-            "@score" => a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal),
-            "@path" => a.file_record.path.cmp(&b.file_record.path),
-            "@hash" => a.file_record.content_hash.cmp(&b.file_record.content_hash),
-            "@size" => a.file_record.total_size.cmp(&b.file_record.total_size),
-            "@created_at" => a.file_record.created_at.cmp(&b.file_record.created_at),
-            "@updated_at" => a.file_record.updated_at.cmp(&b.file_record.updated_at),
-            _ => std::cmp::Ordering::Equal,
-          }
+        let (cmp, both_present) = if sd.is_virtual {
+          compare_virtual_query_order_values(&sd.field, a, b)
         } else {
-          let va = sd.values.get(&a.file_hash).map(Vec::as_slice).unwrap_or_default();
-          let vb = sd.values.get(&b.file_hash).map(Vec::as_slice).unwrap_or_default();
-          va.cmp(&vb)
+          let a_file_key = digest_parts(self.engine.hash_algo(), &[b"file:", a.file_record.path.as_bytes()]);
+          let b_file_key = digest_parts(self.engine.hash_algo(), &[b"file:", b.file_record.path.as_bytes()]);
+          compare_legacy_query_order_values(
+            sd.comparator,
+            sd.values.get(&a_file_key).map(Vec::as_slice),
+            sd.values.get(&b_file_key).map(Vec::as_slice),
+          )
         };
 
-        let cmp = match sd.direction {
-          SortDirection::Asc => cmp,
-          SortDirection::Desc => cmp.reverse(),
+        let cmp = match (&sd.direction, both_present) {
+          (SortDirection::Desc, true) => cmp.reverse(),
+          (SortDirection::Asc | SortDirection::Desc, false) | (SortDirection::Asc, true) => cmp,
         };
 
         if cmp != std::cmp::Ordering::Equal {
           return cmp;
         }
       }
-      std::cmp::Ordering::Equal
+      a.file_record
+        .path
+        .cmp(&b.file_record.path)
+        .then_with(|| {
+          let a_file_key = digest_parts(self.engine.hash_algo(), &[b"file:", a.file_record.path.as_bytes()]);
+          let b_file_key = digest_parts(self.engine.hash_algo(), &[b"file:", b.file_record.path.as_bytes()]);
+          a_file_key.cmp(&b_file_key)
+        })
+        .then_with(|| a.file_hash.cmp(&b.file_hash))
     });
     budget.check_cancellation()?;
 
@@ -1638,7 +1962,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     node: &QueryNode,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     self.evaluate_node(node, path, index_manager, budget)
@@ -1650,7 +1974,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     node: &QueryNode,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     match node {
@@ -1700,7 +2024,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     field_query: &FieldQuery,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     // Virtual fields first try their configured indexes. If no matching index
@@ -1716,7 +2040,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     field_query: &FieldQuery,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     match &field_query.operation {
@@ -1763,7 +2087,7 @@ impl<'a> QueryEngine<'a> {
     field_name: &str,
     path: &str,
     values: &[Vec<u8>],
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let mut indexes = index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget)?;
@@ -1810,8 +2134,13 @@ impl<'a> QueryEngine<'a> {
 
   /// Collect all file hashes from all indexed fields at a path.
   /// Used as the "universe" for NOT operations.
-  fn collect_all_hashes(&self, path: &str, index_manager: &IndexManager, budget: &mut QueryMemoryBudget) -> EngineResult<HashSet<Vec<u8>>> {
-    let field_names = index_manager.list_indexes(path)?;
+  fn collect_all_hashes(
+    &self,
+    path: &str,
+    index_manager: &QueryIndexSourceV1<'_>,
+    budget: &mut QueryMemoryBudget,
+  ) -> EngineResult<HashSet<Vec<u8>>> {
+    let field_names = index_manager.list_indexes(path, budget)?;
     let mut all_hashes = HashSet::new();
     for index_name in &field_names {
       budget.record_work(1)?;
@@ -1841,7 +2170,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     field_query: &FieldQuery,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) else {
@@ -1868,39 +2197,17 @@ impl<'a> QueryEngine<'a> {
       }
     }
 
-    // Collect all files under the query path via recursive directory listing.
-    budget.reserve_listing(self.engine.counters().snapshot().files)?;
-    let listing = match list_directory_recursive_strict(self.engine, path, -1, None, None) {
-      Ok(entries) => entries,
-      Err(EngineError::NotFound(_)) => return Ok(HashSet::new()),
-      Err(other) => return Err(other),
-    };
-
+    // Collect all files under the query path through the captured read source.
+    let files = self.source_file_records(path, budget)?;
     let hash_length = self.engine.hash_algo().hash_length();
-    budget.reserve_hash_work(listing.len(), hash_length, false)?;
+    budget.reserve_hash_work(files.len(), hash_length, false)?;
     let mut matching_hashes = HashSet::new();
 
-    for entry in &listing {
+    for file in files {
       budget.record_work(1)?;
-      // Only consider file entries, not directories.
-      if entry.entry_type != EntryType::FileRecord.to_u8() {
-        continue;
-      }
-
-      // Load the full FileRecord from the entry hash.
-      let Some(preflight_header) = self.engine.get_entry_header(&entry.hash)? else {
-        continue;
-      };
-      budget.reserve_file_record_load(preflight_header.value_length)?;
-      let file_record = match self.engine.get_entry(&entry.hash) {
-        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-        Ok(None) => continue,
-        Err(error) => return Err(error),
-      };
-
-      let matches = self.virtual_field_matches(field_name, &file_record, &field_query.operation)?;
+      let matches = self.virtual_field_matches(field_name, &file.record, &field_query.operation)?;
       if matches {
-        matching_hashes.insert(entry.hash.clone());
+        matching_hashes.insert(file.record_hash);
       }
     }
 
@@ -1912,7 +2219,7 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     field_name: &str,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
@@ -1921,23 +2228,17 @@ impl<'a> QueryEngine<'a> {
       return Err(EngineError::NotFound(format!("No recheck index found for virtual field '{}' at '{}'", field_name, path)));
     }
 
-    let hash_length = self.engine.hash_algo().hash_length();
     let mut matching_hashes = HashSet::new();
 
     for file_hash in candidates {
       budget.record_work(1)?;
-      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+      let Some(file) = self.source_file_by_hash(&file_hash, budget)? else {
         continue;
       };
-      budget.reserve_file_record_load(preflight_header.value_length)?;
-      let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
-        continue;
+      let field_value = match candidate_values.get(&file_hash) {
+        Some(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+        None => self.virtual_field_value_string(field_name, &file.record),
       };
-      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-      let field_value = candidate_values
-        .get(&file_hash)
-        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-        .or_else(|| self.virtual_field_value_string(field_name, &file_record));
 
       let Some(field_value) = field_value else {
         continue;
@@ -1958,7 +2259,7 @@ impl<'a> QueryEngine<'a> {
     field_query: &FieldQuery,
     field_name: &str,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<HashSet<Vec<u8>>> {
     let indexed_query = FieldQuery { field_name: field_name.to_string(), operation: field_query.operation.clone() };
@@ -2001,15 +2302,10 @@ impl<'a> QueryEngine<'a> {
     let mut filtered = HashSet::new();
     for file_hash in hashes {
       budget.record_work(1)?;
-      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+      let Some(file) = self.source_file_by_hash(&file_hash, budget)? else {
         continue;
       };
-      budget.reserve_file_record_load(preflight_header.value_length)?;
-      let Some((header, _key, value)) = self.engine.get_entry(&file_hash)? else {
-        continue;
-      };
-      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-      if path_is_under_query_path(&file_record.path, &normalized_query_path) {
+      if path_is_under_query_path(&file.record.path, &normalized_query_path) {
         filtered.insert(file_hash);
       }
     }
@@ -2215,7 +2511,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     node: &QueryNode,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<bool> {
     match node {
@@ -2253,7 +2549,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     path: &str,
     field_name: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<bool> {
     index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget).map(|indexes| !indexes.is_empty())
@@ -2263,7 +2559,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     path: &str,
     field_name: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<bool> {
     if self.field_has_index(path, field_name, index_manager, budget)? {
@@ -2284,7 +2580,7 @@ impl<'a> QueryEngine<'a> {
     path: &str,
     field_name: &str,
     strategy: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     include_ancestors: bool,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
@@ -2313,9 +2609,7 @@ impl<'a> QueryEngine<'a> {
     effective_node: &QueryNode,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Vec<QueryResult>> {
-    let index_manager = IndexManager::new(self.engine);
-    let hash_length = self.engine.hash_algo().hash_length();
-    let ops = DirectoryOps::new(self.engine);
+    let index_manager = self.index_source();
 
     // Extract the single fuzzy field query
     let field_query = match effective_node {
@@ -2335,14 +2629,8 @@ impl<'a> QueryEngine<'a> {
     for file_hash in candidates {
       budget.record_work(1)?;
       // Load the FileRecord for the result
-      let Some(preflight_header) = self.engine.get_entry_header(&file_hash)? else {
+      let Some(file) = self.source_file_by_hash(&file_hash, budget)? else {
         continue;
-      };
-      budget.reserve_file_record_load(preflight_header.value_length)?;
-      let file_record = match self.engine.get_entry(&file_hash) {
-        Ok(Some((header, _key, value))) => FileRecord::deserialize(&value, hash_length, header.entry_version)?,
-        Ok(None) => continue,
-        Err(error) => return Err(error),
       };
 
       // Try to get value from index first. Virtual fields can derive their
@@ -2352,13 +2640,13 @@ impl<'a> QueryEngine<'a> {
       let field_value = if let Some(value_bytes) = candidate_values.get(&file_hash) {
         String::from_utf8_lossy(value_bytes).to_string()
       } else if let Some(field_name) = canonical_virtual_field_name(&field_query.field_name) {
-        match self.virtual_field_value_string(field_name, &file_record) {
+        match self.virtual_field_value_string(field_name, &file.record) {
           Some(value) => value,
           None => continue,
         }
       } else {
         // Fallback: load file and parse as JSON (for native JSON files without values in index)
-        let (_file_record, file_data, memory) = match self.load_file_with_data(&file_hash, hash_length, &ops, budget)? {
+        let (file_data, memory) = match self.load_file_with_data(&file, budget)? {
           Some(parts) => parts,
           None => continue,
         };
@@ -2376,8 +2664,8 @@ impl<'a> QueryEngine<'a> {
 
       if score > 0.0 {
         results.push(QueryResult::new(
-          file_hash,
-          file_record,
+          file.record_hash,
+          file.record,
           score,
           strategy.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
         ));
@@ -2397,7 +2685,7 @@ impl<'a> QueryEngine<'a> {
     &self,
     field_query: &FieldQuery,
     path: &str,
-    index_manager: &IndexManager,
+    index_manager: &QueryIndexSourceV1<'_>,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<FuzzyCandidates> {
     let mut all_values: FieldValueBytes = HashMap::new();
@@ -2635,28 +2923,16 @@ impl<'a> QueryEngine<'a> {
   /// Used as a fallback for native JSON files whose values are not in the index.
   fn load_file_with_data(
     &self,
-    file_hash: &[u8],
-    hash_length: usize,
-    ops: &DirectoryOps,
+    file: &QuerySourceFileV1,
     budget: &QueryMemoryBudget,
-  ) -> EngineResult<Option<(FileRecord, Vec<u8>, QueryTemporaryMemoryLease)>> {
-    let Some(preflight_header) = self.engine.get_entry_header(file_hash)? else {
-      return Ok(None);
-    };
-    match self.engine.get_entry(file_hash) {
-      Ok(Some((header, _key, value))) => {
-        let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)?;
-        let temporary_bytes = QueryMemoryBudget::buffered_json_amplification_bytes(file_record.total_size, preflight_header.value_length)?;
-        let memory = budget.reserve_temporary(temporary_bytes, "query buffered JSON admission failed")?;
+  ) -> EngineResult<Option<(Vec<u8>, QueryTemporaryMemoryLease)>> {
+    let temporary_bytes = QueryMemoryBudget::buffered_json_amplification_bytes(file.record.total_size, file.record_value_length)?;
+    let memory = budget.reserve_temporary(temporary_bytes, "query buffered JSON admission failed")?;
 
-        match ops.read_file_buffered(&file_record.path) {
-          Ok(data) => Ok(Some((file_record, data, memory))),
-          Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
-          Err(e) => Err(e),
-        }
-      }
-      Ok(None) => Ok(None),
-      Err(e) => Err(e),
+    match self.source_file_body(file) {
+      Ok(data) => Ok(Some((data, memory))),
+      Err(EngineError::NotFound(_)) => Ok(None), // file may have been deleted
+      Err(error) => Err(error),
     }
   }
 
@@ -2872,9 +3148,10 @@ impl<'a> QueryEngine<'a> {
     let mut result_hashes = self.execute_internal(query, &mut budget)?;
     retain_query_results(&mut result_hashes, filter)?;
     budget.reserve_hash_work(result_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
-    let result_hash_set: HashSet<Vec<u8>> = result_hashes.iter().map(|r| r.file_hash.clone()).collect();
+    let result_hash_set: HashSet<Vec<u8>> =
+      result_hashes.iter().map(|result| digest_parts(self.engine.hash_algo(), &[b"file:", result.file_record.path.as_bytes()])).collect();
 
-    let index_manager = IndexManager::new(self.engine);
+    let index_manager = self.index_source();
     let effective_limit = query.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
     let explicit_limit = query.limit.is_some();
 
@@ -2958,17 +3235,28 @@ impl<'a> QueryEngine<'a> {
       budget.record_work(1)?;
       // Build group key from all group_by fields
       let mut key_map = HashMap::new();
-      let mut key_parts: Vec<String> = Vec::new();
+      let mut tuple_components = Vec::new();
+      tuple_components
+        .try_reserve_exact(group_field_data.len())
+        .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve aggregate group tuple components: {error}")))?;
 
       for (field_name, values, type_tag) in &group_field_data {
         budget.record_work(1)?;
-        let value = values.get(file_hash.as_slice()).map(|bytes| bytes_to_json_value(bytes, *type_tag)).unwrap_or(serde_json::Value::Null);
-        key_parts.push(format!("{}={}", field_name, value));
+        let raw_value = values.get(file_hash.as_slice());
+        let value = match raw_value {
+          Some(bytes) => bytes_to_json_value(bytes, *type_tag),
+          None => serde_json::Value::Null,
+        };
+        let component = match raw_value {
+          Some(bytes) => legacy_position_component(position_comparator_for_converter(*type_tag)?, *type_tag, bytes)?,
+          None => LogicalOrderComponentOwnedV1::missing(),
+        };
         key_map.insert(field_name.clone(), value);
+        tuple_components.push(component);
       }
 
-      let group_key = key_parts.join("|");
-      groups.entry(group_key).or_insert_with(|| (key_map, Vec::new())).1.push(file_hash.clone());
+      let group_tuple = encode_legacy_group_tuple(&tuple_components)?;
+      groups.entry(group_tuple).or_insert_with(|| (key_map, Vec::new())).1.push(file_hash.clone());
     }
 
     // Compute aggregates per group
@@ -2976,18 +3264,26 @@ impl<'a> QueryEngine<'a> {
     budget.reserve_group_results(groups.len(), aggregate_field_count, agg.group_by.len())?;
     let mut group_results: Vec<GroupResult> = Vec::with_capacity(groups.len());
 
-    for (key_map, group_hashes) in groups.values() {
+    for (canonical_group_tuple, (key_map, group_hashes)) in &groups {
       budget.record_work(1)?;
       budget.reserve_hash_work(group_hashes.len(), self.engine.hash_algo().hash_length(), false)?;
       let group_hash_set: HashSet<Vec<u8>> = group_hashes.iter().cloned().collect();
       let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&group_hash_set, agg, &field_indexes, &mut budget)?;
 
-      group_results.push(GroupResult { key: key_map.clone(), count: group_hashes.len() as u64, sum, avg, min, max });
+      group_results.push(GroupResult {
+        key: key_map.clone(),
+        count: group_hashes.len() as u64,
+        sum,
+        avg,
+        min,
+        max,
+        canonical_group_tuple: canonical_group_tuple.clone(),
+      });
     }
 
     // Sort groups by count descending (most populated first)
     budget.reserve_stable_sort::<GroupResult>(group_results.len())?;
-    group_results.sort_by(|a, b| b.count.cmp(&a.count));
+    group_results.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.canonical_group_tuple.cmp(&b.canonical_group_tuple)));
     budget.check_cancellation()?;
 
     // Apply limit to groups
@@ -3604,6 +3900,201 @@ fn canonical_virtual_field_name(field_name: &str) -> Option<&'static str> {
     "@updated_at" => Some("@updated_at"),
     "@hash" => Some("@hash"),
     _ => None,
+  }
+}
+
+fn finite_f64_position_component(value: f64) -> EngineResult<LogicalOrderComponentOwnedV1> {
+  if !value.is_finite() {
+    return Err(EngineError::InvalidInput("query score is not finite".to_string()));
+  }
+  let canonical = if value == 0.0 { 0.0 } else { value };
+  Ok(LogicalOrderComponentOwnedV1::present(PositionComparatorV1::FiniteF64, canonical.to_le_bytes().to_vec()))
+}
+
+fn position_comparator_for_converter(converter_type: u8) -> EngineResult<PositionComparatorV1> {
+  match converter_type {
+    CONVERTER_TYPE_HASH => Ok(PositionComparatorV1::BytesBinary),
+    CONVERTER_TYPE_U8 | CONVERTER_TYPE_U16 | CONVERTER_TYPE_U32 | CONVERTER_TYPE_U64 => Ok(PositionComparatorV1::U64),
+    CONVERTER_TYPE_I64 => Ok(PositionComparatorV1::I64),
+    CONVERTER_TYPE_F64 => Ok(PositionComparatorV1::FiniteF64),
+    CONVERTER_TYPE_STRING => Ok(PositionComparatorV1::Utf8Binary),
+    CONVERTER_TYPE_TIMESTAMP => Ok(PositionComparatorV1::TimestampMs),
+    converter_type => Err(EngineError::InvalidInput(format!("converter type {converter_type} has no canonical position comparator"))),
+  }
+}
+
+fn encode_legacy_group_tuple(components: &[LogicalOrderComponentOwnedV1]) -> EngineResult<Vec<u8>> {
+  let field_count = u16::try_from(components.len())
+    .map_err(|error| EngineError::ResourceExhausted(format!("aggregate group field count exceeds canonical tuple width: {error}")))?;
+  let mut output = Vec::new();
+  output
+    .try_reserve_exact(8)
+    .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve aggregate group tuple header: {error}")))?;
+  output.extend_from_slice(b"AGTP");
+  output.extend_from_slice(&1u16.to_le_bytes());
+  output.extend_from_slice(&field_count.to_le_bytes());
+  for component in components {
+    let missing = component.state == PositionComponentStateV1::Missing;
+    let write = PositionComponentWriteV1 { comparator: component.comparator, state: component.state, payload: &component.payload };
+    let values_length = if missing {
+      0
+    } else {
+      logical_position_component_encoded_length_v1(write)
+        .map_err(|error| EngineError::InvalidInput(format!("invalid aggregate group component: {error}")))?
+    };
+    let values_length = u32::try_from(values_length)
+      .map_err(|error| EngineError::ResourceExhausted(format!("aggregate group component exceeds canonical tuple width: {error}")))?;
+    output.push(if missing { 1 } else { 0 });
+    output.extend_from_slice(&[0, 0, 0]);
+    output.extend_from_slice(&(if missing { 0u32 } else { 1u32 }).to_le_bytes());
+    output.extend_from_slice(&values_length.to_le_bytes());
+    if !missing {
+      append_logical_position_component_v1(&mut output, write)
+        .map_err(|error| EngineError::InvalidInput(format!("invalid aggregate group component: {error}")))?;
+    }
+  }
+  Ok(output)
+}
+
+fn legacy_position_component(
+  comparator: PositionComparatorV1,
+  converter_type: u8,
+  value: &[u8],
+) -> EngineResult<LogicalOrderComponentOwnedV1> {
+  if value.is_empty() {
+    return Ok(LogicalOrderComponentOwnedV1::typed_null());
+  }
+  let payload = match comparator {
+    PositionComparatorV1::BytesBinary | PositionComparatorV1::Utf8Binary => value.to_vec(),
+    PositionComparatorV1::U64 => {
+      let decoded = match converter_type {
+        CONVERTER_TYPE_U8 if value.len() == 1 => u64::from(value[0]),
+        CONVERTER_TYPE_U16 if value.len() == 2 => u64::from(u16::from_be_bytes(
+          value.try_into().map_err(|error| EngineError::InvalidInput(format!("selected u16 order value has invalid width: {error}")))?,
+        )),
+        CONVERTER_TYPE_U32 if value.len() == 4 => u64::from(u32::from_be_bytes(
+          value.try_into().map_err(|error| EngineError::InvalidInput(format!("selected u32 order value has invalid width: {error}")))?,
+        )),
+        CONVERTER_TYPE_U8 | CONVERTER_TYPE_U16 | CONVERTER_TYPE_U32 | CONVERTER_TYPE_U64 if value.len() == 8 => u64::from_be_bytes(
+          value.try_into().map_err(|error| EngineError::InvalidInput(format!("selected u64 order value has invalid width: {error}")))?,
+        ),
+        _ => {
+          return Err(EngineError::InvalidInput(format!(
+            "selected numeric order value has invalid width {} for converter {converter_type}",
+            value.len()
+          )));
+        }
+      };
+      decoded.to_le_bytes().to_vec()
+    }
+    PositionComparatorV1::I64 | PositionComparatorV1::TimestampMs => {
+      let decoded = i64::from_be_bytes(
+        value.try_into().map_err(|error| EngineError::InvalidInput(format!("selected signed order value has invalid width: {error}")))?,
+      );
+      decoded.to_le_bytes().to_vec()
+    }
+    PositionComparatorV1::FiniteF64 => {
+      let decoded = f64::from_be_bytes(
+        value.try_into().map_err(|error| EngineError::InvalidInput(format!("selected floating order value has invalid width: {error}")))?,
+      );
+      return finite_f64_position_component(decoded);
+    }
+    PositionComparatorV1::Boolean => {
+      if value != [0] && value != [1] {
+        return Err(EngineError::InvalidInput("selected boolean order value is not canonical".to_string()));
+      }
+      value.to_vec()
+    }
+  };
+  Ok(LogicalOrderComponentOwnedV1::present(comparator, payload))
+}
+
+fn compare_legacy_query_order_values(
+  comparator: PositionComparatorV1,
+  left: Option<&[u8]>,
+  right: Option<&[u8]>,
+) -> (std::cmp::Ordering, bool) {
+  let left_rank = legacy_query_order_presence_rank(left);
+  let right_rank = legacy_query_order_presence_rank(right);
+  if left_rank != right_rank {
+    return (left_rank.cmp(&right_rank), false);
+  }
+  if left_rank != 0 {
+    return (std::cmp::Ordering::Equal, false);
+  }
+  let left = match left {
+    Some(value) => value,
+    None => return (std::cmp::Ordering::Equal, false),
+  };
+  let right = match right {
+    Some(value) => value,
+    None => return (std::cmp::Ordering::Equal, false),
+  };
+  let ordering = match comparator {
+    PositionComparatorV1::BytesBinary | PositionComparatorV1::Utf8Binary => left.cmp(right),
+    PositionComparatorV1::U64 => left.cmp(right),
+    PositionComparatorV1::I64 | PositionComparatorV1::TimestampMs => {
+      (left[0] ^ 0x80).cmp(&(right[0] ^ 0x80)).then_with(|| left[1..].cmp(&right[1..]))
+    }
+    PositionComparatorV1::FiniteF64 => {
+      let left_value = f64::from_be_bytes([left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7]]);
+      let right_value = f64::from_be_bytes([right[0], right[1], right[2], right[3], right[4], right[5], right[6], right[7]]);
+      left_value.total_cmp(&right_value)
+    }
+    PositionComparatorV1::Boolean => left[0].cmp(&right[0]),
+  };
+  (ordering, true)
+}
+
+fn legacy_query_order_presence_rank(value: Option<&[u8]>) -> u8 {
+  match value {
+    Some(value) if !value.is_empty() => 0,
+    Some(_) => 1,
+    None => 2,
+  }
+}
+
+fn compare_virtual_query_order_values(field: &str, left: &QueryResult, right: &QueryResult) -> (std::cmp::Ordering, bool) {
+  match field {
+    "@score" => (left.score.total_cmp(&right.score), true),
+    "@path" => (left.file_record.path.cmp(&right.file_record.path), true),
+    "@filename" | "@file_name" => (query_file_name(&left.file_record.path).cmp(query_file_name(&right.file_record.path)), true),
+    "@extension" => (query_file_extension(&left.file_record.path).cmp(query_file_extension(&right.file_record.path)), true),
+    "@content_type" => {
+      compare_optional_virtual_bytes(left.file_record.content_type.as_deref(), right.file_record.content_type.as_deref(), 1)
+    }
+    "@hash" => compare_optional_virtual_bytes(
+      (!left.file_record.content_hash.is_empty()).then_some(left.file_record.content_hash.as_slice()),
+      (!right.file_record.content_hash.is_empty()).then_some(right.file_record.content_hash.as_slice()),
+      2,
+    ),
+    "@size" => (left.file_record.total_size.cmp(&right.file_record.total_size), true),
+    "@created_at" => (left.file_record.created_at.cmp(&right.file_record.created_at), true),
+    "@updated_at" => (left.file_record.updated_at.cmp(&right.file_record.updated_at), true),
+    _ => (std::cmp::Ordering::Equal, false),
+  }
+}
+
+fn query_file_extension(path: &str) -> &str {
+  match query_file_name(path).rsplit_once('.') {
+    Some((_, extension)) => extension,
+    None => "",
+  }
+}
+
+fn query_file_name(path: &str) -> &str {
+  if let Some(name) = file_name(path) {
+    return name;
+  }
+  ""
+}
+
+fn compare_optional_virtual_bytes<T: AsRef<[u8]>>(left: Option<T>, right: Option<T>, absent_rank: u8) -> (std::cmp::Ordering, bool) {
+  match (left, right) {
+    (Some(left), Some(right)) => (left.as_ref().cmp(right.as_ref()), true),
+    (Some(_), None) => (0u8.cmp(&absent_rank), false),
+    (None, Some(_)) => (absent_rank.cmp(&0), false),
+    (None, None) => (std::cmp::Ordering::Equal, false),
   }
 }
 

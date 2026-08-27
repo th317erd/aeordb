@@ -31,6 +31,7 @@ pub enum EngineError {
   },
   InvalidInput(String),
   ResourceExhausted(String),
+  HistoricalViewUnavailable(String),
   MigrationGcSuspended {
     migration_id: [u8; 16],
     fencing_token: u64,
@@ -79,6 +80,7 @@ impl fmt::Display for EngineError {
       EngineError::SystemFamilyPolicy { code, reason } => write!(formatter, "System family policy failure ({code}): {reason}"),
       EngineError::InvalidInput(msg) => write!(formatter, "Invalid input: {}", msg),
       EngineError::ResourceExhausted(msg) => write!(formatter, "Resource exhausted: {}", msg),
+      EngineError::HistoricalViewUnavailable(msg) => write!(formatter, "Historical view unavailable: {}", msg),
       EngineError::MigrationGcSuspended { fencing_token, .. } => {
         write!(formatter, "Mutating garbage collection is suspended by migration fencing token {fencing_token}")
       }

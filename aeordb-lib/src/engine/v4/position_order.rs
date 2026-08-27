@@ -5,8 +5,9 @@ use std::mem::size_of;
 
 use super::contract_generated;
 use super::position::{
-  CanonicalRouteOrderDefinitionV1, CompiledPositionComparatorV1, CompiledRouteOrderV1, PositionComparatorV1, PositionComponentStateV1,
-  PositionRouteV1, PositionSortDefinitionV1, PositionSortDirectionV1, compile_route_order_definition,
+  CanonicalRouteOrderDefinitionV1, CompiledPositionComparatorV1, CompiledRouteOrderV1, LogicalPositionWriteV1, PositionComparatorV1,
+  PositionComponentStateV1, PositionComponentWriteV1, PositionRouteV1, PositionSortDefinitionV1, PositionSortDirectionV1,
+  compile_route_order_definition, encode_logical_position,
 };
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use super::text_fold::AEOR_TEXT_FOLD_TABLE_FINGERPRINT_V1;
@@ -287,6 +288,27 @@ impl LogicalOrderRowOwnedV1 {
       record_revision_tie: &self.record_revision_tie,
     }
   }
+}
+
+pub fn encode_logical_order_row_position_v1(
+  order: &CompiledRouteOrderV1,
+  namespace_root: &[u8],
+  row: LogicalOrderRowV1<'_>,
+) -> FormatResult<Vec<u8>> {
+  validate_logical_order_row_v1(order, row)
+    .map_err(|error| FormatError::new(MalformedInputClass::CrossRecordClosureMismatch, "invalid_position_cursor", error.to_string()))?;
+  let components = row
+    .components
+    .iter()
+    .map(|component| PositionComponentWriteV1 { comparator: component.comparator, state: component.state, payload: &component.payload })
+    .collect::<Vec<_>>();
+  encode_logical_position(&LogicalPositionWriteV1 {
+    order,
+    namespace_root,
+    file_key_tie: row.file_key_tie,
+    record_revision_tie: row.record_revision_tie,
+    components: &components,
+  })
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::engine::directory_ops::DirectoryOps;
+use crate::engine::directory_ops::{DirectoryOps, EngineFileStream};
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryOwner, MemoryReservation};
@@ -8,6 +8,8 @@ use crate::engine::path_utils::file_name;
 use crate::engine::query_engine::{QueryNode, QueryOp};
 use crate::engine::query_runtime::{QueryRequestBudget, QueryRuntimeReservation};
 use crate::engine::storage_engine::StorageEngine;
+
+use super::legacy_v3_root_adapter::{LegacyV3SelectedFileV1, LegacyV3SelectedRootAdapterV1};
 
 const DEFAULT_MAX_MATCHES_PER_RESULT: usize = 5;
 const HARD_MAX_MATCHES_PER_RESULT: usize = 50;
@@ -177,6 +179,31 @@ pub struct LocatorGeneration {
   pub locator_status: &'static str,
 }
 
+enum LocatorReadFileV1<'source, 'engine> {
+  Current { directory_ops: DirectoryOps<'engine>, file_record: &'source FileRecord },
+  Selected { adapter: &'source LegacyV3SelectedRootAdapterV1<'engine>, selected_file: &'source LegacyV3SelectedFileV1 },
+}
+
+impl<'engine> LocatorReadFileV1<'_, 'engine> {
+  fn file_record(&self) -> &FileRecord {
+    match self {
+      Self::Current { file_record, .. } => file_record,
+      Self::Selected { selected_file, .. } => &selected_file.record,
+    }
+  }
+
+  fn read_buffered(&self) -> EngineResult<Vec<u8>> {
+    self.read_streaming()?.collect_to_vec()
+  }
+
+  fn read_streaming(&self) -> EngineResult<EngineFileStream<'_>> {
+    match self {
+      Self::Current { directory_ops, file_record } => directory_ops.read_file_streaming(&file_record.path),
+      Self::Selected { adapter, selected_file } => adapter.file_stream(selected_file),
+    }
+  }
+}
+
 pub fn terms_from_query_node(node: &QueryNode) -> Vec<LocatorTerm> {
   let mut terms = Vec::new();
   collect_query_terms(node, &mut terms);
@@ -214,7 +241,8 @@ pub(crate) fn generate_locators_with_budget(
   options: &LocatorOptions,
   request_budget: Option<&QueryRequestBudget>,
 ) -> LocatorGeneration {
-  generate_locator_attempt(engine, file_record, terms, options, request_budget).generation
+  let file = LocatorReadFileV1::Current { directory_ops: DirectoryOps::new(engine), file_record };
+  generate_locator_attempt(engine, &file, terms, options, request_budget).generation
 }
 
 pub(crate) fn try_generate_locators_with_budget(
@@ -224,7 +252,24 @@ pub(crate) fn try_generate_locators_with_budget(
   options: &LocatorOptions,
   request_budget: &QueryRequestBudget,
 ) -> EngineResult<LocatorGeneration> {
-  let attempt = generate_locator_attempt(engine, file_record, terms, options, Some(request_budget));
+  let file = LocatorReadFileV1::Current { directory_ops: DirectoryOps::new(engine), file_record };
+  let attempt = generate_locator_attempt(engine, &file, terms, options, Some(request_budget));
+  match attempt.failure {
+    Some(error) => Err(error),
+    None => Ok(attempt.generation),
+  }
+}
+
+pub(crate) fn try_generate_selected_locators_with_budget(
+  engine: &StorageEngine,
+  adapter: &LegacyV3SelectedRootAdapterV1<'_>,
+  selected_file: &LegacyV3SelectedFileV1,
+  terms: &[LocatorTerm],
+  options: &LocatorOptions,
+  request_budget: &QueryRequestBudget,
+) -> EngineResult<LocatorGeneration> {
+  let file = LocatorReadFileV1::Selected { adapter, selected_file };
+  let attempt = generate_locator_attempt(engine, &file, terms, options, Some(request_budget));
   match attempt.failure {
     Some(error) => Err(error),
     None => Ok(attempt.generation),
@@ -238,11 +283,12 @@ struct LocatorAttempt {
 
 fn generate_locator_attempt(
   engine: &StorageEngine,
-  file_record: &FileRecord,
+  file: &LocatorReadFileV1<'_, '_>,
   terms: &[LocatorTerm],
   options: &LocatorOptions,
   request_budget: Option<&QueryRequestBudget>,
 ) -> LocatorAttempt {
+  let file_record = file.file_record();
   if !options.include_matches || terms.is_empty() {
     return LocatorAttempt {
       generation: LocatorGeneration { matches: Vec::new(), matches_truncated: false, locator_status: "unsupported" },
@@ -286,7 +332,7 @@ fn generate_locator_attempt(
     };
 
     let before = matches.len();
-    match generate_stored_file_locators(engine, file_record, term, options, request_budget, &mut matches) {
+    match generate_stored_file_locators(engine, file, term, options, request_budget, &mut matches) {
       Ok(Some(truncated)) => matches_truncated |= truncated,
       Ok(None) => saw_unsupported = true,
       Err(error) => {
@@ -399,12 +445,13 @@ fn generate_metadata_locators(
 
 fn generate_stored_file_locators(
   engine: &StorageEngine,
-  file_record: &FileRecord,
+  file: &LocatorReadFileV1<'_, '_>,
   term: &LocatorTerm,
   options: &LocatorOptions,
   request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchHitLocator>,
 ) -> EngineResult<Option<bool>> {
+  let file_record = file.file_record();
   if is_json_content_type(file_record.content_type.as_deref()) {
     let admitted_bytes = file_record
       .total_size
@@ -412,10 +459,10 @@ fn generate_stored_file_locators(
       .and_then(|bytes| bytes.checked_add(1024 * 1024))
       .ok_or_else(|| EngineError::ResourceExhausted("JSON locator scan estimate overflow".to_string()))?;
     let _memory = reserve_locator_memory(engine, request_budget, admitted_bytes, "JSON locator scan admission failed")?;
-    return generate_buffered_stored_file_locators(engine, file_record, term, options, out);
+    return generate_buffered_stored_file_locators(file, term, options, out);
   }
 
-  match generate_streaming_stored_file_locators(engine, file_record, term, options, request_budget, out) {
+  match generate_streaming_stored_file_locators(engine, file, term, options, request_budget, out) {
     Ok(truncated) => Ok(Some(truncated)),
     Err(EngineError::InvalidInput(message)) if message.starts_with("Invalid UTF-8:") => Ok(None),
     Err(error) => Err(error),
@@ -423,14 +470,13 @@ fn generate_stored_file_locators(
 }
 
 fn generate_buffered_stored_file_locators(
-  engine: &StorageEngine,
-  file_record: &FileRecord,
+  file: &LocatorReadFileV1<'_, '_>,
   term: &LocatorTerm,
   options: &LocatorOptions,
   out: &mut Vec<SearchHitLocator>,
 ) -> EngineResult<Option<bool>> {
-  let ops = DirectoryOps::new(engine);
-  let data = ops.read_file_buffered(&file_record.path)?;
+  let file_record = file.file_record();
+  let data = file.read_buffered()?;
   let Ok(text) = std::str::from_utf8(&data) else {
     return Ok(None);
   };
@@ -573,12 +619,13 @@ struct StreamingLocatorState {
 
 fn generate_streaming_stored_file_locators(
   engine: &StorageEngine,
-  file_record: &FileRecord,
+  file: &LocatorReadFileV1<'_, '_>,
   term: &LocatorTerm,
   options: &LocatorOptions,
   request_budget: &QueryRequestBudget,
   out: &mut Vec<SearchHitLocator>,
 ) -> EngineResult<bool> {
+  let file_record = file.file_record();
   let buffer_limit = usize::try_from(request_budget.position_scan_buffer_bytes())
     .map_err(|_| EngineError::ResourceExhausted("position scan buffer exceeds this platform's address space".to_string()))?;
   let context_bytes = options
@@ -600,8 +647,7 @@ fn generate_streaming_stored_file_locators(
     .try_reserve_exact(usize::try_from(admitted_bytes).unwrap_or(buffer_limit))
     .map_err(|error| EngineError::ResourceExhausted(format!("position locator scan allocation failed: {error}")))?;
   let mut state = StreamingLocatorState { base_byte: 0, base_position: TextPosition::start(), search_byte: 0, seeking_extra_match: false };
-  let directory_ops = DirectoryOps::new(engine);
-  let stream = directory_ops.read_file_streaming(&file_record.path)?;
+  let stream = file.read_streaming()?;
 
   for chunk in stream {
     let chunk = chunk?;

@@ -156,7 +156,7 @@ async fn test_explain_analyze_returns_plan_and_results() {
 }
 
 #[tokio::test]
-async fn test_explain_shows_indexes() {
+async fn test_explain_reports_logical_coverage_without_physical_indexes() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_users(&engine);
   let app = rebuild_app(&jwt_manager, &engine);
@@ -166,13 +166,13 @@ async fn test_explain_shows_indexes() {
 
   let plan = json.get("plan").unwrap();
   let tree = plan.get("query_tree").unwrap();
-  let indexes = tree.get("indexes").unwrap().as_array().unwrap();
-
-  assert!(!indexes.is_empty(), "should list at least one index");
-  let idx = &indexes[0];
-  assert!(idx.get("strategy").is_some(), "index info should have 'strategy'");
-  assert!(idx.get("type").is_some(), "index info should have 'type'");
-  assert!(idx.get("entries").is_some(), "index info should have 'entries'");
+  assert_eq!(tree["field"], "age");
+  assert_eq!(tree["operation"], "eq");
+  assert_eq!(tree["coverage"], "index_union");
+  assert_eq!(tree["recheck"], false);
+  for forbidden_physical_field in ["index_field", "index_source", "strategy", "indexes", "entries", "values_stored"] {
+    assert!(tree.get(forbidden_physical_field).is_none(), "EXPLAIN leaked {forbidden_physical_field}: {tree}");
+  }
 }
 
 #[tokio::test]

@@ -988,15 +988,15 @@ async fn test_engine_head_requires_auth() {
 }
 
 #[tokio::test]
-async fn test_query_unsupported_value_type_returns_400() {
+async fn test_query_unsupported_object_value_returns_400() {
   let (app, jwt_manager, _, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
 
-  // null is an unsupported value type for json_value_to_bytes
+  // Structured objects are not scalar query literals.
   let body = serde_json::json!({
     "path": "/myapp/users",
     "where": [
-      { "field": "age", "op": "eq", "value": null }
+      { "field": "age", "op": "eq", "value": { "nested": true } }
     ]
   });
 

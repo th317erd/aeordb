@@ -401,8 +401,16 @@ object to the keyed body or range collection.
 
 Use `items` to fetch line, character, byte, or JSON Pointer ranges. This is the preferred follow-up for search hit locators.
 
+For locator continuity, take `root.hash` from the query/search response and
+send it as this request's `root_hash`. Also copy the result's `content_hash`
+into `if_content_hash`. The root binds the path and FileRecord revision to the
+same namespace view that produced the locator; the content assertion rejects a
+mismatched body. Omitting `root_hash` selects current HEAD and may return
+different bytes at the same path and range.
+
 ```json
 {
+  "root_hash": "9f26...",
   "items": [
     {
       "id": "hit-1",
@@ -1298,9 +1306,12 @@ participate in exact `@hash` lookup; trigger a forced reindex with
 
 For agent workflows, `/files/search` and `/files/query` also support opt-in hit
 locators with `include_matches: true`. Locator responses include snippets,
-typed ranges, `content_hash` identity anchors, and fetch hints that can be used
-with `/files/fetch` range mode. See [Querying](querying.md#hit-locators) for
-the full schema.
+typed ranges, fetch hints, and exact `file_key`, `record_revision`, and
+`content_hash` identity anchors. Always reuse the response's `root.hash` as the
+`root_hash` of the follow-up `/files/fetch` range request, together with
+`if_content_hash`; this is what makes search-root-X to fetch-root-X reproduce
+the exact bytes even after current HEAD advances. See
+[Querying](querying.md#hit-locators) for the full schema.
 
 **Response:**
 

@@ -130,6 +130,7 @@ pub struct PublicQueryRequestV1 {
   pub selector: RequestedRootSelectorV1,
   pub expression: QueryExpressionV1,
   pub pagination: PositionWindowPlanV1,
+  pub default_limit_applied: bool,
   pub position: Option<LogicalPositionV1>,
   pub order_by: Vec<PublicSortFieldV1>,
   pub include_total: bool,
@@ -145,6 +146,7 @@ pub struct AdmittedPublicQueryRequestV1 {
   pub selector: RequestedRootSelectorV1,
   pub expression: QueryExpressionV1,
   pub pagination: PositionWindowPlanV1,
+  pub default_limit_applied: bool,
   pub order_by: Vec<PublicSortFieldV1>,
   pub include_total: bool,
   pub aggregate: Option<PublicAggregateRequestV1>,
@@ -248,6 +250,7 @@ pub fn admit_public_query_request_v1(
   )
   .map_err(public_root_error)?;
 
+  let default_limit_applied = raw.limit.is_none();
   let admitted_pagination = admit_public_pagination_v1(
     RawPaginationV1 { page: raw.page, offset: raw.offset, after: raw.after, before: raw.before, limit: raw.limit },
     &selector,
@@ -270,6 +273,7 @@ pub fn admit_public_query_request_v1(
     selector,
     expression,
     pagination: admitted_pagination.pagination,
+    default_limit_applied,
     order_by: raw.order_by,
     include_total: raw.include_total,
     aggregate: raw.aggregate,
@@ -295,6 +299,7 @@ pub fn finalize_public_query_request_v1(
     selector: admitted.selector,
     expression: admitted.expression,
     pagination: admitted.pagination,
+    default_limit_applied: admitted.default_limit_applied,
     position,
     order_by: admitted.order_by,
     include_total: admitted.include_total,
@@ -332,10 +337,10 @@ pub fn admit_public_search_request_v1(
   if raw.query.as_ref().is_some_and(|query| query.is_empty() || query.len() > QUERY_MAXIMUM_LITERAL_BYTES_V1) {
     return Err(PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", "search query must be nonempty and bounded"));
   }
-  let requested_path = match raw.path.as_deref() {
-    Some(path) => path,
-    None => "/",
-  };
+  let mut requested_path = "/";
+  if let Some(path) = raw.path.as_deref() {
+    requested_path = path;
+  }
   let path =
     validate_query_path(requested_path).map_err(|error| PublicSchemaErrorV1::new("INVALID_SEARCH_REQUEST", error.context().to_string()))?;
   let selector = parse_root_selector_v1(
@@ -804,6 +809,10 @@ pub struct PublicCollectionMetadataV1 {
   pub limit: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub offset: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub default_limit_hit: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub default_limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
