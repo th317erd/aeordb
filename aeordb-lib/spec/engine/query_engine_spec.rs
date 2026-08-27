@@ -86,6 +86,48 @@ fn test_query_exact_match() {
 }
 
 #[test]
+fn scoped_content_query_uses_inherited_index_owner_without_returning_siblings() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = RequestContext::system();
+  let engine = create_engine(&dir);
+  let ops = DirectoryOps::new(&engine);
+  let config = PathIndexConfig {
+    parser: None,
+    parser_memory_limit: None,
+    logging: false,
+    glob: Some("**/*.json".to_string()),
+    indexes: vec![
+      IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+      IndexFieldConfig { name: "rank".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(10.0) },
+    ],
+  };
+  store_index_config(&engine, "/", &config);
+
+  for (path, name, rank) in [
+    ("/tenant/allowed/alice.json", "Alice", 1),
+    ("/tenant/allowed/bob.json", "Bob", 2),
+    ("/tenant/sibling/alice.json", "Alice", 1),
+    ("/outside/alice.json", "Alice", 1),
+  ] {
+    let body = serde_json::to_vec(&serde_json::json!({ "name": name, "rank": rank })).unwrap();
+    ops.store_file_with_indexing(&ctx, path, &body, Some("application/json")).unwrap();
+  }
+
+  let exact_results = QueryBuilder::new(&engine, "/tenant/allowed").field("name").eq(b"Alice").all().unwrap();
+  assert_eq!(exact_results.len(), 1);
+  assert_eq!(exact_results[0].file_record.path, "/tenant/allowed/alice.json");
+
+  let range_results = QueryBuilder::new(&engine, "/tenant/allowed").field("rank").gt_u64(0).all().unwrap();
+  let mut range_paths = range_results.iter().map(|result| result.file_record.path.as_str()).collect::<Vec<_>>();
+  range_paths.sort_unstable();
+  assert_eq!(range_paths, vec!["/tenant/allowed/alice.json", "/tenant/allowed/bob.json"]);
+
+  let not_results = QueryBuilder::new(&engine, "/tenant/allowed").not(|query| query.field("name").eq_str("Bob")).all().unwrap();
+  assert_eq!(not_results.len(), 1);
+  assert_eq!(not_results[0].file_record.path, "/tenant/allowed/alice.json");
+}
+
+#[test]
 fn query_results_retain_and_release_their_memory_reservation() {
   let dir = tempfile::tempdir().unwrap();
   let engine = setup_users_engine(&dir);

@@ -603,6 +603,28 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
     })
   }
 
+  fn resolve_selected_index_scope(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<(String, Option<PathIndexConfig>)> {
+    let normalized_scope = normalize_path(path);
+    if let Some(configuration) = self.load_selected_index_config(&normalized_scope, budget)? {
+      return Ok((normalized_scope, Some(configuration)));
+    }
+
+    let mut ancestor = parent_path(&normalized_scope);
+    while let Some(directory) = ancestor {
+      if let Some(configuration) = self.load_selected_index_config(&directory, budget)? {
+        if configuration.glob.is_some() {
+          return Ok((directory, Some(configuration)));
+        }
+      }
+      if directory == "/" {
+        break;
+      }
+      ancestor = parent_path(&directory);
+    }
+
+    Ok((normalized_scope, None))
+  }
+
   fn load_selected_index_config_cached<'cache>(
     &self,
     owner_path: &str,
@@ -799,8 +821,8 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
     strategy: &str,
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
-    let normalized_scope = normalize_path(path);
-    let Some(configuration) = self.load_selected_index_config(&normalized_scope, budget)? else {
+    let (normalized_owner, configuration) = self.resolve_selected_index_scope(path, budget)?;
+    let Some(configuration) = configuration else {
       return Ok(None);
     };
     let Some(field) = configuration
@@ -817,11 +839,11 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
     let mut index = FieldIndex::new(field_name.to_string(), converter);
     let mut admitted_index_bytes = LEGACY_SELECTED_INDEX_BUILD_FIXED_OVERHEAD_BYTES_V1;
     let mut configurations = HashMap::new();
-    configurations.insert(normalized_scope.clone(), Some(configuration.clone()));
+    configurations.insert(normalized_owner.clone(), Some(configuration.clone()));
     let mut parser_registry = None;
     let mut parser_registry_loaded = false;
     let family_policy = SystemFamilyPolicyResolver::new(self.engine.hash_algo())?;
-    let files = <Self as QueryReadSourceV1>::list_file_records(self, &normalized_scope, budget)?;
+    let files = <Self as QueryReadSourceV1>::list_file_records(self, &normalized_owner, budget)?;
     for file in files {
       budget.record_work(1)?;
       let indexable = match family_policy.index_policy_for_path(&file.record.path)? {
@@ -833,7 +855,7 @@ impl<'engine> LegacyV3SelectedRootAdapterV1<'engine> {
           ..
         } => false,
       };
-      if !indexable || !self.selected_configuration_owner_matches(&file.record.path, &normalized_scope, budget, &mut configurations)? {
+      if !indexable || !self.selected_configuration_owner_matches(&file.record.path, &normalized_owner, budget, &mut configurations)? {
         continue;
       }
 
@@ -1124,7 +1146,8 @@ impl QueryReadSourceV1 for LegacyV3SelectedRootAdapterV1<'_> {
   }
 
   fn list_indexes(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<String>> {
-    let indexes_path = Self::query_indexes_directory_path(path);
+    let (index_owner, configuration) = self.resolve_selected_index_scope(path, budget)?;
+    let indexes_path = Self::query_indexes_directory_path(&index_owner);
     let mut names = BTreeSet::new();
     match self.directory(&indexes_path) {
       Ok(directory) => {
@@ -1140,7 +1163,7 @@ impl QueryReadSourceV1 for LegacyV3SelectedRootAdapterV1<'_> {
       Err(error) => return Err(error),
     }
 
-    if let Some(configuration) = self.load_selected_index_config(path, budget)? {
+    if let Some(configuration) = configuration {
       for field in configuration.indexes {
         budget.record_work(1)?;
         let Some(field_name) = canonical_selected_index_field_name(&field.name) else {

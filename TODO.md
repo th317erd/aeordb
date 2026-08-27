@@ -1163,7 +1163,7 @@
           - [x] Enforce corrected JSON node, depth, member, and scalar limits during deserialization instead of after the full value tree is allocated.
           - [ ] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
         - [x] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
-    - [ ] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
+    - [x] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [x] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.
         - [x] P7-1a: add the compile-red `root_api_reference_spec`, then implement the 95-registration/124-method contract plus pure selector/response/error model without activating service behavior.
         - [x] P7-1b: implement exact v4 first-authority/lifecycle and current-authorization adapters with request-owned pins and concealment proof.
@@ -1257,7 +1257,7 @@
               - [x] Prove absent, stale, corrupt, source-unavailable, and byte-pressure NVT states preserve the exact Posting answer and a bounded diagnostic receipt.
               - [x] Prove cancellation remains cancellation and corrupt correctness-bearing Posting parents or links remain terminal corruption.
               - [x] Re-run focused, adjacent, broad, suppression, static, contract, and documentation gates before landing P7-3c3.
-        - [ ] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
+        - [x] P7-3d: execute exact complete, partial-plus-complement, and authoritative query/search/sort/top-K/aggregate plans with boolean scope merging, recheck, cancellation, and memory bounds.
           - [x] P7-3d1: freeze one storage-neutral authoritative truth executor for effective-scope document streams, exact canonical predicate semantics, boolean composition, selected-root identity, cancellation, and retained-result memory.
             - [x] Reject nonidentical cross-field ScopeId partitions as typed unavailable until P7-3d4 performs the required FileKey merge; never silently omit a valid scope.
             - [x] Latch field/document visitor failures so a buggy source cannot squelch executor errors and return partial success behind a complete receipt.
@@ -1353,7 +1353,7 @@
           - [x] Add compile-red native proof for exact-root raw reads, both cancellations, foreign rows, body faults, limits, pressure, and release.
           - [x] Implement one disconnected raw-byte adapter that delegates exactly once to `NativeSelectedNamespaceReaderV1::read_file_body`.
           - [x] Freeze architecture isolation and unchanged plugin host/runtime/SDK registries, then pass native, affected, static, documentation, contract, and full-workspace gates.
-      - [ ] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
+      - [x] P7-5: cut over HTTP, embedded SDK, portal/client, authorized SSE, and documentation schemas together.
         - [x] P7-5a: freeze one inactive shared public request/response schema, including raw query AST admission, selectors, APOS pagination, root metadata, locators, ranges, and relationship events.
         - [x] P7-5b: route legacy-v3 compatibility reads through one selected-root adapter and apply the shared schema to list/file/symlink/hash/fetch/download HTTP surfaces without activating v4 authority.
           - [x] P7-5b1: freeze one exact-root legacy-v3 adapter for current, explicit, snapshot, and version selectors plus list/file/symlink/hash reachability.
@@ -1383,7 +1383,7 @@
           - [x] P7-5d1: freeze root-selector, exact-root metadata, and rooted plugin result envelopes in the SDK before changing runtime behavior.
           - [x] P7-5d2: bind embedded/plugin invocation to one lazily resolved authorized root, adapt all eight imports without registry growth, and close fault/architecture/WASM gates.
             - [x] Rebuild every affected first-party WASM guest against the new SDK, refresh tracked bundled artifacts, and prove fresh/reused-database live invocation surfaces exact root metadata.
-        - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
+        - [x] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
           - [x] P7-5e1: attach exact previous/new roots and logical affected relationships to every coordinator-backed mutation event, with red-first producer contract proof.
           - [x] P7-5e2: filter legacy entries and affected relationships in lockstep under current per-connection authority, fail closed on malformed or empty projections, and remove exact global cardinality from scoped/non-root stream gaps.
           - [x] P7-5e3: adapt the bundled portal/client to rooted response envelopes and incremental active-directory SSE patches without reloading unrelated previews, then update public docs.
@@ -1393,10 +1393,14 @@
             - [x] P7-5e5b: move `/system/events` and `/events/me` onto per-subscriber authorization-filtered queues with explicit item/byte bounds and subscriber-local gap accounting.
             - [x] P7-5e5c: preserve deletion visibility through exact previous-root permission authority and unshare visibility through a typed prior-recipient witness without exposing either event to never-authorized subscribers.
             - [x] P7-5e5d: close event/webhook architecture, narrow/affected/broad/resource/documentation, disconnect/shutdown, and disposable live-server gates.
-      - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
+      - [x] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
+        - [x] Map current and selected-root config/index producers plus query, search, sort, aggregate, EXPLAIN, embedded, and plugin consumers.
+        - [x] Add red direct-engine and HTTP regressions for an inherited content index with matching sibling rows outside the requested scope.
+        - [x] Resolve current and exact selected-root index owners through their governing configuration and filter owner-wide exact/fuzzy candidates back to the requested scope.
+        - [x] Pass focused, affected, static, broad-workspace, and disposable live-server gates; record evidence and land the P7 closure.
       - [x] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant. (Completed by P7-5e5c.)
-      - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
     - [ ] P8: execute side-by-side migration preflight, copied-production rehearsal, native release qualification, canary, and explicitly authorized operator cutover.
+      - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [ ] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
     - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
 

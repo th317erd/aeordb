@@ -10,6 +10,7 @@ use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
+use crate::engine::index_config_resolver::IndexConfigResolver;
 use crate::engine::index_store::{FieldIndex, IndexLoadMemoryAccount, IndexManager};
 use crate::engine::json_parser::parse_json_fields;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
@@ -1173,14 +1174,18 @@ pub(crate) trait QueryReadSourceV1 {
 }
 
 enum QueryIndexSourceV1<'a> {
-  Current(IndexManager<'a>),
+  Current { index_manager: IndexManager<'a>, config_resolver: IndexConfigResolver<'a> },
   Selected(&'a dyn QueryReadSourceV1),
 }
 
-impl QueryIndexSourceV1<'_> {
+impl<'a> QueryIndexSourceV1<'a> {
+  fn current_index_owner(config_resolver: &IndexConfigResolver<'a>, path: &str) -> EngineResult<String> {
+    Ok(config_resolver.find_config_for_reindex_scope(path)?.map_or_else(|| normalize_path(path), |(_configuration, owner)| owner))
+  }
+
   fn list_indexes(&self, path: &str, budget: &mut QueryMemoryBudget) -> EngineResult<Vec<String>> {
     match self {
-      Self::Current(index_manager) => index_manager.list_indexes(path),
+      Self::Current { index_manager, config_resolver } => index_manager.list_indexes(&Self::current_index_owner(config_resolver, path)?),
       Self::Selected(source) => source.list_indexes(path, budget),
     }
   }
@@ -1192,7 +1197,9 @@ impl QueryIndexSourceV1<'_> {
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
     match self {
-      Self::Current(index_manager) => index_manager.load_index_with_memory_account(path, field_name, budget),
+      Self::Current { index_manager, config_resolver } => {
+        index_manager.load_index_with_memory_account(&Self::current_index_owner(config_resolver, path)?, field_name, budget)
+      }
       Self::Selected(source) => source.load_index(path, field_name, budget),
     }
   }
@@ -1205,7 +1212,12 @@ impl QueryIndexSourceV1<'_> {
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Option<FieldIndex>> {
     match self {
-      Self::Current(index_manager) => index_manager.load_index_by_strategy_with_memory_account(path, field_name, strategy, budget),
+      Self::Current { index_manager, config_resolver } => index_manager.load_index_by_strategy_with_memory_account(
+        &Self::current_index_owner(config_resolver, path)?,
+        field_name,
+        strategy,
+        budget,
+      ),
       Self::Selected(source) => source.load_index_by_strategy(path, field_name, strategy, budget),
     }
   }
@@ -1217,7 +1229,9 @@ impl QueryIndexSourceV1<'_> {
     budget: &mut QueryMemoryBudget,
   ) -> EngineResult<Vec<FieldIndex>> {
     match self {
-      Self::Current(index_manager) => index_manager.load_indexes_for_field_with_memory_account(path, field_name, budget),
+      Self::Current { index_manager, config_resolver } => {
+        index_manager.load_indexes_for_field_with_memory_account(&Self::current_index_owner(config_resolver, path)?, field_name, budget)
+      }
       Self::Selected(source) => source.load_indexes_for_field(path, field_name, budget),
     }
   }
@@ -1248,7 +1262,10 @@ impl<'a> QueryEngine<'a> {
   fn index_source(&self) -> QueryIndexSourceV1<'a> {
     match self.read_source {
       Some(source) => QueryIndexSourceV1::Selected(source),
-      None => QueryIndexSourceV1::Current(IndexManager::new(self.engine)),
+      None => QueryIndexSourceV1::Current {
+        index_manager: IndexManager::new(self.engine),
+        config_resolver: IndexConfigResolver::new(self.engine),
+      },
     }
   }
 
@@ -1821,6 +1838,7 @@ impl<'a> QueryEngine<'a> {
     } else {
       self.evaluate_node(&effective_node, &query.path, &index_manager, budget)?
     };
+    let result_hashes = self.filter_hashes_to_query_path(result_hashes, &query.path, budget)?;
 
     // Load FileRecords for candidates.
     budget.reserve_result_slots(result_hashes.len())?;
@@ -2621,6 +2639,7 @@ impl<'a> QueryEngine<'a> {
 
     // Get candidates AND values from the appropriate index
     let (candidates, candidate_values) = self.get_fuzzy_candidates_with_values(field_query, &query.path, &index_manager, budget)?;
+    let candidates = self.filter_hashes_to_query_path(candidates, &query.path, budget)?;
 
     // Recheck phase: get field value from index, compute score
     budget.reserve_result_slots(candidates.len())?;
@@ -2778,10 +2797,6 @@ impl<'a> QueryEngine<'a> {
 
         // Collect values from this index
         all_values.extend(index.values.drain());
-        if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
-        }
-
         Ok((candidates, all_values))
       }
       QueryOp::Phonetic(query_str) => {
@@ -2833,10 +2848,6 @@ impl<'a> QueryEngine<'a> {
         if !found_any_index {
           return Err(EngineError::NotFound(format!("No phonetic index found for field '{}' at '{}'", field_query.field_name, path,)));
         }
-        if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
-        }
-
         Ok((candidates, all_values))
       }
       QueryOp::Match(query_str) => {
@@ -2909,10 +2920,6 @@ impl<'a> QueryEngine<'a> {
           }
           all_values.extend(index.values.drain());
         }
-        if is_virtual_field {
-          candidates = self.filter_hashes_to_query_path(candidates, path, budget)?;
-        }
-
         Ok((candidates, all_values))
       }
       _ => Err(EngineError::NotFound("Not a fuzzy operation".to_string())),

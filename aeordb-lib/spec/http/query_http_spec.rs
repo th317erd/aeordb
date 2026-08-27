@@ -288,6 +288,95 @@ async fn test_selected_authoritative_fallback_honors_source_paths_globs_and_near
 }
 
 #[tokio::test]
+async fn test_scoped_content_query_uses_selected_inherited_owner_and_excludes_siblings() {
+  let (_, jwt_manager, engine, _temp_dir) = test_app();
+  let operations = DirectoryOps::new(&engine);
+  let context = RequestContext::system();
+  store_index_config(
+    &engine,
+    "/tenant",
+    &PathIndexConfig {
+      parser: None,
+      parser_memory_limit: None,
+      logging: false,
+      glob: Some("**/*.json".to_string()),
+      indexes: vec![
+        IndexFieldConfig { name: "name".to_string(), index_type: "string".to_string(), source: None, min: None, max: None },
+        IndexFieldConfig { name: "name".to_string(), index_type: "trigram".to_string(), source: None, min: None, max: None },
+        IndexFieldConfig { name: "rank".to_string(), index_type: "u64".to_string(), source: None, min: Some(0.0), max: Some(10.0) },
+      ],
+    },
+  );
+  for (path, rank) in [("/tenant/allowed/later.json", 2), ("/tenant/allowed/earlier.json", 1), ("/tenant/sibling/first.json", 0)] {
+    let body = serde_json::to_vec(&serde_json::json!({ "name": "Alice", "rank": rank })).unwrap();
+    operations.store_file_buffered(&context, path, &body, Some("application/json")).unwrap();
+  }
+
+  let app = rebuild_app(&jwt_manager, &engine);
+  let auth = root_bearer_token(&jwt_manager);
+
+  let (status, exact_response) = query_request(
+    app.clone(),
+    &auth,
+    serde_json::json!({
+      "path": "/tenant/allowed",
+      "where": { "field": "name", "op": "eq", "value": "Alice" },
+      "order_by": [{ "field": "rank", "direction": "asc" }]
+    }),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK, "body: {exact_response}");
+  let exact_paths = exact_response["items"].as_array().unwrap().iter().map(|item| item["path"].as_str().unwrap()).collect::<Vec<_>>();
+  assert_eq!(exact_paths, vec!["/tenant/allowed/earlier.json", "/tenant/allowed/later.json"]);
+
+  let (status, fuzzy_response) = query_request(
+    app.clone(),
+    &auth,
+    serde_json::json!({
+      "path": "/tenant/allowed",
+      "where": { "field": "name", "op": "contains", "value": "Alice" }
+    }),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK, "body: {fuzzy_response}");
+  let mut fuzzy_paths = fuzzy_response["items"].as_array().unwrap().iter().map(|item| item["path"].as_str().unwrap()).collect::<Vec<_>>();
+  fuzzy_paths.sort_unstable();
+  assert_eq!(fuzzy_paths, vec!["/tenant/allowed/earlier.json", "/tenant/allowed/later.json"]);
+
+  let (status, aggregate_response) = query_request(
+    app.clone(),
+    &auth,
+    serde_json::json!({
+      "path": "/tenant/allowed",
+      "where": { "field": "name", "op": "eq", "value": "Alice" },
+      "aggregate": { "count": true, "sum": ["rank"] }
+    }),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK, "body: {aggregate_response}");
+  assert_eq!(aggregate_response["count"], 2, "body: {aggregate_response}");
+  assert_eq!(aggregate_response["sum"]["rank"].as_f64(), Some(3.0), "body: {aggregate_response}");
+
+  let (status, explain_response) = query_request(
+    app,
+    &auth,
+    serde_json::json!({
+      "path": "/tenant/allowed",
+      "where": { "field": "name", "op": "eq", "value": "Alice" },
+      "explain": "plan"
+    }),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK, "body: {explain_response}");
+  let query_tree = &explain_response["plan"]["query_tree"];
+  assert_eq!(query_tree["coverage"], "index_union", "body: {explain_response}");
+  assert_eq!(query_tree["recheck"], false, "body: {explain_response}");
+  for forbidden_physical_field in ["index_field", "index_source", "strategy", "indexes"] {
+    assert!(query_tree.get(forbidden_physical_field).is_none(), "EXPLAIN leaked {forbidden_physical_field}: {query_tree}");
+  }
+}
+
+#[tokio::test]
 async fn test_query_include_matches_returns_range_locators_and_identity() {
   let (_, jwt_manager, engine, _temp_dir) = test_app();
   setup_users(&engine);
