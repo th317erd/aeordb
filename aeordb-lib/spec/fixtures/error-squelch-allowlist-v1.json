@@ -5596,7 +5596,7 @@
     {
       "id": "esq-v1-6b32814c2bbcf8e7da05-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 277,
+      "line": 324,
       "column": 33,
       "enclosing_item": "impl NamespaceMutationBatch::validate",
       "kind": "result_to_option",
@@ -5606,7 +5606,7 @@
     {
       "id": "esq-v1-5a7d2361d2f13f40f8fb-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 460,
+      "line": 507,
       "column": 9,
       "enclosing_item": "impl LocatorReplacementCoordinator < 'a >::preflight",
       "kind": "error_conversion",
@@ -5616,7 +5616,7 @@
     {
       "id": "esq-v1-2d5fa0c6368cc498b7c2-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 500,
+      "line": 547,
       "column": 23,
       "enclosing_item": "impl LocatorReplacementCoordinator < 'a >::apply",
       "kind": "default_on_error",
@@ -5626,7 +5626,7 @@
     {
       "id": "esq-v1-7b39daf83bc9a92dac3e-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 692,
+      "line": 739,
       "column": 5,
       "enclosing_item": "impl NamespaceMutationCoordinator < 'a >::execute_with_namespace",
       "kind": "logged_error_continues",
@@ -5636,7 +5636,7 @@
     {
       "id": "esq-v1-9dcad101314bc1a92d47-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 702,
+      "line": 749,
       "column": 9,
       "enclosing_item": "impl NamespaceMutationCoordinator < 'a >::execute_with_namespace",
       "kind": "logged_error_continues",
@@ -5646,7 +5646,7 @@
     {
       "id": "esq-v1-937c0d1dc58e6bf2f411-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 730,
+      "line": 777,
       "column": 7,
       "enclosing_item": "impl NamespaceMutationCoordinator < 'a >::execute_with_namespace",
       "kind": "logged_error_continues",
@@ -5656,7 +5656,7 @@
     {
       "id": "esq-v1-a15fec955d1ebb9059e4-00",
       "file": "aeordb-lib/src/engine/namespace_mutation.rs",
-      "line": 744,
+      "line": 791,
       "column": 5,
       "enclosing_item": "impl NamespaceMutationCoordinator < 'a >::execute_with_namespace",
       "kind": "logged_error_continues",
@@ -14026,7 +14026,7 @@
     {
       "id": "esq-v1-2e0d6a4c0b25ed5455a7-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 268,
+      "line": 270,
       "column": 24,
       "enclosing_item": "read_aeor_from_disk",
       "kind": "result_to_option",
@@ -14036,7 +14036,7 @@
     {
       "id": "esq-v1-0db37768f5959a4cf92b-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 269,
+      "line": 271,
       "column": 24,
       "enclosing_item": "read_aeor_from_disk",
       "kind": "result_to_option",
@@ -14046,7 +14046,7 @@
     {
       "id": "esq-v1-191a28fa5134c13e969e-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 273,
+      "line": 275,
       "column": 3,
       "enclosing_item": "read_aeor_from_disk",
       "kind": "result_to_option",
@@ -14056,7 +14056,7 @@
     {
       "id": "esq-v1-a7d65ff4c875e8f48f91-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 392,
+      "line": 394,
       "column": 15,
       "enclosing_item": "get_stats",
       "kind": "broad_err_pattern",
@@ -14066,7 +14066,7 @@
     {
       "id": "esq-v1-46f3f56500ede445d3d2-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 414,
+      "line": 416,
       "column": 24,
       "enclosing_item": "get_stats_inner",
       "kind": "default_on_error",
@@ -14076,7 +14076,7 @@
     {
       "id": "esq-v1-3053881fd17dc35208c6-00",
       "file": "aeordb-lib/src/server/portal_routes.rs",
-      "line": 468,
+      "line": 470,
       "column": 21,
       "enclosing_item": "get_stats_inner",
       "kind": "default_on_error",
@@ -14846,7 +14846,7 @@
     {
       "id": "esq-v1-c5929f1be14b572b3f6a-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 169,
+      "line": 170,
       "column": 11,
       "enclosing_item": "impl SseSubscriberAuthority::path_is_permitted",
       "kind": "logged_error_continues",
@@ -14856,7 +14856,7 @@
     {
       "id": "esq-v1-2165b390e783a0a62e39-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 259,
+      "line": 294,
       "column": 5,
       "enclosing_item": "event_to_sse",
       "kind": "broad_err_pattern",
@@ -14866,7 +14866,7 @@
     {
       "id": "esq-v1-6f677c83e87109945780-00",
       "file": "aeordb-lib/src/server/sse_routes.rs",
-      "line": 361,
+      "line": 395,
       "column": 11,
       "enclosing_item": "user_event_stream",
       "kind": "broad_err_pattern",

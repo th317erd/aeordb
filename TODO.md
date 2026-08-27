@@ -1384,6 +1384,11 @@
           - [x] P7-5d2: bind embedded/plugin invocation to one lazily resolved authorized root, adapt all eight imports without registry growth, and close fault/architecture/WASM gates.
             - [x] Rebuild every affected first-party WASM guest against the new SDK, refresh tracked bundled artifacts, and prove fresh/reused-database live invocation surfaces exact root metadata.
         - [ ] P7-5e: project authorization-filtered SSE relationships, cut the bundled portal/client and docs in the same public activation, and close narrow/affected/architecture/broad/live gates.
+          - [x] P7-5e1: attach exact previous/new roots and logical affected relationships to every coordinator-backed mutation event, with red-first producer contract proof.
+          - [x] P7-5e2: filter legacy entries and affected relationships in lockstep under current per-connection authority, fail closed on malformed or empty projections, and remove exact global cardinality from scoped/non-root stream gaps.
+          - [x] P7-5e3: adapt the bundled portal/client to rooted response envelopes and incremental active-directory SSE patches without reloading unrelated previews, then update public docs.
+          - [x] P7-5e4: freeze producer/projector/client architecture uniqueness and pass narrow, affected, static, documentation, broad, and disposable live-server gates.
+          - [ ] P7-5e5: eliminate hidden-traffic influence on scoped/non-root `stream_gap` timing through visibility-aware bounded delivery or exact authorized gap reconstruction; suppressing `missed_events` alone is not timing isolation.
       - [ ] Make scoped query planning resolve inherited index owners instead of probing only the requested path; preserve scope filtering and eliminate content-field `Index not found` failures.
       - [ ] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant.
       - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.

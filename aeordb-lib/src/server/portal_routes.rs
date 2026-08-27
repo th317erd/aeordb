@@ -27,6 +27,7 @@ const PORTAL_SHARED_DASHBOARD_JS: &str = include_str!("../portal/shared/componen
 const PORTAL_SHARED_TOKENS_CSS: &str = include_str!("../portal/shared/styles/tokens.css");
 const PORTAL_SHARED_COMPONENTS_CSS: &str = include_str!("../portal/shared/styles/components.css");
 const PORTAL_FILES_MJS: &str = include_str!("../portal/files.mjs");
+const PORTAL_FILE_EVENT_CONTRACT_MJS: &str = include_str!("../portal/file-event-contract.mjs");
 const PORTAL_SNAPSHOTS_MJS: &str = include_str!("../portal/snapshots.mjs");
 const PORTAL_SETTINGS_MJS: &str = include_str!("../portal/settings.mjs");
 const PORTAL_SHARED_FILE_BROWSER_JS: &str = include_str!("../portal/shared/components/aeor-file-browser.js");
@@ -151,6 +152,7 @@ pub async fn portal_shared_asset(
   request_headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
   let (content, content_type) = match path.as_str() {
+    "file-event-contract.mjs" => (PORTAL_FILE_EVENT_CONTRACT_MJS, "application/javascript; charset=utf-8"),
     "utils.js" => (PORTAL_SHARED_UTILS_JS, "application/javascript; charset=utf-8"),
     "api.js" => (PORTAL_SHARED_API_JS, "application/javascript; charset=utf-8"),
     "preferences.js" => (PORTAL_SHARED_PREFERENCES_JS, "application/javascript; charset=utf-8"),

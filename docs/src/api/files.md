@@ -58,7 +58,9 @@ Store a file at the given path. Parent directories are created automatically. If
 ### Side Effects
 
 - If the path matches `/.aeordb-config/indexes.json` (or a nested variant like `/data/.aeordb-config/indexes.json`), AeorDB attempts to cancel any pending/running reindex and enqueue a replacement for the parent directory. Configs containing only virtual `@` metadata fields use metadata-only reindexing automatically. The `201` acknowledges the file write; scheduling is post-commit derived work. Scheduling failures are logged and counted by `aeordb_system_soft_failures_total{subsystem="automatic_reindex",operation="..."}` so a durable config write is never falsely returned as a retryable failure.
-- Triggers `entries_created` events on the event bus.
+- After hard namespace publication, emits an `entries_created` event with the
+  exact previous/new roots, publication sequence, operation ID, mutation kind,
+  and canonical `affected_relationships`.
 - Runs any deployed store-phase plugins.
 
 ### Example
@@ -628,7 +630,9 @@ Rename or move a file or symlink to a new path. This is a metadata-only operatio
 
 ### Side Effects
 
-- Triggers `entries_created` and `entries_deleted` events on the event bus.
+- After the rename's one hard acknowledgement, emits compatibility
+  `entries_created` and `entries_deleted` fanout carrying the same operation
+  ID, publication sequence, previous/new roots, and logical relationships.
 - If the path is a symlink, the symlink itself is moved (not the target).
 - If a file already exists at the destination path, the operation fails.
 

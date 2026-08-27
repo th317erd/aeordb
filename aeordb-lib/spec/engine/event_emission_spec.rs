@@ -366,6 +366,40 @@ async fn test_store_file_emits_entries_created() {
 }
 
 #[tokio::test]
+async fn coordinator_entry_events_expose_exact_public_roots_and_logical_relationships() {
+  let (engine, bus, ctx, _temp) = setup_with_events();
+  let mut receiver = bus.subscribe();
+  let operations = DirectoryOps::new(&engine);
+  let path = "/public-contract/file.txt";
+
+  let previous_root = engine.head_hash().unwrap();
+  operations.store_file_buffered(&ctx, path, b"first", Some("text/plain")).unwrap();
+  let created = receiver.recv().await.unwrap();
+  let created_root = engine.head_hash().unwrap();
+  assert_eq!(created.payload["previous_root_hash"], hex::encode(previous_root));
+  assert_eq!(created.payload["root_hash"], hex::encode(&created_root));
+  assert_eq!(created.payload["affected_relationships"], serde_json::json!([{"path": path, "entry_type": "file", "change": "created"}]));
+
+  operations.store_file_buffered(&ctx, path, b"second", Some("text/plain")).unwrap();
+  let updated = receiver.recv().await.unwrap();
+  let updated_root = engine.head_hash().unwrap();
+  assert_eq!(updated.payload["previous_root_hash"], hex::encode(&created_root));
+  assert_eq!(updated.payload["root_hash"], hex::encode(&updated_root));
+  assert_eq!(updated.payload["affected_relationships"], serde_json::json!([{"path": path, "entry_type": "file", "change": "updated"}]));
+
+  operations.delete_file(&ctx, path).unwrap();
+  let deleted = receiver.recv().await.unwrap();
+  assert_eq!(deleted.payload["previous_root_hash"], hex::encode(updated_root));
+  assert_eq!(deleted.payload["root_hash"], hex::encode(engine.head_hash().unwrap()));
+  assert_eq!(deleted.payload["affected_relationships"], serde_json::json!([{"path": path, "entry_type": "file", "change": "deleted"}]));
+
+  let serialized = serde_json::to_string(&deleted.payload).unwrap();
+  for forbidden in ["locator_replacements", "stable_key", "physical_incarnation", "previous_identity", "new_identity"] {
+    assert!(!serialized.contains(forbidden), "public event leaked internal relationship authority: {forbidden}");
+  }
+}
+
+#[tokio::test]
 async fn test_store_file_compressed_emits_entries_created() {
   let (engine, bus, ctx, _temp) = setup_with_events();
   let mut rx = bus.subscribe();

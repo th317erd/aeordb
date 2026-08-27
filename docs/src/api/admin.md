@@ -712,7 +712,8 @@ changed HEAD while the backup was being staged, import returns `409 Conflict`
 instead of overwriting that mutation. `force=true` explicitly disables this
 compare-and-publish guard. A successful root-changing import emits
 `imports_completed` only after hard publication and includes `operation_id`,
-`publication_sequence`, and `mutation_kind: "import"`.
+`publication_sequence`, `mutation_kind: "import"`, exact previous/new roots,
+and logical affected relationships.
 Live file, directory, symlink, and logical-byte counters are reconciled from the
 new HEAD after the same acknowledgement; unpromoted and conflicted imports do
 not expose staged locator counts.

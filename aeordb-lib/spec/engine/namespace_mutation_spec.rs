@@ -56,6 +56,45 @@ impl NamespaceMutationFanout for PanickingFanout {
 }
 
 #[test]
+fn public_event_annotation_rejects_invalid_source_identity_evidence() {
+  let acknowledgement_with_invalid_entry_type = NamespaceMutationAcknowledgement {
+    operation_id: uuid::Uuid::new_v4(),
+    kind: NamespaceMutationKind::FileWrite,
+    publication_sequence: 1,
+    previous_root_hash: vec![0x11; 32],
+    root_hash: vec![0x22; 32],
+    source_identities: vec![NamespaceMutationSourceIdentity {
+      path: "/invalid-type".to_string(),
+      entry_type: Some(0xFF),
+      previous_identity: None,
+      new_identity: Some(vec![0x33; 32]),
+    }],
+    locator_replacements: Vec::new(),
+  };
+  let mut payload = serde_json::json!({});
+  assert!(matches!(acknowledgement_with_invalid_entry_type.annotate_event_payload(&mut payload), Err(EngineError::InvalidEntryType(0xFF))));
+
+  let acknowledgement_without_identity = NamespaceMutationAcknowledgement {
+    operation_id: uuid::Uuid::new_v4(),
+    kind: NamespaceMutationKind::FileWrite,
+    publication_sequence: 2,
+    previous_root_hash: vec![0x44; 32],
+    root_hash: vec![0x55; 32],
+    source_identities: vec![NamespaceMutationSourceIdentity {
+      path: "/missing-identity".to_string(),
+      entry_type: Some(EntryType::FileRecord.to_u8()),
+      previous_identity: None,
+      new_identity: None,
+    }],
+    locator_replacements: Vec::new(),
+  };
+  assert!(matches!(
+    acknowledgement_without_identity.annotate_event_payload(&mut serde_json::json!({})),
+    Err(EngineError::InvalidInput(message)) if message.contains("previous or new identity")
+  ));
+}
+
+#[test]
 fn whole_root_publication_rejects_a_changed_expected_head() {
   let (engine, _temporary) = create_temp_engine_for_tests();
   let expected_root = engine.head_hash().unwrap();

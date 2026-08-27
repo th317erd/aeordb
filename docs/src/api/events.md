@@ -61,10 +61,13 @@ be readable under current user/group permissions; user-owned API-key rules are
 an additional bound, while share keys use their active rules as their sole path
 authority. Non-root subscribers never receive paths concealed by the
 SystemFamily registry, including credential and other engine authority records.
-These checks and `path_prefix` are applied to every member of
-`payload.entries`; a mixed batch keeps its visible entries and omits denied
-siblings. A single-path event is omitted when its path is not visible, and a
-batch is omitted when no entries remain.
+These checks and `path_prefix` are applied to every member of both
+`payload.entries` and `payload.affected_relationships`. A mixed batch keeps
+only visible paths in both arrays. The public relationship decoder also strips
+unknown fields, so stable keys, physical incarnations, locator replacements,
+and other storage identities cannot cross this boundary. A malformed
+relationship array fails closed, and an event is omitted when its nonempty
+relationship set becomes empty after authorization.
 
 The stream rechecks mutable user/group and API-key authority as events arrive.
 Revoked, expired, removed, or identity-mismatched keys stop receiving events
@@ -82,7 +85,7 @@ The response is an SSE stream. Each event has the standard SSE fields:
 ```
 id: evt-uuid-here
 event: entries_created
-data: {"event_id":"evt-uuid-here","event_type":"entries_created","timestamp":1775968398000,"payload":{"entries":[{"path":"/data/report.pdf"}],"operation_id":"mutation-uuid-here","publication_sequence":42,"mutation_kind":"file_write"}}
+data: {"event_id":"evt-uuid-here","event_type":"entries_created","timestamp":1775968398000,"payload":{"entries":[{"path":"/data/report.pdf"}],"operation_id":"00000000-0000-4000-8000-000000000001","publication_sequence":42,"mutation_kind":"file_write","previous_root_hash":"7171717171717171717171717171717171717171717171717171717171717171","root_hash":"8181818181818181818181818181818181818181818181818181818181818181","affected_relationships":[{"path":"/data/report.pdf","entry_type":"file","change":"created"}]}}
 
 ```
 
@@ -102,9 +105,10 @@ Each event is a JSON object with:
 | Event Type | Description | Payload |
 |------------|-------------|---------|
 | `server_ready` | Synthetic first event on ready SSE connections | `{"status": "ready", "version": "...", "startup_time": 1781233139578, "uptime_ms": 6500}` |
-| `stream_gap` | This connection fell behind the bounded event buffer and must refresh authoritative state | `{"missed_events": 3, "action": "refresh"}` |
-| `entries_created` | Files were created or updated | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 42, "mutation_kind": "file_write"}` |
-| `entries_deleted` | Files were deleted | `{"entries": [{"path": "..."}], "operation_id": "...", "publication_sequence": 43, "mutation_kind": "file_delete"}` |
+| `stream_gap` | This connection fell behind the bounded event buffer and must refresh authoritative state | Direct root JWT: `{"missed_events": 3, "action": "refresh"}`; scoped/non-root: `{"action": "refresh"}` |
+| `entries_created` | Files or directories were created; legacy overwrite producers may also use this type | Legacy `entries` plus the complete mutation acknowledgement below |
+| `entries_updated` | Entries were updated | Legacy `entries` plus the complete mutation acknowledgement below |
+| `entries_deleted` | Files or directories were deleted | Legacy `entries` plus the complete mutation acknowledgement below |
 | `versions_created` | A new version (snapshot/fork) was created | Version metadata plus namespace acknowledgement |
 | `versions_deleted` | A snapshot/fork was deleted or abandoned | Version metadata plus namespace acknowledgement |
 | `versions_restored` | HEAD moved to a retained snapshot root | Version metadata plus namespace acknowledgement |
@@ -130,22 +134,32 @@ is durable:
 | `operation_id` | string | Unique UUID for the logical namespace mutation |
 | `publication_sequence` | integer | Exact durability sequence acknowledged by the engine |
 | `mutation_kind` | string | Closed mutation family such as `file_write`, `file_delete`, `directory_create`, `directory_delete`, `symlink_write`, `symlink_delete`, `batch_write`, `merge`, `copy`, `rename`, `restore`, `promote`, `import`, `sync_apply`, or `system_write` |
+| `previous_root_hash` | string | Full lowercase hash of the namespace root immediately before the mutation |
+| `root_hash` | string | Full lowercase hash of the namespace root durably published by the mutation |
+| `affected_relationships` | array | Canonical logical path relationships affected by this acknowledgement |
 
-AeorDB is migrating producers to this shared acknowledgement path in stages.
-File, directory, symlink, blob/buffered batch, JSON merge, copy, rename,
-snapshot/fork, promoted import, explicit HEAD-promotion, and sync-apply
-producers now use it. Other system/plugin and maintenance producers may omit these three
-fields until their producer wave is converted. An import that does not change
-HEAD, including `promote=false` and same-root no-ops, has no root-mutation
-acknowledgement to attach. Clients must therefore treat the fields as optional
-during the transition, but must not interpret an absent field as a durability
-failure.
+Each relationship has one exact public shape:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string | Canonical full namespace path visible to this subscriber |
+| `entry_type` | string or null | `file`, `directory`, or `symlink` when the logical type is known |
+| `change` | string | `created`, `updated`, or `deleted` |
+
+Coordinator-backed file, directory, symlink, blob/buffered batch, JSON merge,
+copy, rename, snapshot/fork, promoted import, explicit HEAD-promotion, and
+sync-apply events carry the complete acknowledgement as one contract. An
+import that does not change HEAD, including `promote=false` and same-root
+no-ops, has no root-mutation acknowledgement to attach. Separate operational
+events such as metrics, task status, GC status, heartbeats, and recipient share
+notices are not namespace-mutation events and do not use this schema.
 
 A logical mutation can emit more than one relationship event. File and symlink
 rename preserve separate `entries_deleted` and `entries_created` events, but
-both events carry the same `operation_id`, `publication_sequence`, and
-`mutation_kind: "rename"`. Batch, merge, and copy operations emit one aggregate
-`entries_created` event after their shared hard acknowledgement.
+both events carry the same complete acknowledgement, including roots and
+relationships. Clients should deduplicate fanout by `operation_id`,
+`publication_sequence`, and `root_hash`. Batch, merge, and copy operations emit
+one aggregate `entries_created` event after their shared hard acknowledgement.
 
 A sync receipt can emit aggregate `entries_created` and `entries_deleted`
 events. Both carry the same `operation_id`, `publication_sequence`, and
@@ -398,18 +412,24 @@ The server sends a keepalive ping every **30 seconds** to prevent connection tim
 
 ### Path Prefix Matching
 
-The path prefix filter checks two locations in the event payload:
+The path prefix filter checks three locations in the event payload:
 
-1. **Batch events:** `payload.entries[].path` -- matches if any entry's path starts with the prefix
-2. **Single-path events:** `payload.path` -- matches if the path starts with the prefix
+1. **Legacy batch entries:** `payload.entries[].path`
+2. **Logical relationships:** `payload.affected_relationships[].path`
+3. **Single-path events:** `payload.path`
+
+For mutation events, legacy entries and logical relationships are projected in
+lockstep. A subscriber cannot infer a denied sibling from either array.
 
 ### Connection Behavior
 
 - The connection stays open indefinitely until the client disconnects.
 - If a client falls behind the bounded broadcast buffer, the server emits a
-  `stream_gap` event on that connection with the exact number of events missed.
-  The client must refresh the authoritative listing/query/state it derives from
-  SSE before it resumes applying incremental updates.
+  `stream_gap` event on that connection. A direct root JWT receives the exact
+  `missed_events` count. Scoped root keys and non-root streams receive only
+  `{"action":"refresh"}` so global event cardinality is not disclosed. The
+  client must refresh authoritative listing/query/state before applying more
+  incremental updates.
 - `stream_gap` is delivered regardless of the `events` filter because the
   server cannot prove that every skipped event was irrelevant to that filter.
 - Event IDs are unique correlation identifiers, not a replay cursor. AeorDB
@@ -419,20 +439,35 @@ The path prefix filter checks two locations in the event payload:
 ### JavaScript Example
 
 ```javascript
+const eventTypes = 'entries_created,entries_updated,entries_deleted';
 const evtSource = new EventSource(
-  'http://localhost:6830/system/events?events=entries_created',
-  { headers: { 'Authorization': 'Bearer ' + token } }
+  `/system/events?events=${encodeURIComponent(eventTypes)}&token=${encodeURIComponent(token)}`,
 );
+const appliedOperations = new Set();
 
-evtSource.addEventListener('entries_created', (event) => {
+async function applyMutation(event) {
   const data = JSON.parse(event.data);
-  console.log('Files created:', data.payload.entries);
-});
+  const payload = data.payload;
+  const operationKey = `${payload.operation_id}:${payload.publication_sequence}:${payload.root_hash}`;
+  if (appliedOperations.has(operationKey))
+    return;
 
-evtSource.addEventListener('stream_gap', async (event) => {
-  const data = JSON.parse(event.data);
-  console.warn(`Missed ${data.payload.missed_events} events; refreshing`);
-  await refreshCurrentView();
+  appliedOperations.add(operationKey);
+  const affectedPaths = payload.affected_relationships.map((relationship) => relationship.path);
+  if (affectedPaths.some((path) => parentDirectory(path) === activeDirectory())) {
+    await refreshActiveDirectoryInPlace({
+      root: payload.root_hash,
+      preservePreviewUnlessAffected: affectedPaths,
+    });
+  }
+}
+
+for (const eventType of eventTypes.split(','))
+  evtSource.addEventListener(eventType, applyMutation);
+
+evtSource.addEventListener('stream_gap', async () => {
+  appliedOperations.clear();
+  await refreshActiveDirectoryInPlace({ reconcile: true });
 });
 
 evtSource.onerror = (err) => {
@@ -449,8 +484,9 @@ A per-user SSE channel that delivers ONLY events addressed to the authenticated 
 This channel is the security boundary for personal notifications: each user can only see events sent specifically to them, even if multiple users are subscribed simultaneously.
 
 The per-user stream emits the same `stream_gap` control event if its receiver
-falls behind. Clients must refresh their notification/share state before
-continuing with incremental events.
+falls behind, but does not disclose a global missed-event count. Clients must
+refresh their notification/share state before continuing with incremental
+events.
 
 ### Request
 

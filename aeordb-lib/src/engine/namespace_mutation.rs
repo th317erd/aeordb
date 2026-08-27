@@ -113,7 +113,54 @@ impl NamespaceMutationAcknowledgement {
     object.insert("operation_id".to_string(), serde_json::Value::String(self.operation_id.to_string()));
     object.insert("publication_sequence".to_string(), serde_json::Value::from(self.publication_sequence));
     object.insert("mutation_kind".to_string(), serde_json::Value::String(self.kind.as_str().to_string()));
+    object.insert("previous_root_hash".to_string(), serde_json::Value::String(hex::encode(&self.previous_root_hash)));
+    object.insert("root_hash".to_string(), serde_json::Value::String(hex::encode(&self.root_hash)));
+    let affected_relationships =
+      self.source_identities.iter().map(LogicalAffectedRelationship::from_source_identity).collect::<EngineResult<Vec<_>>>()?;
+    object.insert(
+      "affected_relationships".to_string(),
+      serde_json::to_value(affected_relationships)
+        .map_err(|error| EngineError::InvalidInput(format!("namespace mutation relationships cannot be serialized: {error}")))?,
+    );
     Ok(())
+  }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LogicalAffectedRelationshipChange {
+  Created,
+  Updated,
+  Deleted,
+}
+
+#[derive(Debug, Serialize)]
+struct LogicalAffectedRelationship<'a> {
+  path: &'a str,
+  entry_type: Option<&'static str>,
+  change: LogicalAffectedRelationshipChange,
+}
+
+impl<'a> LogicalAffectedRelationship<'a> {
+  fn from_source_identity(source: &'a NamespaceMutationSourceIdentity) -> EngineResult<Self> {
+    let entry_type = match source.entry_type {
+      None => None,
+      Some(value) => match EntryType::from_u8(value)? {
+        EntryType::FileRecord => Some("file"),
+        EntryType::DirectoryIndex => Some("directory"),
+        EntryType::Symlink => Some("symlink"),
+        _ => None,
+      },
+    };
+    let change = match (&source.previous_identity, &source.new_identity) {
+      (None, Some(_)) => LogicalAffectedRelationshipChange::Created,
+      (Some(_), None) => LogicalAffectedRelationshipChange::Deleted,
+      (Some(_), Some(_)) => LogicalAffectedRelationshipChange::Updated,
+      (None, None) => {
+        return Err(EngineError::InvalidInput("namespace mutation source identity must contain a previous or new identity".to_string()));
+      }
+    };
+    Ok(Self { path: &source.path, entry_type, change })
   }
 }
 

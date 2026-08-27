@@ -434,8 +434,9 @@ buffering the file body. It validates the embedded path and every referenced
 chunk while namespace authority is held, then publishes the FileRecord,
 derived path locator, parent directories, and HEAD under one durability
 receipt. The `entries_created` SSE event and metadata indexing run only after
-that receipt is acknowledged and carry `mutation_kind: "restore"` plus the
-operation ID and publication sequence.
+that receipt is acknowledged. The event carries `mutation_kind: "restore"`,
+the operation ID, publication sequence, exact previous/new roots, and logical
+affected relationships.
 
 **Request Body:**
 

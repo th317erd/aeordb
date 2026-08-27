@@ -222,12 +222,12 @@ function connectUserEventStream() {
         // Invalidate the file browser's cached shared-with-me data and
         // re-fetch its listing so the new share appears immediately
         // without requiring a page reload.
-        const browser = document.querySelector('aeor-files aeor-file-browser-portal, aeor-files aeor-file-browser');
+        const browser = document.querySelector('aeor-files aeordb-file-browser-portal-v1');
         if (browser) {
-          browser._sharedPathData = null;
-          if (typeof browser._fetchListing === 'function') {
-            browser._fetchListing();
-          }
+          browser.refreshActiveListingFromEvent({
+            invalidateSharedPaths: true,
+            preservePreview:       true,
+          });
         }
       } catch (_) {}
     });

@@ -17,6 +17,7 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use super::state::AppState;
+use super::root_public_schema::PublicAffectedRelationshipV1;
 use crate::auth::permission_middleware::require_active_api_key;
 use crate::auth::TokenClaims;
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
@@ -236,6 +237,40 @@ fn project_event_for_subscriber(
     }
   }
 
+  if event.payload.get("affected_relationships").is_some_and(|relationships| !relationships.is_array()) {
+    tracing::error!(event_type = %event.event_type, "Refused SSE mutation event whose affected relationships were not an array");
+    return None;
+  }
+  if let Some(Value::Array(relationships)) = event.payload.get_mut("affected_relationships") {
+    let original_had_relationships = !relationships.is_empty();
+    let mut projected_relationships = Vec::with_capacity(relationships.len());
+    for raw_relationship in relationships.drain(..) {
+      let relationship = match serde_json::from_value::<PublicAffectedRelationshipV1>(raw_relationship) {
+        Ok(relationship) => relationship,
+        Err(error) => {
+          tracing::error!(event_type = %event.event_type, %error, "Refused SSE mutation event with malformed affected relationship");
+          return None;
+        }
+      };
+      let path = &relationship.path;
+      had_path = true;
+      if path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy) {
+        let projected = match serde_json::to_value(relationship) {
+          Ok(projected) => projected,
+          Err(error) => {
+            tracing::error!(event_type = %event.event_type, %error, "Refused SSE mutation event whose affected relationship could not be serialized");
+            return None;
+          }
+        };
+        projected_relationships.push(projected);
+      }
+    }
+    if original_had_relationships && projected_relationships.is_empty() {
+      return None;
+    }
+    *relationships = projected_relationships;
+  }
+
   if let Some(Value::String(path)) = event.payload.get("path") {
     had_path = true;
     if !path_is_visible_to_subscriber(path, path_prefix, &subscriber_rules, authority, family_policy) {
@@ -273,18 +308,16 @@ fn server_ready_event(state: &AppState) -> EngineEvent {
   )
 }
 
-fn stream_gap_to_sse(error: BroadcastStreamRecvError) -> Option<Result<Event, Infallible>> {
+fn stream_gap_to_sse(error: BroadcastStreamRecvError, disclose_missed_event_count: bool) -> Option<Result<Event, Infallible>> {
   let BroadcastStreamRecvError::Lagged(missed_events) = error;
   metrics::counter!("aeordb_sse_stream_gaps_total").increment(1);
   metrics::counter!("aeordb_sse_missed_events_total").increment(missed_events);
-  event_to_sse(EngineEvent::new(
-    EVENT_STREAM_GAP,
-    "system",
-    serde_json::json!({
-      "missed_events": missed_events,
-      "action": "refresh",
-    }),
-  ))
+  let payload = if disclose_missed_event_count {
+    serde_json::json!({"missed_events": missed_events, "action": "refresh"})
+  } else {
+    serde_json::json!({"action": "refresh"})
+  };
+  event_to_sse(EngineEvent::new(EVENT_STREAM_GAP, "system", payload))
 }
 
 /// GET /events/stream -- Server-Sent Events stream of engine events.
@@ -315,13 +348,14 @@ pub async fn event_stream(
   let event_filter = parse_event_filter(params.events);
 
   let path_prefix = params.path_prefix;
+  let disclose_missed_event_count = authority.is_root() && authority.key_id.is_none();
   let ready_event = server_ready_event(&state);
   let initial_ready =
     project_event_for_subscriber(ready_event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse);
 
   let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
     Ok(event) => project_event_for_subscriber(event, &event_filter, &path_prefix, &authority, family_policy).and_then(event_to_sse),
-    Err(error) => stream_gap_to_sse(error),
+    Err(error) => stream_gap_to_sse(error, disclose_missed_event_count),
   });
   let stream = once(initial_ready).filter_map(|event| event).chain(live_stream);
 
@@ -361,7 +395,7 @@ pub async fn user_event_stream(
           Err(_) => None,
         }
       }
-      Err(error) => stream_gap_to_sse(error),
+      Err(error) => stream_gap_to_sse(error, false),
     }
   });
 

@@ -1749,6 +1749,72 @@ fn wave_five_cleanup_uses_bounded_conditional_namespace_authority() {
 }
 
 #[test]
+fn wave_five_authorized_mutation_events_retain_one_producer_projector_and_client_adapter() {
+  let namespace_mutation = include_str!("../../src/engine/namespace_mutation.rs");
+  let directory_ops = include_str!("../../src/engine/directory_ops.rs");
+  let version_manager = include_str!("../../src/engine/version_manager.rs");
+  let backup = include_str!("../../src/engine/backup.rs");
+  let root_public_schema = include_str!("../../src/server/root_public_schema.rs");
+  let sse_routes = include_str!("../../src/server/sse_routes.rs");
+  let portal_routes = include_str!("../../src/server/portal_routes.rs");
+  let server = include_str!("../../src/server/mod.rs");
+  let file_event_contract = include_str!("../../src/portal/file-event-contract.mjs");
+  let files = include_str!("../../src/portal/files.mjs");
+  let app = include_str!("../../src/portal/app.mjs");
+
+  assert_eq!(namespace_mutation.matches("pub fn annotate_event_payload(").count(), 1, "mutation event metadata gained a second producer");
+  assert!(namespace_mutation.contains(".map(LogicalAffectedRelationship::from_source_identity)"));
+  assert!(namespace_mutation.contains(".collect::<EngineResult<Vec<_>>>()?"));
+  for (owner, source) in [("directory operations", directory_ops), ("version manager", version_manager), ("backup", backup)] {
+    assert!(source.contains("acknowledgement.annotate_event_payload"), "{owner} bypasses the canonical mutation event producer");
+    assert!(!source.contains("\"affected_relationships\""), "{owner} independently constructs public mutation relationships");
+  }
+
+  assert_eq!(root_public_schema.matches("pub struct PublicAffectedRelationshipV1").count(), 1, "public relationship schema is duplicated");
+  assert_eq!(sse_routes.matches("fn project_event_for_subscriber(").count(), 1, "SSE gained a second subscriber projector");
+  assert_eq!(
+    sse_routes.matches("serde_json::from_value::<PublicAffectedRelationshipV1>").count(),
+    1,
+    "SSE relationship authority is decoded outside the sole projector"
+  );
+  assert_eq!(
+    sse_routes.matches("project_event_for_subscriber(").count(),
+    3,
+    "an SSE delivery path bypasses or duplicates the sole projector"
+  );
+
+  assert_eq!(file_event_contract.matches("JSON.parse(serializedEvent)").count(), 1, "the client contract gained a second event parser");
+  assert!(file_event_contract.contains("Object.hasOwn(response, alternateCollectionName)"));
+  assert!(!file_event_contract.contains("response.items ||"));
+  assert!(!file_event_contract.contains("response.results ||"));
+  assert_eq!(
+    files.matches("class AeorDBFileBrowserPortal extends AeorFileBrowserPortal").count(),
+    1,
+    "the bundled client adapter is duplicated"
+  );
+  assert_eq!(
+    files.matches("this._readRootedResponse(response,").count(),
+    2,
+    "browse and search no longer share one rooted response adapter"
+  );
+  assert_eq!(files.matches("projectForDirectory(event.data, tab.path)").count(), 1, "mutation SSE gained a second client projection path");
+  assert!(files.contains("queueMicrotask("));
+  assert!(files.contains("this._refreshListingInBackground(tab)"));
+  for forbidden_refresh_path in ["setTimeout(", "debounce", "_fetchListing("] {
+    assert!(!files.contains(forbidden_refresh_path), "bundled client retained forbidden refresh path {forbidden_refresh_path}");
+  }
+
+  assert_eq!(server.matches(".route(\"/shared/{*path}\"").count(), 1, "portal shared-asset delivery is no longer one wildcard route");
+  assert!(!server.contains(".route(\"/shared/file-event-contract.mjs\""), "client contract gained a dedicated public route");
+  assert_eq!(portal_routes.matches("\"file-event-contract.mjs\" =>").count(), 1, "client contract asset mapping is duplicated");
+  assert_eq!(
+    app.matches("browser.refreshActiveListingFromEvent({").count(),
+    1,
+    "share notices gained a second file-browser refresh adapter"
+  );
+}
+
+#[test]
 fn persistent_enum_ids_match_the_generated_registry() {
   for (expected, value) in (1u16..=13).zip(OsErrorClass::ALL) {
     assert_eq!(value.stable_id(), expected);

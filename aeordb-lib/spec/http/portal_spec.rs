@@ -164,6 +164,54 @@ async fn test_portal_app_mjs_returns_javascript() {
 }
 
 #[tokio::test]
+async fn file_browser_uses_one_rooted_authorized_incremental_event_adapter() {
+  let (app, _, _, _temp_dir) = test_app();
+
+  let contract_response = app
+    .clone()
+    .oneshot(Request::builder().method("GET").uri("/shared/file-event-contract.mjs").body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+  assert_eq!(contract_response.status(), StatusCode::OK);
+  assert_eq!(contract_response.headers().get("content-type").unwrap(), "application/javascript; charset=utf-8");
+  let contract_body = String::from_utf8(body_bytes(contract_response.into_body()).await).unwrap();
+  for required in
+    ["validateRootedCollectionResponse", "AuthorizedMutationEventTracker", "affected_relationships", "previous_root_hash", "root_hash"]
+  {
+    assert!(contract_body.contains(required), "file-event contract asset is missing {required}");
+  }
+  for forbidden in ["stable_key", "physical_incarnation", "locator_replacements"] {
+    assert!(!contract_body.contains(forbidden), "file-event contract contains physical identity field {forbidden}");
+  }
+
+  let files_response = app.clone().oneshot(Request::builder().method("GET").uri("/files.mjs").body(Body::empty()).unwrap()).await.unwrap();
+  assert_eq!(files_response.status(), StatusCode::OK);
+  let files_body = String::from_utf8(body_bytes(files_response.into_body()).await).unwrap();
+  for required in [
+    "class AeorDBFileBrowserPortal extends",
+    "validateRootedCollectionResponse",
+    "projectForDirectory",
+    "entries_updated",
+    "stream_gap",
+    "aeordbAuthDisabled",
+    "queueMicrotask",
+    "_refreshListingInBackground",
+    "_refreshPreviewEntry",
+    "aeordb-file-browser-portal-v1",
+  ] {
+    assert!(files_body.contains(required), "file browser client is missing {required}");
+  }
+  for forbidden in ["setTimeout", "_sseDebounce", "._fetchListing("] {
+    assert!(!files_body.contains(forbidden), "file browser client retained full/debounced refresh path {forbidden}");
+  }
+
+  let app_response = app.oneshot(Request::builder().method("GET").uri("/app.mjs").body(Body::empty()).unwrap()).await.unwrap();
+  let app_body = String::from_utf8(body_bytes(app_response.into_body()).await).unwrap();
+  assert!(app_body.contains("refreshActiveListingFromEvent"));
+  assert!(!app_body.contains("browser._fetchListing()"));
+}
+
+#[tokio::test]
 async fn test_portal_metrics_mjs_returns_javascript() {
   let (app, _, _, _temp_dir) = test_app();
 

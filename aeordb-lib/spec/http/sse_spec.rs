@@ -15,7 +15,7 @@ use aeordb::auth::rate_limiter::RateLimiter;
 use aeordb::auth::FileAuthProvider;
 use aeordb::engine::api_key_rules::KeyRule;
 use aeordb::engine::{
-  DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_GC_STATUS, EVENT_METRICS,
+  BufferedFile, DirectoryOps, EngineEvent, EventBus, PermissionStore, RequestContext, StorageEngine, User, EVENT_GC_STATUS, EVENT_METRICS,
   EVENT_SERVER_READY, EVENT_STREAM_GAP,
 };
 use aeordb::engine::system_store;
@@ -358,7 +358,7 @@ async fn test_global_sse_reports_broadcast_lag_as_a_stream_gap() {
 }
 
 #[tokio::test]
-async fn test_user_sse_reports_broadcast_lag_as_a_stream_gap() {
+async fn test_user_sse_reports_broadcast_lag_without_global_event_cardinality() {
   let (app, jwt_manager, engine, event_bus, _temp) = test_app_with_event_capacity(2);
   let user_id = create_test_user(&engine, "sse_lag_user");
   let auth = user_bearer_token(&jwt_manager, user_id);
@@ -373,7 +373,8 @@ async fn test_user_sse_reports_broadcast_lag_as_a_stream_gap() {
 
   let gap = read_next_sse_frame(&mut body).await;
   assert!(gap.contains(&format!("event: {EVENT_STREAM_GAP}")), "missing user stream-gap event: {gap}");
-  assert!(gap.contains("\"missed_events\":3"), "wrong user lag evidence: {gap}");
+  assert!(!gap.contains("missed_events"), "recipient stream leaked global event cardinality: {gap}");
+  assert!(gap.contains("\"action\":\"refresh\""), "missing user recovery action: {gap}");
 }
 
 #[tokio::test]
@@ -1309,9 +1310,24 @@ async fn test_sse_scoped_key_projects_mixed_batch_to_allowed_paths() {
     "entries_created",
     "admin",
     serde_json::json!({
+      "operation_id": "00000000-0000-0000-0000-000000000001",
+      "publication_sequence": 42,
+      "mutation_kind": "batch_write",
+      "previous_root_hash": "11".repeat(32),
+      "root_hash": "22".repeat(32),
       "entries": [
         {"path": "/docs/readme.md"},
         {"path": "/private/secret.txt"},
+      ],
+      "affected_relationships": [
+        {
+          "path": "/docs/readme.md",
+          "entry_type": "file",
+          "change": "created",
+          "stable_key": "must-not-leak",
+          "physical_incarnation": {"offset": 7},
+        },
+        {"path": "/private/secret.txt", "entry_type": "file", "change": "created"},
       ],
     }),
   ));
@@ -1326,6 +1342,89 @@ async fn test_sse_scoped_key_projects_mixed_batch_to_allowed_paths() {
   let body = String::from_utf8_lossy(&frame);
   assert!(body.contains("/docs/readme.md"), "allowed entry was removed: {body}");
   assert!(!body.contains("/private/secret.txt"), "denied entry leaked through mixed batch projection: {body}");
+  assert_eq!(body.matches("/docs/readme.md").count(), 2, "entry and relationship projections diverged: {body}");
+  assert!(body.contains("\"previous_root_hash\":\"11"), "previous root identity was removed: {body}");
+  assert!(body.contains("\"root_hash\":\"22"), "selected root identity was removed: {body}");
+  assert!(!body.contains("stable_key"), "SSE projected internal stable-key authority: {body}");
+  assert!(!body.contains("physical_incarnation"), "SSE projected physical mutation authority: {body}");
+}
+
+#[tokio::test]
+async fn coordinator_batch_reaches_sse_with_exact_roots_and_only_authorized_relationships() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_coordinator_projection");
+  let allowed_path = "/docs/coordinator.txt";
+  let hidden_path = "/private/coordinator.txt";
+  grant_user_read(&engine, user_id, allowed_path);
+
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  let previous_root_hash = engine.head_hash().unwrap();
+  let mutation_context = RequestContext::from_claims("coordinator-actor", event_bus);
+  DirectoryOps::new(&engine)
+    .store_files_buffered_batch(
+      &mutation_context,
+      vec![
+        BufferedFile { path: allowed_path.to_string(), data: b"visible".to_vec(), content_type: Some("text/plain".to_string()) },
+        BufferedFile { path: hidden_path.to_string(), data: b"hidden".to_vec(), content_type: Some("text/plain".to_string()) },
+      ],
+    )
+    .unwrap();
+  let root_hash = engine.head_hash().unwrap();
+
+  let frame = read_next_sse_frame(&mut body).await;
+  let data = frame.lines().find_map(|line| line.strip_prefix("data: ")).expect("SSE frame must include data");
+  let event: serde_json::Value = serde_json::from_str(data).unwrap();
+  assert_eq!(event["payload"]["previous_root_hash"], hex::encode(previous_root_hash));
+  assert_eq!(event["payload"]["root_hash"], hex::encode(root_hash));
+  assert_eq!(event["payload"]["entries"].as_array().unwrap().len(), 1);
+  assert_eq!(event["payload"]["entries"][0]["path"], allowed_path);
+  assert_eq!(
+    event["payload"]["affected_relationships"],
+    serde_json::json!([{"path": allowed_path, "entry_type": "file", "change": "updated"}])
+  );
+  assert!(!frame.contains(hidden_path), "coordinator SSE projection leaked hidden relationship: {frame}");
+}
+
+#[tokio::test]
+async fn malformed_public_relationship_fails_closed_before_sse_projection() {
+  let (app, jwt_manager, engine, event_bus, _temp) = test_app();
+  let user_id = create_test_user(&engine, "sse_malformed_relationship");
+  let path = "/docs/malformed.txt";
+  grant_user_read(&engine, user_id, path);
+  let auth = user_bearer_token(&jwt_manager, user_id);
+  let request = Request::builder()
+    .method("GET")
+    .uri("/system/events?events=entries_created")
+    .header("authorization", &auth)
+    .body(Body::empty())
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  let mut body = response.into_body();
+
+  event_bus.emit(EngineEvent::new(
+    "entries_created",
+    "admin",
+    serde_json::json!({
+      "entries": [{"path": path}],
+      "affected_relationships": [{"path": path, "entry_type": "file", "change": "rewritten"}],
+    }),
+  ));
+
+  assert!(
+    tokio::time::timeout(Duration::from_millis(150), body.frame()).await.is_err(),
+    "malformed public relationship was projected to the subscriber"
+  );
 }
 
 #[tokio::test]
