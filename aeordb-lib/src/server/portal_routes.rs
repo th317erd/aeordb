@@ -372,7 +372,7 @@ pub struct StatsHealth {
 /// All data now comes from:
 /// - `EngineCounters::snapshot()` — O(1) atomic reads
 /// - `RateTrackerSet::snapshot()` — O(window_size) but bounded at 900 samples
-/// - `check_disk()` — single `statvfs` syscall
+/// - `check_disk()` — bounded filesystem-capacity queries
 /// - `std::fs::metadata()` — single `stat` syscall
 /// - one bounded runtime-observability snapshot over fixed owner/property sets
 pub async fn get_stats(

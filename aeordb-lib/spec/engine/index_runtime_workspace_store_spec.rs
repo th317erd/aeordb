@@ -1583,13 +1583,8 @@ fn producer_task_amplification_is_rejected_before_memory_admission() {
   object[184..184 + payload.len()].copy_from_slice(&payload);
   repair_object_integrity(&mut object);
   let task_path = head.workspace_path().join("objects/tasks").join(format!("{}.aiwo", hex::encode([0x66; 16])));
-  fs::remove_file(runtime_path).unwrap();
+  fs::rename(runtime_path, &task_path).unwrap();
   fs::write(&task_path, &object).unwrap();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&task_path, fs::Permissions::from_mode(0o600)).unwrap();
-  }
 
   let manifest_path = manifest_path(head.workspace_path(), 2);
   let mut manifest = fs::read(&manifest_path).unwrap();
@@ -1609,7 +1604,10 @@ fn producer_task_amplification_is_rejected_before_memory_admission() {
     Ok(_) => panic!("accepted an amplified producer-task payload"),
     Err(error) => error,
   };
-  assert!(matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Format(_)));
+  assert!(
+    matches!(error, aeordb::engine::v4::index_runtime_workspace_store::IndexRuntimeWorkspaceStoreErrorV1::Format(_)),
+    "amplified producer task reached a non-format failure: {error}"
+  );
   let owner = constrained.snapshot().unwrap().owner(MemoryOwner::IndexDirtyBuffers).unwrap().clone();
   assert_eq!(owner.reserved_bytes, 0);
   assert_eq!(owner.active_reservations, 0);

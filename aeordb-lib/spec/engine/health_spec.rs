@@ -132,16 +132,13 @@ fn test_disk_health_with_valid_path() {
   let db_path_str = db_path.to_str().unwrap();
 
   let health = check_disk(db_path_str);
-  // On Linux CI, we should get real values.
-  #[cfg(target_os = "linux")]
-  {
-    assert!(health.total_bytes > 0);
-    assert!(health.available_bytes > 0);
-    assert!(health.usage_percent > 0.0);
-    assert!(health.usage_percent < 100.0);
-    // Typical dev/CI machine should be healthy.
-    assert_eq!(health.status, HealthStatus::Healthy);
-  }
+  assert!(health.total_bytes > 0);
+  assert!(health.available_bytes > 0);
+  assert!(health.available_bytes <= health.total_bytes);
+  assert!(health.usage_percent >= 0.0);
+  assert!(health.usage_percent < 100.0);
+  // Typical dev/CI machine should be healthy.
+  assert_eq!(health.status, HealthStatus::Healthy);
 }
 
 #[test]
@@ -157,23 +154,19 @@ fn test_disk_health_fallback_with_invalid_path() {
 
 #[test]
 fn test_disk_health_with_empty_path() {
-  // Empty path should still not panic; falls back to "/" parent.
+  // Empty path should still probe the current filesystem rather than report
+  // an unsupported-platform fallback.
   let health = check_disk("");
-  // On Linux, statvfs on "/" should succeed.
-  #[cfg(target_os = "linux")]
-  {
-    assert!(health.total_bytes > 0);
-  }
+  assert!(health.total_bytes > 0);
+  assert!(health.available_bytes <= health.total_bytes);
 }
 
 #[test]
 fn test_disk_health_with_root_path() {
   let health = check_disk("/");
-  #[cfg(target_os = "linux")]
-  {
-    assert!(health.total_bytes > 0);
-    assert!(health.available_bytes > 0);
-  }
+  assert!(health.total_bytes > 0);
+  assert!(health.available_bytes > 0);
+  assert!(health.available_bytes <= health.total_bytes);
 }
 
 // ===========================================================================

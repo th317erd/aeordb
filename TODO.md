@@ -1099,6 +1099,8 @@
         - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
           - [x] Project the lock-free cached runtime state through shared observability, `/system/stats`, root metrics SSE, Prometheus, and bounded public health without exposing degraded context to non-root callers.
           - [x] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
+          - [ ] Replace the Unix-only disk-health probe with the existing cross-platform filesystem-capacity authority and prove healthy native Windows reporting.
+          - [ ] Preserve the private workspace object security descriptor while constructing the producer-amplification fixture and prove the intended pre-admission format refusal on Windows.
       - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
         - [x] P6-3a: implement the frozen A/B active-pointer writer, deterministic rewrite planner, shallow closure selection, and storage-neutral soft/hard publication contract.
           - [x] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.

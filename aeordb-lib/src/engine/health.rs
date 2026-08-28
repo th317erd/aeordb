@@ -110,35 +110,40 @@ fn classify_engine_operating_status(
 
 /// Check disk health for the partition containing the database file.
 ///
-/// On Unix (Linux/macOS), uses `libc::statvfs` to determine available and total space.
-/// Returns a fallback with zero values and Degraded status on non-Unix
-/// platforms or if the stat call fails; unknown filesystem state must not be
-/// presented as healthy.
+/// Uses the same cross-platform filesystem-capacity authority as storage
+/// admission. Returns a fallback with zero values and Degraded status if the
+/// capacity query fails; unknown filesystem state must not be presented as
+/// healthy.
 pub fn check_disk(db_path: &str) -> DiskHealth {
-  #[cfg(unix)]
-  {
-    use std::ffi::CString;
-    let parent = Path::new(db_path).parent().unwrap_or(Path::new("/"));
-    if let Ok(c_path) = CString::new(parent.to_str().unwrap_or("/")) {
-      unsafe {
-        let mut stat: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-          let total = stat.f_blocks as u64 * stat.f_frsize as u64;
-          let available = stat.f_bavail as u64 * stat.f_frsize as u64;
-          let used = total.saturating_sub(available);
-          let usage = if total > 0 { (used as f64 / total as f64) * 100.0 } else { 0.0 };
+  if db_path.contains('\0') {
+    return DiskHealth { status: HealthStatus::Degraded, available_bytes: 0, total_bytes: 0, usage_percent: 0.0 };
+  }
 
-          let status = if usage > 98.0 {
-            HealthStatus::Unhealthy
-          } else if usage > 90.0 {
-            HealthStatus::Degraded
-          } else {
-            HealthStatus::Healthy
-          };
+  let database_path = Path::new(db_path);
+  let filesystem_probe_path = if database_path.as_os_str().is_empty() {
+    Path::new(".")
+  } else if database_path.is_dir() {
+    database_path
+  } else {
+    match database_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+      Some(parent) => parent,
+      None => Path::new("."),
+    }
+  };
 
-          return DiskHealth { status, available_bytes: available, total_bytes: total, usage_percent: usage };
-        }
-      }
+  if let (Ok(total), Ok(available)) = (fs2::total_space(filesystem_probe_path), fs2::available_space(filesystem_probe_path)) {
+    if total > 0 && available <= total {
+      let used = total.saturating_sub(available);
+      let usage = (used as f64 / total as f64) * 100.0;
+      let status = if usage > 98.0 {
+        HealthStatus::Unhealthy
+      } else if usage > 90.0 {
+        HealthStatus::Degraded
+      } else {
+        HealthStatus::Healthy
+      };
+
+      return DiskHealth { status, available_bytes: available, total_bytes: total, usage_percent: usage };
     }
   }
 

@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1513,
+  "maximum_occurrences": 1510,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -4131,36 +4131,6 @@
       "enclosing_item": "check_engine",
       "kind": "broad_err_pattern",
       "pattern": "Err (_)",
-      "review": "optional-observability-default"
-    },
-    {
-      "id": "esq-v1-9e08d6eb91e8f66f360a-00",
-      "file": "aeordb-lib/src/engine/health.rs",
-      "line": 121,
-      "column": 18,
-      "enclosing_item": "check_disk",
-      "kind": "default_on_error",
-      "pattern": "Path :: new (db_path) . parent () . unwrap_or (Path :: new (\"/\"))",
-      "review": "optional-observability-default"
-    },
-    {
-      "id": "esq-v1-e7c21b5fa023ba0139c7-00",
-      "file": "aeordb-lib/src/engine/health.rs",
-      "line": 122,
-      "column": 5,
-      "enclosing_item": "check_disk",
-      "kind": "success_only_conditional",
-      "pattern": "if let Ok (c_path) = CString :: new (parent . to_str () . unwrap_or (\"/\")) { unsafe { let mut stat : libc :: statvfs = std :: mem :: zeroed () ; if libc :: statvfs (c_path . as_ptr () , & mut stat) == 0 { let total = stat . f_blocks as u...",
-      "review": "parser-alternative-probe"
-    },
-    {
-      "id": "esq-v1-8c5b3cec712bb19c4f44-00",
-      "file": "aeordb-lib/src/engine/health.rs",
-      "line": 122,
-      "column": 38,
-      "enclosing_item": "check_disk",
-      "kind": "default_on_error",
-      "pattern": "parent . to_str () . unwrap_or (\"/\")",
       "review": "optional-observability-default"
     },
     {
