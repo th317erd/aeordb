@@ -612,7 +612,7 @@
           - [x] Pass the complete Linux workspace/all-target suite, all-target compilation, suppression, formatting, documentation, and independent contract gates.
           - [x] Qualify the exact pushed commit on macOS arm64 and Windows x86_64 MSVC using the frozen lockfile and bounded native commands.
           - [x] Record retained activation boundaries and close P3b-3 only after every required proof is green.
-    - [ ] P3c: implement the shadow clone, bounded capture, root map, migration lease/progress, reconciliation, and cutover-journal substrate without service activation.
+    - [x] P3c: implement the shadow clone, bounded capture, root map, migration lease/progress, reconciliation, and cutover-journal substrate without service activation.
       - [x] P3c-1a: add typed MigrationLease and MigrationProgress codecs over the frozen SystemControlV1 bytes and independent fixtures.
       - [x] P3c-1b: implement fail-closed source/destination preflight evidence, physical identity, capacity, capability, configuration, and strict-verification admission.
         - [x] Freeze one bounded observation contract over source/header identity, strict verification, recovery closure, protected-family inventory, native qualification, resources, configuration, and binary identity.
@@ -627,13 +627,13 @@
         - [x] Prove real file-backed A/B/A publication and reopen, concurrent CAS, every malformed/foreign/stale/terminal path, and disconnected service architecture.
       - [x] P3c-1d: suspend every source mutating-GC and retention-cleanup entry point for the exact selected lease while preserving read-only diagnostics.
       - [x] P3c-2a: implement bounded streaming base-clone planning and destination-first initialization without source mutation.
-      - [ ] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
+      - [x] P3c-2b: implement bounded capture, pressure/exhaustion latching, durable checkpoints, resume, and final full-reconciliation authority.
         - [x] P3c-2b1: freeze the external capture segment/checkpoint formats and private bounded workspace with independent fixtures and reopen validation.
         - [x] P3c-2b2: add one optional source-publication capture owner that preserves acknowledged writes, latches exhaustion/pressure durably, checkpoints, and resumes exactly.
           - [x] P3c-2b2a: reserve the durable AMPR `needs_full_reconcile` authority bit, add its specialized monotonic owner, and permit an exact zero-publication initial checkpoint.
           - [x] P3c-2b2b: install one independently bounded optional `StorageEngine` capture subscription at an exact source-root/publication boundary without sharing the index drain.
           - [x] P3c-2b2c: encode post-commit notices into bounded AINX segments, checkpoint every 300 seconds, hard-latch every loss/failure, and reopen conservatively across process boots.
-        - [ ] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
+        - [x] P3c-2b3: stream the base clone into the initialized destination, replay retained capture, and require an exact final-freeze authority/SystemFamily diff whenever capture is incomplete.
           - [x] P3c-2b3p: correct `WholeEntityV1` to preserve the ratified per-type EntityVersion across v4 physical framing, including migrated v0 directory/chunk entities, before any migration writer can publish them.
           - [x] P3c-2b3a: expose one bounded immutable-entity and successor-root publication boundary by reusing the existing physical v4 dependency, header, KV, durability, and root-witness authority.
           - [x] P3c-2b3b: stream the exact preflight-pinned v3 authority and retained-root/SystemFamily closure into the initialized destination without retaining a whole-tree inventory or mutating the source.
@@ -664,17 +664,17 @@
               - [x] Run affected, architecture, full-workspace, real-file, and native-platform qualification gates and record durable evidence.
             - [x] P3c-2b3d3: reconcile the complete frozen retained-root and SystemFamily inventory, stream every final root mapping, and let only the live freeze proof authorize the monotonic AMPR final-freeze completion/watermark.
             - [x] Prove the post-hard-commit/pre-capture race, prior admitted raw and namespace writes, blocked new writes, capture gaps, stale roots, malformed flat/B-tree state, missing protected closure, cancellation/timeout/memory pressure, retry/reopen, both hash widths, and byte-for-byte source invariance.
-          - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
+          - [x] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
             - [x] Measure isolated base-clone allocator and process-RSS high-water against declared migration accounting for BLAKE3-256 and SHA-512, including reservation release and source invariance.
             - [x] Retain explicit desktop command/resource evidence and run the affected/broad gates without compiling Rust on `wyatt-laptop`.
-            - [ ] Normalize source-audit caller paths across native separators and rerun the exact Windows qualification matrix.
-          - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
+            - [x] Normalize source-audit caller paths across native separators and rerun the exact Windows qualification matrix.
+          - [x] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
             - [x] Reproduce the exact 4,097-item boundary and a second-window failure before changing production publication.
             - [x] Prevalidate the complete request, then publish only missing immutable artifacts in 511-entry authority windows while keeping selection last.
-            - [ ] Prove exact retry, prefix reuse, no sequence growth for existing artifacts, broad regression safety, and native-platform behavior.
+            - [x] Prove exact retry, prefix reuse, no sequence growth for existing artifacts, broad regression safety, and native-platform behavior.
       - [x] P3c-3a: add fixture-matching typed legacy-root-map codecs and one shared immutable-system-control publication/read authority.
-      - [ ] P3c-3b: add the bounded private staging/sort workspace, producer sinks, authority-last root-map owner, and selected streaming reader.
-      - [ ] P3c-3c: bind the selected root-map control into AMPR destination verification and prove cancel/resume, commit-unknown recovery, bounded resources, shadow-only refusal, and byte-for-byte source invariance.
+      - [x] P3c-3b: add the bounded private staging/sort workspace, producer sinks, authority-last root-map owner, and selected streaming reader.
+      - [x] P3c-3c: bind the selected root-map control into AMPR destination verification and prove cancel/resume, commit-unknown recovery, bounded resources, shadow-only refusal, and byte-for-byte source invariance.
     - [ ] P4: implement bounded physical inventory, logical/physical lifecycle, quarantine, sweep, and receipt-backed Void authority without destructive activation.
       - [x] P4-1: expose typed physical-inventory readers and build a disconnected streaming inventory/reference model.
         - [x] Add the `gc_v4_model_spec` campaign target and demonstrate the missing typed inventory API.
