@@ -1,12 +1,15 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aeordb::engine::directory_entry::{ChildEntry, deserialize_child_entries, serialize_child_entries};
 use aeordb::engine::entry_header::FLAG_SYSTEM;
-use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy, MemoryPressure};
+use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy, MemoryPressure};
 use aeordb::engine::native_durability::PlatformFileIdentityDescriptorV1;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::contract_generated::CONTRACT_REGISTRY_SHA256;
@@ -40,6 +43,79 @@ const DATABASE_ID: [u8; 16] = [0x10; 16];
 const MIGRATION_ID: [u8; 16] = [0x20; 16];
 const SOURCE_PHYSICAL_ID: [u8; 16] = [0x30; 16];
 const DESTINATION_PHYSICAL_ID: [u8; 16] = [0x40; 16];
+const RESOURCE_PROBE_ENV: &str = "AEORDB_MIGRATION_BASE_CLONE_RESOURCE_PROBE";
+const RESOURCE_ROOT_ENV: &str = "AEORDB_MIGRATION_BASE_CLONE_RESOURCE_ROOT";
+const RESOURCE_TEST_NAME: &str = "base_clone_physical_memory_stays_within_declared_accounting_for_both_hash_widths";
+const RESOURCE_MEASUREMENT_PREFIX: &str = "P3C_BASE_CLONE_RESOURCE";
+const RESOURCE_METADATA_BYTES: usize = 96 * 1024;
+const RESOURCE_RECORDS: usize = 512;
+const RESOURCE_MEMORY_LIMIT_BYTES: u64 = 128 << 20;
+const RESOURCE_ACCOUNTING_ALLOWANCE_BYTES: usize = 8 << 20;
+const RESOURCE_RSS_ALLOWANCE_BYTES: u64 = 32 << 20;
+
+static CURRENT_ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_ALLOCATED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+struct CountingAllocator;
+
+unsafe impl GlobalAlloc for CountingAllocator {
+  unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    let pointer = unsafe { System.alloc(layout) };
+    if !pointer.is_null() {
+      allocation_added(layout.size());
+    }
+    pointer
+  }
+
+  unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+    let pointer = unsafe { System.alloc_zeroed(layout) };
+    if !pointer.is_null() {
+      allocation_added(layout.size());
+    }
+    pointer
+  }
+
+  unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+    unsafe { System.dealloc(pointer, layout) };
+    CURRENT_ALLOCATED_BYTES.fetch_sub(layout.size(), Ordering::SeqCst);
+  }
+
+  unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    let replacement = unsafe { System.realloc(pointer, layout, new_size) };
+    if !replacement.is_null() {
+      if new_size >= layout.size() {
+        allocation_added(new_size - layout.size());
+      } else {
+        CURRENT_ALLOCATED_BYTES.fetch_sub(layout.size() - new_size, Ordering::SeqCst);
+      }
+    }
+    replacement
+  }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn allocation_added(bytes: usize) {
+  let current = CURRENT_ALLOCATED_BYTES.fetch_add(bytes, Ordering::SeqCst).saturating_add(bytes);
+  let mut peak = PEAK_ALLOCATED_BYTES.load(Ordering::SeqCst);
+  while current > peak {
+    match PEAK_ALLOCATED_BYTES.compare_exchange_weak(peak, current, Ordering::SeqCst, Ordering::SeqCst) {
+      Ok(_) => break,
+      Err(observed) => peak = observed,
+    }
+  }
+}
+
+fn reset_allocation_peak() -> usize {
+  let baseline = CURRENT_ALLOCATED_BYTES.load(Ordering::SeqCst);
+  PEAK_ALLOCATED_BYTES.store(baseline, Ordering::SeqCst);
+  baseline
+}
+
+fn allocation_peak_growth(baseline: usize) -> usize {
+  PEAK_ALLOCATED_BYTES.load(Ordering::SeqCst).saturating_sub(baseline)
+}
 
 fn id(first: u8) -> [u8; 16] {
   std::array::from_fn(|offset| first.wrapping_add(offset as u8))
@@ -363,6 +439,23 @@ impl MigrationBaseCloneEntrySourceV1 for FakeSource {
       value.clone(),
     )))
   }
+}
+
+fn fake_source_fingerprint(source: &FakeSource) -> [u8; 32] {
+  let mut entries = source.entries.iter().collect::<Vec<_>>();
+  entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+  let mut hasher = blake3::Hasher::new();
+  for (map_key, (header, stored_key, value)) in entries {
+    hasher.update(&(map_key.len() as u64).to_le_bytes());
+    hasher.update(map_key);
+    hasher.update(&[header.entry_version, header.entry_type.to_u8(), header.flags]);
+    hasher.update(&header.hash_algo.to_u16().to_le_bytes());
+    hasher.update(&(stored_key.len() as u64).to_le_bytes());
+    hasher.update(stored_key);
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+  }
+  *hasher.finalize().as_bytes()
 }
 
 fn content_key(algorithm: HashAlgorithm, entry_type: EntryType, value: &[u8]) -> Vec<u8> {
@@ -1384,6 +1477,123 @@ fn base_clone_rejects_an_oversized_decoded_chunk_bound_before_source_reads_or_de
   assert_eq!(error.code(), "migration_clone_limits");
   assert_eq!(chunk_reads.load(Ordering::Relaxed), 0);
   assert_eq!(destination.publisher().observe().unwrap(), before);
+}
+
+fn run_base_clone_resource_probe(algorithm: HashAlgorithm) {
+  let source_identity = identity(0x50, 0x70);
+  let mut source = FakeSource::new(algorithm, source_identity);
+  let head = content_key(algorithm, EntryType::DirectoryIndex, &[]);
+  source.insert(EntryType::DirectoryIndex, 0, CompressionAlgorithm::None, head.clone(), Vec::new());
+  let mut seed_rows = seeds(&head, false);
+  let empty_hash = digest_parts(algorithm, &[b""]);
+  for index in 0..RESOURCE_RECORDS {
+    let path = format!("/resource-{index:04}.json");
+    let record = FileRecord {
+      path: path.clone(),
+      content_type: Some("application/json".to_string()),
+      total_size: 0,
+      created_at: 1_700_000_000_001,
+      updated_at: 1_700_000_000_001,
+      metadata: vec![(index % 251) as u8; RESOURCE_METADATA_BYTES],
+      content_hash: empty_hash.clone(),
+      chunk_hashes: Vec::new(),
+    };
+    let value = record.serialize(algorithm.hash_length()).unwrap();
+    let identity = file_identity_key(algorithm, &record);
+    source.insert(EntryType::FileRecord, 1, CompressionAlgorithm::None, identity.clone(), value);
+    seed_rows.push(MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::DetachedProtectedPath,
+      path,
+      entry_type: EntryType::FileRecord,
+      hash: identity,
+    });
+  }
+
+  let destination_directory = match env::var_os(RESOURCE_ROOT_ENV) {
+    Some(root) => {
+      fs::create_dir_all(&root).unwrap();
+      tempfile::Builder::new().prefix("base-clone-resource-").tempdir_in(root).unwrap()
+    }
+    None => tempfile::tempdir().unwrap(),
+  };
+  let (permit, destination) = initialize_destination(&destination_directory, algorithm, source_identity, head, counts(1, 0));
+  let mut stream = Stream::new(&permit, seed_rows);
+  let memory = memory();
+  let source_before = fake_source_fingerprint(&source);
+  let baseline_process_memory = aeordb::engine::rss_sampler::try_read_process_memory().unwrap();
+  let baseline_allocator_bytes = reset_allocation_peak();
+
+  let receipt =
+    execute(&permit, &source, &mut stream, &destination, &memory, &CancellationToken::new(), RESOURCE_MEMORY_LIMIT_BYTES).unwrap();
+
+  let allocator_peak_growth_bytes = allocation_peak_growth(baseline_allocator_bytes);
+  let final_process_memory = aeordb::engine::rss_sampler::try_read_process_memory().unwrap();
+  let baseline_peak_rss_bytes = baseline_process_memory.peak_resident_kb.max(baseline_process_memory.resident_kb).saturating_mul(1024);
+  let peak_rss_bytes = final_process_memory.peak_resident_kb.max(final_process_memory.resident_kb).saturating_mul(1024);
+  let peak_rss_growth_bytes = peak_rss_bytes.saturating_sub(baseline_peak_rss_bytes);
+  let migration_owner = memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().clone();
+
+  assert_eq!(fake_source_fingerprint(&source), source_before, "resource probe mutated its source graph");
+  assert_eq!(migration_owner.reserved_bytes, 0, "migration reservation leaked after successful clone");
+  assert_eq!(migration_owner.active_reservations, 0, "migration reservation owner remained active after successful clone");
+  assert_eq!(receipt.published_entities, (RESOURCE_RECORDS + 1) as u64);
+  assert_eq!(receipt.maximum_batch_entities, 511);
+  assert!(receipt.maximum_batch_encoded_bytes > 40 << 20, "resource fixture stopped exercising a large publication batch");
+  assert!(receipt.peak_accounted_memory_bytes <= RESOURCE_MEMORY_LIMIT_BYTES);
+  assert!(
+    allocator_peak_growth_bytes <= receipt.peak_accounted_memory_bytes as usize + RESOURCE_ACCOUNTING_ALLOWANCE_BYTES,
+    "allocator peak growth {allocator_peak_growth_bytes} exceeded declared peak {} plus {} bytes of fixed test/publisher allowance",
+    receipt.peak_accounted_memory_bytes,
+    RESOURCE_ACCOUNTING_ALLOWANCE_BYTES,
+  );
+  assert!(baseline_peak_rss_bytes > 0 && peak_rss_bytes > 0, "native process RSS observation was unavailable");
+  assert!(
+    peak_rss_growth_bytes <= receipt.peak_accounted_memory_bytes.saturating_add(RESOURCE_RSS_ALLOWANCE_BYTES),
+    "RSS peak growth {peak_rss_growth_bytes} exceeded declared peak {} plus {} bytes of allocator/runtime allowance",
+    receipt.peak_accounted_memory_bytes,
+    RESOURCE_RSS_ALLOWANCE_BYTES,
+  );
+
+  println!(
+    "{RESOURCE_MEASUREMENT_PREFIX} algorithm={algorithm:?} allocator_peak_growth_bytes={allocator_peak_growth_bytes} rss_peak_growth_bytes={peak_rss_growth_bytes} accounted_peak_bytes={} maximum_batch_entities={} maximum_batch_encoded_bytes={}",
+    receipt.peak_accounted_memory_bytes, receipt.maximum_batch_entities, receipt.maximum_batch_encoded_bytes,
+  );
+}
+
+#[test]
+fn base_clone_physical_memory_stays_within_declared_accounting_for_both_hash_widths() {
+  let child_algorithm = env::var(RESOURCE_PROBE_ENV).ok();
+  if let Some(child_algorithm) = child_algorithm {
+    let algorithm = match child_algorithm.as_str() {
+      "blake3-256" => HashAlgorithm::Blake3_256,
+      "sha-512" => HashAlgorithm::Sha512,
+      other => panic!("unknown resource-probe hash algorithm {other}"),
+    };
+    run_base_clone_resource_probe(algorithm);
+    return;
+  }
+
+  for (child_algorithm, expected_algorithm) in [("blake3-256", "Blake3_256"), ("sha-512", "Sha512")] {
+    let output = Command::new(env::current_exe().unwrap())
+      .arg("--exact")
+      .arg(RESOURCE_TEST_NAME)
+      .arg("--nocapture")
+      .arg("--test-threads=1")
+      .env(RESOURCE_PROBE_ENV, child_algorithm)
+      .output()
+      .unwrap();
+    let standard_output = String::from_utf8_lossy(&output.stdout);
+    let standard_error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+      output.status.success(),
+      "isolated {child_algorithm} resource probe failed\nstdout:\n{standard_output}\nstderr:\n{standard_error}"
+    );
+    assert!(
+      standard_output.contains(RESOURCE_MEASUREMENT_PREFIX) && standard_output.contains(expected_algorithm),
+      "isolated {child_algorithm} resource probe omitted its measurement marker\nstdout:\n{standard_output}\nstderr:\n{standard_error}"
+    );
+    print!("{standard_output}");
+  }
 }
 
 #[test]

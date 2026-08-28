@@ -665,6 +665,8 @@
             - [x] P3c-2b3d3: reconcile the complete frozen retained-root and SystemFamily inventory, stream every final root mapping, and let only the live freeze proof authorize the monotonic AMPR final-freeze completion/watermark.
             - [x] Prove the post-hard-commit/pre-capture race, prior admitted raw and namespace writes, blocked new writes, capture gaps, stale roots, malformed flat/B-tree state, missing protected closure, cancellation/timeout/memory pressure, retry/reopen, both hash widths, and byte-for-byte source invariance.
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
+            - [x] Measure isolated base-clone allocator and process-RSS high-water against declared migration accounting for BLAKE3-256 and SHA-512, including reservation release and source invariance.
+            - [x] Retain explicit desktop command/resource evidence and run the affected/broad gates without compiling Rust on `wyatt-laptop`.
           - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
             - [x] Reproduce the exact 4,097-item boundary and a second-window failure before changing production publication.
             - [x] Prevalidate the complete request, then publish only missing immutable artifacts in 511-entry authority windows while keeping selection last.
