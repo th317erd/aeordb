@@ -923,7 +923,7 @@
         - [x] P5-8a: add a dedicated shadow-generation integration target that composes every P5 artifact family and validates exact graph closure after file-backed restart.
         - [x] P5-8b: prove large synthetic build/update/compaction and NVT fallback equivalence under explicit memory, artifact, and corruption bounds while preserving cancellation ownership for the P6 task authority.
         - [x] P5-8c: run the complete P5 matrix, broad/static/native-platform, external real-world, cleanup, and Child 05 closure gates.
-    - [ ] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
+    - [x] P6: implement recoverable soft mutation coverage, bounded workers, cache eviction, page publication, and exact coverage/fallback activation.
       - [x] P6-1: implement the post-authority soft mutation stream, sequence/gap model, and authoritative reconciliation boundary.
         - [x] P6-1a: freeze the typed coverage epoch/cursor, mutation envelope, admission outcomes, and gap/rebuild state machine in `coverage_runtime_spec` with an independent model.
         - [x] P6-1b: route every namespace mutation producer through one engine-owned, bounded, non-blocking post-commit fanout while preserving caller-specific effects.
@@ -933,19 +933,19 @@
           - [x] P6-1c-c: replay validated journal chains and reconcile missing, ambiguous, corrupt, or disconnected authority to bounded diff/rebuild.
           - [x] P6-1c-d: clear current loss only with a generation-checked authoritative reconciliation and prove restart, cancellation, corruption, and concurrent-loss races.
         - [x] P6-1d: prove restart, dropped/duplicate/out-of-order delivery, queue pressure, whole-root transitions, cancellation, memory bounds, and unchanged acknowledgement durability/latency.
-      - [ ] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
+      - [x] P6-2: implement the single bounded IndexCoordinator, task admission, memtable, spill, checkpoint, cache, cancellation, and graceful shutdown runtime.
         - [x] P6-2a: implement the storage-neutral coordinator state machine, active/frozen memtables, exact shared-memory reservations, deterministic dedupe/replacement, flush triggers, cancellation, and drain contract.
         - [x] P6-2b: persist/replay the soft journal and typed task checkpoint, root unpublished attachments, and fail closed to reconciliation on missing/corrupt/discontinuous recovery state.
           - [x] P6-2b-a: freeze the durable store, selected-checkpoint, publication receipt, recovery outcome, and bounded-memory contracts in a compile-red target.
           - [x] P6-2b-b: implement dependency-first/checkpoint-last persistence with complete attachment and journal readback before selected-root publication.
           - [x] P6-2b-c: implement bounded restart replay with explicit missing, corrupt, discontinuous, cancellation, and store-failure outcomes.
           - [x] P6-2b-d: qualify crash boundaries, idempotence, stale selection, resource pressure, activation isolation, and broad regressions.
-        - [ ] P6-2c: route parser/mapper/converter and every legacy/v1 index mutation through one coordinator task path with bounded retry, spill, and per-index degraded outcomes.
+        - [x] P6-2c: route parser/mapper/converter and every legacy/v1 index mutation through one coordinator task path with bounded retry, spill, and per-index degraded outcomes.
           - [x] P6-2c-a: freeze a body-free, exact-root/journal-referenced producer task contract with bounded shared-memory admission, canonical leases, cancellation, retry, and spill.
           - [x] P6-2c-b: freeze typed per-owner ready, deterministic-unindexable, retryable, and degraded outcomes (including independent field-index degradation) and feed every emitted ordered record through `IndexCoordinatorV1`.
-          - [ ] P6-2c-c: refactor parser/mapper/config resolution into a collector executed only by the coordinator task owner; remove synchronous pipeline work from directory post-commit fanout.
+          - [x] P6-2c-c: refactor parser/mapper/config resolution into a collector executed only by the coordinator task owner; remove synchronous pipeline work from directory post-commit fanout.
             - [x] Compose exact journal record, FileRecord revision, semantic scope, content-only, retry, and leased executor handling under one storage-neutral mutation worker.
-            - [ ] Resolve concrete semantic-catalog definitions and scope-local ordinals under retained shared-memory admission.
+            - [x] Resolve concrete semantic-catalog definitions and scope-local ordinals under retained shared-memory admission.
               - [x] Expose borrowed typed definition and catalog-node views over the frozen SemanticObjectV1 bytes without materializing a second record/child vector.
               - [x] Retain one Task memory reservation across semantic catalog traversal, definition loading, ordinal resolution, and worker consumption.
               - [x] Bind semantic scope reads to the exact producer operation ID and cooperative cancellation callback.
@@ -960,23 +960,23 @@
                   - [x] Resolve live FileKey mappings from the exact attached ScopeCatalog manifest/reverse directory.
                     - [x] Prove bounded leaf and multi-level reverse-directory lookup plus malformed child closure and memory refusal.
               - [x] Prove malformed closure, count/depth/prefix disagreement, cancellation, memory pressure, ordinal retry/move/delete/recreate, and aggregate-limit behavior.
-            - [ ] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
+            - [x] Activate the worker behind one recovered runtime owner, retaining legacy query-visible indexing until immutable shadow cutover.
               - [x] Freeze one fail-closed runtime-owner lifecycle that exclusively composes the soft hub, producer queue, mutation memtable, worker, publication retry, degraded latch, and drain state.
               - [x] Bind the owner to one concrete recovery store and bounded per-scope selected-checkpoint adapter registry without adding another selector or in-memory persistent cursor map.
                 - [x] Bind bounded immutable IndexArtifact length/read and idempotent batch publication to the native v4 WholeEntity/KV/header authority.
                 - [x] Bind selected checkpoint roots to typed IndexOperationControl A/B publication with retirement lineage.
                 - [x] Compose the concrete recovery store and bounded evictable per-scope registry under shared memory admission.
-              - [ ] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
+              - [x] Install the recovered owner in `StorageEngine` and route the existing timer, pressure, metrics, spill, startup, and shutdown seams through it while legacy queries remain authoritative.
                 - [x] P6-2d-c3a: converge `StorageEngine` and `IndexRuntimeOwnerV1` on one shared soft-mutation hub and publish lock-free cached lifecycle/queue/mutation observability.
                   - [x] Freeze a compile-red engine-installation contract for inactive observation, one-time ownership, exact shared-hub visibility, and nonblocking contended acknowledgement.
                   - [x] Store the engine soft hub under one shared `Arc`, install at most one recovering owner under namespace authority, and route acknowledgement/loss observation through that owner when present.
                   - [x] Prove focused owner/namespace/engine behavior, architecture uniqueness, shared-memory accounting, and unchanged v3 query authority before landing c3a.
-                - [ ] P6-2d-c3b: construct exactly one runtime owner during create/open, resolve content-only or selected-checkpoint recovery before admission, and surface typed degraded startup without changing v3 query authority.
+                - [x] P6-2d-c3b: construct exactly one runtime owner during create/open, resolve content-only or selected-checkpoint recovery before admission, and surface typed degraded startup without changing v3 query authority.
                   - [x] Replace duplicated test-only v4 publisher reopen sequences with one no-follow production `V4FirstAuthorityPublisher::open` authority.
                   - [x] Publish successor semantic objects through one bounded canonical native system-file boundary before selecting a complete semantic authority.
                   - [x] Freeze a bounded native runtime recovery request/result over explicit shadow identity, content-only authority, and selected checkpoint descriptors.
                   - [x] Install recovery exactly once, retain typed degraded evidence on corrupt/missing/discontinuous state, and prove restart without changing legacy query visibility.
-                - [ ] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
+                - [x] P6-2d-c3c: add the concrete selector-last runtime batch publisher and durable producer spill boundary required by live worker/flush activation.
                   - [x] P6-2d-c3c-a: freeze a versioned, checksummed, bounded index-workspace manifest/object format and independent cross-platform fixtures before its first writer.
                   - [x] P6-2d-c3c-b: implement private no-follow immutable workspace append/reopen with exact identity, chain, byte/count, cancellation, memory, and durability validation.
                     - [x] Freeze one disconnected store API over explicit database, destination, workspace, runtime, and hash-profile identity.
@@ -1005,12 +1005,12 @@
                     - [x] Generalize the selector-last publisher's prepared/pending authority so runtime batches and producer spills share one cumulative checkpoint path.
                     - [x] Require spill receipts to bind the exact producer operation identity before the coordinator may release retained work.
                     - [x] Run focused, affected, suppression, contract, full-workspace, and disconnected-architecture gates; record and land c3c-e.
-                  - [ ] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
+                  - [x] P6-2d-c3c-f: prove crash prefixes, tamper/truncation, stale selectors, restart, cancellation, pressure, widest-hash operation, architecture uniqueness, and unchanged v3 query authority before landing c3c.
                     - [x] Add compile-red restart proof for an unselected producer object/manifest prefix whose durable timestamp differs from the new process clock.
                     - [x] Add compile-red historical-duplicate proof after later cumulative runtime publication; resolve only an exact selected-chain producer object without another append.
                     - [x] Close object, manifest, checkpoint, selector, cancellation, memory, free-space, capacity, tamper, truncation, and widest-hash crash/failure prefixes.
                     - [x] Prove one workspace, spill, checkpoint, selector, runtime-owner, and legacy-query authority through source and behavioral architecture gates.
-                    - [ ] Run focused, affected, suppression, contract, full-workspace, native-platform, and real-filesystem gates; record and land c3c.
+                    - [x] Run focused, affected, suppression, contract, full-workspace, native-platform, and real-filesystem gates; record and land c3c.
                 - [x] P6-2d-c3d: drive v4 work through the existing index timer and memory-pressure cadence, with cancellation and no second timer/worker authority.
                   - [x] Map the single cadence's mutation, pressure, clock, cancellation, publisher, timer, retry, observability, and later shutdown/startup boundaries.
                   - [x] Add compile-red count, age, pressure, cancellation, retry-identity, concurrent-serialization, and timer-uniqueness proofs.
@@ -1022,7 +1022,7 @@
                   - [x] Pass Linux focused, affected, architecture, suppression, contract, all-target, strict-baseline, full-workspace, and resource gates.
                   - [x] Pass exact-source native Darwin and Windows cross-platform gates and record the retained evidence.
                   - [x] Run focused, affected, architecture, suppression, contract, full-workspace, resource, and native-platform gates; record and land c3d.
-                - [ ] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
+                - [x] P6-2d-c3e: include recoverable v4 dirty state in emergency spill and drain/final-publish/checkpoint it before KV shutdown completion.
                   - [x] Add compile-red proofs for one cadence-owned drain, immediate exact frozen-batch retry, multi-batch progress, idempotent stop, and refusal of queued/reconciliation work.
                   - [x] Invoke that same cadence after engine operation/durability drain and before legacy-index/KV/hot-tail/header shutdown publication.
                   - [x] Freeze a v3 emergency-spill envelope with a typed, bounded v4 runtime-reconciliation component while preserving exact v1/v2 readers and limits.
@@ -1031,26 +1031,26 @@
                   - [x] Close adversarial artifact-trust gaps before landing c3e.
                     - [x] Reject any caller-supplied artifact whose typed fields disagree with the exact retained manifest/component bytes.
                     - [x] Reject foreign-database artifacts before WAL replay, persistent catalog/latch seeding, or applied-marker publication.
-                  - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3e.
+                  - [x] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3e.
                     - [x] Pass the exact-commit native Darwin matrix, including the raw native-path identity fixture.
-                    - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
-                - [ ] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
+                    - [x] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
+                - [x] P6-2d-c3f: prove create/open/restart, recovery failure, queue loss, retry/cancellation, pressure, spill refusal/replay, shutdown refusal, metrics non-blocking behavior, and unchanged legacy query results.
                   - [x] Add compile-red proof that runtime publication and cadence cannot be installed as a second, partial lifecycle step.
                   - [x] Construct one fresh or selected-head-resumed publisher and cadence before exposing the recovered runtime owner.
                   - [x] Reuse only an exact empty unselected workspace after restart; reject any unexpected retained state.
                   - [x] Prove selected dirty-overlay restart, malformed recovery, cancellation, pressure, spill/shutdown refusal, cached metrics, and legacy-query invariants.
                   - [x] Acquire source hard authority before pinning destination selection at the final installation frontier; prove the cross-file lock order cannot regress.
                   - [x] Prove fresh-workspace restart accepts partial empty skeletons but rejects wrong node types, symlinks, non-UTF-8 names, and retained payloads.
-                  - [ ] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3f.
+                  - [x] Run focused, affected, architecture, suppression, contract, full-workspace, resource, real-filesystem, and native-platform gates; record and land c3f.
                     - [x] Pass the final Linux focused, affected, architecture, suppression, contract, documentation, static, full-workspace, resource, and real-filesystem gates.
                     - [x] Pass the exact-commit native Darwin matrix after landing the Linux unit.
-                    - [ ] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
-          - [ ] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
+                    - [x] Pass the exact-commit native Windows matrix after the `win11vm` reverse tunnel returns.
+          - [x] P6-2c-d: converge delete cleanup, configuration retirement, reindex, repair, explicit legacy mutation, and v1 mutation producers on the same task admission path; add architecture gates against bypasses.
             - [x] P6-2c-d1: freeze the complete maintenance producer taxonomy and deterministic root/semantic/scope-bound operation identity.
             - [x] P6-2c-d2: make the installed cadence the sole serialized admission and durable-spill boundary for both exact mutation journals and root-pinned maintenance tasks.
             - [x] P6-2c-d3: expose one source-authority-first `StorageEngine` maintenance admission facade that is inert without an installed runtime and reloads current semantic authority.
             - [x] P6-2c-d4: persist and admit drained soft mutation journals without destructive dequeue-before-durability or unaccounted amplification.
-            - [ ] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
+            - [x] P6-2c-d5: service root-pinned maintenance tasks through bounded authoritative scans and the same parser/mapper/collector worker.
               - [x] P6-2c-d5a: freeze the bounded root-pinned scan/service contract, task-kind semantics, continuation authority, and architecture falsifiers.
               - [x] P6-2c-d5b: add production exact-revision, semantic-catalog, scope-ordinal, and parser adapters without buffering whole indexes or adding a producer path.
                 - [x] P6-2c-d5b1: bind exact historical FileRecord revisions without consulting mutable HEAD/path authority.
@@ -1072,36 +1072,36 @@
                   - [x] Fail closed while retaining unsupported artifact-compaction work until P6-3 supplies its immutable compaction executor.
                   - [x] Prove mixed canonical task ordering, all nine task kinds, restart cursor reset with deterministic duplicate collapse, cancellation, pressure, corruption, panic, and lease release.
                   - [x] Add architecture gates for one lease selector, one parser/mapper/collector core, and no selector-specific producer path; run focused through broad proof.
-              - [ ] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
+              - [x] P6-2c-d5e: service bounded work from the installed cadence/timer and prove cancellation, pressure, corruption, restart, retry, and resource bounds.
                 - [x] Add a production first-authority mutation-journal source that probes before allocation, reserves the frozen maximum through `MemoryOwner::Task`, and rejects missing, changed, foreign, malformed, canceled, or over-limit evidence without retaining unaccounted bytes.
                 - [x] Add one cadence-owned count/time-bounded producer-service slice that uses the existing exhaustive owner dispatcher and selector-last publisher lock, then attempts due mutation publication independently without introducing another scheduler, worker, lease selector, or spill authority.
                 - [x] Assemble exact revision, root-pinned scan, selected semantic catalog, durable scope-ordinal, native parser, and optional mapper sources only at the installed native runtime boundary under explicit engine defaults.
                 - [x] Drive bounded one-task/page attempts from the existing five-second server index timer and preserve the embedded-host cadence entry point, soft-journal durability ordering, legacy/v4 independence, cancellation, and shutdown authority.
-                - [ ] Prove focused journal, cadence, installed-runtime, restart, retry, corruption, pressure, reservation-release, and timer-uniqueness behavior before affected, architecture, suppression, contract, broad, resource, real-filesystem, and native-platform gates.
+                - [x] Prove focused journal, cadence, installed-runtime, restart, retry, corruption, pressure, reservation-release, and timer-uniqueness behavior before affected, architecture, suppression, contract, broad, resource, real-filesystem, and native-platform gates.
                   - [x] Pass the exact-commit Linux and macOS arm64 matrices and preserve their resource/log evidence.
-                  - [ ] Pass the exact-commit Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
+                  - [x] Pass the exact-commit Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
             - [x] P6-2c-d6: route delete cleanup, config retirement, reindex, repair, migration, and explicit legacy/v1 callers while retaining only the explicit legacy query-compatibility adapter until P6-3.
               - [x] P6-2c-d6a: route post-commit legacy metadata mutation and delete cleanup through root-pinned maintenance admission without changing hard-write acknowledgement.
               - [x] P6-2c-d6b: route task-worker configuration retirement, reindex, and forced legacy migration through one exact task-operation admission boundary.
               - [x] P6-2c-d6c: route online repair and remaining explicit maintenance callers; prove inactive-runtime compatibility and failure direction.
               - [x] P6-2c-d6d: audit every direct v3 writer and record the sole retained legacy query-compatibility surface before d7 removes the standalone queue.
-            - [ ] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
+            - [x] P6-2c-d7: remove the standalone unbounded cleanup queue and add source architecture gates against direct producer/coordinator/index-buffer bypasses.
               - [x] Prove the detached unbounded cleanup channel, worker, server state, route enqueue, and public re-export are absent while post-commit cleanup remains covered.
               - [x] Freeze the sole production coordinator construction/admission/lease, cadence construction/admission/service, and legacy index-buffer construction callers.
               - [x] Run focused delete/index/runtime gates before affected, architecture, suppression, static, broad, resource, and real-world qualification.
-              - [ ] Qualify the exact landed commit on native macOS arm64 and Windows x86_64 MSVC; retain the Windows gate until the reverse endpoint is reachable.
+              - [x] Qualify the exact landed commit on native macOS arm64 and Windows x86_64 MSVC; retain the Windows gate until the reverse endpoint is reachable.
                 - [x] Pass the exact-commit native macOS arm64 matrix.
-                - [ ] Pass the exact-commit native Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
-          - [ ] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
+                - [x] Pass the exact-commit native Windows x86_64 MSVC matrix after the `win11vm` reverse endpoint returns.
+          - [x] P6-2c-e: prove pressure, cancellation, retry exhaustion, spill failure/recovery, mixed per-index outcomes, duplicate delivery, and unchanged hard-write acknowledgement behavior.
             - [x] Prove installed admission pressure plus durable-spill refusal cannot reverse post-commit indexed writes or deletes.
             - [x] Close the existing cancellation, retry exhaustion, spill recovery, mixed-owner, and duplicate-delivery matrix through one reviewed evidence inventory.
-            - [ ] Run focused producer/runtime/namespace gates before affected, architecture, suppression, static, broad, resource, real-world, and native qualification.
-        - [ ] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
+            - [x] Run focused producer/runtime/namespace gates before affected, architecture, suppression, static, broad, resource, real-world, and native qualification.
+        - [x] P6-2d: integrate count/time/pressure flush, clean cache admission/eviction, metrics, startup recovery, and graceful final flush/checkpoint without a second timer or shutdown path.
           - [x] Project the lock-free cached runtime state through shared observability, `/system/stats`, root metrics SSE, Prometheus, and bounded public health without exposing degraded context to non-root callers.
           - [x] Reconcile the implemented c3 lifecycle proof against every P6-2d requirement and retain migration-qualified startup activation for P8 rather than opening an unrelated v4 authority during ordinary v3 create/open.
-          - [ ] Replace the Unix-only disk-health probe with the existing cross-platform filesystem-capacity authority and prove healthy native Windows reporting.
-          - [ ] Preserve the private workspace object security descriptor while constructing the producer-amplification fixture and prove the intended pre-admission format refusal on Windows.
-      - [ ] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
+          - [x] Replace the Unix-only disk-health probe with the existing cross-platform filesystem-capacity authority and prove healthy native Windows reporting.
+          - [x] Preserve the private workspace object security descriptor while constructing the producer-amplification fixture and prove the intended pre-admission format refusal on Windows.
+      - [x] P6-3: activate validated immutable page publication, compaction, shadow-generation coverage transitions, and exact covered-plus-authoritative fallback planning.
         - [x] P6-3a: implement the frozen A/B active-pointer writer, deterministic rewrite planner, shallow closure selection, and storage-neutral soft/hard publication contract.
           - [x] Byte-match all twelve independent active-pointer fixtures and reject malformed identities, slots, generations, sequences, targets, and overflow.
           - [x] Count structurally valid but closure-invalid sequences, preserve the highest closure-valid fallback, and fail closed on equal-sequence ambiguity.
