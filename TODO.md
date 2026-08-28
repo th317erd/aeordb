@@ -667,6 +667,7 @@
           - [ ] P3c-2b3e: prove cancellation, restart, commit-unknown recovery, bounded memory/disk behavior, source byte invariance, both hash widths, and native platform behavior before handoff.
             - [x] Measure isolated base-clone allocator and process-RSS high-water against declared migration accounting for BLAKE3-256 and SHA-512, including reservation release and source invariance.
             - [x] Retain explicit desktop command/resource evidence and run the affected/broad gates without compiling Rust on `wyatt-laptop`.
+            - [ ] Normalize source-audit caller paths across native separators and rerun the exact Windows qualification matrix.
           - [ ] Resolve the pre-existing immutable IndexArtifact publisher's 4,097-item request contract against the shared 511-entry atomic-visibility limit with bounded windowing before activation.
             - [x] Reproduce the exact 4,097-item boundary and a second-window failure before changing production publication.
             - [x] Prevalidate the complete request, then publish only missing immutable artifacts in 511-entry authority windows while keeping selection last.
@@ -1157,13 +1158,13 @@
           - [x] Preserve the v3 query-compatible writer and assign its removal to the P7 coordinated reader cutover rather than deleting it before a replacement reader exists.
           - [x] Prove ordinary v3 create/open remains inactive, migration-qualified open installs one recovered owner, restart reconstructs it, shutdown retains pinned snapshots safely, and no second writer, timer, selector, cache, or query authority survives.
         - [x] Rotate each cumulative runtime workspace only after immutable publication proves its dirty batches and completed producer tasks are represented, carrying forward exactly the still-pending tasks so restart replay remains bounded.
-      - [ ] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
+      - [x] P6-4: prove all producer commit paths exclude derived work and meet the latency/resource contract under real-world load.
         - [x] P6-4a: prove the 10,000-record bound uses one durable AITK-v1 `Reconcile` journal pin, then service exact record identities through a bounded in-memory continuation without per-record selectors, fsyncs, or quadratic commit-time coordinator work.
-        - [ ] P6-4b: measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.
+        - [x] P6-4b: measure and bound corrected native-parser peak allocation, including compressed Office/ODF expansion and adversarial high-node JSON, before v4 producer activation; accounting reservations alone are not proof of allocator-level bounds.
           - [x] Add an isolated counting-allocator integration target and reproduce unbounded compressed-entry and post-build high-node amplification before changing production behavior.
           - [x] Bound corrected Office/ODF ZIP expansion cumulatively with declared-size and streaming checks while preserving the legacy parser contract unchanged.
           - [x] Enforce corrected JSON node, depth, member, and scalar limits during deserialization instead of after the full value tree is allocated.
-          - [ ] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
+          - [x] Prove measured allocator peak, process RSS, reservation release, malformed/policy classification, legacy compatibility, and affected/broad/static gates.
         - [x] P6-4c: run exact-source real-world producer commit, restart, and resource traces against the frozen acceptance envelope.
     - [x] P7: implement root-aware query planning, APOS, locators, and coordinated HTTP/SDK/UI/SSE/documentation cutover.
       - [x] P7-1: freeze and integrate the method-aware route matrix, `ResolvedReadView` adapters, root selector, response, and stable error contract.

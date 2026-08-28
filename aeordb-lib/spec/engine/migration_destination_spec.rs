@@ -1729,7 +1729,7 @@ fn source_occurrences_by_file(root: &Path, needle: &str) -> BTreeMap<String, usi
     .filter_map(|path| {
       let source = fs::read_to_string(&path).unwrap();
       let count = source.matches(needle).count();
-      (count > 0).then(|| (path.strip_prefix(root).unwrap().to_string_lossy().into_owned(), count))
+      (count > 0).then(|| (path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"), count))
     })
     .collect()
 }
