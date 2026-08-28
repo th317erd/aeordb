@@ -464,10 +464,7 @@ fn decode_runtime_batch_payload_v2(profile: HashProfile, bytes: &[u8]) -> Result
   let h = profile.width();
   let minimum_mutation_bytes = mutation_count.checked_mul(40 + h + 2).ok_or("runtime_v2_mutation_count_overflow")?;
   let minimum_transition_bytes = transition_count.checked_mul(48 + h).ok_or("runtime_v2_transition_count_overflow")?;
-  if minimum_mutation_bytes
-    .checked_add(minimum_transition_bytes)
-    .is_none_or(|minimum| minimum > bytes.len() - 64)
-  {
+  if minimum_mutation_bytes.checked_add(minimum_transition_bytes).is_none_or(|minimum| minimum > bytes.len() - 64) {
     return Err("runtime_v2_count_amplification");
   }
   let mut cursor = 64usize;

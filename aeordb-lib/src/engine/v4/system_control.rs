@@ -13,9 +13,9 @@ pub const SYSTEM_CONTROL_IDENTITY_LENGTH_CAP: usize = 4_096;
 const ONE_MIB: usize = 1_048_576;
 const FOUR_KIB: usize = 4_096;
 const MAX_SEGMENT_LENGTH: usize = 64 * ONE_MIB;
-const JOURNAL_LENGTH: usize = 2_048;
-const JOURNAL_SLOT_LENGTH: usize = 1_024;
-const JOURNAL_SLOT_CRC_OFFSET: usize = 1_020;
+pub(crate) const JOURNAL_LENGTH: usize = 2_048;
+pub(crate) const JOURNAL_SLOT_LENGTH: usize = 1_024;
+pub(crate) const JOURNAL_SLOT_CRC_OFFSET: usize = 1_020;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
