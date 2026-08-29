@@ -302,6 +302,8 @@ pub struct EnhancedStats {
   pub throughput: StatsThroughput,
   pub health: StatsHealth,
   pub memory: crate::engine::storage_engine::EngineMemoryStats,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub identity_engine: Option<crate::engine::runtime_observability::IdentityEngineMemoryObservabilitySnapshot>,
   pub durability: crate::engine::runtime_observability::DurabilityObservabilitySnapshot,
   pub configuration: crate::engine::runtime_observability::ConfigurationObservabilitySnapshot,
   pub index_runtime: crate::engine::runtime_observability::IndexRuntimeObservabilitySnapshot,
@@ -455,10 +457,12 @@ fn get_stats_inner(
 
   // Disk health: single statvfs call
   let disk_health = check_disk(db_path);
-  let runtime = state.engine.runtime_observability_snapshot(visibility).map_err(|error| {
-    tracing::error!(%error, "Failed to collect runtime observability snapshot");
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
-  })?;
+  let runtime =
+    crate::engine::runtime_observability::collect_runtime_observability_with_identity_engine(&state.engine, &state.auth_engine, visibility)
+      .map_err(|error| {
+        tracing::error!(%error, "Failed to collect runtime observability snapshot");
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": error.to_string()})))
+      })?;
   let gc = runtime.gc.clone();
 
   // Dedup hit rate: chunks_deduped / (chunks + chunks_deduped)
@@ -505,6 +509,7 @@ fn get_stats_inner(
       gc,
     },
     memory: runtime.memory,
+    identity_engine: runtime.identity_engine,
     durability: runtime.durability,
     configuration: runtime.configuration,
     index_runtime: runtime.index_runtime,

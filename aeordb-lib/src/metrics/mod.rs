@@ -119,6 +119,7 @@ pub fn record_memory_metrics(memory: &EngineMemoryStats) {
 
 pub fn record_runtime_metrics(runtime: &RuntimeObservabilitySnapshot) {
   record_memory_metrics(&runtime.memory);
+  record_identity_engine_metrics(runtime.identity_engine.as_ref());
   record_index_runtime_metrics(&runtime.index_runtime);
   let durability = &runtime.durability;
   metrics::gauge!(definitions::DURABILITY_HARD_FRONTIER).set(durability.frontier.hard_frontier as f64);
@@ -142,6 +143,24 @@ pub fn record_runtime_metrics(runtime: &RuntimeObservabilitySnapshot) {
   record_gc_metrics(runtime.gc.as_ref());
   record_configuration_family("runtime", &runtime.configuration.runtime);
   record_configuration_family("lifecycle", &runtime.configuration.lifecycle);
+}
+
+fn record_identity_engine_metrics(identity: Option<&crate::engine::runtime_observability::IdentityEngineMemoryObservabilitySnapshot>) {
+  metrics::gauge!(definitions::IDENTITY_ENGINE_ACTIVE).set(bool_gauge(identity.is_some()));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_MEMORY_OBSERVED_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.coordinator.observed_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_MEMORY_RESERVED_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.coordinator.reserved_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_MEMORY_ACCOUNTED_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.coordinator.accounted_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_ESTIMATED_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.estimated_engine_owned_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_INDEX_CACHE_RESIDENT_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.index_cache.estimated_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_DIRECTORY_CACHE_RESIDENT_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.directory_cache.estimated_bytes as f64));
+  metrics::gauge!(definitions::IDENTITY_ENGINE_SERVER_CACHE_RESIDENT_BYTES)
+    .set(identity.map_or(0.0, |snapshot| snapshot.caches.resident_bytes as f64));
 }
 
 fn record_index_runtime_metrics(runtime: &crate::engine::runtime_observability::IndexRuntimeObservabilitySnapshot) {

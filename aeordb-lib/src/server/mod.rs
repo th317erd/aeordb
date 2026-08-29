@@ -62,6 +62,7 @@ pub use cors::{CorsState, CorsRule, CorsConfig, build_cors_state, load_cors_conf
 const BLOB_MANIFEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 pub type ServerApplicationParts = (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>);
+pub type ServerApplicationIdentityParts = (Router, Option<String>, Arc<StorageEngine>, Arc<EventBus>, Arc<TaskQueue>, Arc<StorageEngine>);
 
 /// Spawn a 100ms timer that calls `engine.try_flush_hot_buffer()` on every
 /// tick. Without this, KV writes accumulate in `write_buffer` / `hot_buffer`
@@ -245,6 +246,32 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
   progress_callback: Option<EngineStartupProgressCallback>,
   command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
 ) -> Result<ServerApplicationParts, String> {
+  let (router, bootstrap_key, engine, event_bus, task_queue, _) =
+    try_create_app_with_auth_mode_cancel_progress_configuration_and_identity_engine(
+      engine_path,
+      auth_mode,
+      hot_dir,
+      cors_flag,
+      cancel,
+      progress_callback,
+      command_line,
+    )?;
+  Ok((router, bootstrap_key, engine, event_bus, task_queue))
+}
+
+/// Fallible server construction that also returns the authentication authority
+/// engine so process-level observers can distinguish `file://` from
+/// `auth=self` without reopening either database.
+#[allow(clippy::too_many_arguments)]
+pub fn try_create_app_with_auth_mode_cancel_progress_configuration_and_identity_engine(
+  engine_path: &str,
+  auth_mode: &AuthMode,
+  hot_dir: Option<&std::path::Path>,
+  cors_flag: Option<&str>,
+  cancel: Option<tokio_util::sync::CancellationToken>,
+  progress_callback: Option<EngineStartupProgressCallback>,
+  command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+) -> Result<ServerApplicationIdentityParts, String> {
   let engine = try_create_engine_with_hot_dir_progress_and_configuration_overrides(engine_path, hot_dir, progress_callback, command_line)
     .map_err(|error| format!("failed to initialize storage engine at '{engine_path}': {error}"))?;
 
@@ -261,6 +288,10 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
         .map_err(|error| format!("failed to initialize auth provider from identity file '{path}': {error}"))?;
       (Arc::new(provider), key)
     }
+  };
+  let identity_engine = match auth_provider.authority_engine() {
+    Some(identity_engine) => identity_engine,
+    None => engine.clone(),
   };
 
   let jwt_manager = Arc::new(
@@ -301,7 +332,7 @@ pub fn try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides
   .map_err(|error| format!("failed to initialize server authority: {error}"))?;
   spawn_hot_buffer_flush_timer(engine.clone(), cancel.clone());
   spawn_index_buffer_flush_timer(engine.clone(), cancel);
-  Ok((router, bootstrap_key, engine, event_bus, task_queue))
+  Ok((router, bootstrap_key, engine, event_bus, task_queue, identity_engine))
 }
 
 /// Build the application router with a specific JwtManager (useful for tests).

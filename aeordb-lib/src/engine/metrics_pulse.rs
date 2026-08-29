@@ -29,6 +29,34 @@ pub fn spawn_metrics_pulse(
   db_path: String,
   cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+  spawn_metrics_pulse_inner(bus, engine.clone(), engine, counters, rate_trackers, db_path, cancel)
+}
+
+/// Spawn the metrics pulse with a separately owned `file://` identity engine.
+/// Passing the same allocation as `engine` is safe and omits the identity
+/// projection rather than reporting the primary engine twice.
+pub fn spawn_metrics_pulse_with_identity_engine(
+  bus: Arc<EventBus>,
+  engine: Arc<StorageEngine>,
+  identity_engine: Arc<StorageEngine>,
+  counters: Arc<EngineCounters>,
+  rate_trackers: Arc<RateTrackerSet>,
+  db_path: String,
+  cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+  spawn_metrics_pulse_inner(bus, engine, identity_engine, counters, rate_trackers, db_path, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_metrics_pulse_inner(
+  bus: Arc<EventBus>,
+  engine: Arc<StorageEngine>,
+  identity_engine: Arc<StorageEngine>,
+  counters: Arc<EngineCounters>,
+  rate_trackers: Arc<RateTrackerSet>,
+  db_path: String,
+  cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
     loop {
       tokio::select! {
@@ -48,7 +76,11 @@ pub fn spawn_metrics_pulse(
           continue;
         }
       };
-      let runtime = match engine.runtime_observability_snapshot(ConfigurationVisibility::Root) {
+      let runtime = match crate::engine::runtime_observability::collect_runtime_observability_with_identity_engine(
+        &engine,
+        &identity_engine,
+        ConfigurationVisibility::Root,
+      ) {
         Ok(runtime) => runtime,
         Err(error) => {
           tracing::error!(%error, "Metrics pulse could not collect runtime observability snapshot");
@@ -76,7 +108,8 @@ pub fn spawn_metrics_pulse(
       let total_chunk_ops = snapshot.chunks + snapshot.chunks_deduped_total;
       let dedup_hit_rate = if total_chunk_ops > 0 { snapshot.chunks_deduped_total as f64 / total_chunk_ops as f64 } else { 0.0 };
 
-      let payload = serde_json::json!({
+      let identity_engine = runtime.identity_engine.clone();
+      let mut payload = serde_json::json!({
           "counts": {
               "files": snapshot.files,
               "directories": snapshot.directories,
@@ -133,6 +166,9 @@ pub fn spawn_metrics_pulse(
           "configuration": runtime.configuration,
           "index_runtime": runtime.index_runtime,
       });
+      if let Some(identity_engine) = identity_engine {
+        payload["identity_engine"] = serde_json::json!(identity_engine);
+      }
 
       let event = EngineEvent::new(EVENT_METRICS, "system", payload);
       bus.emit(event);

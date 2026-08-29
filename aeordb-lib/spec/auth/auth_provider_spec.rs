@@ -757,6 +757,23 @@ async fn separate_identity_file_drives_http_api_key_cache_and_revocation() {
   let token = token_body["token"].as_str().unwrap().to_string();
   let first_refresh = token_body["refresh_token"].as_str().unwrap().to_string();
 
+  let stats_response = app
+    .clone()
+    .oneshot(
+      Request::builder().method("GET").uri("/system/stats").header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(stats_response.status(), StatusCode::OK);
+  let stats = body_json(stats_response.into_body()).await;
+  let identity_memory = &stats["identity_engine"];
+  assert!(identity_memory.is_object(), "file:// auth must expose its distinct identity engine");
+  assert!(identity_memory.get("process").is_none(), "process-wide RSS must not be reported twice");
+  assert!(identity_memory["coordinator"]["accounted_bytes"].is_number());
+  assert!(identity_memory["index_cache"]["estimated_bytes"].is_number());
+  assert!(identity_memory["directory_cache"]["estimated_bytes"].is_number());
+  assert!(identity_memory["caches"]["resident_bytes"].is_number());
+
   let refresh_response = app
     .clone()
     .oneshot(

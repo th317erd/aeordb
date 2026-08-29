@@ -13,12 +13,13 @@ use tower::ServiceExt;
 use aeordb::auth::auth_uri::{AuthMode, resolve_auth_mode};
 use aeordb::auth::bootstrap_root_key;
 use aeordb::engine::{
-  spawn_heartbeat, spawn_metrics_pulse, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler, spawn_task_worker,
+  spawn_heartbeat, spawn_metrics_pulse_with_identity_engine, spawn_rate_sampler, spawn_webhook_dispatcher, spawn_cron_scheduler,
+  spawn_task_worker,
 };
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::plugins::PluginManager;
 use aeordb::logging::{LogConfig, LogFormat, try_initialize_logging};
-use aeordb::server::try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides;
+use aeordb::server::try_create_app_with_auth_mode_cancel_progress_configuration_and_identity_engine;
 
 #[cfg(test)]
 #[path = "../../spec/start_internal_spec.rs"]
@@ -552,8 +553,8 @@ async fn initialize_server_runtime(
   let engine_progress: aeordb::engine::EngineStartupProgressCallback = Arc::new(move |progress| {
     apply_engine_startup_progress(&engine_progress_gate, progress);
   });
-  let (application, file_bootstrap_key, engine, event_bus, task_queue) =
-    try_create_app_with_auth_mode_cancel_progress_and_configuration_overrides(
+  let (application, file_bootstrap_key, engine, event_bus, task_queue, identity_engine) =
+    try_create_app_with_auth_mode_cancel_progress_configuration_and_identity_engine(
       &database,
       &auth_mode,
       Some(hot_dir_ref),
@@ -599,8 +600,15 @@ async fn initialize_server_runtime(
   let counters = engine.counters().clone();
   let rate_trackers = Arc::new(RateTrackerSet::new());
   let sampler_handle = spawn_rate_sampler(counters.clone(), rate_trackers.clone(), cancel.clone());
-  let metrics_handle =
-    spawn_metrics_pulse(event_bus.clone(), engine.clone(), counters, rate_trackers.clone(), database.clone(), cancel.clone());
+  let metrics_handle = spawn_metrics_pulse_with_identity_engine(
+    event_bus.clone(),
+    engine.clone(),
+    identity_engine,
+    counters,
+    rate_trackers.clone(),
+    database.clone(),
+    cancel.clone(),
+  );
 
   // Make rate_trackers and db_path available to the stats endpoint via Extension.
   let application = application.layer(axum::Extension(rate_trackers)).layer(axum::Extension(database.clone()));

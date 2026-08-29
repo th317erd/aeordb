@@ -437,6 +437,7 @@ async fn test_stats_has_enhanced_structure() {
   }
   assert_eq!(json["index_runtime"]["state"], "inactive");
   assert_eq!(json["index_runtime"]["installed"], false);
+  assert!(json.get("identity_engine").is_none(), "auth=self must not report the primary engine twice");
 
   // Identity fields
   let identity = &json["identity"];

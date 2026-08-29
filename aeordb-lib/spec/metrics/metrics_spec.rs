@@ -236,6 +236,14 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
     "aeordb_index_runtime_scope_cache_hits",
     "aeordb_index_runtime_scope_cache_misses",
     "aeordb_index_runtime_scope_cache_evictions",
+    "aeordb_identity_engine_active",
+    "aeordb_identity_engine_memory_observed_bytes",
+    "aeordb_identity_engine_memory_reserved_bytes",
+    "aeordb_identity_engine_memory_accounted_bytes",
+    "aeordb_identity_engine_estimated_bytes",
+    "aeordb_identity_engine_index_cache_resident_bytes",
+    "aeordb_identity_engine_directory_cache_resident_bytes",
+    "aeordb_identity_engine_server_cache_resident_bytes",
     "aeordb_gc_run_active",
     "aeordb_gc_run_progress_ratio",
     "aeordb_gc_run_state",
@@ -247,7 +255,39 @@ async fn test_memory_metrics_are_recorded_on_metrics_endpoint() {
   assert!(output.contains("aeordb_index_runtime_state{state=\"inactive\"} 1"));
   assert!(output.contains("aeordb_index_runtime_coverage_refresh_pending 0"));
   assert!(output.contains("aeordb_index_runtime_scope_cache_entries 0"));
+  assert!(output.contains("aeordb_identity_engine_active 0"), "auth=self must not activate distinct identity metrics");
   assert!(!output.contains(&run_id), "Prometheus output must not use run IDs as high-cardinality labels");
+}
+
+#[test]
+#[serial]
+fn identity_engine_metrics_activate_only_for_a_distinct_engine() {
+  let prometheus = initialize_metrics();
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let (identity_engine, _identity_temporary) = create_temp_engine_for_tests();
+  let distinct = aeordb::engine::runtime_observability::collect_runtime_observability_with_identity_engine(
+    &engine,
+    &identity_engine,
+    aeordb::engine::configuration_observability::ConfigurationVisibility::Root,
+  )
+  .unwrap();
+  aeordb::metrics::record_runtime_metrics(&distinct);
+  let active = prometheus.render();
+  assert!(active.contains("aeordb_identity_engine_active 1"));
+  assert!(active.contains("aeordb_identity_engine_memory_accounted_bytes"));
+  assert!(active.contains("aeordb_identity_engine_server_cache_resident_bytes"));
+  assert!(!active.contains("aeordb_identity_engine_process"), "process-wide memory must not gain an identity-engine duplicate");
+
+  let shared = aeordb::engine::runtime_observability::collect_runtime_observability_with_identity_engine(
+    &engine,
+    &engine,
+    aeordb::engine::configuration_observability::ConfigurationVisibility::Root,
+  )
+  .unwrap();
+  aeordb::metrics::record_runtime_metrics(&shared);
+  let reset = prometheus.render();
+  assert!(reset.contains("aeordb_identity_engine_active 0"));
+  assert!(reset.contains("aeordb_identity_engine_memory_accounted_bytes 0"));
 }
 
 #[tokio::test]

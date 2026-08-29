@@ -1234,8 +1234,11 @@ pub async fn metrics_endpoint(State(state): State<AppState>, Extension(claims): 
   if let Err(response) = require_root(&claims) {
     return response;
   }
-  let runtime = match state.engine.runtime_observability_snapshot(crate::engine::configuration_observability::ConfigurationVisibility::Root)
-  {
+  let runtime = match crate::engine::runtime_observability::collect_runtime_observability_with_identity_engine(
+    &state.engine,
+    &state.auth_engine,
+    crate::engine::configuration_observability::ConfigurationVisibility::Root,
+  ) {
     Ok(runtime) => runtime,
     Err(error) => {
       tracing::error!(%error, "Failed to collect runtime observability snapshot");

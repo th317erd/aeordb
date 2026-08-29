@@ -250,7 +250,7 @@ pub use engine_event::{
 pub use event_bus::{EventBus, ProjectedEvent, ProjectedEventReceiver, ProjectedSubscriptionError};
 pub use heartbeat::spawn_heartbeat;
 pub use integrity_scanner::spawn_integrity_scanner;
-pub use metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
+pub use metrics_pulse::{spawn_metrics_pulse, spawn_metrics_pulse_with_identity_engine, spawn_rate_sampler};
 pub use task_worker::{spawn_task_worker, process_next_task};
 pub use cron_scheduler::{
   CronConfig, CronSchedule, CronScheduleUpdate, CronTickResult, create_cron_schedule, delete_cron_schedule, load_cron_config,

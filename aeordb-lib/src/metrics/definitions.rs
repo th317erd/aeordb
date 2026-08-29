@@ -135,6 +135,14 @@ pub const INDEX_RUNTIME_SCOPE_CACHE_MISSES: &str = "aeordb_index_runtime_scope_c
 pub const INDEX_RUNTIME_SCOPE_CACHE_EVICTIONS: &str = "aeordb_index_runtime_scope_cache_evictions";
 pub const DIRECTORY_CACHE_ESTIMATED_BYTES: &str = "aeordb_directory_cache_estimated_bytes";
 pub const DIRECTORY_CACHE_ENTRIES: &str = "aeordb_directory_cache_entries";
+pub const IDENTITY_ENGINE_ACTIVE: &str = "aeordb_identity_engine_active";
+pub const IDENTITY_ENGINE_MEMORY_OBSERVED_BYTES: &str = "aeordb_identity_engine_memory_observed_bytes";
+pub const IDENTITY_ENGINE_MEMORY_RESERVED_BYTES: &str = "aeordb_identity_engine_memory_reserved_bytes";
+pub const IDENTITY_ENGINE_MEMORY_ACCOUNTED_BYTES: &str = "aeordb_identity_engine_memory_accounted_bytes";
+pub const IDENTITY_ENGINE_ESTIMATED_BYTES: &str = "aeordb_identity_engine_estimated_bytes";
+pub const IDENTITY_ENGINE_INDEX_CACHE_RESIDENT_BYTES: &str = "aeordb_identity_engine_index_cache_resident_bytes";
+pub const IDENTITY_ENGINE_DIRECTORY_CACHE_RESIDENT_BYTES: &str = "aeordb_identity_engine_directory_cache_resident_bytes";
+pub const IDENTITY_ENGINE_SERVER_CACHE_RESIDENT_BYTES: &str = "aeordb_identity_engine_server_cache_resident_bytes";
 
 // Durability
 pub const DURABILITY_HARD_FRONTIER: &str = "aeordb_durability_hard_frontier";

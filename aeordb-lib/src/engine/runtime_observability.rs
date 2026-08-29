@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -5,17 +7,51 @@ use crate::engine::config_resolver::ConfigurationFamily;
 use crate::engine::configuration_observability::{configuration_envelope, ConfigurationVisibility};
 use crate::engine::durability_coordinator::{DurabilityBarrierObservation, DurabilityCoordinatorSnapshot, DurabilityGroupPolicySnapshot};
 use crate::engine::errors::{EngineError, EngineResult};
-use crate::engine::storage_engine::{DurabilityFailureState, EmergencySpillReport, EngineMemoryStats, StorageEngine};
+use crate::engine::memory_coordinator::{MemoryOwnerSnapshot, MemoryPolicy, MemoryPressure};
+use crate::engine::storage_engine::{
+  DirectoryCacheMemoryStats, DurabilityFailureState, EmergencySpillReport, EngineCacheMemoryStats, EngineMemoryStats,
+  IndexCacheMemoryStats, StorageEngine,
+};
 use crate::engine::v4::durability_recovery::PersistentDurabilityRecoveryState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeObservabilitySnapshot {
   pub memory: EngineMemoryStats,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub identity_engine: Option<IdentityEngineMemoryObservabilitySnapshot>,
   pub durability: DurabilityObservabilitySnapshot,
   pub configuration: ConfigurationObservabilitySnapshot,
   pub index_runtime: IndexRuntimeObservabilitySnapshot,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub gc: Option<crate::engine::gc_run_status::GcRunStatusSnapshotV1>,
+}
+
+/// Engine-local memory and cache residency for a distinct `file://` identity
+/// authority. Process-wide RSS and the coordinator's process residual are
+/// deliberately omitted because the primary and identity engines share one
+/// process.
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityEngineMemoryObservabilitySnapshot {
+  pub coordinator: IdentityEngineMemoryCoordinatorSnapshot,
+  pub index_cache: IndexCacheMemoryStats,
+  pub directory_cache: DirectoryCacheMemoryStats,
+  pub caches: EngineCacheMemoryStats,
+  pub estimated_engine_owned_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityEngineMemoryCoordinatorSnapshot {
+  pub policy: Option<MemoryPolicy>,
+  pub policy_error: Option<String>,
+  pub pressure: MemoryPressure,
+  pub maintenance_paused: bool,
+  pub observed_bytes: u64,
+  pub reserved_bytes: u64,
+  pub critical_reserved_bytes: u64,
+  pub accounted_bytes: u64,
+  pub rejected_reservations: u64,
+  pub deferred_reservations: u64,
+  pub owners: Vec<MemoryOwnerSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +219,7 @@ pub fn collect_runtime_observability(
 
   Ok(RuntimeObservabilitySnapshot {
     memory,
+    identity_engine: None,
     durability: durability_observability(engine, frontier, group_policy, runtime_failure, persistent_recovery, spill, visibility),
     configuration: ConfigurationObservabilitySnapshot {
       runtime: configuration_envelope(&configuration, ConfigurationFamily::Runtime, visibility),
@@ -191,6 +228,43 @@ pub fn collect_runtime_observability(
     index_runtime: index_runtime_observability(engine, visibility)?,
     gc: (visibility == ConfigurationVisibility::Root).then(|| engine.gc_run_status()).flatten(),
   })
+}
+
+/// Collect the shared runtime projection and attach engine-local identity
+/// residency only when authentication owns a physically distinct engine.
+pub fn collect_runtime_observability_with_identity_engine(
+  engine: &Arc<StorageEngine>,
+  identity_engine: &Arc<StorageEngine>,
+  visibility: ConfigurationVisibility,
+) -> EngineResult<RuntimeObservabilitySnapshot> {
+  let mut runtime = collect_runtime_observability(engine, visibility)?;
+  if !Arc::ptr_eq(engine, identity_engine) {
+    runtime.identity_engine = Some(identity_engine_memory_observability(identity_engine.memory_stats()?));
+  }
+  Ok(runtime)
+}
+
+fn identity_engine_memory_observability(memory: EngineMemoryStats) -> IdentityEngineMemoryObservabilitySnapshot {
+  let EngineMemoryStats { coordinator, index_cache, directory_cache, caches, estimated_engine_owned_bytes, .. } = memory;
+  IdentityEngineMemoryObservabilitySnapshot {
+    coordinator: IdentityEngineMemoryCoordinatorSnapshot {
+      policy: coordinator.policy,
+      policy_error: coordinator.policy_error,
+      pressure: coordinator.pressure,
+      maintenance_paused: coordinator.maintenance_paused,
+      observed_bytes: coordinator.observed_bytes,
+      reserved_bytes: coordinator.reserved_bytes,
+      critical_reserved_bytes: coordinator.critical_reserved_bytes,
+      accounted_bytes: coordinator.accounted_bytes,
+      rejected_reservations: coordinator.rejected_reservations,
+      deferred_reservations: coordinator.deferred_reservations,
+      owners: coordinator.owners,
+    },
+    index_cache,
+    directory_cache,
+    caches,
+    estimated_engine_owned_bytes,
+  }
 }
 
 fn index_runtime_observability(

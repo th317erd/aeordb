@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use aeordb::engine::engine_counters::EngineCounters;
 use aeordb::engine::event_bus::EventBus;
-use aeordb::engine::metrics_pulse::{spawn_metrics_pulse, spawn_rate_sampler};
+use aeordb::engine::metrics_pulse::{spawn_metrics_pulse, spawn_metrics_pulse_with_identity_engine, spawn_rate_sampler};
 use aeordb::engine::rate_tracker::RateTrackerSet;
 use aeordb::engine::configuration_observability::ConfigurationVisibility;
 use aeordb::engine::gc::run_gc;
@@ -343,6 +343,29 @@ async fn test_metrics_pulse_nonexistent_db_path() {
 
   let received = tokio::time::timeout(std::time::Duration::from_secs(16), rx.recv()).await;
   assert!(received.is_err(), "metrics pulse must not publish a fabricated zero disk size when metadata is unavailable");
+
+  cancel.cancel();
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn metrics_pulse_exposes_only_a_distinct_identity_engine() {
+  let (engine, temp) = create_temp_engine_for_tests();
+  let (identity_engine, _identity_temp) = create_temp_engine_for_tests();
+  let db_path = temp.path().join("test.aeordb").to_string_lossy().to_string();
+  let bus = Arc::new(EventBus::new());
+  let mut rx = bus.subscribe();
+  let counters = Arc::new(EngineCounters::new());
+  let rate_trackers = Arc::new(RateTrackerSet::new());
+  let cancel = CancellationToken::new();
+
+  let handle = spawn_metrics_pulse_with_identity_engine(bus, engine, identity_engine, counters, rate_trackers, db_path, cancel.clone());
+  let event = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv()).await.unwrap().unwrap();
+  let identity_memory = &event.payload["identity_engine"];
+  assert!(identity_memory.is_object());
+  assert!(identity_memory.get("process").is_none());
+  assert!(identity_memory["coordinator"]["accounted_bytes"].is_number());
+  assert!(identity_memory["caches"]["resident_bytes"].is_number());
 
   cancel.cancel();
   let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

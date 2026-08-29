@@ -686,6 +686,12 @@ pub struct EngineCacheMemoryStats {
   pub grants_index_entries: usize,
   pub group_entries: usize,
   pub api_key_entries: usize,
+  pub permissions_resident_bytes: u64,
+  pub index_config_resident_bytes: u64,
+  pub grants_index_resident_bytes: u64,
+  pub group_resident_bytes: u64,
+  pub api_key_resident_bytes: u64,
+  pub resident_bytes: u64,
 }
 
 struct EngineMemoryInputs {
@@ -5385,6 +5391,18 @@ impl StorageEngine {
       grants_index_entries: inputs.grants.entries,
       group_entries: inputs.groups.entries,
       api_key_entries: inputs.api_keys.entries,
+      permissions_resident_bytes: inputs.permissions.resident_bytes,
+      index_config_resident_bytes: inputs.index_config.resident_bytes,
+      grants_index_resident_bytes: inputs.grants.resident_bytes,
+      group_resident_bytes: inputs.groups.resident_bytes,
+      api_key_resident_bytes: inputs.api_keys.resident_bytes,
+      resident_bytes: inputs
+        .permissions
+        .resident_bytes
+        .saturating_add(inputs.index_config.resident_bytes)
+        .saturating_add(inputs.grants.resident_bytes)
+        .saturating_add(inputs.groups.resident_bytes)
+        .saturating_add(inputs.api_keys.resident_bytes),
     };
     let index_cache = IndexCacheMemoryStats {
       cached_indexes: index_stats.cached_indexes,
