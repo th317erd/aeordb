@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P8-2-native-release-qualification",
+  "captured_at": "2026-08-29T22:51:43Z",
+  "status": "pass-safe-native-candidate-only",
+  "source": {
+    "commit": "40015259a23de438cb72e77257bd64f6c037ae92",
+    "branch": "development",
+    "cargo_lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+    "portal_inputs": {
+      "aeor-web-components_commit": "b608faab73778560e7f99c49ac9624b0a23de609",
+      "aeordb-web-components_commit": "927aeda8708fe07dcd3465c942be0341ead82c67",
+      "canonical_working_byte_manifest_sha256": "ab2a19314f5cda149b11227b269dceb44b8bd4c5a080a9c814891eda72aab1c3",
+      "windows_checkout_note": "The Windows working-byte manifest differs only because Git checked text files out with Windows line endings; the Git tree, source commit, tracked-source diff, portal commits, and Cargo.lock are exact."
+    },
+    "tracked_content_exact_on_all_platforms": true
+  },
+  "required_capability": "aeordb.v3-transition-recovery.v1",
+  "candidate_version": "aeordb 0.9.5",
+  "embedded_documentation": {
+    "mdbook_version": "0.5.2",
+    "linux_tool": "mdbook 0.5.2 from the installed toolchain",
+    "macos_tool": {
+      "path": "/Users/wyatt/.cache/codex/tools/mdbook-v0.5.2/mdbook",
+      "official_archive_sha256": "da2f55653e96e3f6e1c53e2e13e91cc0cfbce8ab971c2e0de792c0f1f8d24222"
+    },
+    "windows_tool": {
+      "path": "C:\\Users\\wyatt\\.cache\\codex\\tools\\mdbook-v0.5.2\\mdbook.exe",
+      "official_archive_sha256": "e78fa1159bfc381d03f9c6659c48c883706497dc63c9153007a8a4c8df8da166"
+    },
+    "generated_constant": "DOCS_BUILT_WITH_MDBOOK: bool = true",
+    "live_payload_sha256": {
+      "health_json": "8d2b8c32bdc25f181e031d0c0ed48795ce96a5167826d0a7e81189e49c5c2a8d",
+      "docs_index_html": "23c5d14c0d47e51143cc8bf1412d220c3508c33c46e01a95801c8bc53c52aca4",
+      "docs_api_files_html": "7f8be4ff212fc0a22d259650b565442ec6e9a81ddce0632de008a08e768780a2",
+      "docs_skill_md": "44451aac28fafe1f12c580ead29a9ad05e5f53c2d93c9a4b8b69ccc0856eb153"
+    },
+    "live_payload_bytes": {
+      "health_json": 38,
+      "docs_index_html": 24090,
+      "docs_api_files_html": 83691,
+      "docs_skill_md": 4850
+    },
+    "live_route_contract": {
+      "/system/health": 200,
+      "/docs/": 200,
+      "/docs/api/files.html": 200,
+      "/docs/SKILL.md": 200,
+      "/docs/definitely-not-present.html": 404,
+      "fallback_page_absent": true,
+      "payloads_identical_on_all_three_platforms": true
+    }
+  },
+  "platforms": {
+    "linux_x86_64_gnu": {
+      "host": "wyatt-desktop",
+      "os": "Ubuntu 24.04-derived Linux, kernel 7.0.0-30-generic",
+      "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+      "cargo": "1.94.0 (85eff7c80 2026-01-15)",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "source_tree": "/media/Data/AeorDB/Tests/p8-release-40015259/work",
+      "target_directory": "/media/Data/AeorDB/Tests/p8-release-40015259/target",
+      "source_and_target_filesystem": "fuseblk/NTFS on /media/Data",
+      "temporary_filesystem": "ext4 under /home/wyatt/.cache/codex",
+      "build_command": "timeout 30m cargo build --locked --release -p aeordb-cli --bin aeordb -j6",
+      "build_result": "pass",
+      "build_wall_seconds": 223.51,
+      "build_maximum_rss_kib": 4318304,
+      "build_swaps": 0,
+      "build_log": "/media/Data/AeorDB/Tests/p8-release-40015259/linux-release-build.log",
+      "build_log_sha256": "26738264aa7df15095c43243e81c5145c2b14030a9af2b012ef47cfafdcac639",
+      "binary": "/media/Data/AeorDB/Tests/p8-release-40015259/target/release/aeordb",
+      "binary_sha256": "b65f2a16ae1037d8c19e486f6fe9cbb6aab340e2289debbf0f9819c7cf285d44",
+      "binary_bytes": 240650640,
+      "binary_format": "ELF 64-bit x86-64 GNU/Linux with release debuginfo",
+      "live_http_log": "/media/Data/AeorDB/Tests/p8-release-40015259/linux-live-docs-http.log",
+      "live_http_log_sha256": "6e1834f53f4c7cdba2952dc6462d782efdd653cf0f0e6391ea93811f14200c8b",
+      "live_server_log": "/media/Data/AeorDB/Tests/p8-release-40015259/linux-live-docs-server.log",
+      "live_server_log_sha256": "a1e5a8f14eb76a2e4452551605144bebcfe8280ca59690d309ba5e75ff039f77",
+      "shutdown": "SIGINT received; every background task and storage engine shut down; process exit 0; no residual aeordb process"
+    },
+    "macos_arm64": {
+      "host": "wyatt-mac",
+      "os": "macOS 26.5.2 build 25F84",
+      "rustc": "1.95.0 (59807616e 2026-04-14)",
+      "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)",
+      "target_triple": "aarch64-apple-darwin",
+      "source_tree": "/Users/wyatt/.cache/codex/p8-release-40015259-canonical/work",
+      "target_directory": "/Users/wyatt/.cache/codex/p8-release-40015259-target",
+      "filesystem": "APFS under /Users/wyatt/.cache/codex",
+      "build_command": "PATH=/Users/wyatt/.cache/codex/tools/mdbook-v0.5.2:$PATH cargo build --locked --release -p aeordb-cli --bin aeordb -j1",
+      "build_deadline_seconds": 1800,
+      "build_result": "pass",
+      "cargo_reported_build_seconds": 187,
+      "build_maximum_rss_bytes": 3735207936,
+      "build_swaps": 0,
+      "build_log": "/Users/wyatt/.cache/codex/p8-release-40015259-macos-canonical-docs-build.log",
+      "build_log_sha256": "8018a4257eeea45998501f3adb95554ccfbef0959d15453055199e51e6769974",
+      "binary": "/Users/wyatt/.cache/codex/p8-release-40015259-target/release/aeordb",
+      "binary_sha256": "f57b25e17f4edbf073580fea8bfff389d9701af2c6914cc1f07ffdfbc154d622",
+      "binary_bytes": 46243784,
+      "binary_format": "Mach-O 64-bit arm64, ad-hoc linker signature",
+      "live_http_log": "/Users/wyatt/.cache/codex/p8-release-40015259-macos-live-docs-http.log",
+      "live_http_log_sha256": "b3665b97fee9e578375f48dbead861c51933876d5e84c59238af65ba50b60430",
+      "live_server_log": "/Users/wyatt/.cache/codex/p8-release-40015259-macos-live-docs-server.log",
+      "live_server_log_sha256": "7c5a403d480537d0eab672c93047b3bdbf5ff150f1ef7ba35c9efef3d52c7c4b",
+      "shutdown": "SIGINT received; every background task and storage engine shut down; process exit 0; no residual aeordb process"
+    },
+    "windows_x86_64_msvc": {
+      "host": "win11vm",
+      "os": "Windows NT 10.0.26200.0",
+      "rustc": "1.95.0 (59807616e 2026-04-14)",
+      "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)",
+      "target_triple": "x86_64-pc-windows-msvc",
+      "source_tree": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\p8-release-40015259-canonical\\work",
+      "target_directory": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\release-40015259-target",
+      "filesystem": "NTFS",
+      "build_command": "PATH prepended with cached mdbook 0.5.2; cargo build --locked --release -p aeordb-cli --bin aeordb -j1",
+      "build_deadline_seconds": 5400,
+      "build_result": "pass",
+      "cargo_reported_build_seconds": 653,
+      "build_log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-release-40015259-windows-canonical-docs-build.log",
+      "build_log_sha256": "ed860f488cbd8e2d29831dbcd480f93a9d806c11da33ac61ddf26f4f393b5ccb",
+      "binary": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\release-40015259-target\\release\\aeordb.exe",
+      "binary_sha256": "659ec1e6c88bf03a7419f4e2dbab6f6eff28dd1d3ddcec6303adfaca9278db54",
+      "binary_bytes": 42405888,
+      "binary_format": "PE32+ x86-64 MSVC",
+      "live_http_log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-release-40015259-windows-live-docs-http-final.log",
+      "live_http_log_sha256": "2448d52f22a944c37a57e068cdf603398803ea6b6397258fbf04155801b0e0bd",
+      "live_server_log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-release-40015259-windows-live-docs-server-final.log",
+      "live_server_log_sha256": "dc0f2cc088048e98edab95cbc1b2c814c477f678a9571a4cfccca280ba0e8ae0",
+      "shutdown": "A shared-console process harness masked the parent, generated CTRL_C_EVENT, waited for the exact child, and observed full engine shutdown plus child exit 0; no residual aeordb process"
+    }
+  },
+  "integrated_linux_workspace": {
+    "command": "timeout --signal=TERM --kill-after=30s 2700 cargo test --locked -j6 --workspace --all-targets -- --test-threads=6",
+    "result": "pass",
+    "result_groups": 343,
+    "passed": 7352,
+    "failed": 0,
+    "ignored": 7,
+    "filtered_out": 126,
+    "wall_seconds": 2169.92,
+    "maximum_rss_kib": 3503616,
+    "swaps": 0,
+    "timed_command_exit": 0,
+    "outer_ssh_wrapper_exit": 1,
+    "outer_wrapper_note": "The outer retained session returned 1 after printing the log, but /usr/bin/time recorded the Cargo command's exit status as 0. A separate parser found 343 ok result groups, zero failed tests, zero FAILED groups, zero Cargo error lines, and the exact timed exit marker.",
+    "log": "/media/Data/AeorDB/Tests/p8-release-40015259/workspace-all-targets.log",
+    "log_sha256": "e0d9c11076054afdd9d08574a5d2130b9c5d197bc4b61f141a8532260d0a4352"
+  },
+  "static_and_contract_gates": {
+    "cargo_fmt_all_check": "pass with rustfmt nightly-option warnings only",
+    "git_diff_check": "pass",
+    "mdbook_build": {
+      "result": "pass",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p8-release-40015259-mdbook.log",
+      "log_sha256": "dc137df35b17344ae33785de9240f26750b43bbe9c9f952b0cd56621b18aa8f4"
+    },
+    "independent_v4_contract": {
+      "result": "pass",
+      "fixtures": 454,
+      "routes": 95,
+      "documentation_pages": 38,
+      "log": "/media/Data/AeorDB/Tests/p8-release-40015259/check-v4-contracts.log",
+      "log_sha256": "654418ef65ef42c9798c75336b311e12afa80f8de10cbabd98eadec688049fed"
+    }
+  },
+  "rejected_attempts": [
+    {
+      "platform": "macos-arm64",
+      "reason": "The first tree contained uncommitted external portal assets and was rejected as candidate provenance.",
+      "log": "/Users/wyatt/.cache/codex/p8-release-40015259-macos-build.log",
+      "log_sha256": "418c5cdaa29faa773dc98b205cc4f1ff0a55be2a2433bda099eb15a44447034c"
+    },
+    {
+      "platform": "windows-x86_64-msvc",
+      "reason": "The first tree contained uncommitted external portal assets and was rejected as candidate provenance.",
+      "log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-release-40015259-windows-build.log",
+      "log_sha256": "cf54c30df0f043337d8871de7f87baf5c2cac5283b2a544ee906a181d6046119"
+    },
+    {
+      "platform": "macos-arm64",
+      "reason": "The first clean-source build lacked mdbook and embedded the fallback page, so it was rejected.",
+      "log": "/Users/wyatt/.cache/codex/p8-release-40015259-macos-canonical-build.log",
+      "log_sha256": "bd365982e83b288441a314eb4cd56a256effeed3908ef6e70baea6b766560165"
+    },
+    {
+      "platform": "windows-x86_64-msvc",
+      "reason": "The first clean-source build lacked mdbook and embedded the fallback page, so it was rejected.",
+      "log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-release-40015259-windows-canonical-build.log",
+      "log_sha256": "b413834e4690ba5e0fdfc94c871cf6652660a6b7c737d98b1d00e8d6c4d9714c"
+    },
+    {
+      "platform": "windows-x86_64-msvc",
+      "reason": "Direct SSH Ctrl+C closed its pseudo-console before shutdown completion; a CTRL_BREAK process-group attempt terminated with 0xc000013a; a targeted CTRL_C event to an isolated group was ignored. All were rejected and the one remaining exact disposable test PID was explicitly hard-cleaned before the successful shared-console run.",
+      "retained_server_log_sha256": [
+        "93cfec703c3e8990c5711493d6a71eee5c25a36479e42d9db7c390cfbe6adff4",
+        "51a7f8b1d04ab6d31c09019b4380febd0fdf569810bbb8a3f21c2e746d1a88ff",
+        "8110d1e817d8792f78f3a3c48e112d7265604c7ef44fbcccf35d50fceaaa7438"
+      ]
+    }
+  ],
+  "qualification_boundary": {
+    "native_release_candidate_built": true,
+    "native_release_candidate_live_checked": true,
+    "production_database_touched": false,
+    "production_derived_copy_touched": false,
+    "candidate_installed": false,
+    "candidate_published_to_downloads": false,
+    "canary_run": false,
+    "service_activated": false,
+    "operational_cutover_run": false,
+    "first_v4_write_accepted": false,
+    "destructive_gc_run": false,
+    "next_gate": "P9 safe repository verification and debt/documentation closure; copied-production, canary, install, deployment, cutover, acceptance, and destructive GC still require separate authorization"
+  }
+}

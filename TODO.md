@@ -1416,6 +1416,8 @@
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
       - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
+      - [x] P8-2a: build exact-source Linux/macOS/Windows release candidates, require full embedded mdBook assets, verify version/capability/binary digests, and exercise the real documentation routes with clean shutdown.
+      - [ ] P8-2b: run the canary candidate under real clients and load only after separate authorization for the canary environment or copy.
     - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

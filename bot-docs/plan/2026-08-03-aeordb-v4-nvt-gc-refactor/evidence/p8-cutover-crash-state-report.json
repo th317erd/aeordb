@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P8-1a3-cutover-crash-state-report",
+  "captured_at": "2026-08-29T22:51:43Z",
+  "status": "pass-disconnected-same-filesystem-only",
+  "test_source_commit": "818ec2f6d3e0da9170d387991bf67c93e1335f37",
+  "publication_source_commit": "40015259a23de438cb72e77257bd64f6c037ae92",
+  "source_drift_between_commits": [
+    "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/progress/07-migration.md"
+  ],
+  "test_target": {
+    "package": "aeordb-cli",
+    "name": "cutover_fault_spec",
+    "source": "aeordb-cli/spec/cutover_fault_spec.rs",
+    "canonical_matrix": "aeordb-lib/spec/engine/migration_cutover_rehearsal_spec.rs",
+    "command": "timeout 30m cargo test --locked -j1 -p aeordb-cli --test cutover_fault_spec -- --test-threads=1",
+    "tests": 10
+  },
+  "proved_states": [
+    {
+      "test": "real_files_cut_over_read_only_and_roll_back_to_the_exact_frozen_v3_source",
+      "proof": "Real disposable files enter read-only validation, preserve the exact v3 source at the identified backup, roll back before acceptance, and retry idempotently."
+    },
+    {
+      "test": "every_initial_journal_and_database_control_prefix_recovers_forward_without_source_loss",
+      "proof": "Every initial journal and destination-verify database-control prefix recovers forward without changing the source checksum."
+    },
+    {
+      "test": "every_cutover_journal_sync_install_and_reopen_prefix_recovers_forward_without_source_loss",
+      "proof": "Both cutover phases cover every journal slot write/file sync/read-back, database-control, source/destination file sync, parent sync, source-backup install, destination-service install, and reopen prefix."
+    },
+    {
+      "test": "hard_link_install_prefixes_recover_forward_to_the_exact_v4_service",
+      "proof": "Native source-linked and destination-linked namespace prefixes recover forward to the exact v4 physical identity."
+    },
+    {
+      "test": "every_pre_acceptance_rollback_prefix_recovers_and_restores_v3_service",
+      "proof": "Every rollback journal/control and destination/source restore prefix returns the exact v3 checksum to the service path before acceptance."
+    },
+    {
+      "test": "every_pre_install_hard_link_prefix_recovers_backward_to_the_exact_v3_service",
+      "proof": "Pristine, source-linked, source-backed-up, and destination-linked pre-install prefixes recover backward to v3 and preserve the v4 destination identity."
+    },
+    {
+      "test": "invalid_stale_canceled_and_colliding_inputs_refuse_before_namespace_mutation",
+      "proof": "Wrong path digests, stale source checksum, stale destination verification/header, replacement identity, backup collision, and cancellation fail before namespace mutation."
+    },
+    {
+      "test": "recovery_refuses_valid_but_unapproved_journal_successors_and_corrupt_journals",
+      "proof": "A valid but unapproved OperatorAcceptance successor and a corrupt 2,048-byte journal both fail closed without source loss."
+    },
+    {
+      "test": "cutover_paths_require_absolute_distinct_same_parent_artifacts",
+      "proof": "Relative paths and cross-parent source/destination/journal layouts are rejected."
+    },
+    {
+      "test": "execution_and_rollback_refuse_cancellation_invalid_evidence_and_clock_overflow_before_mutation",
+      "proof": "Execution cancellation, empty rollback evidence, and clock overflow refuse before backup installation or source mutation."
+    }
+  ],
+  "native_results": {
+    "linux_x86_64_gnu": {
+      "result": "pass",
+      "tests": 10,
+      "evidence": "The exact target is included in the complete 40015259 workspace/all-targets run.",
+      "log": "/media/Data/AeorDB/Tests/p8-release-40015259/workspace-all-targets.log",
+      "log_sha256": "e0d9c11076054afdd9d08574a5d2130b9c5d197bc4b61f141a8532260d0a4352"
+    },
+    "macos_arm64": {
+      "result": "pass",
+      "tests": 10,
+      "test_seconds": 12.40,
+      "log": "/Users/wyatt/.cache/codex/p8-cutover-fault-818ec2f-macos.log",
+      "log_sha256": "d33b664739da8e26ad90d5f9d8295f3133aae000dab863ac18971ac23c2c5c43"
+    },
+    "windows_x86_64_msvc": {
+      "result": "pass",
+      "tests": 10,
+      "test_seconds": 47.13,
+      "log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p8-cutover-fault-818ec2f-windows.log",
+      "log_sha256": "a353f599fa0bd71c098435d48c9f51e61285c7569bc63a219b96bd09899629e0"
+    }
+  },
+  "failure_first_evidence": {
+    "reason": "The campaign target did not exist before the P8 integration landing.",
+    "log": "/media/Data/AeorDB/Tests/p8-identity-observability-20260829/cutover-fault-target-red.log",
+    "log_sha256": "ffee6550dddc2e49da71cb17baf6191dcd21bae32edff91ef4464d6f111f97a4"
+  },
+  "invariants": {
+    "source_checksum_preserved_at_every_fault": true,
+    "destination_physical_identity_verified": true,
+    "journal_and_database_control_must_agree": true,
+    "read_only_validation_precedes_acceptance": true,
+    "operator_acceptance_exercised": false,
+    "first_v4_write_exercised": false,
+    "production_database_touched": false,
+    "production_derived_copy_touched": false,
+    "operational_cutover_exercised": false
+  },
+  "remaining_gates": [
+    "separately authorized copied-production rehearsal",
+    "separately authorized canary with real clients and load",
+    "production preflight and read-only cutover validation",
+    "recorded operator acceptance and first-v4-write boundary",
+    "post-cutover monitoring and separately authorized destructive GC"
+  ]
+}
