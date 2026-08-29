@@ -1414,7 +1414,7 @@
           - [x] P8-1a3: bind the typed ACUT transition semantics to migration/destination/file-identity evidence, then prove every pre-acceptance journal/sync/rename/reopen crash prefix on disposable same-filesystem files.
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
       - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
-      - [ ] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
+      - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
     - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
