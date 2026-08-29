@@ -1231,6 +1231,10 @@ name = "migration_cutover_journal_spec"
 path = "spec/engine/migration_cutover_journal_spec.rs"
 
 [[test]]
+name = "migration_cutover_control_spec"
+path = "spec/engine/migration_cutover_control_spec.rs"
+
+[[test]]
 name = "migration_preflight_spec"
 path = "spec/engine/migration_preflight_spec.rs"
 

@@ -78,7 +78,7 @@ pub enum MigrationPhaseV1 {
 }
 
 impl MigrationPhaseV1 {
-  fn from_u16(value: u16) -> FormatResult<Self> {
+  pub(crate) fn from_u16(value: u16) -> FormatResult<Self> {
     match value {
       1 => Ok(Self::Preflight),
       2 => Ok(Self::Copy),

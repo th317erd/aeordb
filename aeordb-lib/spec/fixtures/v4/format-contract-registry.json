@@ -3411,7 +3411,40 @@
         "0x0043": { "identity": "NamespaceRoot hash H", "formula": "64 + 4H", "cap": 1048576 },
         "0x0050": { "identity": "singleton", "formula": "88 + 2H + diagnostic_length", "cap": 1048576 },
         "0x0051": { "identity": "singleton", "formula": "44 + H + sum(72 + path_length)", "cap": 1048576 },
-        "0x0052": { "identity": "migration_id[16]", "formula": "140 + 5H", "cap": 1048576 }
+        "0x0052": {
+          "identity": "migration_id[16]",
+          "formula": "140 + 5H",
+          "cap": 1048576,
+          "layout": [
+            { "offset": 0, "length": 16, "field": "database_id", "rule": "nonzero preserved logical database identity" },
+            { "offset": 16, "length": 16, "field": "migration_id", "rule": "nonzero permanent control identity" },
+            { "offset": 32, "length": 16, "field": "source_physical_instance_id", "rule": "nonzero and distinct from destination physical identity" },
+            { "offset": 48, "length": 16, "field": "destination_physical_instance_id", "rule": "nonzero and distinct from source physical identity" },
+            { "offset": 64, "length": 16, "field": "holder_boot_id", "rule": "nonzero exact AMLE holder" },
+            { "offset": 80, "length": 8, "field": "fencing_token", "rule": "nonzero exact AMLE/AMPR fence" },
+            { "offset": 88, "length": 2, "field": "phase", "rule": "frozen cutover_phase_v1 enum" },
+            { "offset": 90, "length": 2, "field": "reserved", "rule": "zero" },
+            { "offset": 92, "length": 2, "field": "source_format", "rule": "exactly 3" },
+            { "offset": 94, "length": 2, "field": "destination_format", "rule": "exactly 4" },
+            { "offset": 96, "length": 4, "field": "reserved", "rule": "zero" },
+            { "offset": 100, "length": 8, "field": "journal_sequence", "rule": "nonzero monotonic semantic journal sequence; typed selected external slot binds this exact value" },
+            { "offset": 108, "length": 8, "field": "destination_header_sequence", "rule": "nonzero selected v4 header sequence" },
+            { "offset": 116, "length": 8, "field": "source_file_size", "rule": "nonzero exact source size captured under freeze" },
+            { "offset": 124, "length": 8, "field": "destination_file_size", "rule": "nonzero exact destination size after full verification" },
+            { "offset": 132, "length": 8, "field": "updated_at_ms", "rule": "nonnegative i64 and monotonic across semantic successors" },
+            { "offset": 140, "length": "H", "field": "source_path_identity_hash", "rule": "nonzero database-width typed hash of the admitted source path digest" },
+            { "offset": "140 + H", "length": "H", "field": "destination_path_identity_hash", "rule": "nonzero database-width typed hash of the admitted destination path digest" },
+            { "offset": "140 + 2H", "length": "H", "field": "source_stable_file_identity_hash", "rule": "nonzero database-width typed hash of complete frozen source identity evidence" },
+            { "offset": "140 + 3H", "length": "H", "field": "destination_stable_file_identity_hash", "rule": "nonzero database-width typed hash of complete verified destination identity evidence" },
+            { "offset": "140 + 4H", "length": "H", "field": "last_error_evidence", "rule": "all-zero when absent or one nonzero non-traversed database-width evidence hash" }
+          ],
+          "phase_registry": {
+            "1": "preflight", "2": "copy", "3": "reconcile", "4": "final_freeze",
+            "5": "destination_verify", "6": "cutover", "7": "read_only_validation", "8": "operator_acceptance"
+          },
+          "path_identity_hash": "HASH('aeordb.side-by-side-cutover.path-identity.v1\\0' || artifact_role u8 (1 source, 2 destination) || admitted_path_digest[32]) using the selected database hash algorithm",
+          "stable_file_identity_hash": "HASH('aeordb.side-by-side-cutover.stable-file-identity.v1\\0' || artifact_role u8 || database_id[16] || physical_instance_id[16] || platform_file_identity_descriptor[56] || format u16 LE || selected_header_sequence u64 LE || selected_header_BLAKE3[32] || file_size u64 LE) using the selected database hash algorithm"
+        }
       },
       "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043"],
       "pending_body_fixture_kinds": [],
@@ -3469,6 +3502,7 @@
       "total_length": 2048,
       "slot_length": 1024,
       "slot_layout": "magic[4] || schema u16=1 || slot_length u16=1024 || slot_sequence u64 || body_length u32=140+5H || flags u32=0 || reserved[8]=0 || body || zero padding through 1019 || CRC32",
+      "body_contract": "the exact normative system-control-v1 body_contracts 0x0052 layout, phase registry, and typed hash recipes",
       "body_formula": "140 + 5H",
       "hard_cap": 2048,
       "selection": "highest valid sequence; equal identical accepted; equal disagreement is ambiguous; one torn slot falls back; no valid slot fails recovery",

@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "340e5a50f3affbd5b60485cbb2327d1a7f343ca922692ea13dab5288d918a54d";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "88a3e7fe6b0aaa23142d69313ebcd971ec04ada3ae7ceb0f8069df65aa6d71fd";
+pub const CONTRACT_REGISTRY_SHA256: &str = "49b81e7362a7a8e0aab9f6313d6d75019a76ee68499311c250833f11c7330486";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "3785f431ea8cc060e2446430019f05639223d9688c31eb8e0010f86ca391bb80";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";

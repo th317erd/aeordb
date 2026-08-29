@@ -3,7 +3,7 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "340e5a50f3affbd5b60485cbb2327d1a7f343ca922692ea13dab5288d918a54d",
+  "source_sha256": "49b81e7362a7a8e0aab9f6313d6d75019a76ee68499311c250833f11c7330486",
   "fixture_manifest_sha256": "4a0d2358760354136805ebf346c3a4fc98c2007c519fd2207679d8b88e8c77d0",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
