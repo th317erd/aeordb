@@ -1412,6 +1412,7 @@
             - [x] Prove a malformed post-sync read-back is classified as uncertain durable selection, never as retained prior authority.
             - [x] Account for the transient 16-byte ACUT identity validation alongside both journal buffers and the inactive slot.
           - [x] P8-1a3: bind the typed ACUT transition semantics to migration/destination/file-identity evidence, then prove every pre-acceptance journal/sync/rename/reopen crash prefix on disposable same-filesystem files.
+          - [x] Expose the required `aeordb-cli --test cutover_fault_spec` campaign target through the canonical cutover rehearsal matrix without duplicating its fault logic.
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
       - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.

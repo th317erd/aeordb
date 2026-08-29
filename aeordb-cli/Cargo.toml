@@ -42,6 +42,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+blake3 = "1"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
@@ -88,6 +89,10 @@ path = "spec/start_spec.rs"
 [[test]]
 name = "root_route_live_spec"
 path = "spec/root_route_live_spec.rs"
+
+[[test]]
+name = "cutover_fault_spec"
+path = "spec/cutover_fault_spec.rs"
 
 [[test]]
 name = "soak_worker_cli_spec"
