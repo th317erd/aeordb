@@ -1,6 +1,17 @@
 # Storage Engine
 
-The storage engine is an append-only WAL (write-ahead log) where the log IS the database. Every write appends a new entry. The file only grows (until garbage collection reclaims unreachable entries). This design gives you crash recovery, versioning, and integrity verification as structural properties rather than bolted-on features.
+The currently selected v3 service engine is an append-oriented WAL
+(write-ahead log) where the log is primary database evidence. Ordinary writes
+append entries; current v3 garbage collection can reclaim selected physical
+regions under its compatibility policy. This design gives you crash recovery,
+versioning, and integrity verification as structural properties rather than
+bolted-on features.
+
+AeorDB also contains a staged v4 format, root, lifecycle, GC, native-index,
+query, and side-by-side migration implementation. Ordinary startup does not
+select v4 and the public CLI has no migration/cutover command. The v3 details
+below remain operationally relevant until an explicitly accepted v4 cutover.
+See [V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## Entry Format
 
@@ -355,6 +366,35 @@ authority. Generic file and plugin APIs cannot manufacture control authority by
 supplying a path below the protected subtree. The v3 compatibility adapter
 continues to write the existing system-flagged FileRecord v0 representation;
 this authority boundary does not change stored bytes.
+
+## Staged V4 Storage Target
+
+V4 is a capability-admitted side-by-side format, not an in-place reinterpretation
+of the v3 bytes described above:
+
+- validated A/B `DatabaseHeaderV4` slots select explicit roots, formats,
+  capabilities, and durable control state;
+- bounded readers validate all lengths, hash roles, versions, reserved bytes,
+  closure, and allocation before authority is admitted;
+- immutable namespace roots and semantic objects separate current authority
+  from path locators and detached SystemFamily state;
+- typed control publication, durability barriers, root lifecycle, GC mark,
+  quarantine, sweep, Void claim, and settlement have explicit crash direction;
+- native index definitions, pages, directories, manifests, coverage, sparse
+  NVT hints, and query positions are immutable artifacts selected by verified
+  roots; and
+- a side-by-side migration destination is fully cloned, reconciled, and
+  verified before a journaled same-filesystem service-path cutover.
+
+Sparse NVT data is never membership or ordering authority. Missing, corrupt,
+stale, or unsupported acceleration must fall back to validated pages or source
+truth without changing results. Likewise, a prepared v4 destination and its
+workspaces are not service authority until the cutover/acceptance state machine
+selects them.
+
+The implementation and native fault matrices are qualified, but copied-
+production rehearsal, canary, operational cutover, operator acceptance, first
+v4 write, and destructive v4 GC remain distinct authorization gates.
 
 ## Crash Recovery
 

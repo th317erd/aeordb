@@ -1,5 +1,12 @@
 # Database Resilience Features — Design Spec
 
+> **Partially incorporated and superseded for recovery/GC/healing on
+> 2026-08-03.** Verification/scanner behavior remains historical evidence;
+> current durability, repair, GC/Void, and v4 recovery contracts belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> The cluster auto-heal transport was never implemented and its stub has been
+> deleted; this document is not authority to restore it.
+
 **Date:** 2026-04-24
 **Status:** Approved
 

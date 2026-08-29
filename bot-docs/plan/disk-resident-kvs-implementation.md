@@ -1,5 +1,10 @@
 # Disk-Resident KV Store Implementation Plan
 
+> **Preserved as active-v3 implementation history and replaced for v4 on
+> 2026-08-03.** Do not execute this old bucket/NVT sequence as current work.
+> V4 format, bounded index pages, recovery, and migration now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the in-memory sorted Vec KV store with a disk-resident bucket-page KV store indexed by the NVT, fixing the O(N) Vec::insert degradation at scale while bounding memory usage.

@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P9-documentation-and-supersession",
+  "captured_at": "2026-08-29T23:55:41Z",
+  "status": "pass-safe-repository-only",
+  "source": {
+    "baseline_commit": "bbe6f265f50ab177bc09b89c5fbd469d4ffbb2f7",
+    "branch": "development",
+    "definition": "The tested candidate is the baseline commit plus the documentation, compatibility-description, debt-policy, supersession, contract, progress, and evidence files recorded by this report.",
+    "cargo_lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+  },
+  "documentation": {
+    "inventoried_pages": 39,
+    "migration_page": {
+      "path": "docs/src/operations/migration.md",
+      "sha256": "6ae151d16c239dd2098141d848544af8f1227b363e2f50b354f233804a99c5a8",
+      "html_sha256": "e422152c7aaef07ee40fb838d590a3f58fd010a3a3b7563e5f76da3d80e38bfb"
+    },
+    "boundaries": [
+      "ordinary service authority remains the v3 compatibility runtime",
+      "no public migrate/cutover CLI or HTTP route and no automatic v4 activation",
+      "legacy single-file convergence and forced FileRecord backfill are not v3-to-v4 migration",
+      "copied-production rehearsal, canary, installation/deployment, cutover, acceptance, first v4 write, monitoring, and destructive v4 GC remain separate gates",
+      "post-first-write rollback requires v4-aware recovery or an explicitly authorized data rollback from the preserved v3 backup"
+    ],
+    "updated_surfaces": [
+      "storage architecture and active-v3/staged-v4 authority",
+      "current whole-index compatibility and v4 native index artifacts",
+      "CLI/configuration/install/deployment capability boundary",
+      "backup, GC, observability, API versioning, and client release notes",
+      "served bot SKILL and mdBook navigation"
+    ],
+    "key_source_sha256": {
+      "docs/src/SKILL.md": "8177135a256403f9b1e023d1b5c4f5384712ee29e08956dde5c691ad1e679dc3",
+      "docs/src/concepts/architecture.md": "73229aa22d0ee3d36d17dde580479a684a13d0dad59602e6d2ca445242c4a0a7",
+      "docs/src/concepts/indexing.md": "7331ab8c9480908b25cfb574cf405ceda5931eaec88d0784ce78757f9defa652",
+      "docs/src/concepts/storage-engine.md": "8467e565c7846a969e7482b6bf82cc3f6342ad07b859b3c2650f51230050f528",
+      "docs/src/cli/commands.md": "e3f06c3850e66afcd129548915cb766dfd80fceb7dd3d1fd347d3b49632dcffe",
+      "docs/src/getting-started/configuration.md": "f3e37a1d385af3a1ba867fe38154e38c5e99a7cf25447afae70e3b7a67da4d0f"
+    }
+  },
+  "supersession": {
+    "changed_historical_documents": 33,
+    "policy": "Historical implementation and design documents are preserved with explicit fully-superseded, partially-incorporated, or active-v3-history banners and a live link to the current campaign.",
+    "resolved_link_check": "pass",
+    "notable_closed_contradictions": [
+      "external hot-file transaction plans are pre-single-file history, not current recovery authority",
+      "the v3 single-file plan is not a v4 in-place migration procedure",
+      "old whole-index/NVT, GC/Void, namespace, durability, and migration plans are not independently executable authority"
+    ]
+  },
+  "hot_dir_compatibility": {
+    "behavior": "The public flag, TOML key, and Rust constructors remain accepted, but the current engine ignores the resolved path and stores recovery state in the database file's hot tail.",
+    "public_help_corrected": true,
+    "active_docs_corrected": true,
+    "external_path_created_in_live_test": false,
+    "debt_policy": {
+      "path": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/v4-debt-policy.json",
+      "sha256": "e1aea19fd975fb4fc1ec6941cd24f77df405984c5685889e4b98ac1a6c75d24b",
+      "entry": "legacy-hot-dir-option",
+      "entry_maximum_matches": 77,
+      "reviewed_entries_total": 8,
+      "retained_matches_total": 164
+    }
+  },
+  "failure_first_evidence": [
+    {
+      "hypothesis": "The required migration/operator page did not exist.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-migration-doc-target-red.log",
+      "log_sha256": "9e42d82dc10d7faac5ae33a53c31301b66b9bc6b2b6d1d9443ec784979d7be49"
+    },
+    {
+      "hypothesis": "Adding the page without updating the machine documentation inventory must fail closed.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-migration-doc-manifest-red.log",
+      "log_sha256": "45b1384950b50283122561dbd092b10aca91e51889e98d57a1fa393433b26246"
+    },
+    {
+      "hypothesis": "The active CLI/API/operator surface still advertised retired external hot files.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-hot-dir-contract-red.log",
+      "log_sha256": "364698d3c5a75e7d9d0f138ecd90ddec61814d2b51ec243205332e9255b2dee1"
+    },
+    {
+      "hypothesis": "The retained hot-dir API had no reviewed timed-compatibility entry.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-hot-dir-debt-policy-red.log",
+      "log_sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
+    }
+  ],
+  "verification": {
+    "mdbook": {
+      "result": "pass",
+      "command": "timeout 2m mdbook build docs -d /home/wyatt/.cache/codex/aeordb-docs-p9.NS8ngP",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-mdbook-final.log",
+      "log_sha256": "73fb5e4902a247a5f7848a600305b548f0329860b355bc0a8d888b2e2c971cb3"
+    },
+    "source_links": {
+      "result": "pass",
+      "pages": 39,
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-links-final.log",
+      "log_sha256": "077e67d472c8cd05f00963b65c09818024a31b377abed77cb620b35dd24f6138"
+    },
+    "static_and_supersession": {
+      "result": "pass",
+      "coverage": "33 historical-document banner links, JSON/YAML syntax, Rust formatting, and git diff hygiene",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-static-final.log",
+      "log_sha256": "7c90df077c4ef1c108182d538525219ce53832584a06411cee457faa71065337"
+    },
+    "debt_policy": {
+      "self_test_result": "pass",
+      "self_test_log_sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee",
+      "gate_result": "pass",
+      "gate_log_sha256": "a1cdc0cc2a89df2d046000e027cb12db537b927b5637b661b05ebc21a4b4ad37"
+    },
+    "independent_contract": {
+      "result": "pass",
+      "fixtures": 454,
+      "routes": 95,
+      "documentation_pages": 39,
+      "debt_entries": 8,
+      "debt_matches": 164,
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-contract-final.log",
+      "log_sha256": "79ce73569b5fc32116d7d116633cc760b205e57a7c8a32438fc475dc7c0aef86"
+    },
+    "linux_cli_and_workspace": {
+      "host": "wyatt-desktop",
+      "focused_targets": [
+        "config_spec",
+        "start_spec",
+        "root_route_live_spec"
+      ],
+      "focused_passed": 64,
+      "focused_failed": 0,
+      "workspace_all_target_check": "pass with the historical test-only require_wasm_parser warning",
+      "release_build": "pass in 2m23s",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-cli-build.log",
+      "log_sha256": "505d19239378a68c11aae1c0e4f4d8a77a471cd931891908cf4f4db026d8ece3",
+      "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+      "cargo": "1.94.0 (85eff7c80 2026-01-15)"
+    },
+    "linux_release_binary": {
+      "path": "/media/Data/AeorDB/Tests/p8-release-40015259/target/release/aeordb",
+      "version": "aeordb 0.9.5",
+      "bytes": 240821784,
+      "sha256": "75d010c655cd163536234176296a4f6649bf08021f3dcf082d3619f5b40aa2dd"
+    },
+    "live_server": {
+      "result": "pass",
+      "run_root": "/home/wyatt/.cache/codex/aeordb-tests/p9-docs-bbe6f265.29UJme",
+      "health": "200 healthy",
+      "docs_index": 200,
+      "migration_page": 200,
+      "commands_page": 200,
+      "bot_skill": 200,
+      "missing_page": 404,
+      "file_put": 201,
+      "file_get": "200 and byte-exact",
+      "missing_hot_dir_value": "parser rejected before database creation",
+      "legacy_hot_path_absent_before_start_after_write_and_after_verify": true,
+      "shutdown": "SIGINT, exit 0, no residual process",
+      "offline_verify": "Status: OK; 195 valid entries; zero corrupt, missing, dangling, B-tree, unlisted, stale-KV, missing-KV, invalid-offset, or invalid-Void defects",
+      "database_sha256_after_verify": "ddb4ddd64f0cdded56e5c04d9127f5a13c81d89d4beebc94804eb66777fbc536",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-live-server-final2.log",
+      "log_sha256": "830e1c40a6ef2129a97fa154b64e415b80f484913a49f060554e7230f76ff4f5"
+    }
+  },
+  "rejected_attempts": [
+    {
+      "reason": "The first live harness accepted the public 200/startup progress response as readiness. Every protected docs/file route correctly returned 503 while startup was incomplete; the exact process then shut down gracefully through the cleanup trap. The final harness required status=healthy before exercising routes.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-docs-live-server-final.log",
+      "log_sha256": "03b699e002f0778749c235c4c55e924b77523224ffa03650827b6fa2c0a3e391",
+      "server_log_sha256": "4cdf2d0466fc549aaee71c2a5e0d621383ca4312844e0bb61fefb3e9cb503843",
+      "http_log_sha256": "dcb0d049e26ddf5dd5091cb7c67c39b873b023509f3bed234a8d2cdb448d4215"
+    }
+  ],
+  "qualification_boundary": {
+    "operator_documentation_published_in_repository": true,
+    "supersession_markers_complete_for_identified_stale_authority": true,
+    "required_v3_compatibility_preserved": true,
+    "public_v4_migration_surface_added": false,
+    "production_database_touched": false,
+    "production_derived_copy_touched": false,
+    "candidate_installed": false,
+    "candidate_published_to_downloads": false,
+    "canary_run": false,
+    "service_activated": false,
+    "operational_cutover_run": false,
+    "operator_acceptance_recorded": false,
+    "first_v4_write_accepted": false,
+    "destructive_gc_run": false,
+    "next_gate": "Eliminate the repository-wide strict-Clippy backlog without suppressions, then run final broad/native/crash/soak/resource/real-world qualification. Copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC remain separately gated."
+  }
+}

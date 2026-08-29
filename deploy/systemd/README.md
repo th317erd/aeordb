@@ -125,7 +125,7 @@ The unit shipped here points at `/mnt/storage/aeordb/files.taraani.org.aeordb`
 elsewhere, edit:
 
 - `ExecStart` — `--database` path, `--host` / `--port`, any extra flags
-- `ReadWritePaths` — the directory holding the DB file and any hot-dir
+- `ReadWritePaths` — the directory holding the DB file and any explicitly configured external spill/workspace paths; the legacy `--hot-dir` value is unused
 - `Description` — a friendly name for your deployment
 
 ## Control

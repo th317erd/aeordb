@@ -830,12 +830,15 @@ use crate::auth::middleware::auth_middleware;
 use crate::auth::permission_middleware::permission_middleware;
 use crate::engine::system_store;
 
-/// Create or open a StorageEngine at the given path (no hot file — for tests/tools).
+/// Create or open a StorageEngine without a legacy hot-dir compatibility value.
 pub fn create_engine_for_storage(engine_path: &str) -> Arc<StorageEngine> {
   create_engine_with_hot_dir(engine_path, None)
 }
 
-/// Create or open a StorageEngine with an optional hot directory for crash recovery.
+/// Create or open a StorageEngine while accepting the legacy hot-dir parameter.
+///
+/// Recovery state is stored in the database file's hot tail, so the current
+/// engine ignores this compatibility value.
 pub fn create_engine_with_hot_dir(engine_path: &str, hot_dir: Option<&std::path::Path>) -> Arc<StorageEngine> {
   create_engine_with_hot_dir_and_progress(engine_path, hot_dir, None)
 }

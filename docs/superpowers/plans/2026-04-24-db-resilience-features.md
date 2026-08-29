@@ -1,5 +1,11 @@
 # Database Resilience Features Implementation Plan
 
+> **Partially incorporated and superseded for recovery/GC/healing on
+> 2026-08-03.** Do not execute this plan's auto-snapshot, repair, scanner, or
+> auto-heal steps independently. Current behavior and v4 authority belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> The nonfunctional `auto_heal` stub named below was deliberately deleted in P9.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Four resilience features: auto-snapshot before GC, `aeordb verify` CLI with `--repair`, background integrity scanner, and cluster auto-healing from peers.

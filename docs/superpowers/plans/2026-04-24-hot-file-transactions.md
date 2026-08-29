@@ -1,5 +1,11 @@
 # Hot File Transactions Implementation Plan
 
+> **Preserved as pre-single-file v3 history and superseded for recovery
+> authority on 2026-08-03.** Do not reintroduce the external hot-file protocol
+> described here. Current in-file hot-tail, durability, recovery, migration,
+> and crash-direction contracts belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make multi-entry operations (`store_file`, `delete_file`) atomic by delaying hot file truncation until the full operation completes, then replaying incomplete operations on restart.

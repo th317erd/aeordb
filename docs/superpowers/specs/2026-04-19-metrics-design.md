@@ -1,5 +1,10 @@
 # AeorDB Enhanced Metrics — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Completed v3 counters remain a
+> regression dependency. Bounded runtime memory/durability/index/GC
+> observability and publication contracts now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-19
 **Status:** Approved
 **Scope:** Atomic counters, rolling rate computation, stats API, dashboard, Prometheus

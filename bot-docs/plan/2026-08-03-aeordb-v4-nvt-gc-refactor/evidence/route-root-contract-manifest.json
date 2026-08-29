@@ -260,6 +260,7 @@
     "docs/src/operations/gc.md",
     "docs/src/operations/observability.md",
     "docs/src/operations/deployment-safety.md",
+    "docs/src/operations/migration.md",
     "docs/src/operations/reindex.md",
     "docs/src/operations/tasks.md",
     "docs/src/operations/backup.md",

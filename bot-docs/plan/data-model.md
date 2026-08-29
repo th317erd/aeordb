@@ -1,5 +1,11 @@
 # Data Model — Paths, Parsers, and Indexes
 
+> **Partially incorporated on 2026-08-03.** Raw-byte/path concepts remain
+> historical context. Parser/dependency identity, source evaluation, index
+> definitions, semantic roots, permissions, and migration contracts now belong
+> to the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md); do not
+> execute the older storage/index design here independently.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design
 

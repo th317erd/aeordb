@@ -1,5 +1,11 @@
 # Production Readiness — Error Handling, Observability, Resilience
 
+> **Partially incorporated on 2026-08-03.** Durability latches/spill, bounded
+> error handling, memory/configuration, GC/index observability, migration, and
+> release evidence now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Completed
+> unrelated operational work remains historical regression context.
+
 **Date:** 2026-04-17
 **Status:** Design spec
 **Goal:** Button down all hatches before real-world use

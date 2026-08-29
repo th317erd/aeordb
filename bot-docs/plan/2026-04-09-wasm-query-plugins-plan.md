@@ -1,5 +1,10 @@
 # WASM Query Plugins Implementation Plan (Phases 1+2)
 
+> **Partially incorporated on 2026-08-03.** Do not independently execute this
+> file's semantic persistence, query authority, or migration tasks. Those
+> contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable WASM plugins to read, write, query, and aggregate data with the invoking user's permissions, returning custom-shaped responses.

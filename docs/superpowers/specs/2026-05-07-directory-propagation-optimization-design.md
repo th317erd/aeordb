@@ -1,5 +1,10 @@
 # Directory Propagation Optimization
 
+> **Preserved as active-v3 implementation history and partially incorporated
+> on 2026-08-03.** V4 namespace mutation, immutable root publication,
+> acknowledgement, selected-root reads, and migration now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-05-07
 **Status:** Approved
 

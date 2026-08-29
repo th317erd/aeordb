@@ -1,5 +1,11 @@
 # Hot Tail Compliance Fix
 
+> **Preserved as active-v3 hardening history and partially incorporated on
+> 2026-08-03.** The corrected in-file hot tail remains a compatibility
+> dependency; current durability latches, bounded recovery, v4 publication,
+> migration, and crash-direction contracts belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-05-09
 **Status:** Draft
 **Reference:** `docs/superpowers/specs/2026-04-28-single-file-database-design.md` Section 3 (Write Flow)

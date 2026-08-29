@@ -79,6 +79,29 @@
       "removal_gate": "Remove at an embedded API major boundary or after a compatibility adapter converts every embedded caller to canonical APOS with replay and malformed-cursor proof."
     },
     {
+      "id": "legacy-hot-dir-option",
+      "classification": "timed_compatibility_shim",
+      "pattern": "hot-dir|(^|[^[:alnum:]])_?hot_dir([^[:alnum:]]|$)|with_hot_dir",
+      "scan_roots": [
+        "aeordb-cli/src/commands/start.rs",
+        "aeordb-cli/src/config.rs",
+        "aeordb-cli/src/main.rs",
+        "aeordb-lib/src/engine/storage_engine.rs",
+        "aeordb-lib/src/server/mod.rs"
+      ],
+      "allowed_paths": [
+        "aeordb-cli/src/commands/start.rs",
+        "aeordb-cli/src/config.rs",
+        "aeordb-cli/src/main.rs",
+        "aeordb-lib/src/engine/storage_engine.rs",
+        "aeordb-lib/src/server/mod.rs"
+      ],
+      "maximum_matches": 77,
+      "owner": "CLI, storage API, and migration/cutover owners",
+      "rationale": "The public flag, TOML key, and Rust startup constructors remain parse-compatible for existing launchers while the current single-file engine deliberately ignores the path and stores recovery state in its in-file hot tail.",
+      "removal_gate": "Remove at a declared CLI and Rust API compatibility boundary after supported launch configurations no longer pass hot_dir and native/live proof shows every startup, join, peer-registration, embedded-server, and tool path uses only in-file recovery state."
+    },
+    {
       "id": "dead-auto-heal-stub",
       "classification": "forbidden",
       "pattern": "auto_heal_unimplemented|try_heal_from_peers|request_chunk_from_peer|pub mod auto_heal",

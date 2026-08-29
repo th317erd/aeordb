@@ -1,5 +1,11 @@
 # Storage Engine — Content-Addressed Chunk Store
 
+> **Superseded for storage architecture on 2026-08-03.** The chunk-only target
+> and its unresolved design tasks are not current implementation authority.
+> Active-v3 preservation plus the v4 format/root/migration target now belong to
+> the [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Retain
+> this document only as historical design context.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design
 

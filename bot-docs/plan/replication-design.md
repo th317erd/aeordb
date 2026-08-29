@@ -1,5 +1,11 @@
 # AeorDB Replication — Comprehensive Design
 
+> **Partially incorporated on 2026-08-03.** V4 capability negotiation,
+> SystemFamily/root transfer closure, selected-root identity, and migration
+> admission now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). This WIP
+> remains authority only for replication topics outside those named contracts.
+
 **Date:** 2026-04-15
 **Status:** WIP — questions flagged at bottom
 

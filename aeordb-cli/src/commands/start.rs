@@ -357,13 +357,14 @@ pub async fn run(config: StartConfig<'_>) -> Result<(), String> {
       eprintln!();
     }
   }
-  // Resolve hot directory: use --hot-dir if specified, otherwise default to
-  // the database file's parent directory.
+  // Preserve the legacy hot-dir value through the public startup API. The
+  // current storage engine ignores it because recovery state lives in-file.
+  // Resolving the historical default keeps startup output and callers stable.
   let default_hot_dir = Path::new(database).parent().unwrap_or(Path::new(".")).to_path_buf();
   let hot_dir = hot_dir_arg.map(std::path::PathBuf::from).unwrap_or(default_hot_dir);
   let hot_dir_ref = hot_dir.as_path();
 
-  println!("Hot dir: {}", hot_dir_ref.display());
+  println!("Legacy hot-dir compatibility value (unused): {}", hot_dir_ref.display());
   match cors_flag {
     Some("*") => println!("CORS: allow all origins"),
     Some(origins) => println!("CORS: {origins}"),

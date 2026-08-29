@@ -2,6 +2,12 @@
 
 Complete reference for the `aeordb` command-line interface.
 
+The current CLI has no `migrate` or `cutover` subcommand. Ordinary start,
+install, export/import, promote, reindex, and deployment checks do not activate
+the staged v4 database format. See
+[V3-to-V4 Migration and Cutover](../operations/migration.md) for the exact
+release and authorization boundary.
+
 ## `aeordb start`
 
 Start the AeorDB server.
@@ -20,7 +26,7 @@ aeordb start [OPTIONS]
 | `--database` | `-D` | `data.aeordb` | Path to the `.aeordb` database file |
 | `--log-format` | | `pretty` | Log output format: `pretty` or `json` |
 | `--auth` | | (none) | Auth provider URI (see below) |
-| `--hot-dir` | | (database parent dir) | Directory for write-ahead hot files |
+| `--hot-dir` | | (database parent dir) | Legacy compatibility value; accepted but unused by the current in-file hot-tail engine |
 | `--cors-origins` | | (disabled) | CORS allowed origins |
 | `--tls-cert` | | -- | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | | -- | Path to TLS private key PEM file (requires `--tls-cert`) |
@@ -80,8 +86,8 @@ aeordb start
 # Production with auth on port 8080
 aeordb start --port 8080 --database /var/lib/aeordb/prod.aeordb --auth self --log-format json
 
-# Custom hot directory and CORS
-aeordb start --database data.aeordb --hot-dir /fast-ssd/hot --cors-origins "*"
+# CORS for a local database
+aeordb start --database data.aeordb --cors-origins "*"
 
 # HTTPS with TLS
 aeordb start --tls-cert /etc/ssl/cert.pem --tls-key /etc/ssl/key.pem --port 443
@@ -102,6 +108,12 @@ aeordb start --database data.aeordb --peers "http://nodeC:6830,http://nodeD:6830
 # Show version
 aeordb --version
 ```
+
+`--hot-dir` and `storage.hot_dir` remain accepted so existing launch scripts
+and configuration files continue to parse. The current engine does not create
+or replay separate hot files: crash-recovery state is stored in the `.aeordb`
+file's hot tail. New deployments should omit this legacy compatibility
+option.
 
 ### What Happens on Start
 

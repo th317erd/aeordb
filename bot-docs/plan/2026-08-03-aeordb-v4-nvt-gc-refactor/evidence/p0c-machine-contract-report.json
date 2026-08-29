@@ -21,7 +21,7 @@
     "rustfmt_check": "pass",
     "fixture_cases_verified": 454,
     "route_registrations_inventoried": 95,
-    "documentation_pages_inventoried": 38,
+    "documentation_pages_inventoried": 39,
     "v4_writers_activated": false
   },
   "failure_cases": [

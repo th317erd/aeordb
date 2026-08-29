@@ -1,6 +1,16 @@
 # Architecture
 
-AeorDB is a single-file database built on an append-only write-ahead log (WAL). The database file contains all data, indexes, and metadata in one place. Understanding the architecture helps you reason about performance, recovery, and versioning behavior.
+AeorDB is a single-file database built on an append-oriented write-ahead log
+(WAL). The database file contains user data, namespace state, the in-file KV
+lookup block, recovery state, and stored index artifacts. Understanding the
+architecture helps you reason about performance, recovery, versioning, and the
+v3-to-v4 migration boundary.
+
+The currently selected service authority is the v3 compatibility runtime. The
+binary also contains the independently tested v4 format/root/GC/native-index
+and migration substrate, but ordinary startup does not select it and there is
+no public migration command. See
+[V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## High-Level Overview
 
@@ -33,14 +43,14 @@ AeorDB is a single-file database built on an append-only write-ahead log (WAL). 
               +--------------+--------------+
               |              |              |
         +-----+----+  +-----+----+  +------+------+
-        | Append   |  | KV Store |  | NVT         |
-        | Writer   |  | (.kv)    |  | (in-memory) |
-        +----------+  +----------+  +-------------+
-              |              |
-              +--------------+
-                    |
-            [  mydb.aeordb  ]    <-- single file on disk
-            [ mydb.aeordb.kv ]   <-- KV index file
+        | Append   |  | In-file  |  | Active v0  |
+        | Writer   |  | KV/NVT   |  | indexes    |
+        +-----+----+  +-----+----+  +------+------+
+              |              |              |
+              +--------------+--------------+
+                             |
+                     [ mydb.aeordb ]
+                 A/B header + KV + WAL + hot tail
 ```
 
 ## Native Parsers
@@ -55,18 +65,20 @@ System metrics combine O(1) atomic counters with one shared bounded runtime-obse
 
 The `.aeordb` file is an append-only WAL. Every write appends a new entry to the end of the file. Entries are never modified in place (except during garbage collection).
 
-### File Layout
+### Current V3 Service Layout
 
 ```
-[File Header - 256 bytes]
-  Magic: "AEOR"
-  Hash algorithm, timestamps, KV/NVT pointers, HEAD hash, entry count
-
-[Entry 1] [Entry 2] [Entry 3] ... [Entry N]
-  Chunks, FileRecords, DirectoryIndexes, Snapshots, DeletionRecords, Voids
+[Header slot A - 256 bytes]
+[Header slot B - 256 bytes]
+[Reserved growth zone and in-file KV bucket pages]
+[Append-oriented WAL entries]
+[Hot tail: pending KV writes, Void snapshot, durability metadata]
 ```
 
-The 256-byte file header contains pointers to the KV block, NVT, and the current HEAD hash. Every entry carries its own header with magic bytes, type tag, hash algorithm, compression flag, key, and value.
+The two v3 header slots carry sequence and CRC evidence; startup selects the
+highest valid slot. The selected header locates the KV block, WAL frontier, hot
+tail, and current HEAD. Every WAL entry carries its own header with magic
+bytes, type tag, hash algorithm, compression flag, key, and value.
 
 ### Entry Types
 
@@ -79,52 +91,81 @@ The 256-byte file header contains pointers to the KV block, NVT, and the current
 | DeletionRecord | Marks a file as deleted (for version history completeness) |
 | Void | Free space marker (reclaimable by future writes) |
 
-## The KV Index File (`.aeordb.kv`)
+## In-File KV Lookup Block
 
-The KV store is a sorted array of `(hash, offset)` pairs stored in a separate file. It maps content hashes to byte offsets in the main `.aeordb` file, providing O(1) lookups when combined with the NVT.
+The active v3 KV store is inside the `.aeordb` file. Bucket pages map hashes to
+WAL offsets and carry validation metadata. The WAL remains primary evidence;
+corrupt or stale lookup state is rebuilt from verified entries rather than
+being treated as user authority.
 
-Each entry is `hash_length + 8` bytes (40 bytes for BLAKE3-256). The entries are sorted by hash, and the NVT tells you which bucket to look in, so lookups are a single seek + small scan.
+There is no current `.aeordb.kv` sidecar to delete during recovery. Preserve
+the complete database file, lock, configured emergency-spill artifacts, and
+logs before attempting repair.
 
 ### KV Resize
 
-When the KV store needs to grow, the engine enters a brief resize mode:
+When the KV block needs to grow, the engine uses a staged in-file transition:
 1. A temporary buffer KV store is created
-2. New writes go to the buffer (no blocking)
-3. The primary KV store is expanded
-4. Buffer contents are merged into the primary
-5. Buffer is discarded
+2. Admitted writes are retained in the bounded buffer
+3. The growth zone and affected WAL span are relocated safely
+4. Buffered entries are merged into the expanded primary block
+5. A new durable header/hot-tail boundary is published
 
-Writes never block during resize.
+Admission, memory pressure, durability failure, or an incomplete resize can
+delay or refuse writes; callers must not assume resize is an unbounded
+always-successful background operation.
 
 ## NVT (Normalized Vector Table)
 
-The NVT is an in-memory structure that provides fast hash-to-bucket lookups for the KV store.
+The active v3 normalized-vector lookup narrows a hash to a small KV bucket
+range. It accelerates exact lookup but does not replace full hash verification.
 
 ### How It Works
 
-1. Normalize the hash to a scalar: `first_8_bytes_as_u64 / u64::MAX` produces a value in [0.0, 1.0]
-2. Map the scalar to a bucket: `bucket_index = floor(scalar * num_buckets)`
-3. The bucket points to a range in the KV store -- scan that range for the exact hash
+1. Normalize the relevant hash prefix to the configured lookup coordinate.
+2. Resolve the coordinate to the selected bucket/page range.
+3. Read the candidate entries and require an exact full-hash match.
 
-BLAKE3 hashes are uniformly distributed, so buckets stay balanced without manual tuning. The NVT starts at 1,024 buckets and doubles when the average scan length exceeds a threshold.
+Lookup metadata is recoverable. It cannot make malformed WAL data valid or
+change which namespace root is authoritative.
 
-### Scaling
+## Staged V4 Architecture
 
-| Entries | NVT Buckets | NVT Memory | Avg Scan |
-|---------|-------------|------------|----------|
-| 10,000 | 1,024 | 16 KB | ~10 |
-| 1,000,000 | 65,536 | 1 MB | ~15 |
-| 100,000,000 | 1,048,576 | 16 MB | ~95 |
+The v4 target separates persistent authority from acceleration:
 
-## Hot File WAL (Crash Recovery)
+- `DatabaseHeaderV4` uses validated A/B publication and capability admission.
+- Immutable namespace roots and semantic state select content-addressed
+  objects; typed SystemFamily policy defines protected/detached authority.
+- Index definitions, pages, directories, manifests, coverage, and sparse NVT
+  hints are immutable native artifacts. The NVT is optional acceleration, not
+  membership or ordering authority.
+- Exact query evaluation falls back to validated pages or authoritative source
+  state when coverage or NVT hints are absent, stale, corrupt, or unsupported.
+- Root lifecycle, GC candidates, quarantine, sweep evidence, Void claims, and
+  settlement use explicit controls and crash-recoverable state machines.
+- Side-by-side migration creates and verifies a separate destination before any
+  service-path change; read-only validation precedes operator acceptance and
+  the first v4 write.
 
-The `--hot-dir` flag specifies a directory for write-ahead hot files. During a write:
+These structures are present for qualification and migration orchestration;
+they do not make ordinary v3 service data v4.
 
-1. The entry is written to a hot file first (fsync'd)
-2. The entry is then written to the main `.aeordb` file
-3. On success, the hot file entry is cleared
+## In-File Hot Tail (Crash Recovery)
 
-If the process crashes between steps 1 and 2, the hot file is replayed on the next startup to recover uncommitted writes. If `--hot-dir` is not specified, the hot directory defaults to the same directory as the database file.
+The selected header points to an in-file hot tail containing pending KV write
+records, the current Void snapshot, and durability metadata. During normal
+publication:
+
+1. WAL bytes and buffered lookup state are written under the shared durability
+   coordinator.
+2. The database and hot-tail state are synchronized and read back as required.
+3. A header slot is advanced only to a durable frontier.
+
+If the hot tail or selected frontier is invalid after a crash, startup uses the
+dirty-rebuild path and reconstructs lookup/Void state from verified WAL
+evidence. Configured external emergency-spill directories are incident
+evidence for otherwise unpublishable state; they are not the ordinary hot
+tail. See [Storage Engine](./storage-engine.md#emergency-spill-recovery).
 
 ## Snapshot Double-Buffering
 

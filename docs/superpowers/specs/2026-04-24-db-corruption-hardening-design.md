@@ -1,5 +1,11 @@
 # Database Corruption Hardening — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Scanner/verify behavior remains a
+> v3 recovery dependency. Durability latches/spill, bounded repair, GC/Void,
+> v4 recovery, and peer-healing policy now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+> The unauthenticated/synchronous auto-healing concept here is not approved.
+
 **Date:** 2026-04-24
 **Status:** Approved
 **Severity:** Critical — addresses data loss and permanent write failures

@@ -1,5 +1,11 @@
 # Hot File Transactions — Design Spec
 
+> **Preserved as pre-single-file v3 design history and superseded for recovery
+> authority on 2026-08-03.** External hot files are no longer the active
+> implementation. Current in-file hot-tail, durability, recovery, migration,
+> and crash-direction contracts belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-24
 **Status:** Approved
 

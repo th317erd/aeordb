@@ -1,5 +1,11 @@
 # Disk-Resident KV Store — Spec
 
+> **Preserved as active-v3 ancestry and replaced for v4 on 2026-08-03.** The
+> current in-file v3 KV behavior remains a compatibility dependency. V4 format,
+> memory, page/index, recovery, and migration authority belongs to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md); this draft is
+> not a new implementation queue.
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** High — KV store Vec::insert is O(N), degrading write throughput at 50K+ entries

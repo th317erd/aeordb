@@ -1,5 +1,11 @@
 # Single-File Database Refactor — Design Spec
 
+> **Preserved as active-v3 architecture and replaced for v4 on 2026-08-03.**
+> The implemented single-file v3 layout remains a compatibility dependency.
+> V4 header/format, root, durability, index, GC/Void, and migration contracts
+> now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-28
 **Status:** Approved
 **Priority:** Critical — eliminates sidecar files, completes the original disk-resident KV design

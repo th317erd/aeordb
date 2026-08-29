@@ -129,9 +129,16 @@ of silently accepting current HEAD. Share-link credentials are current-only.
 
 - Treat AeorDB as a database, not a disposable file server.
 - Do not run repair, GC, import, export-over, or repeated restarts against a suspected corrupt original until evidence has been preserved.
-- If corruption is suspected, preserve the database file, hot files, lock file, and logs before mutation.
+- If corruption is suspected, preserve the database file, lock file, configured external spill evidence, and logs before mutation. Current hot-tail recovery state is inside the database file.
 - Prefer graceful shutdown with SIGTERM/Ctrl+C and wait for completion.
 - Avoid broad unbounded searches or full-file fetches when a scoped search or range fetch will do.
+- Ordinary service operation still uses the v3 compatibility runtime. There is
+  no public `migrate` or `cutover` command/route and no automatic v4 activation.
+  Never invoke internal migration modules, rename database artifacts by hand,
+  or infer v4 acceptance from a healthy restart.
+- Copied-production rehearsal, canary, installation/deployment, cutover,
+  operator acceptance, first v4 write, and destructive v4 GC are distinct
+  authorization boundaries. Approval for one does not approve the next.
 
 ## More Detail
 
@@ -141,4 +148,5 @@ Start with:
 - `GET /docs/api/querying.html`
 - `GET /docs/api/upload-protocol.html`
 - `GET /docs/api/plugins.html`
+- `GET /docs/operations/migration.html`
 - `GET /docs/operations/threat-model.html`

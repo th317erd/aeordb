@@ -1,5 +1,12 @@
 # AeorDB — Master Plan
 
+> **Partially incorporated on 2026-08-03.** V4 persistent formats, storage and
+> namespace authority, native indexes/NVT, root-aware query, GC/Void, migration,
+> and cutover now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). This master
+> plan remains historical authority only for unrelated product direction that
+> does not conflict with that campaign.
+
 The database that says "NO" to every problem current databases have.
 
 ---

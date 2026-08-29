@@ -1,5 +1,10 @@
 # Global Search Endpoint + Default Indexes
 
+> **Partially incorporated on 2026-08-03.** Current v3 default-index/search
+> behavior remains compatible; v4 definitions/artifacts/NVT, exact-root search,
+> coverage/fallback, APOS, locators, and migration now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 ## Goal
 
 A global search endpoint (`POST /files/search`) that searches across all indexed directories, plus built-in default indexes on every file's metadata (filename, hash, timestamps, size, content type) so the entire database is searchable out of the box.

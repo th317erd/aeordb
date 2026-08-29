@@ -1,5 +1,11 @@
 # Database Corruption Hardening Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Completed scanner/verify hardening
+> remains regression evidence. Do not execute the old quarantine, GC, or
+> cluster-auto-heal sequence independently; current recovery and v4 authority
+> belongs to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make AeorDB resilient to corruption in the append log and KV index — scanner scans past corrupt entries, KV pages self-heal, hash verification on reads, corrupt data quarantined to `lost+found/`, and cluster auto-healing from peers.

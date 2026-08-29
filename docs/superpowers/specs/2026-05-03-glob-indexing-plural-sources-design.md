@@ -1,5 +1,10 @@
 # Glob-Based Subdirectory Indexing + Plural Source Resolver
 
+> **Partially incorporated on 2026-08-03.** Existing v3 glob/fan-out behavior
+> remains a compatibility contract. V4 source selectors, bounded evaluation,
+> semantic definitions, native index publication, and migration now belong to
+> the [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 ## Goal
 
 Enable a single index config to index files across subdirectories using glob patterns, and support extracting multiple values from arrays/objects in JSON documents using empty-string and regex source path segments.

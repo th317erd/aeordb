@@ -1,3 +1,8 @@
+# Partially incorporated on 2026-08-03. Historical route/system-path
+# normalization remains regression context; selected-root API, protected-family,
+# error, and documentation contracts now belong to
+# bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md. Do not rerun the older
+# migration/rename phases independently.
 title: "AeorDB Consistency Audit — Implementation Plan"
 spec: docs/superpowers/specs/2026-04-18-consistency-audit-design.md
 date: 2026-04-18

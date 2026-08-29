@@ -1,5 +1,10 @@
 # AeorDB Consistency Audit — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Historical route/system-path
+> normalization remains regression context. Selected-root API,
+> protected-family, error, and documentation contracts now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-18
 **Status:** Approved
 **Scope:** Public API surface, internal naming, config structure, error handling

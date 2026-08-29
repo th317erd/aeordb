@@ -3273,8 +3273,7 @@ impl StorageEngine {
 
   /// Create a new database file at the given path.
   ///
-  /// Does not use a hot directory for crash recovery. Suitable for tests and
-  /// CLI tools; production servers should use [`create_with_hot_dir`](Self::create_with_hot_dir).
+  /// Crash-recovery state is stored in the hot tail of the database file.
   pub fn create(path: &str) -> EngineResult<Self> {
     Self::create_with_hot_dir(path, None)
   }
@@ -3283,11 +3282,10 @@ impl StorageEngine {
     Self::create_internal(path, None, Some(coordinator), Default::default())
   }
 
-  /// Create a new database file at the given path with an optional hot directory
-  /// for crash-recovery write-ahead logging.
+  /// Create a new database file while accepting the legacy hot-dir parameter.
   ///
-  /// NOTE: `hot_dir` is ignored — hot data is stored in the hot tail at the end
-  /// of the main .aeordb file. The parameter is kept for API backward compat.
+  /// `hot_dir` is ignored: hot data is stored in the hot tail at the end of the
+  /// main `.aeordb` file. The parameter remains for API compatibility.
   pub fn create_with_hot_dir(path: &str, _hot_dir: Option<&Path>) -> EngineResult<Self> {
     Self::create_internal(path, _hot_dir, None, Default::default())
   }
@@ -4052,19 +4050,17 @@ impl StorageEngine {
 
   /// Open an existing database file.
   ///
-  /// Rebuilds the KV index from a full file scan if the `.kv` sidecar is
-  /// missing or stale. Does not use a hot directory. Refuses to open patch
-  /// databases (`backup_type > 1`).
+  /// Performs any required in-file recovery and refuses to open patch databases
+  /// (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
     let engine = Self::open_internal(path, None, None, None, Default::default())?;
     Self::reject_patch_database(engine, path)
   }
 
-  /// Open an existing database with a hot directory for crash recovery.
+  /// Open an existing database while accepting the legacy hot-dir parameter.
   ///
-  /// Replays any existing hot files on startup, then initializes a new hot
-  /// file for ongoing writes. This is the recommended open path for production
-  /// servers.
+  /// Recovery state is replayed from the database file's hot tail. `hot_dir`
+  /// remains in this API for compatibility and is ignored by the current engine.
   pub fn open_with_hot_dir(path: &str, hot_dir: Option<&Path>) -> EngineResult<Self> {
     Self::open_with_hot_dir_and_progress(path, hot_dir, None)
   }

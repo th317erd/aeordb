@@ -2,10 +2,10 @@
 
 ## Landing State
 
-- **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt and documentation closure is active. Copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
-- **Current landing unit:** P9 debt classification, safe dead-path retirement, and enforceable non-growth policy are green; operator/bot documentation and plan supersession are next.
+- **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt plus operator/documentation closure are green, and strict Clippy is next. Copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
+- **Current landing unit:** P9 migration/operator/bot documentation, precise stale-plan supersession, and the retained hot-dir compatibility contract are green; repository-wide strict Clippy is next.
 - **Entry commit:** `30cee29f8deeecda48419ddc31c697178ac375b9` (`record P8 native release qualification`).
-- **Last pushed green commit:** `30cee29f8deeecda48419ddc31c697178ac375b9` on `development` and `origin/development`.
+- **Last pushed green commit:** `bbe6f265f50ab177bc09b89c5fbd469d4ffbb2f7` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** Safe P8 migration workspaces, cutover fault target, exact-source native release candidates, live documentation routes, and integrated Linux workspace qualification are green and pushed.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -21,9 +21,20 @@
 - The affected Linux matrix passes 176 aggregation, suppression-architecture, query-engine, and pagination tests with zero failures. Workspace all-target checking passes with only the historical test-only `require_wasm_parser` warning. The chained independent contract gate passes 454 fixtures, 7 debt entries/87 retained matches, 95 routes, and 38 documentation pages.
 - Durable command, failure-first, native, hash, and boundary evidence is recorded in `evidence/p9-debt-gate-report.json`. The unit touches no production or production-derived database, install, download artifact, deployment, canary, service activation, cutover, acceptance, first v4 write, or destructive GC boundary.
 
+## P9 Documentation and Supersession Qualification
+
+- The active 39-page mdBook now states the exact current authority: ordinary service operation remains on the v3 compatibility runtime, no public CLI/HTTP migration or automatic v4 activation exists, and legacy layout convergence plus forced FileRecord backfill are not v3-to-v4 migration. The new operator page freezes preflight, clone/capture/reconciliation, read-only cutover, acceptance, first-write, rollback, evidence, monitoring, and destructive-GC boundaries without exposing an internal command as public API.
+- Architecture, storage, indexing, configuration, CLI, installation, backup, deployment, GC, observability, API-versioning, client-release, and served bot guidance agree on the current-v3/staged-v4 boundary. The old external `.aeordb.kv` and hot-file recovery advice is removed from active instructions; the current single file, lock, external spill evidence, and logs are preserved instead.
+- Thirty-three identified historical design/implementation documents now carry explicit fully-superseded, partially-incorporated, or active-v3-history banners with valid links to the current campaign. The external hot-file transaction documents are explicitly pre-single-file history rather than current recovery authority.
+- Territory tracing found that `--hot-dir`, `storage.hot_dir`, and the public Rust constructor family remain accepted but are ignored by the current engine. Their public descriptions and startup output now say so, and `legacy-hot-dir-option` is a timed compatibility entry with owner, exact five-file production surface, 77-match ceiling, and removal gate. The complete debt policy passes at eight entries and 164 retained matches.
+- Failure-first proof records the absent migration page, machine inventory drift, stale external-hot-file claims, and missing debt-policy entry. mdBook, all 39 source links, JSON/YAML syntax, formatting, diff hygiene, 33 banner links, the debt self-test/gate, and the independent 454-fixture/95-route/39-document contract gate pass.
+- On `wyatt-desktop`, 64 focused CLI configuration/start/live-route tests pass, workspace all-target checking is green except for the historical test-only macro warning, and the exact release CLI builds in 2m23s. Its generated help preserves the flag without advertising external hot files and exposes no `migrate`/`cutover` command.
+- A real release server under `/home/wyatt/.cache` proved healthy startup, embedded docs/migration/CLI/SKILL `200` responses, a missing-doc `404`, byte-exact file PUT/GET, missing-value parser refusal before database creation, no creation of the deliberately nonexistent compatibility hot path, clean SIGINT exit, and offline verification of 195 valid entries with zero reported defects. The first harness attempt is truthfully retained: public health returned `200` with `status=starting` while every protected route returned the expected `503`; the final harness waits for `status=healthy`.
+- Durable failure, build, link, contract, live, hash, and authorization evidence is recorded in `evidence/p9-documentation-report.json`. No production or production-derived database, install, download artifact, deployment, canary, cutover, acceptance, first v4 write, or destructive GC boundary was touched.
+
 ## P9 Next Action
 
-Publish the migration/operator/bot documentation and precise supersession/incorporation markers for stale plans, then close strict Clippy and run the final broad/native/crash-soak/resource qualification. Keep copied-production, canary, installation/deployment, operational cutover, acceptance, monitoring, and destructive GC behind their exact separate authorization gates.
+Eliminate the repository-wide strict-Clippy backlog without suppressions or weakened lint policy, then run the final broad/native/crash-soak/resource qualification. Keep copied-production, canary, installation/deployment, operational cutover, acceptance, monitoring, and destructive GC behind their exact separate authorization gates.
 
 ## Inventory Contract
 

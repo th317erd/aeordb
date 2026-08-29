@@ -1,10 +1,10 @@
 # Installation
 
-AeorDB is built from source using the Rust toolchain. There are no external dependencies -- the binary is fully self-contained.
+AeorDB is built from source using the stable Rust toolchain. There are no runtime external dependencies -- the binary is fully self-contained.
 
 ## Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (stable toolchain, 1.75+)
+- [Rust](https://www.rust-lang.org/tools/install) (current stable toolchain)
 
 Install Rust if you don't have it:
 
@@ -53,15 +53,26 @@ Usage: aeordb <COMMAND>
 
 Commands:
   start            Start the database server
+  status           Inspect bounded runtime diagnostics from a running server
   stress           Run stress tests against a running instance
   emergency-reset  Emergency reset: revoke the current root API key and generate a new one
   export           Export a version as a self-contained .aeordb file
   diff             Create a patch .aeordb containing only the changeset between two versions
   import           Import an export or patch .aeordb file into a target database
   promote          Promote a version hash to HEAD
+  verify           Verify database integrity and optionally repair issues
   gc               Run garbage collection to reclaim unreachable entries
+  probe            Probe database internals for recovery diagnostics
+  deployment-capabilities
+                    Report binary capabilities used by checked installers
+  deployment-check Check whether a candidate may replace the current binary
   help             Print this message or the help of the given subcommand(s)
 ```
+
+There is no public `migrate` or `cutover` command. Installing a candidate does
+not convert an existing v3 database to v4, and the deployment transition
+capability is not a v4-acceptance flag. See
+[V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## Optional: Install an Existing Binary
 

@@ -164,4 +164,4 @@ The Dashboard shows:
 4. Use Prometheus for trends and SSE for live transitions. Do not repeatedly restart a latched or corruption-suspected database before preserving the database, spill artifacts, and logs.
 5. If `durability.repair.required` is true, review the reported artifacts and run the displayed repair command under the normal evidence-copy safety rules.
 
-See [Admin Operations](../api/admin.md#monitoring), [Events](../api/events.md#metrics-event), [CLI Commands](../cli/commands.md#aeordb-status), and [Deployment Safety](./deployment-safety.md).
+See [Admin Operations](../api/admin.md#monitoring), [Events](../api/events.md#metrics-event), [CLI Commands](../cli/commands.md#aeordb-status), [Deployment Safety](./deployment-safety.md), and [V3-to-V4 Migration and Cutover](./migration.md).

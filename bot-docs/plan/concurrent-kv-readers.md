@@ -1,5 +1,11 @@
 # Concurrent KV Readers During Write — Spec
 
+> **Preserved as an active-v3 compatibility dependency and partially
+> incorporated on 2026-08-03.** V4 cache/memory, immutable page, root, and
+> migration contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md); this document
+> does not define the v4 read path.
+
 **Date:** 2026-04-08
 **Status:** Approved
 **Priority:** High — silent cliff under concurrent load

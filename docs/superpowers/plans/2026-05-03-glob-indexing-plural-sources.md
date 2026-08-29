@@ -1,5 +1,10 @@
 # Glob Indexing + Plural Source Resolver Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Existing v3 glob/fan-out behavior
+> remains a compatibility contract. V4 source selectors, bounded evaluation,
+> semantic definitions, native index publication, and migration now belong to
+> the [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable index configs to index files across subdirectories via glob patterns, and support extracting multiple values from JSON arrays/objects via empty-string and regex source path segments.

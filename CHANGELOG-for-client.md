@@ -4,6 +4,37 @@ Changelog of AeorDB server changes relevant to the client team.
 
 ---
 
+## V4/NVT/GC Campaign Status (2026-08-29)
+
+- The server now contains the independently tested v4 format, semantic-root,
+  lifecycle/GC, native-index, root-aware query, and side-by-side migration
+  substrate.
+- Ordinary service startup still selects the v3 compatibility runtime. There is
+  no public `migrate`/`cutover` CLI or HTTP route and no automatic v4 format
+  activation. Client applications must not infer v4 acceptance from a binary
+  upgrade, healthy restart, inactive/installed index-runtime metrics, reindex,
+  import, or root promotion.
+- Query/search/list/fetch support exact selected-root behavior. Query and search
+  return the selected `root` metadata; related fetches should reuse that exact
+  `root_hash`. APOS pagination tokens are canonical unpadded base64url and must
+  remain bound to their explicit root.
+- Legacy-v3 non-JSON historical search can return
+  `503 HISTORICAL_VIEW_UNAVAILABLE` when exact parser semantics cannot be
+  reconstructed. Clients must surface that error rather than retry against a
+  different root.
+- Root-only operational surfaces expose bounded durability, repair, memory,
+  configuration, GC, and v4 index-runtime status. An inactive v4 runtime is
+  expected on the current v3 service.
+- Copied-production rehearsal, canary, installation/deployment, cutover,
+  operator acceptance, first v4 write, monitoring, and destructive v4 GC are
+  separate release gates. No client rollout should assume a later gate was
+  approved because an earlier one passed.
+
+See the served **V3-to-V4 Migration and Cutover** operations page for the
+current boundary and rollback model.
+
+---
+
 ## Breaking Changes
 
 ### `ApiKeyRecord.user_id` is now `Option<Uuid>`

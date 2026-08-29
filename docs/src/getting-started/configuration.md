@@ -32,7 +32,7 @@ jwt_expiry_seconds = 3600
 [storage]
 database = "data.aeordb"
 chunk_size = 262144
-# hot_dir = "./hot"
+# hot_dir = "./hot" # Legacy compatibility only; current engine ignores it.
 ```
 
 An example config file is included in the repository as `aeordb.example.toml`.
@@ -50,13 +50,20 @@ aeordb start [OPTIONS]
 | `--host` | `0.0.0.0` | Bind address |
 | `--database`, `-D` | `data.aeordb` | Path to the database file (created if it does not exist) |
 | `--auth` | self-contained | Auth provider URI (see [Auth Modes](#auth-modes)) |
-| `--hot-dir` | database parent dir | Directory for write-ahead hot files (crash recovery journal) |
+| `--hot-dir` | database parent dir | Legacy compatibility value; accepted but unused by the current in-file hot-tail engine |
 | `--cors-origins` | disabled | CORS allowed origins (see [CORS](#cors)) |
 | `--log-format` | `pretty` | Log output format: `pretty` or `json` |
 | `--tls-cert` | — | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | — | Path to TLS private key PEM file (requires `--tls-cert`) |
 | `--jwt-expiry` | `604800` | JWT token lifetime in seconds (7 days) |
 | `--chunk-size` | `262144` | Write chunk size in bytes (256 KiB default) |
+
+### Legacy Hot-dir Compatibility
+
+The `--hot-dir` flag and `storage.hot_dir` TOML key predate the single-file
+storage layout. They remain accepted for legacy compatibility, but the current
+engine ignores the value and stores crash-recovery state in the `.aeordb`
+file's hot tail. New configurations should omit it.
 
 ### Logging Filters
 
@@ -124,7 +131,6 @@ aeordb start \
   --port 443 \
   --tls-cert /etc/ssl/certs/aeordb.pem \
   --tls-key /etc/ssl/private/aeordb.key \
-  --hot-dir /var/lib/aeordb/hot \
   --cors-origins "https://myapp.com,https://admin.myapp.com" \
   --log-format json
 

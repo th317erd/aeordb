@@ -58,7 +58,7 @@ pub struct StorageConfig {
   pub database: Option<String>,
   /// Write chunk size in bytes (default: 262144 = 256 KiB).
   pub chunk_size: Option<usize>,
-  /// Directory for write-ahead hot files (defaults to database file's parent directory).
+  /// Legacy compatibility option; current recovery state lives in the database file's hot tail.
   pub hot_dir: Option<String>,
 }
 

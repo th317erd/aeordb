@@ -2,6 +2,12 @@
 
 AeorDB is an append-only database: writes, overwrites, and deletes all append new entries without modifying existing ones. Over time, this leaves orphaned entries -- old file versions, deleted content, stale directory indexes -- consuming disk space. Garbage collection (GC) reclaims that space.
 
+The public CLI/HTTP/task/cron GC surfaces currently execute the v3
+compatibility policy. The staged v4 lifecycle and physical-reclamation engine
+is not selected by an ordinary service start or by these commands. Destructive
+v4 GC remains a separate post-cutover authorization boundary; see
+[V3-to-V4 Migration and Cutover](./migration.md).
+
 ## What GC Does
 
 GC uses a **mark-and-sweep** algorithm:
@@ -181,7 +187,13 @@ discard teardown failures.
 
 Before a non-dry-run GC, AeorDB normally creates an engine-internal `_aeordb_pre_gc_*` snapshot as a safety net. If lifecycle configuration has `"snapshot_writes_enabled": false`, GC skips that safety snapshot and continues with the mark-and-sweep run. Existing snapshots are still honored as live roots either way.
 
-**Crash safety**: If the process crashes mid-sweep, the `.aeordb` file may contain partially overwritten entries. On restart, the `.kv` index file will be stale and must be deleted to trigger a full rebuild from the `.aeordb` file scan. The rebuild replays deletion records and reconstructs the index, so no committed data is lost. Garbage entries that were not yet swept will persist until the next GC run.
+**Crash safety**: If the process crashes mid-sweep, the `.aeordb` file may
+contain only a prefix of the planned reclamation. On restart, AeorDB validates
+the in-file A/B header, KV pages, and hot tail; a dirty or torn state triggers
+the bounded WAL rebuild/reconciliation path. Do not delete, truncate, or invent
+a `.kv` sidecar: the current database is single-file and its in-file recovery
+metadata is evidence. Garbage entries that were not yet swept remain retained
+until a later GC run.
 
 ## Performance
 

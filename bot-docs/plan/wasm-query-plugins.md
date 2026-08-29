@@ -1,5 +1,11 @@
 # WASM Query Plugins — Spec
 
+> **Partially incorporated on 2026-08-03.** Plugin semantic identity,
+> dependency closure, bounded source evaluation, query-root authority, and
+> migration behavior now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Unaffected
+> plugin API history remains reference material only where it does not conflict.
+
 **Date:** 2026-04-09
 **Status:** Approved
 **Priority:** High — the last major feature for the plugin system

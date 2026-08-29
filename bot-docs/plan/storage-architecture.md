@@ -1,5 +1,12 @@
 # Storage Architecture — The Final Design
 
+> **Partially incorporated and replaced for storage authority on 2026-08-03.**
+> The redb/chunk-tree target, format layout, root authority, index, GC, and
+> migration assumptions here are not current implementation authority. Those
+> contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Preserve only
+> unaffected conceptual history.
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design — Finalized Architecture (Revision 2)
 

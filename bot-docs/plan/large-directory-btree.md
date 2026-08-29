@@ -1,5 +1,11 @@
 # Large Directory Optimization: Content-Addressed B-Tree — Spec
 
+> **Preserved as a v3 compatibility dependency and partially incorporated on
+> 2026-08-03.** Existing v3 B-tree reads/writes remain regression obligations;
+> v4 namespace-tree closure, root authority, bounded traversal, migration, and
+> GC behavior now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-07
 **Status:** Draft
 **Priority:** High — write throughput degrades 6x at 20K files per directory

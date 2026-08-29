@@ -1,5 +1,10 @@
 # Media Parser Metadata Implementation Plan
 
+> **Partially incorporated on 2026-08-03.** Preserve completed media extraction
+> behavior, but do not execute semantic identity, index persistence, or
+> migration work here independently; those contracts now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fill textual metadata gaps in image (JPEG/TIFF), video (MP4/MOV), and audio (WAV) native parsers so creative professionals can search and index by author, description, copyright, and other document properties.

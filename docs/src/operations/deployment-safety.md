@@ -133,6 +133,19 @@ Once a candidate has been installed and started, an unhealthy startup is not
 automatically downgraded. The candidate may already have published newer state;
 an operator must inspect the failure before selecting a rollback binary.
 
+## V4 Migration Boundary
+
+Checked replacement only decides whether a binary understands the selected v3
+durability/recovery authority. The `aeordb.v3-transition-recovery.v1`
+capability does not select a v4 root, run a side-by-side clone, approve a
+cutover, or accept a first v4 write. The current CLI exposes no public v4
+migration command.
+
+Copied-production rehearsal, canary, installation, deployment, operational
+cutover, operator acceptance, first v4 write, and destructive v4 GC remain
+separate gates. See [V3-to-V4 Migration and Cutover](./migration.md) before
+interpreting a candidate or deployment result.
+
 The production helper recognizes these overrides:
 
 | Variable | Default |

@@ -1,5 +1,11 @@
 # Concurrent KV Readers Implementation Plan
 
+> **Preserved as active-v3 implementation history and partially incorporated
+> on 2026-08-03.** Existing v3 snapshot/read behavior remains a compatibility
+> regression obligation. V4 memory, page/index, root, and migration authority
+> now belongs to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Split DiskKVStore into a KVWriter (Mutex, exclusive) and ReadSnapshot (Arc, lock-free) so reads never block behind writes.

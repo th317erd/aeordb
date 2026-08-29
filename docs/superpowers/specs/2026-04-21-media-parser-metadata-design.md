@@ -1,5 +1,10 @@
 # Media Parser Metadata Gaps — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Format-specific extraction remains
+> historical parser behavior. Immutable parser/dependency identity, bounded
+> source semantics, indexing publication, and migration now belong to the
+> [V4/NVT/GC campaign](../../../bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Date:** 2026-04-21
 **Status:** Approved
 

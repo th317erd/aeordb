@@ -2,7 +2,10 @@
 
 ## Current State
 
-AeorDB is **pre-beta**. There is exactly one supported API version, and no external clients are running prior builds. The HTTP API is not prefixed with `/v1/`; the sync wire protocol carries no explicit version header. Both will change before beta.
+AeorDB 0.9.x is pre-1.0. The current HTTP API is not prefixed with `/v1/`,
+and the sync wire protocol carries no explicit version header. Existing clients
+still depend on the documented unprefixed contracts, so current behavior and
+compatibility windows must be treated as real even before 1.0.
 
 This document records the policy that will apply once beta opens.
 
@@ -54,15 +57,28 @@ Treated as cluster-wide upgrades:
 
 ## Format Version (On-Disk)
 
-The file header carries `format_magic = b"AEOR"` (4 bytes) and `format_version: u8` (currently `1`). Format-breaking changes (e.g. KV page CRC, A/B header double-buffer) require a version bump.
+The current service selects the v3 compatibility format, including its
+validated A/B header and single-file KV/WAL/hot-tail layout. The binary also
+contains a capability-admitted v4 format and side-by-side migration substrate;
+ordinary startup does not reinterpret v3 bytes as v4.
 
 ### Open-time behavior
-- Wrong magic: refuse with `EngineError::InvalidMagic` ("not an AeorDB file").
-- Unknown version: refuse with `EngineError::InvalidEntryVersion(N)` ("DB format vN, this build expects v{SUPPORTED}; use the build that wrote this file to export, then re-import").
+- Wrong, truncated, ambiguous, or unsupported header/format evidence fails
+  closed rather than guessing a version.
+- Binary replacement must pass the read-only deployment/capability gate before
+  the candidate opens an existing database.
+- A v4 destination is a separate verified file until the journaled cutover
+  state machine selects it; migration workspaces are never service authority.
 
 ### Migration policy
-- Pre-beta: no migration tooling. Format breaks require nuking the dev DB.
-- Beta-and-later: every format-version bump must ship with an `aeordb migrate --from N --to N+1` command that opens the old format and writes a new file at the new format.
+- There is currently no public `aeordb migrate`/`cutover` command or HTTP
+  migration route and no automatic v3-to-v4 activation.
+- A future public format transition must ship with versioned, documented,
+  bounded side-by-side orchestration, exact capability checks, copied-data
+  rehearsal, rollback, and explicit acceptance. An in-place byte rewrite is
+  not an acceptable migration policy.
+- See [V3-to-V4 Migration and Cutover](./migration.md) for the current release
+  boundary.
 
 ## Library API (Rust crate)
 

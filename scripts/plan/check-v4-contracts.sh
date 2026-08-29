@@ -130,6 +130,51 @@ jq -r '.documentation_pages[]' "$evidence_dir/route-root-contract-manifest.json"
 ) >"$docs_source"
 cmp -s "$docs_manifest" "$docs_source" || fail "documentation page inventory drifted"
 
+migration_doc="$repo_root/docs/src/operations/migration.md"
+[[ -f "$migration_doc" ]] || fail "missing v3-to-v4 migration operator documentation"
+rg -Fq 'There is currently no public `aeordb migrate`, `aeordb cutover`, HTTP' "$migration_doc" \
+  || fail "migration documentation does not preserve the no-public-activation boundary"
+rg -Fq 'Operator acceptance and first v4 write' "$migration_doc" \
+  || fail "migration documentation does not separate acceptance from the first v4 write"
+rg -Fq 'Destructive v4 GC' "$migration_doc" \
+  || fail "migration documentation does not preserve the destructive-GC authorization boundary"
+
+hot_dir_contract_paths=(
+  "$repo_root/aeordb-cli/src/main.rs"
+  "$repo_root/aeordb-cli/src/config.rs"
+  "$repo_root/aeordb-cli/src/commands/start.rs"
+  "$repo_root/aeordb-lib/src/server/mod.rs"
+  "$repo_root/aeordb-lib/src/engine/storage_engine.rs"
+  "$repo_root/docs/src/SKILL.md"
+  "$repo_root/docs/src/cli/commands.md"
+  "$repo_root/docs/src/getting-started/configuration.md"
+  "$repo_root/deploy/systemd/README.md"
+  "$repo_root/aeordb.example.toml"
+)
+if rg -n \
+  'Directory for write-ahead hot files|hot directory for crash recovery|hot directory for crash-recovery|Replays any existing hot files|DB file and any hot-dir|database file, hot files' \
+  "${hot_dir_contract_paths[@]}" >/dev/null; then
+  fail "an active CLI, API, or operator surface still advertises the retired hot-directory implementation"
+fi
+for path in \
+  "$repo_root/aeordb-cli/src/main.rs" \
+  "$repo_root/aeordb-cli/src/config.rs" \
+  "$repo_root/docs/src/cli/commands.md" \
+  "$repo_root/docs/src/getting-started/configuration.md"; do
+  rg -iq 'legacy compatibility' "$path" \
+    || fail "hot-dir compatibility status is absent from ${path#"$repo_root/"}"
+done
+debt_policy="$evidence_dir/v4-debt-policy.json"
+jq -e '
+  any(.entries[];
+    .id == "legacy-hot-dir-option" and
+    .classification == "timed_compatibility_shim" and
+    .maximum_matches > 0 and
+    (.owner | length) > 0 and
+    (.removal_gate | length) > 0)
+' "$debt_policy" >/dev/null \
+  || fail "the retained hot-dir API is absent from the reviewed compatibility-debt policy"
+
 jq -e '
   ([.entry_type_to_kv_tag[].entry_tag] | length) == ([.entry_type_to_kv_tag[].entry_tag] | unique | length) and
   ([.entry_type_to_kv_tag[].kv_tag] | length) == ([.entry_type_to_kv_tag[].kv_tag] | unique | length) and

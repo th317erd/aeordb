@@ -1,3 +1,7 @@
+# Partially incorporated on 2026-08-03. Runtime memory/durability/index/GC
+# observability and bounded publication now belong to
+# bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor.md. Completed v3 counter
+# behavior remains regression evidence, not an independent implementation queue.
 title: "AeorDB Enhanced Metrics — Implementation Plan"
 spec: docs/superpowers/specs/2026-04-19-metrics-design.md
 date: 2026-04-19

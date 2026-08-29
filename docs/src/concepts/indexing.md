@@ -1,6 +1,16 @@
 # Indexing & Queries
 
-AeorDB indexes are opt-in and configured per-directory. Nothing is indexed by default -- you control exactly which fields are indexed, with which strategies, and for which file types. This keeps the engine lean and predictable.
+AeorDB indexes are configured per directory. New databases bootstrap a root
+configuration for common virtual metadata fields; content/parser fields and
+additional strategies remain opt-in. Existing databases retain their stored
+configuration rather than silently receiving new defaults.
+
+The public service currently reads and writes the v0 whole-index compatibility
+format described in the configuration and query sections below. AeorDB also
+contains the migration-qualified v4 native artifact/page/NVT runtime, but
+ordinary startup leaves it inactive and public query authority remains on the
+v0 compatibility path until an explicitly accepted v4 cutover. See
+[V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## Index Configuration
 
@@ -78,9 +88,13 @@ This creates three separate index files for the same field:
 
 Use the appropriate query operator to target the desired index.
 
-## How Indexes Work
+## Current V0 Whole-Index Compatibility
 
-AeorDB uses a Normalized Vector Table (NVT) for index lookups. Each indexed field gets its own NVT.
+The active service keeps one serialized whole-index representation per
+field/strategy and uses its normalized-vector lookup for candidate narrowing.
+This retained format is a timed compatibility surface, not the v4 storage
+model. Exact equality uses exact-capable scalar indexes first and only falls
+back to verified stored raw values when the available strategy is tokenizing.
 
 ### The NVT Approach
 
@@ -95,7 +109,8 @@ For a query like `WHERE age > 30`:
 2. All buckets after that point are candidates
 3. Only those buckets are scanned
 
-This is O(1) for the bucket lookup, with a small linear scan within the bucket.
+The coordinate narrows candidates; full value/file identity checks still decide
+matches. Do not treat bucket position as query authority.
 
 ### Two-Tier Execution
 
@@ -109,6 +124,31 @@ Complex queries (OR, NOT, multi-field boolean logic) build NVT bitmaps and compo
 - The final mask identifies which buckets contain results
 
 Memory usage is bounded: a bitmask for 1M buckets is only 128KB, regardless of how many entries exist.
+
+## V4 Native Index Artifacts
+
+The staged v4 runtime replaces whole-index serialization with independently
+validated immutable artifacts:
+
+- versioned converter/strategy definitions and semantic fingerprints;
+- scope catalogs, canonical value stores, reverse document identity, and
+  document state;
+- bounded field pages plus dependency-first page directories and manifests;
+- exact coverage controls that identify which immutable generation may answer
+  a query;
+- sparse NVT artifacts used only as optional range/navigation hints; and
+- canonical logical positions and APOS cursors bound to the selected root.
+
+Mutation batches are grouped by owner/document and published through a bounded
+copy-on-write runtime. Selected pages remain immutable, dirty work is journaled,
+and clean caches are evictable. No v4 query may load, clone, sort, or serialize
+an entire index, and NVT absence/corruption cannot change results: exact page or
+authoritative-source fallback remains mandatory.
+
+`GET /system/stats` exposes the bounded v4 `index_runtime` projection. An
+ordinary v3 server reports it as inactive; that is expected and does not mean
+the current whole-index files were converted. Reindexing the v3 service also
+does not activate v4.
 
 ## Source Resolution
 

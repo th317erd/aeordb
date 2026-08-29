@@ -55,7 +55,7 @@ enum Commands {
     /// Auth provider URI: disabled/false/null/no/0, self, file:///path/to/identity
     #[arg(long)]
     auth: Option<String>,
-    /// Directory for write-ahead hot files (defaults to database file's parent directory)
+    /// Legacy compatibility option; current recovery state lives in the database file's hot tail
     #[arg(long)]
     hot_dir: Option<String>,
     /// CORS allowed origins: "*" for all, or comma-separated origins (e.g. "https://a.com,https://b.com")
@@ -311,7 +311,9 @@ async fn main() {
       // Auth: CLI --auth overrides config auth.mode.
       let merged_auth: Option<String> = auth.or(file_config.auth.mode);
 
-      // Hot dir: CLI --hot-dir overrides config storage.hot_dir.
+      // Legacy hot-dir compatibility value: CLI --hot-dir overrides config
+      // storage.hot_dir. The storage engine deliberately ignores the resolved
+      // path because recovery state now lives in the database file's hot tail.
       let merged_hot_dir: Option<String> = hot_dir.or(file_config.storage.hot_dir);
 
       // CORS: CLI --cors-origins overrides config server.cors.origins.

@@ -1,5 +1,11 @@
 # Enhanced Directory Listing — Design Spec
 
+> **Partially incorporated on 2026-08-03.** Selected-root listing, bounded
+> traversal, authorization/concealment, root metadata, and locator behavior now
+> belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md). Unaffected
+> listing response history remains reference material.
+
 **Date:** 2026-04-13
 
 ---

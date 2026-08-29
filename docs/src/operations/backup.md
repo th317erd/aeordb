@@ -2,6 +2,11 @@
 
 AeorDB supports exporting database versions as self-contained `.aeordb` files, creating incremental patches between versions, importing backups, and promoting version hashes.
 
+These are logical v3 service operations, not the staged v3-to-v4 side-by-side
+migration. An export can be used to create independent evidence or test data,
+but importing or promoting it does not activate v4. See
+[V3-to-V4 Migration and Cutover](./migration.md).
+
 ## Concepts
 
 - **Full export**: A clean `.aeordb` file containing only the live entries at a specific version. No voids, no deletion records, no stale overwrites, no history.

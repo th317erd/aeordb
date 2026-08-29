@@ -1,5 +1,11 @@
 # Custom Storage Engine — The AeorDB WAL-Filesystem
 
+> **Preserved as v3 history and partially incorporated on 2026-08-03.** This
+> file explains ancestry of the active v3 WAL engine, but it is not authority
+> for v4 bytes, durability, namespace roots, GC/Void, indexes, or migration.
+> Those contracts now belong to the
+> [V4/NVT/GC campaign](./2026-08-03-aeordb-v4-nvt-gc-refactor.md).
+
 **Parent:** [Master Plan](./master-plan.md)
 **Status:** In Design — Final Architecture (Revision 2)
 
