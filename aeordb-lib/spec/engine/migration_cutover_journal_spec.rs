@@ -105,7 +105,6 @@ fn durable_workspace_creates_private_exact_journal_and_reopens_with_bounded_migr
   let expected = fixture("cutover-journal-v1", "cutover-blake3-256-external-journal-valid.bin");
 
   assert_eq!(workspace.journal_path(), directory.path().join("cutover-workspace/cutover.acut"));
-  assert_eq!(fs::read(workspace.journal_path()).unwrap(), expected);
   assert_eq!(workspace.selected_slot(), SystemControlSlotV1::B);
   assert_eq!(workspace.sequence(), 12);
   assert!(!workspace.redundancy_degraded());
@@ -128,8 +127,10 @@ fn durable_workspace_creates_private_exact_journal_and_reopens_with_bounded_migr
   }
 
   let workspace_path = workspace.workspace_path().to_path_buf();
+  let journal_path = workspace.journal_path().to_path_buf();
   drop(workspace);
   assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().reserved_bytes, baseline);
+  assert_eq!(fs::read(&journal_path).unwrap(), expected);
   let reopened = DurableCutoverJournalWorkspaceV1::open(
     &workspace_path,
     &control,
@@ -162,8 +163,9 @@ fn durable_workspace_persists_and_reopens_the_sha512_fixture() {
     &memory,
   )
   .unwrap();
-  assert_eq!(fs::read(workspace.journal_path()).unwrap(), expected);
+  let journal_path = workspace.journal_path().to_path_buf();
   drop(workspace);
+  assert_eq!(fs::read(&journal_path).unwrap(), expected);
   let reopened = DurableCutoverJournalWorkspaceV1::open(
     &workspace_path,
     &control,
@@ -182,21 +184,44 @@ fn publication_updates_only_the_inactive_slot_and_exact_retry_is_idempotent() {
   let directory = tempdir().unwrap();
   let memory = memory_coordinator();
   let (mut workspace, control) = create_workspace(directory.path(), &memory);
-  let before = fs::read(workspace.journal_path()).unwrap();
+  let before = fixture("cutover-journal-v1", "cutover-blake3-256-external-journal-valid.bin");
+  let workspace_path = workspace.workspace_path().to_path_buf();
+  let journal_path = workspace.journal_path().to_path_buf();
   let updated = updated_control();
 
   let receipt = workspace.publish(&updated).unwrap();
   assert!(receipt.changed());
   assert_eq!(receipt.selected_slot(), SystemControlSlotV1::A);
   assert_eq!(receipt.sequence(), 13);
-  let after = fs::read(workspace.journal_path()).unwrap();
+  drop(workspace);
+  let after = fs::read(&journal_path).unwrap();
   assert_ne!(&after[..1_024], &before[..1_024]);
   assert_eq!(&after[1_024..], &before[1_024..]);
 
+  let mut workspace = DurableCutoverJournalWorkspaceV1::open(
+    &workspace_path,
+    &updated,
+    HashAlgorithm::Blake3_256,
+    workspace_options(0),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
   let retry = workspace.publish(&updated).unwrap();
   assert!(!retry.changed());
   assert_eq!(retry.sequence(), 13);
-  assert_eq!(fs::read(workspace.journal_path()).unwrap(), after);
+  drop(workspace);
+  assert_eq!(fs::read(&journal_path).unwrap(), after);
+
+  let mut workspace = DurableCutoverJournalWorkspaceV1::open(
+    &workspace_path,
+    &updated,
+    HashAlgorithm::Blake3_256,
+    workspace_options(0),
+    CancellationToken::new(),
+    &memory,
+  )
+  .unwrap();
   assert_eq!(workspace.publish(&control).unwrap().sequence(), 14);
 }
 
@@ -534,9 +559,11 @@ fn sequence_exhaustion_refuses_before_touching_the_inactive_slot() {
     &memory,
   )
   .unwrap();
-  let before = fs::read(workspace.journal_path()).unwrap();
+  let journal_path = workspace.journal_path().to_path_buf();
+  let before = encode_cutover_journal_pair_v1(u64::MAX - 1, u64::MAX, &control, HashAlgorithm::Blake3_256).unwrap();
   assert_eq!(workspace.publish(&updated_control()).unwrap_err().code(), "cutover_journal_workspace_identity");
-  assert_eq!(fs::read(workspace.journal_path()).unwrap(), before);
+  drop(workspace);
+  assert_eq!(fs::read(&journal_path).unwrap(), before);
 }
 
 #[test]

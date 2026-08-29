@@ -17,9 +17,13 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::emergency_spill::open_regular_file_read_write_no_follow;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation};
 use crate::engine::native_durability::{
-  NativeDurabilityError, PlatformFileIdentityDescriptorV1, platform_file_identity, platform_file_identity_from_file, preallocate_file,
-  read_file_at_native, sync_directory_native, sync_file_all_native, write_file_at_native,
+  NativeDurabilityError, NativeDurabilityResult, PlatformFileIdentityDescriptorV1, platform_file_identity,
+  platform_file_identity_from_file, preallocate_file, sync_directory_native, sync_file_all_native, write_file_at_native,
 };
+#[cfg(unix)]
+use crate::engine::native_durability::read_file_at_native;
+#[cfg(windows)]
+use crate::engine::native_durability::NativeDurabilityOperation;
 use crate::engine::HashAlgorithm;
 
 use super::private_workspace::{
@@ -553,11 +557,25 @@ fn validate_workspace_path(workspace_path: &Path) -> Result<(), CutoverJournalWo
 fn acquire_exclusive_journal_lock(file: &fs::File, journal_path: &Path) -> Result<(), CutoverJournalWorkspaceErrorV1> {
   match FileExt::try_lock_exclusive(file) {
     Ok(()) => Ok(()),
-    Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+    Err(source) if is_journal_lock_contention(&source) => {
       Err(CutoverJournalWorkspaceErrorV1::Locked(format!("another cutover journal owner holds {}", journal_path.display())))
     }
     Err(source) => Err(CutoverJournalWorkspaceErrorV1::Io { operation: "cutover journal exclusive lock", source }),
   }
+}
+
+fn is_journal_lock_contention(error: &std::io::Error) -> bool {
+  if error.kind() == std::io::ErrorKind::WouldBlock {
+    return true;
+  }
+  #[cfg(windows)]
+  {
+    // Windows reports byte-range lock contention as ERROR_SHARING_VIOLATION
+    // or ERROR_LOCK_VIOLATION without mapping either value to WouldBlock.
+    return matches!(error.raw_os_error(), Some(32 | 33));
+  }
+  #[cfg(not(windows))]
+  false
 }
 
 fn capture_journal_identity(
@@ -593,8 +611,43 @@ fn read_exact_journal(file: &fs::File) -> Result<Vec<u8>, CutoverJournalWorkspac
     )))
   })?;
   bytes.resize(JOURNAL_LENGTH, 0);
-  read_file_at_native(file, 0, &mut bytes).map_err(|source| CutoverJournalWorkspaceErrorV1::Durability(Box::new(source)))?;
+  read_locked_file_at_native(file, 0, &mut bytes).map_err(|source| CutoverJournalWorkspaceErrorV1::Durability(Box::new(source)))?;
   Ok(bytes)
+}
+
+#[cfg(unix)]
+fn read_locked_file_at_native(file: &fs::File, offset: u64, bytes: &mut [u8]) -> NativeDurabilityResult<()> {
+  read_file_at_native(file, offset, bytes)
+}
+
+#[cfg(windows)]
+fn read_locked_file_at_native(file: &fs::File, offset: u64, bytes: &mut [u8]) -> NativeDurabilityResult<()> {
+  use std::os::windows::fs::FileExt;
+
+  // Windows byte-range locks reject reads from the separate handle created by
+  // the shared positional reader. This workspace owns the handle exclusively,
+  // and every journal access carries an explicit offset, so read through the
+  // same locked handle without releasing the lock or opening a race window.
+  let mut read = 0usize;
+  while read < bytes.len() {
+    let read_offset = offset.checked_add(read as u64).ok_or_else(|| {
+      NativeDurabilityError::operation_io(
+        NativeDurabilityOperation::ReadBack,
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "locked journal read offset overflow"),
+      )
+    })?;
+    let count = file
+      .seek_read(&mut bytes[read..], read_offset)
+      .map_err(|source| NativeDurabilityError::operation_io(NativeDurabilityOperation::ReadBack, source))?;
+    if count == 0 {
+      return Err(NativeDurabilityError::operation_io(
+        NativeDurabilityOperation::ReadBack,
+        std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+      ));
+    }
+    read += count;
+  }
+  Ok(())
 }
 
 fn validate_selected_journal(
