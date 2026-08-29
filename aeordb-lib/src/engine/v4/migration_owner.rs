@@ -22,6 +22,9 @@ use super::migration_control::{
   MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
   encode_migration_progress_control,
 };
+use super::migration_cutover_control::{
+  SideBySideCutoverBodyV1, decode_side_by_side_cutover_control_v1, encode_side_by_side_cutover_control_v1,
+};
 use super::migration_final_authority_reconciliation::MigrationFinalAuthorityReconciliationProofV1;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::migration_root_map_owner::{LegacyRootMapOwnerErrorV1, VerifiedLegacyRootMapReaderV1};
@@ -133,6 +136,17 @@ pub struct MigrationDestinationVerificationRequestV1<'request, 'freeze, 'source,
   pub monotonic_now_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct MigrationDestinationVerificationCompletionRequestV1<'request, 'freeze, 'source, 'destination> {
+  pub proof: &'request MigrationFinalAuthorityReconciliationProofV1<'freeze, 'source>,
+  pub root_map: &'request VerifiedLegacyRootMapReaderV1<'destination>,
+  pub cancellation: &'request tokio_util::sync::CancellationToken,
+  pub expected_map_generation: u64,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationLeaseRenewalReceiptV1 {
   pub control_sequence: u64,
@@ -164,6 +178,32 @@ pub struct MigrationProgressTransitionReceiptV1 {
   pub fencing_token: u64,
   pub phase: MigrationPhaseV1,
   pub state: MigrationProgressStateV1,
+  pub idempotent: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MigrationCutoverProgressRequestV1 {
+  pub phase: MigrationPhaseV1,
+  pub state: MigrationProgressStateV1,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MigrationCutoverFailureRequestV1 {
+  pub phase: MigrationPhaseV1,
+  pub last_error_evidence: Vec<u8>,
+  pub updated_at_ms: i64,
+  pub publication_timestamp_ms: u64,
+  pub monotonic_now_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MigrationCutoverControlReceiptV1 {
+  pub control_sequence: u64,
+  pub journal_sequence: u64,
+  pub phase: MigrationPhaseV1,
   pub idempotent: bool,
 }
 
@@ -648,7 +688,12 @@ impl MigrationStateOwnerV1 {
         "destination verification requires a nonzero expected root-map generation",
       ));
     }
-    self.validate_destination_verification_evidence(&request)?;
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
     let (context, progress) =
       self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
     let closure = request.proof.closure();
@@ -698,7 +743,12 @@ impl MigrationStateOwnerV1 {
     body.destination_header_sequence = request.root_map.destination_header_sequence();
     body.legacy_root_map_control_payload_hash = request.root_map.control_payload_hash().to_vec();
     body.updated_at_ms = request.updated_at_ms;
-    self.validate_destination_verification_evidence(&request)?;
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
     let root_map_identity = self.permit.migration_id();
     let root_map_guard = MutableSystemControlGuardV1 {
       kind: SystemControlKindV1::LegacyRootMapControl,
@@ -714,6 +764,165 @@ impl MigrationStateOwnerV1 {
       body,
       0,
       false,
+      false,
+      Some(root_map_guard),
+      Some(MutableSystemControlAuthorityExpectationV1 {
+        selected_header_sequence: request.root_map.destination_header_sequence(),
+        head_hash: request.root_map.destination_head(),
+      }),
+      retirement_owner,
+    )
+  }
+
+  pub fn complete_destination_verification(
+    &self,
+    request: MigrationDestinationVerificationCompletionRequestV1<'_, '_, '_, '_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.expected_map_generation == 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_generation",
+        "destination verification requires a nonzero expected root-map generation",
+      ));
+    }
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.phase != MigrationPhaseV1::DestinationVerify
+      || !matches!(progress.body.state, MigrationProgressStateV1::Running | MigrationProgressStateV1::Complete)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_phase",
+        "full destination verification requires running or already complete DestinationVerify progress",
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD;
+    if progress.body.flags & required_flags != required_flags
+      || progress.body.legacy_root_map_control_payload_hash != request.root_map.control_payload_hash()
+      || progress.body.destination_header_sequence > request.root_map.destination_header_sequence()
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_binding",
+        "destination verification progress is not bound to the selected live freeze, root map, and destination authority",
+      ));
+    }
+    if progress.body.state == MigrationProgressStateV1::Complete {
+      if progress.body.flags & MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED == 0 {
+        return Err(MigrationStateOwnerErrorV1::invalid(
+          "migration_destination_verification_flag",
+          "completed destination verification is missing its full-verification flag",
+        ));
+      }
+      return Ok(progress_receipt(&progress, true));
+    }
+
+    let mut body = progress.body.clone();
+    body.state = MigrationProgressStateV1::Complete;
+    body.flags |= MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+    body.destination_header_sequence = request.root_map.destination_header_sequence();
+    body.updated_at_ms = request.updated_at_ms;
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
+    let root_map_identity = self.permit.migration_id();
+    let root_map_guard = MutableSystemControlGuardV1 {
+      kind: SystemControlKindV1::LegacyRootMapControl,
+      identity: &root_map_identity,
+      expected: request.root_map.control_expectation(),
+    };
+    if request.cancellation.is_cancelled() {
+      return Err(MigrationStateOwnerErrorV1::RootMap(Box::new(LegacyRootMapOwnerErrorV1::Canceled)));
+    }
+    self.publish_progress_body_inner(
+      context,
+      &progress,
+      body,
+      MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED,
+      false,
+      false,
+      Some(root_map_guard),
+      Some(MutableSystemControlAuthorityExpectationV1 {
+        selected_header_sequence: request.root_map.destination_header_sequence(),
+        head_hash: request.root_map.destination_head(),
+      }),
+      retirement_owner,
+    )
+  }
+
+  pub fn start_destination_full_verification(
+    &self,
+    request: MigrationDestinationVerificationCompletionRequestV1<'_, '_, '_, '_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.expected_map_generation == 0 {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_generation",
+        "destination verification requires a nonzero expected root-map generation",
+      ));
+    }
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.phase != MigrationPhaseV1::DestinationVerify
+      || !matches!(progress.body.state, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_phase",
+        "full destination verification can start only from pending or already running DestinationVerify progress",
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD;
+    if progress.body.flags & required_flags != required_flags
+      || progress.body.legacy_root_map_control_payload_hash != request.root_map.control_payload_hash()
+      || progress.body.destination_header_sequence > request.root_map.destination_header_sequence()
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_destination_verification_binding",
+        "destination verification progress is not bound to the selected live freeze, root map, and destination authority",
+      ));
+    }
+    if progress.body.state == MigrationProgressStateV1::Running {
+      return Ok(progress_receipt(&progress, true));
+    }
+    let mut body = progress.body.clone();
+    body.state = MigrationProgressStateV1::Running;
+    body.destination_header_sequence = request.root_map.destination_header_sequence();
+    body.updated_at_ms = request.updated_at_ms;
+    self.validate_destination_verification_evidence(
+      request.proof,
+      request.root_map,
+      request.cancellation,
+      request.expected_map_generation,
+    )?;
+    let root_map_identity = self.permit.migration_id();
+    let root_map_guard = MutableSystemControlGuardV1 {
+      kind: SystemControlKindV1::LegacyRootMapControl,
+      identity: &root_map_identity,
+      expected: request.root_map.control_expectation(),
+    };
+    if request.cancellation.is_cancelled() {
+      return Err(MigrationStateOwnerErrorV1::RootMap(Box::new(LegacyRootMapOwnerErrorV1::Canceled)));
+    }
+    self.publish_progress_body_inner(
+      context,
+      &progress,
+      body,
+      0,
+      false,
+      false,
       Some(root_map_guard),
       Some(MutableSystemControlAuthorityExpectationV1 {
         selected_header_sequence: request.root_map.destination_header_sequence(),
@@ -725,33 +934,35 @@ impl MigrationStateOwnerV1 {
 
   fn validate_destination_verification_evidence(
     &self,
-    request: &MigrationDestinationVerificationRequestV1<'_, '_, '_, '_>,
+    proof: &MigrationFinalAuthorityReconciliationProofV1<'_, '_>,
+    root_map: &VerifiedLegacyRootMapReaderV1<'_>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    expected_map_generation: u64,
   ) -> Result<(), MigrationStateOwnerErrorV1> {
-    request.root_map.validate_selected_unchanged()?;
-    let map = request.root_map.control_body();
+    root_map.validate_selected_unchanged()?;
+    let map = root_map.control_body();
     if map.database_id != self.permit.database_id()
       || map.migration_id != self.permit.migration_id()
       || map.logical_database_id != self.permit.database_id()
       || map.source_physical_instance_id != self.permit.source_physical_instance_id()
       || map.destination_physical_instance_id != self.permit.destination_physical_instance_id()
-      || map.map_generation != request.expected_map_generation
+      || map.map_generation != expected_map_generation
     {
       return Err(MigrationStateOwnerErrorV1::invalid(
         "migration_destination_verification_map_binding",
         "selected root map differs from the permit identity, physical incarnations, or expected generation",
       ));
     }
-    request
-      .proof
+    proof
       .validate_for_destination_verification(
         &self.permit,
         &self.publisher,
-        request.root_map.destination_header_sequence(),
-        request.root_map.destination_head(),
+        root_map.destination_header_sequence(),
+        root_map.destination_head(),
       )
       .map_err(|error| MigrationStateOwnerErrorV1::invalid(error.code(), error.to_string()))?;
-    let closure = request.proof.closure();
-    let mapped = request.root_map.lookup(&closure.frozen_source_root, request.cancellation)?.ok_or_else(|| {
+    let closure = proof.closure();
+    let mapped = root_map.lookup(&closure.frozen_source_root, cancellation)?.ok_or_else(|| {
       MigrationStateOwnerErrorV1::invalid(
         "migration_destination_verification_current_root",
         "selected root map does not contain the frozen source root",
@@ -885,6 +1096,7 @@ impl MigrationStateOwnerV1 {
       body,
       authorized_new_flags,
       allow_same_state_metadata_update,
+      false,
       None,
       None,
       retirement_owner,
@@ -908,10 +1120,21 @@ impl MigrationStateOwnerV1 {
       body,
       authorized_new_flags,
       allow_same_state_metadata_update,
+      false,
       None,
       Some(authority_expectation),
       retirement_owner,
     )
+  }
+
+  fn publish_cutover_failure_body(
+    &self,
+    context: MigrationProgressPublicationContextV1,
+    progress: &MigrationProgressControlV1,
+    body: MigrationProgressBodyV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    self.publish_progress_body_inner(context, progress, body, 0, false, true, None, None, retirement_owner)
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -922,11 +1145,12 @@ impl MigrationStateOwnerV1 {
     body: MigrationProgressBodyV1,
     authorized_new_flags: u32,
     allow_same_state_metadata_update: bool,
+    allow_complete_to_failed: bool,
     extra_guard: Option<MutableSystemControlGuardV1<'_>>,
     authority_expectation: Option<MutableSystemControlAuthorityExpectationV1<'_>>,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
-    validate_progress_transition(&progress.body, &body, authorized_new_flags, allow_same_state_metadata_update)?;
+    validate_progress_transition(&progress.body, &body, authorized_new_flags, allow_same_state_metadata_update, allow_complete_to_failed)?;
     let sequence = progress.sequence.checked_add(1).ok_or_else(|| {
       MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
     })?;
@@ -1290,6 +1514,239 @@ impl MigrationStateOwnerV1 {
     ))
   }
 
+  pub(crate) fn advance_cutover_progress(
+    &self,
+    request: MigrationCutoverProgressRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if !matches!(request.phase, MigrationPhaseV1::Cutover | MigrationPhaseV1::ReadOnlyValidation) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_progress_phase",
+        "the cutover owner may advance only Cutover and ReadOnlyValidation progress",
+      ));
+    }
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    let idempotent = progress.body.phase == request.phase && progress.body.state == request.state;
+    if idempotent {
+      return Ok(progress_receipt(&progress, true));
+    }
+    let allowed = matches!(
+      (progress.body.phase, progress.body.state, request.phase, request.state),
+      (
+        MigrationPhaseV1::DestinationVerify,
+        MigrationProgressStateV1::Complete,
+        MigrationPhaseV1::Cutover,
+        MigrationProgressStateV1::Pending
+      ) | (MigrationPhaseV1::Cutover, MigrationProgressStateV1::Pending, MigrationPhaseV1::Cutover, MigrationProgressStateV1::Running)
+        | (MigrationPhaseV1::Cutover, MigrationProgressStateV1::Running, MigrationPhaseV1::Cutover, MigrationProgressStateV1::Complete)
+        | (
+          MigrationPhaseV1::Cutover,
+          MigrationProgressStateV1::Complete,
+          MigrationPhaseV1::ReadOnlyValidation,
+          MigrationProgressStateV1::Pending
+        )
+    );
+    if !allowed {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_progress_transition",
+        format!(
+          "cutover owner cannot advance {:?}/{:?} to {:?}/{:?}",
+          progress.body.phase, progress.body.state, request.phase, request.state
+        ),
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
+      | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
+      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+    if progress.body.flags & required_flags != required_flags {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_progress_prerequisites",
+        "cutover progress requires source GC suspension, source write freeze, and full destination verification",
+      ));
+    }
+    let mut body = progress.body.clone();
+    body.phase = request.phase;
+    body.state = request.state;
+    body.updated_at_ms = request.updated_at_ms;
+    self.publish_progress_body(context, &progress, body, 0, false, retirement_owner)
+  }
+
+  pub(crate) fn observe_cutover_progress(
+    &self,
+    updated_at_ms: i64,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+  ) -> Result<MigrationProgressBodyV1, MigrationStateOwnerErrorV1> {
+    let (_, progress) = self.prepare_progress_publication(updated_at_ms, publication_timestamp_ms, monotonic_now_ms)?;
+    Ok(progress.body)
+  }
+
+  pub(crate) fn fail_cutover_progress(
+    &self,
+    request: MigrationCutoverFailureRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if !matches!(request.phase, MigrationPhaseV1::DestinationVerify | MigrationPhaseV1::Cutover | MigrationPhaseV1::ReadOnlyValidation) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_failure_phase",
+        "pre-acceptance cutover failure may terminate only destination verification, cutover, or read-only validation",
+      ));
+    }
+    let hash_width = self.permit.hash_algorithm().hash_length();
+    if request.last_error_evidence.len() != hash_width || all_zero(&request.last_error_evidence) {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_failure_evidence",
+        "pre-acceptance cutover failure requires nonzero database-profile evidence",
+      ));
+    }
+    let (context, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    if progress.body.phase != request.phase {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_failure_phase",
+        "pre-acceptance cutover failure must terminate the selected migration phase",
+      ));
+    }
+    if progress.body.state == MigrationProgressStateV1::Failed {
+      if progress.body.last_error_evidence != request.last_error_evidence {
+        return Err(MigrationStateOwnerErrorV1::invalid(
+          "migration_cutover_failure_conflict",
+          "selected failed migration progress records different failure evidence",
+        ));
+      }
+      return Ok(progress_receipt(&progress, true));
+    }
+    if progress.body.state == MigrationProgressStateV1::Canceled {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_failure_terminal",
+        "canceled migration progress cannot be replaced by cutover failure evidence",
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
+      | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
+      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+    if progress.body.flags & required_flags != required_flags {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_failure_prerequisites",
+        "pre-acceptance cutover failure requires the selected freeze and destination-verification evidence",
+      ));
+    }
+    let mut body = progress.body.clone();
+    body.state = MigrationProgressStateV1::Failed;
+    body.last_error_evidence = request.last_error_evidence;
+    body.updated_at_ms = request.updated_at_ms;
+    self.publish_cutover_failure_body(context, &progress, body, retirement_owner)
+  }
+
+  pub(crate) fn publish_cutover_control(
+    &self,
+    body: &SideBySideCutoverBodyV1,
+    publication_timestamp_ms: u64,
+    monotonic_now_ms: u64,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationCutoverControlReceiptV1, MigrationStateOwnerErrorV1> {
+    let publication_time_ms = validate_publication_clock(publication_timestamp_ms, monotonic_now_ms, i64::MAX as u64)?;
+    validate_transition_publication_time(publication_time_ms, body.updated_at_ms)?;
+    validate_destination_authority(&self.publisher, &self.permit)?;
+    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&self.publisher, &self.permit)?;
+    validate_owned_held_controls(self, &lease, &progress, publication_time_ms)?;
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
+      | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
+      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+    if progress.body.flags & required_flags != required_flags
+      || progress.body.phase != body.phase
+      || body.destination_header_sequence < progress.body.destination_header_sequence
+      || progress.body.state == MigrationProgressStateV1::Failed
+      || progress.body.state == MigrationProgressStateV1::Canceled
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_control_progress",
+        "ACUT publication requires matching active migration progress with every cutover prerequisite",
+      ));
+    }
+    if body.database_id != self.permit.database_id()
+      || body.migration_id != self.permit.migration_id()
+      || body.source_physical_instance_id != self.permit.source_physical_instance_id()
+      || body.destination_physical_instance_id != self.permit.destination_physical_instance_id()
+      || body.holder_boot_id != self.holder_boot_id
+      || body.fencing_token != self.fencing_token
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_cutover_control_binding",
+        "ACUT body does not match the selected permit, holder, and fence",
+      ));
+    }
+
+    let current = self.publisher.load_mutable_system_control(
+      SystemControlKindV1::SideBySideCutover,
+      &self.permit.database_id(),
+      &self.permit.migration_id(),
+    )?;
+    if let Some(selected) = current.as_ref() {
+      let selected_control = decode_side_by_side_cutover_control_v1(&selected.bytes, self.permit.hash_algorithm())?;
+      if selected_control.body == *body {
+        return Ok(MigrationCutoverControlReceiptV1 {
+          control_sequence: selected_control.sequence,
+          journal_sequence: body.journal_sequence,
+          phase: body.phase,
+          idempotent: true,
+        });
+      }
+    }
+    let control_sequence = match current.as_ref() {
+      Some(selected) => selected.control_sequence.checked_add(1).ok_or_else(|| {
+        MigrationStateOwnerErrorV1::invalid("migration_cutover_control_sequence_exhausted", "ACUT control sequence is exhausted")
+      })?,
+      None => 1,
+    };
+    let encoded = encode_side_by_side_cutover_control_v1(control_sequence, body, self.permit.hash_algorithm())?;
+    let guard_identity = self.permit.migration_id();
+    let guards = [
+      MutableSystemControlGuardV1 {
+        kind: SystemControlKindV1::MigrationLease,
+        identity: &guard_identity,
+        expected: control_expectation(&loaded_lease),
+      },
+      MutableSystemControlGuardV1 {
+        kind: SystemControlKindV1::MigrationProgress,
+        identity: &guard_identity,
+        expected: control_expectation(&loaded_progress),
+      },
+    ];
+    let request = MutableSystemControlPublicationRequestV1 {
+      database_id: &self.permit.database_id(),
+      kind: SystemControlKindV1::SideBySideCutover,
+      identity: &self.permit.migration_id(),
+      expected: current.as_ref().map(control_expectation),
+      guards: &guards,
+      encoded_control: &encoded,
+      publication_timestamp_ms,
+      monotonic_now_ms,
+    };
+    let receipt = match self.publisher.publish_mutable_system_control(request, retirement_owner) {
+      Ok(receipt) => receipt,
+      Err(source) if source.committed_receipt().is_some() => {
+        return Err(MigrationStateOwnerErrorV1::CutoverControlCommitted { source: Box::new(source) });
+      }
+      Err(source) => return Err(MigrationStateOwnerErrorV1::Publication(source)),
+    };
+    Ok(MigrationCutoverControlReceiptV1 {
+      control_sequence: receipt.control_sequence,
+      journal_sequence: body.journal_sequence,
+      phase: body.phase,
+      idempotent: receipt.idempotent,
+    })
+  }
+
+  pub(crate) fn publisher(&self) -> &Arc<V4FirstAuthorityPublisher> {
+    &self.publisher
+  }
+
+  pub(crate) const fn permit(&self) -> &MigrationPreflightPermitV1 {
+    &self.permit
+  }
+
   pub const fn fencing_token(&self) -> u64 {
     self.fencing_token
   }
@@ -1360,6 +1817,7 @@ pub enum MigrationStateOwnerErrorV1 {
   TakeoverLeaseCommitted { fencing_token: u64, source: Box<MutableSystemControlPublicationErrorV1> },
   TakeoverPartial { lease_control_sequence: u64, fencing_token: u64, source: MutableSystemControlPublicationErrorV1 },
   TakeoverCommitted { lease_control_sequence: u64, fencing_token: u64, source: Box<MutableSystemControlPublicationErrorV1> },
+  CutoverControlCommitted { source: Box<MutableSystemControlPublicationErrorV1> },
   Format(FormatError),
   RootMap(Box<LegacyRootMapOwnerErrorV1>),
   Authority(FirstAuthorityPublicationErrorV1),
@@ -1381,6 +1839,7 @@ impl MigrationStateOwnerErrorV1 {
       Self::TakeoverLeaseCommitted { .. } => "migration_takeover_lease_committed",
       Self::TakeoverPartial { .. } => "migration_takeover_partial",
       Self::TakeoverCommitted { .. } => "migration_takeover_committed",
+      Self::CutoverControlCommitted { .. } => "migration_cutover_control_committed",
       Self::Format(source) => source.code(),
       Self::RootMap(source) => source.code(),
       Self::Authority(source) => source.code(),
@@ -1427,6 +1886,9 @@ impl Display for MigrationStateOwnerErrorV1 {
       Self::TakeoverCommitted { lease_control_sequence, fencing_token, source } => {
         write!(formatter, "{code}: migration takeover lease {lease_control_sequence} and progress token {fencing_token} committed but post-commit handling failed: {source}")
       }
+      Self::CutoverControlCommitted { source } => {
+        write!(formatter, "{code}: side-by-side cutover control committed but post-commit handling failed: {source}")
+      }
       Self::Format(source) => write!(formatter, "{code}: migration control format error: {source}"),
       Self::RootMap(source) => write!(formatter, "{code}: selected legacy root-map error: {source}"),
       Self::Authority(source) => write!(formatter, "{code}: migration authority error: {source}"),
@@ -1446,7 +1908,8 @@ impl Error for MigrationStateOwnerErrorV1 {
       | Self::ProgressTransitionCommitted { source }
       | Self::ReleaseTransitionCommitted { source, .. }
       | Self::TakeoverLeaseCommitted { source, .. }
-      | Self::TakeoverCommitted { source, .. } => Some(source.as_ref()),
+      | Self::TakeoverCommitted { source, .. }
+      | Self::CutoverControlCommitted { source } => Some(source.as_ref()),
       Self::ReleasePartial { source, .. } | Self::TakeoverPartial { source, .. } => Some(source),
       Self::Format(source) => Some(source),
       Self::RootMap(source) => Some(source.as_ref()),
@@ -1775,6 +2238,7 @@ fn validate_progress_transition(
   target: &MigrationProgressBodyV1,
   authorized_new_flags: u32,
   allow_same_state_metadata_update: bool,
+  allow_complete_to_failed: bool,
 ) -> Result<(), MigrationStateOwnerErrorV1> {
   let current_phase = current.phase as u16;
   let target_phase = target.phase as u16;
@@ -1785,7 +2249,9 @@ fn validate_progress_transition(
     ));
   }
   if target_phase == current_phase {
-    if !(allow_same_state_metadata_update && target.state == current.state) {
+    let specialized_complete_failure =
+      allow_complete_to_failed && current.state == MigrationProgressStateV1::Complete && target.state == MigrationProgressStateV1::Failed;
+    if !(specialized_complete_failure || allow_same_state_metadata_update && target.state == current.state) {
       validate_same_phase_state_transition(current.state, target.state)?;
     }
   } else if current.state != MigrationProgressStateV1::Complete || target.state != MigrationProgressStateV1::Pending {

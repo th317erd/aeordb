@@ -319,6 +319,34 @@ impl DurableCutoverJournalWorkspaceV1 {
     cancellation: CancellationToken,
     memory: &MemoryCoordinator,
   ) -> Result<Self, CutoverJournalWorkspaceErrorV1> {
+    let expected_body = validated_cutover_body(expected_encoded_control, algorithm)
+      .map_err(|source| CutoverJournalWorkspaceErrorV1::Format(Box::new(source)))?;
+    Self::open_selected_internal(workspace_path, Some(expected_body), algorithm, options, cancellation, memory)
+  }
+
+  /// Reopens and locks whichever valid ACUT slot is durably selected.
+  ///
+  /// This is intentionally untyped: the cutover transition owner must decode
+  /// and bind the selected opaque body against database authority and admitted
+  /// evidence before it may publish or mutate the namespace.
+  pub fn open_selected(
+    workspace_path: &Path,
+    algorithm: HashAlgorithm,
+    options: CutoverJournalWorkspaceOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, CutoverJournalWorkspaceErrorV1> {
+    Self::open_selected_internal(workspace_path, None, algorithm, options, cancellation, memory)
+  }
+
+  fn open_selected_internal(
+    workspace_path: &Path,
+    expected_body: Option<&[u8]>,
+    algorithm: HashAlgorithm,
+    options: CutoverJournalWorkspaceOptionsV1,
+    cancellation: CancellationToken,
+    memory: &MemoryCoordinator,
+  ) -> Result<Self, CutoverJournalWorkspaceErrorV1> {
     check_cancellation(&cancellation)?;
     validate_workspace_path(workspace_path)?;
     let reserved_memory_bytes = state_accounting_bytes(workspace_path)?;
@@ -326,8 +354,6 @@ impl DurableCutoverJournalWorkspaceV1 {
       .reserve(MemoryOwner::Migration, reserved_memory_bytes, AdmissionClass::Maintenance)
       .map_err(|source| CutoverJournalWorkspaceErrorV1::Memory(Box::new(source)))?;
     let journal_path = workspace_path.join(CUTOVER_JOURNAL_FILE_NAME_V1);
-    let expected_body = validated_cutover_body(expected_encoded_control, algorithm)
-      .map_err(|source| CutoverJournalWorkspaceErrorV1::Format(Box::new(source)))?;
     validate_private_directory_readonly(workspace_path, "cutover journal workspace")?;
     ensure_capacity(workspace_path, 0, options.minimum_free_bytes)?;
     let journal_file =
@@ -336,7 +362,16 @@ impl DurableCutoverJournalWorkspaceV1 {
     validate_private_regular_file(&journal_path, &journal_file, "cutover journal")?;
     let journal_identity = capture_journal_identity(&journal_file, &journal_path)?;
     let journal_bytes = read_exact_journal(&journal_file)?;
-    let (selected_slot, sequence, redundancy_degraded) = validate_selected_journal(&journal_bytes, expected_body, algorithm)?;
+    let selection =
+      select_cutover_journal(&journal_bytes, algorithm).map_err(|source| CutoverJournalWorkspaceErrorV1::Format(Box::new(source)))?;
+    if expected_body.is_some_and(|expected| selection.body != expected) {
+      return Err(CutoverJournalWorkspaceErrorV1::Identity(
+        "selected external journal body differs from the expected database cutover control".to_string(),
+      ));
+    }
+    let selected_slot = selection.selected_slot;
+    let sequence = selection.sequence;
+    let redundancy_degraded = selection.redundancy_degraded;
     check_cancellation(&cancellation)?;
     Ok(Self {
       workspace_path: workspace_path.to_path_buf(),

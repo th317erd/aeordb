@@ -894,7 +894,7 @@ fn release_and_takeover_prepare_fallible_state_before_their_first_publication() 
 
   let takeover = source
     .split_once("pub fn takeover(")
-    .and_then(|(_, remainder)| remainder.split_once("pub const fn fencing_token(").map(|(takeover, _)| takeover))
+    .and_then(|(_, remainder)| remainder.split_once("pub(crate) fn advance_cutover_progress(").map(|(takeover, _)| takeover))
     .expect("migration takeover method boundary");
   assert_eq!(takeover.matches("require_migration_controls(").count(), 1);
   assert!(takeover.rfind("encode_migration_progress_control").unwrap() < takeover.find("publish_control(").unwrap());

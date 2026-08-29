@@ -463,6 +463,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
       PathBuf::from("engine/v4/index_runtime_installation.rs"),
       PathBuf::from("engine/v4/migration_capture_replay.rs"),
       PathBuf::from("engine/v4/migration_capture_runtime.rs"),
+      PathBuf::from("engine/v4/migration_cutover_rehearsal.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),
       PathBuf::from("engine/v4/migration_root_map_owner.rs"),
       PathBuf::from("engine/v4/migration_source_gc.rs"),

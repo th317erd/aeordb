@@ -720,18 +720,28 @@ fn collect_rust_sources(path: &Path, sources: &mut Vec<std::path::PathBuf>) {
 fn durable_cutover_journal_authority_remains_disconnected_from_production_callers() {
   let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let owner_path = source_root.join("engine/v4/migration_cutover_journal.rs");
+  let rehearsal_owner_path = source_root.join("engine/v4/migration_cutover_rehearsal.rs");
+  let module_path = source_root.join("engine/v4/mod.rs");
   let owner = fs::read_to_string(&owner_path).unwrap();
   assert!(!owner.contains("StorageEngine"));
   assert!(!owner.contains("ControlStore"));
   assert!(!owner.contains("server::"));
+  let rehearsal_owner = fs::read_to_string(&rehearsal_owner_path).unwrap();
+  assert!(!rehearsal_owner.contains("StorageEngine"));
+  assert!(!rehearsal_owner.contains("server::"));
+  assert!(!rehearsal_owner.contains("axum::"));
+  assert!(!rehearsal_owner.contains("clap::"));
 
   let mut sources = Vec::new();
   collect_rust_sources(&source_root, &mut sources);
   for source in sources {
-    if source == owner_path {
+    if source == owner_path || source == rehearsal_owner_path {
       continue;
     }
     let contents = fs::read_to_string(&source).unwrap();
     assert!(!contents.contains("DurableCutoverJournalWorkspaceV1"), "cutover journal authority was activated by {}", source.display());
+    if source != module_path {
+      assert!(!contents.contains("SideBySideCutoverRehearsalOwnerV1"), "cutover rehearsal authority was activated by {}", source.display());
+    }
   }
 }

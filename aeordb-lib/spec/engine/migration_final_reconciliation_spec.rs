@@ -32,12 +32,12 @@ use aeordb::engine::v4::migration_final_reconciliation::{
   stream_strict_migration_merkle_diff_v1,
 };
 use aeordb::engine::v4::migration_control::{
-  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationPhaseV1,
-  MigrationProgressStateV1, decode_migration_progress_control,
+  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
+  MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationPhaseV1, MigrationProgressStateV1, decode_migration_progress_control,
 };
 use aeordb::engine::v4::migration_owner::{
-  MigrationAcquisitionRequestV1, MigrationDestinationVerificationRequestV1, MigrationFinalFreezeCompletionRequestV1,
-  MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
+  MigrationAcquisitionRequestV1, MigrationDestinationVerificationCompletionRequestV1, MigrationDestinationVerificationRequestV1,
+  MigrationFinalFreezeCompletionRequestV1, MigrationLeaseRenewalRequestV1, MigrationProgressTransitionRequestV1, MigrationStateOwnerV1,
 };
 use aeordb::engine::v4::migration_final_authority_reconciliation::{
   MigrationFinalAuthorityInventoryClosureV1, MigrationFinalAuthorityInventorySourceV1, MigrationFinalAuthorityReconciliationErrorV1,
@@ -2113,6 +2113,95 @@ fn selected_root_map_and_live_frozen_source_begin_destination_verification_idemp
     )
     .unwrap();
   assert!(recovered.idempotent);
+
+  let completion_reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let started = owner
+    .start_destination_full_verification(
+      MigrationDestinationVerificationCompletionRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &completion_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_004_600,
+        publication_timestamp_ms: 1_700_000_004_700,
+        monotonic_now_ms: 48_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert_eq!(
+    (started.phase, started.state, started.idempotent),
+    (MigrationPhaseV1::DestinationVerify, MigrationProgressStateV1::Running, false)
+  );
+  let completion_reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let completion_destination_sequence = completion_reader.destination_header_sequence();
+  let completed = owner
+    .complete_destination_verification(
+      MigrationDestinationVerificationCompletionRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &completion_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_004_800,
+        publication_timestamp_ms: 1_700_000_004_900,
+        monotonic_now_ms: 49_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert_eq!(
+    (completed.phase, completed.state, completed.idempotent),
+    (MigrationPhaseV1::DestinationVerify, MigrationProgressStateV1::Complete, false)
+  );
+  let selected = fixture
+    .destination
+    .publisher()
+    .load_mutable_system_control(SystemControlKindV1::MigrationProgress, &fixture.permit.database_id(), &fixture.permit.migration_id())
+    .unwrap()
+    .unwrap();
+  let selected = decode_migration_progress_control(&selected.bytes, fixture.permit.hash_algorithm()).unwrap();
+  assert_eq!(selected.body.destination_header_sequence, completion_destination_sequence);
+  assert_ne!(selected.body.flags & MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, 0);
+
+  let retry_reader = VerifiedLegacyRootMapReaderV1::open(
+    fixture.destination.publisher(),
+    fixture.permit.database_id(),
+    fixture.permit.migration_id(),
+    &cancellation,
+    &fixture.memory,
+  )
+  .unwrap();
+  let retry = owner
+    .complete_destination_verification(
+      MigrationDestinationVerificationCompletionRequestV1 {
+        proof: final_authority.proof(),
+        root_map: &retry_reader,
+        cancellation: &cancellation,
+        expected_map_generation: 1,
+        updated_at_ms: 1_700_000_005_000,
+        publication_timestamp_ms: 1_700_000_005_100,
+        monotonic_now_ms: 50_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  assert!(retry.idempotent);
+  freeze.validate_unchanged().unwrap();
+  assert_eq!(fs::read(&fixture.source_path).unwrap(), source_before);
 }
 
 #[test]

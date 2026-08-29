@@ -169,9 +169,14 @@ pub fn decode_side_by_side_cutover_control_v1(bytes: &[u8], algorithm: HashAlgor
   if control.kind != SystemControlKindV1::SideBySideCutover {
     return Err(kind_error("cutover_control_kind", "control is not a side-by-side cutover control"));
   }
+  let body = decode_side_by_side_cutover_body_v1(control.body, algorithm)?;
+  Ok(SideBySideCutoverControlV1 { sequence: control.sequence, body })
+}
+
+pub fn decode_side_by_side_cutover_body_v1(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<SideBySideCutoverBodyV1> {
   let hash_width = algorithm.hash_length();
   let expected = cutover_body_length(algorithm)?;
-  let mut reader = BoundedReader::new(control.body, expected)?;
+  let mut reader = BoundedReader::new(bytes, expected)?;
   let database_id = read_id(&mut reader)?;
   let migration_id = read_id(&mut reader)?;
   let source_physical_instance_id = read_id(&mut reader)?;
@@ -220,7 +225,7 @@ pub fn decode_side_by_side_cutover_control_v1(bytes: &[u8], algorithm: HashAlgor
     last_error_evidence,
   };
   validate_cutover_body(&body, algorithm)?;
-  Ok(SideBySideCutoverControlV1 { sequence: control.sequence, body })
+  Ok(body)
 }
 
 fn validate_cutover_body(request: &SideBySideCutoverBodyV1, algorithm: HashAlgorithm) -> FormatResult<()> {
@@ -290,7 +295,10 @@ fn cutover_body_length(algorithm: HashAlgorithm) -> FormatResult<usize> {
 }
 
 fn read_id(reader: &mut BoundedReader<'_>) -> FormatResult<[u8; 16]> {
-  reader.read_exact(16)?.try_into().map_err(|_| length_error("cutover identity has the wrong length"))
+  let bytes = reader.read_exact(16)?;
+  let mut identity = [0u8; 16];
+  identity.copy_from_slice(bytes);
+  Ok(identity)
 }
 
 fn valid_platform_identity(identity: PlatformFileIdentityDescriptorV1) -> bool {

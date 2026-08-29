@@ -183,6 +183,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let index_runtime_installation_path = source_root.join("engine/v4/index_runtime_installation.rs");
   let migration_base_clone_execution_path = source_root.join("engine/v4/migration_base_clone_execution.rs");
   let migration_capture_replay_path = source_root.join("engine/v4/migration_capture_replay.rs");
+  let migration_cutover_rehearsal_path = source_root.join("engine/v4/migration_cutover_rehearsal.rs");
   let migration_destination_path = source_root.join("engine/v4/migration_destination.rs");
   let migration_final_authority_reconciliation_path = source_root.join("engine/v4/migration_final_authority_reconciliation.rs");
   let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
@@ -214,6 +215,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &index_runtime_installation_path,
       &migration_base_clone_execution_path,
       &migration_capture_replay_path,
+      &migration_cutover_rehearsal_path,
       &migration_destination_path,
       &migration_final_authority_reconciliation_path,
       &migration_final_reconciliation_path,
@@ -235,6 +237,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &index_runtime_installation_path,
     &migration_base_clone_execution_path,
     &migration_capture_replay_path,
+    &migration_cutover_rehearsal_path,
     &migration_destination_path,
     &migration_final_authority_reconciliation_path,
     &migration_final_reconciliation_path,

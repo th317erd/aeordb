@@ -504,11 +504,15 @@ pub struct MigrationPreflightPermitV1 {
   migration_id: [u8; 16],
   source_physical_instance_id: [u8; 16],
   destination_physical_instance_id: [u8; 16],
+  source_path_digest: [u8; 32],
   source_file_identity: PlatformFileIdentityDescriptorV1,
   destination_path_digest: [u8; 32],
   destination_parent_identity: PlatformFileIdentityDescriptorV1,
   hash_algorithm: HashAlgorithm,
+  source_file_size: u64,
+  source_complete_file_checksum: [u8; 32],
   source_header_sequence: u64,
+  source_selected_header_digest: [u8; 32],
   source_capture_head: Vec<u8>,
   configuration_generation: u64,
   effective_configuration_fingerprint: Vec<u8>,
@@ -538,6 +542,10 @@ impl MigrationPreflightPermitV1 {
     self.destination_physical_instance_id
   }
 
+  pub const fn source_path_digest(&self) -> [u8; 32] {
+    self.source_path_digest
+  }
+
   pub const fn source_file_identity(&self) -> PlatformFileIdentityDescriptorV1 {
     self.source_file_identity
   }
@@ -554,8 +562,20 @@ impl MigrationPreflightPermitV1 {
     self.hash_algorithm
   }
 
+  pub const fn source_file_size(&self) -> u64 {
+    self.source_file_size
+  }
+
+  pub const fn source_complete_file_checksum(&self) -> [u8; 32] {
+    self.source_complete_file_checksum
+  }
+
   pub const fn source_header_sequence(&self) -> u64 {
     self.source_header_sequence
+  }
+
+  pub const fn source_selected_header_digest(&self) -> [u8; 32] {
+    self.source_selected_header_digest
   }
 
   pub fn source_capture_head(&self) -> &[u8] {
@@ -667,11 +687,15 @@ pub fn admit_migration_preflight_v1(
     migration_id: request.identity.migration_id,
     source_physical_instance_id: request.identity.source_physical_instance_id,
     destination_physical_instance_id: request.identity.destination_physical_instance_id,
+    source_path_digest: request.identity.source_path_digest,
     source_file_identity: request.identity.source_file_identity,
     destination_path_digest: request.identity.destination_path_digest,
     destination_parent_identity: request.identity.destination_parent_identity,
     hash_algorithm: request.source.hash_algorithm,
+    source_file_size: request.source.file_size,
+    source_complete_file_checksum: request.source.complete_file_checksum,
     source_header_sequence: request.source.selected_header_sequence,
+    source_selected_header_digest: request.source.selected_header_digest,
     source_capture_head: request.source.head_hash.clone(),
     configuration_generation: request.configuration.generation,
     effective_configuration_fingerprint: request.configuration.effective_configuration_fingerprint.clone(),
