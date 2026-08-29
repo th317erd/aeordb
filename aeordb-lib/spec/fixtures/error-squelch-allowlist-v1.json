@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1510,
+  "maximum_occurrences": 1508,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -1842,26 +1842,6 @@
       "kind": "default_on_error",
       "pattern": "permitted . chars () . nth (index) . map (| ch | ch != '-') . unwrap_or (false)",
       "review": "optional-data-default"
-    },
-    {
-      "id": "esq-v1-86293abec69ed54ac8ac-00",
-      "file": "aeordb-lib/src/engine/auto_heal.rs",
-      "line": 67,
-      "column": 11,
-      "enclosing_item": "try_heal_from_peers",
-      "kind": "logged_error_continues",
-      "pattern": "Err (e) => { tracing :: warn ! (\"Failed to store healed entry {}: {}\" , hash_short , e ,) ; }",
-      "review": "optional-cleanup-evidence"
-    },
-    {
-      "id": "esq-v1-21245d4778fdaa6b659d-00",
-      "file": "aeordb-lib/src/engine/auto_heal.rs",
-      "line": 72,
-      "column": 7,
-      "enclosing_item": "try_heal_from_peers",
-      "kind": "logged_error_continues",
-      "pattern": "Err (e) => { tracing :: debug ! (\"Peer {} could not provide entry {}: {}\" , peer . node_id , hash_short , e ,) ; }",
-      "review": "optional-cleanup-evidence"
     },
     {
       "id": "esq-v1-5b0b129eb3e9aaaa9951-00",

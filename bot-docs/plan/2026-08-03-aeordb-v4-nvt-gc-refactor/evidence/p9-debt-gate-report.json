@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P9-debt-gate",
+  "captured_at": "2026-08-29T23:20:11Z",
+  "status": "pass-safe-repository-only",
+  "source": {
+    "baseline_commit": "30cee29f8deeecda48419ddc31c697178ac375b9",
+    "branch": "development",
+    "definition": "The tested candidate is the baseline commit plus the P9 files and deletions recorded by this report.",
+    "native_source_sha256": {
+      "aeordb-lib/Cargo.toml": "e6891592f3783ee7cbfb62171e46f80e7dd344a75e0e7aae1647f096e3bd1292",
+      "aeordb-lib/src/engine/mod.rs": "3b2bb22c9f075a7072d9d0b28331d070c2c4618de447146994078a2f39b65b06",
+      "aeordb-lib/src/engine/query_engine.rs": "9d5eca4400df9c3221cf0dce89705a58278589ad0141fa1910393a68be8cd8e3",
+      "aeordb-lib/src/engine/rss_sampler.rs": "95db6f1966c98d946f448be6945cc40544ce45401b38af714a98297bc2028290"
+    },
+    "native_source_hashes_identical_on_linux_macos_and_windows": true,
+    "deleted_source_files_absent_on_all_three_platforms": [
+      "aeordb-lib/src/engine/auto_heal.rs"
+    ]
+  },
+  "policy": {
+    "path": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/v4-debt-policy.json",
+    "sha256": "91350476047636181138b01c22a81fcb8c2ce02120b0ce06c0daf7f2cfa74f6a",
+    "reviewed_entries": 7,
+    "retained_matches": 87,
+    "timed_compatibility_shims": [
+      "selected-root-v3-adapter",
+      "legacy-v3-root-service-mode",
+      "v0-whole-index-manager",
+      "embedded-json-query-cursor"
+    ],
+    "forbidden_debt": [
+      "dead-auto-heal-stub",
+      "misnamed-legacy-position-component",
+      "v4-whole-index-manager-bypass"
+    ],
+    "permanent_projections": []
+  },
+  "safe_retirement": {
+    "deleted_feature": "auto_heal_unimplemented",
+    "deleted_module": "engine::auto_heal",
+    "reason": "The opt-in module had no transport implementation and always failed peer retrieval, so retaining it could falsely imply corruption recovery.",
+    "persisted_writer_inventory_updated": true,
+    "error_squelch_inventory": {
+      "previous_maximum_occurrences": 1510,
+      "current_maximum_occurrences": 1508,
+      "removed_stale_rows": 2
+    },
+    "terminology_correction": "legacy_position_component was renamed v0_index_position_component because its input is the v0 whole-index representation while its output is canonical logical position data.",
+    "linux_only_from_str_import": "The trait import is now Linux-gated, removing the former unused-import warning on macOS and Windows without a lint suppression."
+  },
+  "failure_first_evidence": [
+    {
+      "hypothesis": "The named P9 debt target did not exist.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-target-red.log",
+      "log_sha256": "d935e58499720efe879071b401a6f2f12f994f4ce557f0f4b358c46ded7ade7c"
+    },
+    {
+      "hypothesis": "The debt self-test did not exist.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-spec-red.log",
+      "log_sha256": "15989e40b9dc3492f5f0a2439517ae5b3449a3461a22f89adc2c8f332fdc563d"
+    },
+    {
+      "hypothesis": "The dead auto-heal feature and source were forbidden by policy before deletion.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-autoheal-red.log",
+      "log_sha256": "5babfb754ab8a9643b52dbc64310f973cadb738e1400a120bfaee0eceed803b5"
+    },
+    {
+      "hypothesis": "The independent contract gate did not yet invoke the debt policy.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-chain-red.log",
+      "log_sha256": "3f9ad5fef5e4e14c5b46967366ae1ebc026afcbe6ef53b942905072eccb4caf3"
+    },
+    {
+      "hypothesis": "The misleading legacy-position helper name remained forbidden.",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-position-name-red.log",
+      "log_sha256": "4355bb93846192535f6274784b6d3c3c8645b9481f231fb865610678f5d014a8"
+    }
+  ],
+  "verification": {
+    "debt_self_test": {
+      "result": "pass",
+      "coverage": "Valid policy plus missing policy, schema/campaign/id, duplicate id, classification, empty/multiline regex, owner/rationale/removal metadata, numeric/class-specific ceilings, collection shape, duplicate roots/paths, forbidden allow paths, unsafe/missing/out-of-root paths, invalid regex, unreviewed growth, forbidden matches, stale paths, and malformed JSON.",
+      "command": "timeout 20s scripts/spec/check-v4-debt-spec.sh",
+      "log": "/home/wyatt/.cache/codex/aeordb-tests/logs/p9-v4-debt-spec-green.log",
+      "log_sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee"
+    },
+    "standalone_debt_gate": {
+      "result": "pass",
+      "command": "timeout 120s scripts/plan/check-v4-debt.sh",
+      "reviewed_entries": 7,
+      "retained_matches": 87
+    },
+    "affected_linux_tests": {
+      "result": "pass",
+      "targets": [
+        "aggregation_spec",
+        "error_squelch_architecture_spec",
+        "query_engine_spec",
+        "query_pagination_spec"
+      ],
+      "passed": 176,
+      "failed": 0,
+      "log": "/media/Data/AeorDB/Tests/p9-debt-30cee29/affected-green.log",
+      "log_sha256": "ebaf2fda211eeeed1929d6bfb675de7f497be255daf88777514495d0dd09e259"
+    },
+    "linux_workspace_check": {
+      "result": "pass",
+      "command": "cargo check --locked --workspace --all-targets",
+      "known_unrelated_warning": "The historical test-only require_wasm_parser macro remains unused in index_values_spec.",
+      "log": "/media/Data/AeorDB/Tests/p9-debt-30cee29/workspace-check.log",
+      "log_sha256": "f9a326515bec0b442e06537f4d57d9e5ee0916606d976ec937a1a481bf36082e"
+    },
+    "independent_contract_gate": {
+      "result": "pass",
+      "fixtures": 454,
+      "debt_entries": 7,
+      "debt_matches": 87,
+      "routes": 95,
+      "documentation_pages": 38,
+      "log": "/media/Data/AeorDB/Tests/p9-debt-30cee29/contract.log",
+      "log_sha256": "22403739d484009e26b4f5804b2d886752b0a142ea8de12d3af48e204ee49e9f"
+    },
+    "macos_arm64_release_check": {
+      "result": "pass",
+      "command": "cargo check --locked --release -p aeordb --lib -j1",
+      "cargo_reported_seconds": 49.16,
+      "former_from_str_warning_absent": true,
+      "log": "/Users/wyatt/.cache/codex/p9-debt-30cee29/macos-release-check.log",
+      "log_sha256": "21b136bf96ed302838c17f6d3eeaf8d099d2f76f100d242180f4250c815eb334"
+    },
+    "windows_x86_64_msvc_release_check": {
+      "result": "pass",
+      "command": "cargo check --locked --release -p aeordb --lib -j1",
+      "cargo_reported_seconds": 175,
+      "former_from_str_warning_absent": true,
+      "log": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\logs\\p9-debt-30cee29-windows-release-check.log",
+      "log_sha256": "38a96a5b1380194f55cc581c588da9ad5e2bb2630ef06a06f4539c1e82f7d8b3"
+    }
+  },
+  "rejected_attempts": [
+    {
+      "reason": "The first Linux affected matrix correctly failed after an import was initially moved above suppression-inventory line anchors. The import was relocated after production items, preserving exact unrelated review metadata rather than rewriting the audit inventory.",
+      "log": "/media/Data/AeorDB/Tests/p9-debt-30cee29/affected.log",
+      "log_sha256": "5101e63a2017dce9d3807eceaf4666a71282165bb5cd5aea2b71f271c4bb7c07"
+    }
+  ],
+  "qualification_boundary": {
+    "repository_debt_gate_active": true,
+    "dead_stub_deleted": true,
+    "required_compatibility_readers_preserved": true,
+    "production_database_touched": false,
+    "production_derived_copy_touched": false,
+    "candidate_installed": false,
+    "candidate_published_to_downloads": false,
+    "canary_run": false,
+    "service_activated": false,
+    "operational_cutover_run": false,
+    "first_v4_write_accepted": false,
+    "destructive_gc_run": false,
+    "next_gate": "P9 operator/bot documentation and supersession closure, followed by strict Clippy and final broad/native/soak/resource qualification. Copied-production, canary, installation, deployment, cutover, acceptance, and destructive GC remain separately gated."
+  }
+}

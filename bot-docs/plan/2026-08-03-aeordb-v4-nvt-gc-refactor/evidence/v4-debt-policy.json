@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P9-debt-gate",
+  "baseline_source_commit": "30cee29f8deeecda48419ddc31c697178ac375b9",
+  "entries": [
+    {
+      "id": "selected-root-v3-adapter",
+      "classification": "timed_compatibility_shim",
+      "pattern": "LegacyV3SelectedRootAdapterV1",
+      "scan_roots": [
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [
+        "aeordb-lib/src/plugins/wasm_runtime.rs",
+        "aeordb-lib/src/server/download_routes.rs",
+        "aeordb-lib/src/server/engine_routes.rs",
+        "aeordb-lib/src/server/fetch_routes.rs",
+        "aeordb-lib/src/server/legacy_v3_root_adapter.rs",
+        "aeordb-lib/src/server/search_locators.rs",
+        "aeordb-lib/src/server/sse_routes.rs"
+      ],
+      "maximum_matches": 46,
+      "owner": "migration/cutover and public root-contract owners",
+      "rationale": "Public and plugin selected-root reads still execute against the live v3 service while v4 remains a disconnected shadow authority.",
+      "removal_gate": "Remove after accepted v4 write authority, expiry of the supported v3 selected-root compatibility window, and native proof that every public/plugin root consumer uses the v4 read view."
+    },
+    {
+      "id": "legacy-v3-root-service-mode",
+      "classification": "timed_compatibility_shim",
+      "pattern": "LegacyV3Compatibility",
+      "scan_roots": [
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [
+        "aeordb-lib/src/engine/root_operation.rs",
+        "aeordb-lib/src/engine/v4/gc_run.rs",
+        "aeordb-lib/src/server/engine_routes.rs"
+      ],
+      "maximum_matches": 5,
+      "owner": "root-operation, GC, and migration/cutover owners",
+      "rationale": "Current service reads and the non-destructive GC bridge must remain explicit until operational v4 authority is accepted.",
+      "removal_gate": "Remove after v4 service activation, first-write acceptance, and proof that current root operations plus production GC no longer call the v3 compatibility bridge."
+    },
+    {
+      "id": "v0-whole-index-manager",
+      "classification": "timed_compatibility_shim",
+      "pattern": "\\bIndexManager\\b",
+      "scan_roots": [
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [
+        "aeordb-lib/src/engine/index_cleanup.rs",
+        "aeordb-lib/src/engine/index_store.rs",
+        "aeordb-lib/src/engine/indexing_pipeline.rs",
+        "aeordb-lib/src/engine/mod.rs",
+        "aeordb-lib/src/engine/query_engine.rs",
+        "aeordb-lib/src/engine/storage_engine.rs",
+        "aeordb-lib/src/engine/task_worker.rs"
+      ],
+      "maximum_matches": 30,
+      "owner": "index runtime and migration/cutover owners",
+      "rationale": "The v3 whole-index format remains the active service writer/query source and the migration source reader while v4 native IndexArtifacts are shadow-only.",
+      "removal_gate": "Remove after v4 IndexArtifacts own public and embedded query, reindex, cleanup, cache, and task paths and the retained v3 backup is offline-only."
+    },
+    {
+      "id": "embedded-json-query-cursor",
+      "classification": "timed_compatibility_shim",
+      "pattern": "fn (encode_cursor|decode_cursor)|encode_cursor\\(|decode_cursor\\(",
+      "scan_roots": [
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [
+        "aeordb-lib/src/engine/query_engine.rs"
+      ],
+      "maximum_matches": 6,
+      "owner": "embedded query API owner",
+      "rationale": "The embedded Rust query API still exposes its version-bound JSON/base64 pagination cursor while public HTTP pagination uses canonical APOS.",
+      "removal_gate": "Remove at an embedded API major boundary or after a compatibility adapter converts every embedded caller to canonical APOS with replay and malformed-cursor proof."
+    },
+    {
+      "id": "dead-auto-heal-stub",
+      "classification": "forbidden",
+      "pattern": "auto_heal_unimplemented|try_heal_from_peers|request_chunk_from_peer|pub mod auto_heal",
+      "scan_roots": [
+        "aeordb-lib/Cargo.toml",
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [],
+      "maximum_matches": 0,
+      "owner": "storage resilience owner",
+      "rationale": "The opt-in module always returned an error for transport and could create a false claim of corruption recovery.",
+      "removal_gate": "Do not reintroduce without a ratified asynchronous peer-heal protocol, authenticated transport, resource bounds, corruption tests, and live multi-node proof."
+    },
+    {
+      "id": "misnamed-legacy-position-component",
+      "classification": "forbidden",
+      "pattern": "legacy_position_component",
+      "scan_roots": [
+        "aeordb-lib/src"
+      ],
+      "allowed_paths": [],
+      "maximum_matches": 0,
+      "owner": "query and APOS contract owner",
+      "rationale": "The helper converts v0 whole-index scalar bytes into a canonical logical position component; calling the canonical output legacy obscures the actual compatibility boundary.",
+      "removal_gate": "Keep the compatibility conversion explicitly named for its v0 input until the whole-index reader itself is retired."
+    },
+    {
+      "id": "v4-whole-index-manager-bypass",
+      "classification": "forbidden",
+      "pattern": "IndexManager::new",
+      "scan_roots": [
+        "aeordb-lib/src/engine/v4"
+      ],
+      "allowed_paths": [],
+      "maximum_matches": 0,
+      "owner": "v4 index runtime owner",
+      "rationale": "V4 query and index production must use selected native IndexArtifacts rather than silently reopening the v3 whole-index manager.",
+      "removal_gate": "A future exception requires a ratified compatibility boundary and an architecture test proving it cannot become v4 authority."
+    }
+  ]
+}

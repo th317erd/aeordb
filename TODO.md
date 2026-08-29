@@ -1419,6 +1419,14 @@
       - [x] P8-2a: build exact-source Linux/macOS/Windows release candidates, require full embedded mdBook assets, verify version/capability/binary digests, and exercise the real documentation routes with clean shutdown.
       - [ ] P8-2b: run the canary candidate under real clients and load only after separate authorization for the canary environment or copy.
     - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
+      - [x] Inventory every retained v3/index/cursor compatibility path and freeze owner, rationale, exact allowed paths, non-growing ceiling, and removal gate.
+      - [x] Delete the nonfunctional opt-in auto-heal stub, shrink its suppression inventory, and record its retirement in the persisted producer/consumer inventory.
+      - [x] Correct the misleading v0 whole-index position-helper name and eliminate the non-Linux unused import without a lint suppression.
+      - [x] Add an adversarially self-tested debt gate to the independent v4 contract wrapper and prove the P9 debt unit on Linux, macOS arm64, and Windows x86_64 MSVC.
+      - [ ] Publish migration/operator/bot documentation and precise supersession/incorporation markers for stale plans.
+      - [ ] Eliminate the repository-wide strict-Clippy backlog without suppressions or weakened lint policy.
+      - [ ] Run and publish the final broad, native, crash/soak, resource, and real-world repository qualification.
+      - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
   - [x] Reconcile dedicated IndexArtifacts with current snapshot, backup, and replication behavior.

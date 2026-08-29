@@ -786,5 +786,8 @@ CARGO_TARGET_DIR="$reference_target" cargo run -j "$reference_jobs" --locked --q
   "$contract_registry" "$system_family_manifest" "$architecture_registry" "$generated_contract" \
   || fail "generated v4 Rust contract constants are stale"
 
+"$repo_root/scripts/plan/check-v4-debt.sh" \
+  || fail "reviewed v4 debt policy failed"
+
 printf 'v4 P0 contract evidence: PASS (%s routes, %s docs, entry %s)\n' \
   "$manifest_route_count" "$(wc -l <"$docs_manifest")" "$entry_commit"

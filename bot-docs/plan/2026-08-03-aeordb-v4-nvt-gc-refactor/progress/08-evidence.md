@@ -2,15 +2,28 @@
 
 ## Landing State
 
-- **Status:** P0a and P2f are complete; continuous phase evidence remains active through P9.
-- **Current landing unit:** Child 03 P3b-2b write-once semantic-object storage is complete; P3b-2c atomic shadow first-authority publication is active.
-- **Entry commit:** `5e0dc2a` (`fix: return metrics initialization conflicts`).
-- **Last pushed green commit:** P3b-2b write-once semantic-object storage commit `0b739c7` on `development` and `origin/development`.
+- **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt and documentation closure is active. Copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
+- **Current landing unit:** P9 debt classification, safe dead-path retirement, and enforceable non-growth policy are green; operator/bot documentation and plan supersession are next.
+- **Entry commit:** `30cee29f8deeecda48419ddc31c697178ac375b9` (`record P8 native release qualification`).
+- **Last pushed green commit:** `30cee29f8deeecda48419ddc31c697178ac375b9` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
-- **Start gate:** P2a-P2e are green and pushed; P2f must land before any P3 writer activates.
+- **Start gate:** Safe P8 migration workspaces, cutover fault target, exact-source native release candidates, live documentation routes, and integrated Linux workspace qualification are green and pushed.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
 - **Owned files:** this ledger; suppression scanner/inventory; architecture target; narrowly required production corrections and regression tests; affected operator documentation.
 - **Forbidden files and actions honored:** no v4 service authority, migration/cutover activation, production or evidence database mutation, deployment, `.codex/DETAILS.md`, `.codex/wip.md`, or `downloads/` changes.
+
+## P9 Debt Gate Qualification
+
+- The new checked policy classifies four still-required compatibility surfaces with exact owners, allowed files, non-growing match ceilings, rationales, and removal gates: selected-root v3 reads, explicit legacy-v3 root service mode, the active v0 whole-index manager, and the embedded JSON/base64 query cursor. Three forbidden classes must remain at zero: the dead auto-heal stub, the misleading `legacy_position_component` name, and any v4 `IndexManager::new` bypass. The gate passes at 7 reviewed entries and 87 retained matches and is now part of the independent v4 contract wrapper.
+- The opt-in auto-heal module and feature were safely deleted because peer retrieval had no transport and always returned an error. Its two stale suppression rows were removed, shrinking the reviewed ceiling from 1,510 to 1,508, and the persisted producer/consumer inventory now records the retired writer explicitly. Required v3 readers and writers remain intact.
+- The v0 whole-index conversion helper is now named for its input representation, and `FromStr` is imported only on Linux. Identical changed-source hashes were verified on Linux, macOS arm64, and Windows x86_64 MSVC; the deleted source is absent on all three. Release-profile library checks pass natively in 49.16 seconds on macOS and 175 seconds on Windows, with the former unused-import warning absent on both.
+- The adversarial shell self-test covers the valid policy and every validation family: missing/malformed/schema metadata, duplicate identities/paths, classification and ceiling rules, unsafe/missing/out-of-root paths, invalid patterns, new paths, match growth, forbidden matches, and stale review paths. It passes under an outer 20-second deadline; the standalone gate passes under 120 seconds.
+- The affected Linux matrix passes 176 aggregation, suppression-architecture, query-engine, and pagination tests with zero failures. Workspace all-target checking passes with only the historical test-only `require_wasm_parser` warning. The chained independent contract gate passes 454 fixtures, 7 debt entries/87 retained matches, 95 routes, and 38 documentation pages.
+- Durable command, failure-first, native, hash, and boundary evidence is recorded in `evidence/p9-debt-gate-report.json`. The unit touches no production or production-derived database, install, download artifact, deployment, canary, service activation, cutover, acceptance, first v4 write, or destructive GC boundary.
+
+## P9 Next Action
+
+Publish the migration/operator/bot documentation and precise supersession/incorporation markers for stale plans, then close strict Clippy and run the final broad/native/crash-soak/resource qualification. Keep copied-production, canary, installation/deployment, operational cutover, acceptance, monitoring, and destructive GC behind their exact separate authorization gates.
 
 ## Inventory Contract
 

@@ -1528,7 +1528,7 @@ impl<'a> QueryEngine<'a> {
     let Some(value) = index.values.get(file_key) else {
       return Ok(LogicalOrderComponentOwnedV1::missing());
     };
-    legacy_position_component(comparator, index.converter.type_tag(), value)
+    v0_index_position_component(comparator, index.converter.type_tag(), value)
   }
 
   pub fn execute_paginated_with_cancellation(&self, query: &Query, cancellation: &CancellationToken) -> EngineResult<PaginatedResult> {
@@ -1926,7 +1926,7 @@ impl<'a> QueryEngine<'a> {
       for result in results.iter() {
         let file_key = digest_parts(self.engine.hash_algo(), &[b"file:", result.file_record.path.as_bytes()]);
         if let Some(value) = sort.values.get(&file_key) {
-          legacy_position_component(sort.comparator, sort.converter_type, value)?;
+          v0_index_position_component(sort.comparator, sort.converter_type, value)?;
         }
       }
     }
@@ -3255,7 +3255,7 @@ impl<'a> QueryEngine<'a> {
           None => serde_json::Value::Null,
         };
         let component = match raw_value {
-          Some(bytes) => legacy_position_component(position_comparator_for_converter(*type_tag)?, *type_tag, bytes)?,
+          Some(bytes) => v0_index_position_component(position_comparator_for_converter(*type_tag)?, *type_tag, bytes)?,
           None => LogicalOrderComponentOwnedV1::missing(),
         };
         key_map.insert(field_name.clone(), value);
@@ -3963,7 +3963,7 @@ fn encode_legacy_group_tuple(components: &[LogicalOrderComponentOwnedV1]) -> Eng
   Ok(output)
 }
 
-fn legacy_position_component(
+fn v0_index_position_component(
   comparator: PositionComparatorV1,
   converter_type: u8,
   value: &[u8],

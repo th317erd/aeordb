@@ -1,7 +1,5 @@
 pub mod api_key_rules;
 pub mod append_writer;
-#[cfg(feature = "auto_heal_unimplemented")]
-pub mod auto_heal;
 pub mod backup;
 pub mod batch_commit;
 pub mod binary_utils;

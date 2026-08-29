@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{io, str::FromStr};
+use std::io;
 
 /// Current resident set size in kB. 0 if unavailable.
 pub fn read_rss_kb() -> u64 {
@@ -497,6 +497,9 @@ impl Drop for PhaseSampler {
     }
   }
 }
+
+#[cfg(target_os = "linux")]
+use std::str::FromStr;
 
 #[cfg(test)]
 mod tests {

@@ -142,7 +142,6 @@
       "aeordb-lib/src/server/version_routes.rs"
     ],
     "raw_entry_writer_files": [
-      "aeordb-lib/src/engine/auto_heal.rs",
       "aeordb-lib/src/engine/backup.rs",
       "aeordb-lib/src/engine/batch_commit.rs",
       "aeordb-lib/src/engine/btree.rs",
@@ -153,6 +152,13 @@
       "aeordb-lib/src/engine/task_queue.rs",
       "aeordb-lib/src/engine/version_manager.rs",
       "aeordb-lib/src/server/upload_routes.rs"
+    ],
+    "retired_raw_entry_writer_files": [
+      {
+        "path": "aeordb-lib/src/engine/auto_heal.rs",
+        "phase": "P9",
+        "reason": "Deleted the opt-in stub because its peer transport always returned an error and it could not heal any entry."
+      }
     ],
     "directory_mutator_caller_files": [
       "aeordb-cli/src/bin/crash-soak-worker.rs",
