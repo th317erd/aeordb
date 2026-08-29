@@ -1406,14 +1406,14 @@
       - [x] Preserve secure deletion and unshare SSE visibility through a typed recipient or prior-audience witness when the acknowledged mutation removes the subscriber's current grant. (Completed by P7-5e5c.)
     - [ ] P8: execute side-by-side migration preflight, copied-production rehearsal, native release qualification, canary, and explicitly authorized operator cutover.
       - [ ] P8-1: complete synthetic and separately authorized copied-production fault rehearsal without touching the production source.
-        - [ ] P8-1a: build the disconnected cutover-control/journal authority and same-filesystem synthetic crash harness.
+        - [x] P8-1a: build the disconnected cutover-control/journal authority and same-filesystem synthetic crash harness.
           - [x] P8-1a1: reproduce the frozen both-width `cutover.acut` fixtures from one validated ACUT control body without assigning undocumented field semantics.
           - [x] P8-1a2: publish and reopen the private 2,048-byte A/B journal through bounded migration memory/capacity admission, exact read-back, and injected durability failures.
             - [x] Prove a malformed post-sync read-back is classified as uncertain durable selection, never as retained prior authority.
             - [x] Account for the transient 16-byte ACUT identity validation alongside both journal buffers and the inactive slot.
-          - [ ] P8-1a3: bind the typed ACUT transition semantics to migration/destination/file-identity evidence, then prove every pre-acceptance journal/sync/rename/reopen crash prefix on disposable same-filesystem files.
+          - [x] P8-1a3: bind the typed ACUT transition semantics to migration/destination/file-identity evidence, then prove every pre-acceptance journal/sync/rename/reopen crash prefix on disposable same-filesystem files.
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
-      - [ ] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
+      - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [ ] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
     - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
 
