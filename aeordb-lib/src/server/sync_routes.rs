@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::responses::{engine_error_response, ErrorResponse};
+use super::responses::{engine_error_response, ErrorResponse, RouteResponseError};
 use super::state::AppState;
 use super::temp_response::{body_from_tempfile, json_to_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
 use crate::engine::api_key_rules::{check_operation_permitted, match_rules, KeyRule};
@@ -120,7 +120,7 @@ impl SyncCaller {
 
 /// Determine the caller identity from request headers.
 /// Verifies JWT Bearer token. Returns 401 if no valid auth is present.
-fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCaller, Response> {
+fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCaller, RouteResponseError> {
   // 0. If auth is disabled (dev mode), select peer-replication policy to
   //    preserve the pre-auth-disabled sync behavior.
   if !state.auth_provider.is_enabled() {
@@ -130,19 +130,27 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
   // 1. Try JWT Bearer token.
   if let Some(auth_header) = headers.get("authorization") {
     let token = auth_header.to_str().ok().and_then(|s| s.strip_prefix("Bearer ")).ok_or_else(|| {
-      ErrorResponse::new("Invalid authorization header: expected 'Bearer <token>' format")
-        .with_status(StatusCode::UNAUTHORIZED)
-        .into_response()
+      RouteResponseError::from(
+        ErrorResponse::new("Invalid authorization header: expected 'Bearer <token>' format")
+          .with_status(StatusCode::UNAUTHORIZED)
+          .into_response(),
+      )
     })?;
 
     let claims = state.jwt_manager.verify_token(token).map_err(|_| {
-      ErrorResponse::new("Invalid or expired JWT. Re-authenticate via POST /auth/token")
-        .with_status(StatusCode::UNAUTHORIZED)
-        .into_response()
+      RouteResponseError::from(
+        ErrorResponse::new("Invalid or expired JWT. Re-authenticate via POST /auth/token")
+          .with_status(StatusCode::UNAUTHORIZED)
+          .into_response(),
+      )
     })?;
 
     let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
-      ErrorResponse::new("Invalid user ID in token: 'sub' claim is not a valid UUID").with_status(StatusCode::UNAUTHORIZED).into_response()
+      RouteResponseError::from(
+        ErrorResponse::new("Invalid user ID in token: 'sub' claim is not a valid UUID")
+          .with_status(StatusCode::UNAUTHORIZED)
+          .into_response(),
+      )
     })?;
 
     if crate::engine::user::is_root(&user_id) {
@@ -164,14 +172,16 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
             return Err(
               ErrorResponse::new("API key has been revoked. Create a new key via POST /auth/api-keys")
                 .with_status(StatusCode::UNAUTHORIZED)
-                .into_response(),
+                .into_response()
+                .into(),
             );
           }
           if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
             return Err(
               ErrorResponse::new("API key expired. Create a new key via POST /auth/api-keys")
                 .with_status(StatusCode::UNAUTHORIZED)
-                .into_response(),
+                .into_response()
+                .into(),
             );
           }
           key_record.rules
@@ -180,7 +190,8 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
           return Err(
             ErrorResponse::new("API key not found: the key referenced in the token no longer exists")
               .with_status(StatusCode::UNAUTHORIZED)
-              .into_response(),
+              .into_response()
+              .into(),
           );
         }
         Err(_) => {
@@ -189,7 +200,8 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
               "Failed to look up API key: could not read from storage. If this persists, check GET /system/health for system status",
             )
             .with_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .into_response(),
+            .into_response()
+            .into(),
           );
         }
       }
@@ -203,7 +215,8 @@ fn determine_sync_caller(headers: &HeaderMap, state: &AppState) -> Result<SyncCa
   Err(
     ErrorResponse::new("Authentication required. Provide a Bearer token via the Authorization header")
       .with_status(StatusCode::UNAUTHORIZED)
-      .into_response(),
+      .into_response()
+      .into(),
   )
 }
 
@@ -339,7 +352,7 @@ pub async fn sync_diff(State(state): State<AppState>, headers: HeaderMap, Json(p
 
   let caller = match determine_sync_caller(&headers, &state) {
     Ok(c) => c,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let since_hash = match payload.since_root_hash.as_deref() {
@@ -415,9 +428,9 @@ fn build_sync_diff_response(
   // existing client-sync contract after registry policy.
   if let SyncCaller::ScopedUser { user_id, key_rules } = &caller {
     if key_rules.is_empty() {
-      match user_has_grant_scope(user_id, &state) {
+      match user_has_grant_scope(user_id, state) {
         Ok(true) => {
-          filter_changes_by_user_permissions(&mut changes, user_id, &state)?;
+          filter_changes_by_user_permissions(&mut changes, user_id, state)?;
         }
         Ok(false) => {}
         Err(error) => return Err(error),
@@ -522,7 +535,7 @@ pub async fn sync_chunks(State(state): State<AppState>, headers: HeaderMap, Json
 
   let caller = match determine_sync_caller(&headers, &state) {
     Ok(c) => c,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let filter_system = !caller.include_system();

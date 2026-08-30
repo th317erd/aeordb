@@ -51,10 +51,10 @@ fn lifecycle_manifest<'a>(
   candidate_directory_hash: Option<&'a [u8]>,
   generation: u64,
   source_complete_mark_generation: u64,
-  candidate_count: u64,
-  candidate_bytes: u64,
+  candidates: (u64, u64),
   key: Vec<u8>,
 ) -> RootLifecycleManifestV1<'a> {
+  let (candidate_count, candidate_bytes) = candidates;
   RootLifecycleManifestV1 {
     database_id,
     generation,
@@ -80,9 +80,9 @@ fn candidate_bytes(
   first_generation: u64,
   last_generation: u64,
   grace_at_pending_ms: u64,
-  authority_digest: &[u8],
-  admission_hash: &[u8],
+  evidence: (&[u8], &[u8]),
 ) -> Vec<u8> {
+  let (authority_digest, admission_hash) = evidence;
   encode_root_candidate_record_v1(&RootCandidateRecordWriteV1 {
     hash_algorithm: algorithm,
     namespace_root_hash: root_hash,
@@ -104,9 +104,9 @@ fn assert_candidate(
   first_generation: u64,
   last_generation: u64,
   grace_at_pending_ms: u64,
-  authority_digest: &[u8],
-  admission_hash: &[u8],
+  evidence: (&[u8], &[u8]),
 ) {
+  let (authority_digest, admission_hash) = evidence;
   assert_eq!(candidate.namespace_root_hash, root_hash);
   assert_eq!(candidate.reason, 1);
   assert_eq!(candidate.pending_since_ms, pending_since_ms);
@@ -127,7 +127,7 @@ fn zero_grace_starts_a_candidate_and_still_requires_a_later_complete_mark_at_bot
     let root_hash = sequence(width, 0x60);
     let admission_hash = sequence(width, 0x80);
     let candidate_directory_hash = sequence(width, 0xa0);
-    let prior = lifecycle_manifest(&DATABASE_ID, &authority_digest, None, 10, 100, 0, 0, sequence(width, 0xc0));
+    let prior = lifecycle_manifest(&DATABASE_ID, &authority_digest, None, 10, 100, (0, 0), sequence(width, 0xc0));
     let cancellation = CancellationToken::new();
     let mut first_mark = RootLifecycleTransitionModelV1::new(
       RootLifecycleTransitionContextV1 {
@@ -159,13 +159,13 @@ fn zero_grace_starts_a_candidate_and_still_requires_a_later_complete_mark_at_bot
     let RootLifecycleTransitionV1::CandidateStarted(candidate) = transition else {
       panic!("the discovery mark must start a candidate, never retire it")
     };
-    assert_candidate(&candidate, &root_hash, 1_000, 101, 101, 0, &next_authority_digest, &admission_hash);
+    assert_candidate(&candidate, &root_hash, 1_000, 101, 101, 0, (&next_authority_digest, &admission_hash));
     let encoded_from_transition = encode_root_candidate_record_v1(&candidate.as_write_request(algorithm)).unwrap();
     assert_eq!(decode_root_candidate_record_v1(&encoded_from_transition, algorithm).unwrap().namespace_root_hash, root_hash);
     let first_summary = first_mark.finish().unwrap();
     assert_eq!((first_summary.started_count, first_summary.retirement_count), (1, 0));
 
-    let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 101, 101, 0, &next_authority_digest, &admission_hash);
+    let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 101, 101, 0, (&next_authority_digest, &admission_hash));
     let prior_candidate = decode_root_candidate_record_v1(&encoded_candidate, algorithm).unwrap();
     let second_prior = lifecycle_manifest(
       &DATABASE_ID,
@@ -173,8 +173,7 @@ fn zero_grace_starts_a_candidate_and_still_requires_a_later_complete_mark_at_bot
       Some(&candidate_directory_hash),
       11,
       101,
-      1,
-      encoded_candidate.len() as u64,
+      (1, encoded_candidate.len() as u64),
       sequence(width, 0xd0),
     );
     let mut second_mark = RootLifecycleTransitionModelV1::new(
@@ -316,7 +315,7 @@ fn effective_grace_uses_the_larger_frozen_or_current_value_and_checked_time() {
   let root_hash = sequence(width, 0x30);
   let admission_hash = sequence(width, 0x50);
   let candidate_directory_hash = sequence(width, 0x70);
-  let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 40, 40, 2_000, &authority_digest, &admission_hash);
+  let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 40, 40, 2_000, (&authority_digest, &admission_hash));
   let prior_candidate = decode_root_candidate_record_v1(&encoded_candidate, algorithm).unwrap();
   let prior = lifecycle_manifest(
     &DATABASE_ID,
@@ -324,8 +323,7 @@ fn effective_grace_uses_the_larger_frozen_or_current_value_and_checked_time() {
     Some(&candidate_directory_hash),
     20,
     40,
-    1,
-    encoded_candidate.len() as u64,
+    (1, encoded_candidate.len() as u64),
     sequence(width, 0x90),
   );
   let cancellation = CancellationToken::new();
@@ -364,7 +362,7 @@ fn effective_grace_uses_the_larger_frozen_or_current_value_and_checked_time() {
       let RootLifecycleTransitionV1::CandidateConfirmed(candidate) = transition else {
         panic!("grace that has not elapsed must only confirm the pending candidate")
       };
-      assert_candidate(&candidate, &root_hash, 1_000, 40, 41, 2_000, &authority_digest, &admission_hash);
+      assert_candidate(&candidate, &root_hash, 1_000, 40, 41, 2_000, (&authority_digest, &admission_hash));
     }
     model.finish().unwrap();
   }
@@ -415,8 +413,8 @@ fn reachable_roots_clear_candidates_while_indeterminate_roots_preserve_them() {
   let first_admission = sequence(width, 0x91);
   let second_admission = sequence(width, 0xb1);
   let candidate_directory_hash = sequence(width, 0xd1);
-  let first_bytes = candidate_bytes(algorithm, &first_root, 1_000, 50, 50, 10_000, &authority_digest, &first_admission);
-  let second_bytes = candidate_bytes(algorithm, &second_root, 1_001, 50, 50, 10_000, &authority_digest, &second_admission);
+  let first_bytes = candidate_bytes(algorithm, &first_root, 1_000, 50, 50, 10_000, (&authority_digest, &first_admission));
+  let second_bytes = candidate_bytes(algorithm, &second_root, 1_001, 50, 50, 10_000, (&authority_digest, &second_admission));
   let first_candidate = decode_root_candidate_record_v1(&first_bytes, algorithm).unwrap();
   let second_candidate = decode_root_candidate_record_v1(&second_bytes, algorithm).unwrap();
   let prior = lifecycle_manifest(
@@ -425,8 +423,7 @@ fn reachable_roots_clear_candidates_while_indeterminate_roots_preserve_them() {
     Some(&candidate_directory_hash),
     30,
     50,
-    2,
-    (first_bytes.len() + second_bytes.len()) as u64,
+    (2, (first_bytes.len() + second_bytes.len()) as u64),
     sequence(width, 0xe1),
   );
   let cancellation = CancellationToken::new();
@@ -485,7 +482,7 @@ fn deterministic_capacity_refusal_never_evicts_state_or_reopens_growth_later_in_
   let final_root = sequence(width, 0xa2);
   let admission_hash = sequence(width, 0xd2);
   let candidate_directory_hash = sequence(width, 0xe2);
-  let clearing_bytes = candidate_bytes(algorithm, &clearing_root, 1_000, 60, 60, 10_000, &authority_digest, &admission_hash);
+  let clearing_bytes = candidate_bytes(algorithm, &clearing_root, 1_000, 60, 60, 10_000, (&authority_digest, &admission_hash));
   let clearing_candidate = decode_root_candidate_record_v1(&clearing_bytes, algorithm).unwrap();
   let prior = lifecycle_manifest(
     &DATABASE_ID,
@@ -493,8 +490,7 @@ fn deterministic_capacity_refusal_never_evicts_state_or_reopens_growth_later_in_
     Some(&candidate_directory_hash),
     40,
     60,
-    1,
-    candidate_length,
+    (1, candidate_length),
     sequence(width, 0xf2),
   );
   let cancellation = CancellationToken::new();
@@ -563,7 +559,7 @@ fn malformed_or_stale_evidence_cancellation_and_incomplete_authority_fail_closed
   let admission_hash = sequence(width, 0x53);
   let wrong_admission_hash = sequence(width, 0x73);
   let candidate_directory_hash = sequence(width, 0x93);
-  let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 70, 70, 0, &authority_digest, &admission_hash);
+  let encoded_candidate = candidate_bytes(algorithm, &root_hash, 1_000, 70, 70, 0, (&authority_digest, &admission_hash));
   let prior_candidate = decode_root_candidate_record_v1(&encoded_candidate, algorithm).unwrap();
   let prior = lifecycle_manifest(
     &DATABASE_ID,
@@ -571,8 +567,7 @@ fn malformed_or_stale_evidence_cancellation_and_incomplete_authority_fail_closed
     Some(&candidate_directory_hash),
     50,
     70,
-    1,
-    encoded_candidate.len() as u64,
+    (1, encoded_candidate.len() as u64),
     sequence(width, 0xb3),
   );
 
@@ -758,7 +753,7 @@ fn ordering_limits_and_manifest_candidate_coverage_are_exact() {
   let second_root = sequence(width, 0x64);
   let admission_hash = sequence(width, 0xa4);
   let candidate_directory_hash = sequence(width, 0xc4);
-  let encoded_candidate = candidate_bytes(algorithm, &first_root, 1_000, 80, 80, 5_000, &authority_digest, &admission_hash);
+  let encoded_candidate = candidate_bytes(algorithm, &first_root, 1_000, 80, 80, 5_000, (&authority_digest, &admission_hash));
   let prior_candidate = decode_root_candidate_record_v1(&encoded_candidate, algorithm).unwrap();
   let prior = lifecycle_manifest(
     &DATABASE_ID,
@@ -766,8 +761,7 @@ fn ordering_limits_and_manifest_candidate_coverage_are_exact() {
     Some(&candidate_directory_hash),
     60,
     80,
-    1,
-    encoded_candidate.len() as u64,
+    (1, encoded_candidate.len() as u64),
     sequence(width, 0xe4),
   );
   let cancellation = CancellationToken::new();

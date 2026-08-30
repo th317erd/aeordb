@@ -115,7 +115,7 @@ fn create_publisher(algorithm: HashAlgorithm) -> (TempDir, PathBuf, V4FirstAutho
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("mark-checkpoint-storage.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
-  let header = initial_header(algorithm, initial_block_size() as u64);
+  let header = initial_header(algorithm, initial_block_size());
   let slot = encode_database_header_slot(&header).unwrap();
   file.write_all(&slot).unwrap();
   file.write_all(&slot).unwrap();
@@ -216,10 +216,9 @@ fn prepare_checkpoint(
   algorithm: HashAlgorithm,
   run_byte: u8,
   generation: u64,
-  checkpoint_sequence: u64,
-  control_slot: u8,
-  control_sequence: u64,
+  sequences: (u64, u8, u64),
 ) -> PreparedCheckpoint {
+  let (checkpoint_sequence, control_slot, control_sequence) = sequences;
   let run_id = [run_byte; 16];
   let identity = MarkWorkspaceIdentityV1::new(database_id(), run_id, generation, checkpoint_sequence, algorithm).unwrap();
   let basis = MarkWorkspaceBasisV1::new(
@@ -336,19 +335,19 @@ fn whole_entity_authority_publishes_a_b_a_and_retires_the_prior_control_at_both_
     )
     .unwrap();
 
-    let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x51, 101, 1, 0, 1);
+    let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x51, 101, (1, 0, 1));
     let a1_receipt = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_200_001);
     assert_eq!(a1_receipt.control_slot, 0);
     assert!(!a1_receipt.replaced_control);
     assert_eq!(a1_receipt.lineage_state.code(), "not_required");
     let old_a_locator = publisher.locator(&a1.control.key).unwrap().unwrap();
 
-    let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x52, 102, 2, 1, 2);
+    let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x52, 102, (2, 1, 2));
     let b2_receipt = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_200_002);
     assert_eq!(b2_receipt.control_slot, 1);
     assert!(!b2_receipt.replaced_control);
 
-    let a3 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x53, 103, 3, 0, 3);
+    let a3 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x53, 103, (3, 0, 3));
     let a3_receipt = publish(&mut publisher, &mut owner, algorithm, &a3, 1_700_000_200_003);
     assert_eq!(a3_receipt.control_slot, 0);
     assert!(a3_receipt.replaced_control);
@@ -402,8 +401,8 @@ fn workspace_mismatch_and_canceled_retirement_owner_refuse_before_checkpoint_aut
   let scratch = directory.path().join("scratch");
   fs::create_dir(&scratch).unwrap();
   let memory = memory_coordinator();
-  let prepared = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x61, 201, 1, 0, 1);
-  let other = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x62, 202, 2, 0, 2);
+  let prepared = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x61, 201, (1, 0, 1));
+  let other = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x62, 202, (2, 0, 2));
   let cancellation = CancellationToken::new();
   let mut owner = RetirementJournalOwnerV1::new_chain(
     algorithm,
@@ -473,9 +472,9 @@ fn restart_selection_reports_absence_then_selects_the_newest_complete_checkpoint
       &memory,
     )
     .unwrap();
-    let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x71, 301, 1, 0, 1);
+    let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x71, 301, (1, 0, 1));
     let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_400_001);
-    let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x72, 302, 2, 1, 2);
+    let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x72, 302, (2, 1, 2));
     let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_400_002);
     let a_checkpoint = decoded_checkpoint(algorithm, &a1);
     let b_checkpoint = decoded_checkpoint(algorithm, &b2);
@@ -522,9 +521,9 @@ fn selection_falls_back_from_a_tampered_newer_workspace_and_refuses_when_both_ar
     &memory,
   )
   .unwrap();
-  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x73, 303, 1, 0, 1);
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x73, 303, (1, 0, 1));
   let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_500_001);
-  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x74, 304, 2, 1, 2);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x74, 304, (2, 1, 2));
   let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_500_002);
   let a_checkpoint = decoded_checkpoint(algorithm, &a1);
   let b_checkpoint = decoded_checkpoint(algorithm, &b2);
@@ -571,9 +570,9 @@ fn corrupt_control_falls_back_but_equal_sequence_disagreement_remains_ambiguous(
     &memory,
   )
   .unwrap();
-  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x75, 305, 1, 0, 1);
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x75, 305, (1, 0, 1));
   let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_600_001);
-  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x76, 306, 2, 1, 2);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x76, 306, (2, 1, 2));
   let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_600_002);
   let a_checkpoint = decoded_checkpoint(algorithm, &a1);
   let b_checkpoint = decoded_checkpoint(algorithm, &b2);
@@ -609,9 +608,9 @@ fn corrupt_control_falls_back_but_equal_sequence_disagreement_remains_ambiguous(
     &memory,
   )
   .unwrap();
-  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x77, 307, 1, 0, 1);
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x77, 307, (1, 0, 1));
   let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_700_001);
-  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x78, 308, 2, 1, 2);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x78, 308, (2, 1, 2));
   let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_700_002);
   let b_locator = publisher.locator(&b2.control.key).unwrap().unwrap();
   let high_water = publisher.observe().unwrap().selected.header.write_sequence_high_water;
@@ -669,7 +668,7 @@ fn selection_cancellation_memory_pressure_and_context_amplification_fail_before_
     &memory,
   )
   .unwrap();
-  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x79, 309, 1, 0, 1);
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x79, 309, (1, 0, 1));
   let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_800_001);
   let checkpoint = decoded_checkpoint(algorithm, &a1);
   let context = resume_context(algorithm, &checkpoint);
@@ -710,9 +709,9 @@ fn control_with_a_missing_checkpoint_does_not_hide_its_complete_peer() {
     &memory,
   )
   .unwrap();
-  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7A, 310, 1, 0, 1);
+  let a1 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7A, 310, (1, 0, 1));
   let _ = publish(&mut publisher, &mut owner, algorithm, &a1, 1_700_000_900_001);
-  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7B, 311, 2, 1, 2);
+  let b2 = prepare_checkpoint(&path, &scratch, &memory, algorithm, 0x7B, 311, (2, 1, 2));
   let _ = publish(&mut publisher, &mut owner, algorithm, &b2, 1_700_000_900_002);
 
   let b_locator = publisher.locator(&b2.control.key).unwrap().unwrap();

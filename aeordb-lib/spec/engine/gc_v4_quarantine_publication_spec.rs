@@ -112,7 +112,7 @@ fn publisher() -> (tempfile::TempDir, V4FirstAuthorityPublisher) {
   let path = directory.path().join("quarantine-publication.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
   let algorithm = HashAlgorithm::Blake3_256;
-  let kv_block_length = initial_block_size() as u64;
+  let kv_block_length = initial_block_size();
   let header = initial_header(algorithm, kv_block_length);
   let slot = encode_database_header_slot(&header).unwrap();
   file.seek(SeekFrom::Start(0)).unwrap();
@@ -184,10 +184,10 @@ fn manifest_bytes(
   completed_at_ms: u64,
   basis: &BasisV1,
   lifecycle_hash: &[u8],
-  candidate_count: u64,
-  eligible_count: u64,
+  counts: (u64, u64),
   delta_hashes: &[u8],
 ) -> Vec<u8> {
+  let (candidate_count, eligible_count) = counts;
   let required_capabilities = capabilities();
   let record_bytes = u64::try_from(52 + 2 * algorithm.hash_length()).unwrap();
   encode_quarantine_manifest_v1(&QuarantineManifestWriteV1 {
@@ -219,7 +219,7 @@ fn completed_transition_qualifies_only_its_exact_incremental_delta_at_both_hash_
     let lifecycle_bytes = lifecycle_bytes(algorithm);
     let lifecycle = lifecycle_manifest(&lifecycle_bytes, algorithm);
     let prior_basis = BasisV1::new(algorithm);
-    let prior_bytes = manifest_bytes(algorithm, 100, 1_000, &prior_basis, &lifecycle.key, 0, 0, &[]);
+    let prior_bytes = manifest_bytes(algorithm, 100, 1_000, &prior_basis, &lifecycle.key, (0, 0), &[]);
     let prior = decode_quarantine_manifest_v1(&prior_bytes, algorithm).unwrap();
     let next_basis = BasisV1 {
       authority: sequence(algorithm.hash_length(), 0x52),
@@ -284,7 +284,7 @@ fn completed_transition_qualifies_only_its_exact_incremental_delta_at_both_hash_
     })
     .unwrap();
     let transition_permit = model.finish_for_publication().unwrap();
-    let next_bytes = manifest_bytes(algorithm, 101, 2_000, &next_basis, &lifecycle.key, 1, 0, &delta.key);
+    let next_bytes = manifest_bytes(algorithm, 101, 2_000, &next_basis, &lifecycle.key, (1, 0), &delta.key);
     let next = decode_quarantine_manifest_v1(&next_bytes, algorithm).unwrap();
     let mut closure = QuarantineClosureValidatorV1::new(
       &next,
@@ -327,7 +327,7 @@ fn completed_transition_qualifies_only_its_exact_incremental_delta_at_both_hash_
       records: &[substituted_record],
     })
     .unwrap();
-    let substituted_manifest_bytes = manifest_bytes(algorithm, 101, 2_000, &next_basis, &lifecycle.key, 1, 0, &substituted.key);
+    let substituted_manifest_bytes = manifest_bytes(algorithm, 101, 2_000, &next_basis, &lifecycle.key, (1, 0), &substituted.key);
     let substituted_manifest = decode_quarantine_manifest_v1(&substituted_manifest_bytes, algorithm).unwrap();
     let mut substituted_closure = QuarantineClosureValidatorV1::new(
       &substituted_manifest,
@@ -363,7 +363,7 @@ fn omitted_delta_aggregate_drift_and_cancellation_fail_closed() {
   let lifecycle_bytes = lifecycle_bytes(algorithm);
   let lifecycle = lifecycle_manifest(&lifecycle_bytes, algorithm);
   let basis = BasisV1::new(algorithm);
-  let prior_bytes = manifest_bytes(algorithm, 200, 1_000, &basis, &lifecycle.key, 0, 0, &[]);
+  let prior_bytes = manifest_bytes(algorithm, 200, 1_000, &basis, &lifecycle.key, (0, 0), &[]);
   let prior = decode_quarantine_manifest_v1(&prior_bytes, algorithm).unwrap();
   let cancellation = CancellationToken::new();
   let model = PhysicalQuarantineTransitionModelV1::new(
@@ -390,7 +390,7 @@ fn omitted_delta_aggregate_drift_and_cancellation_fail_closed() {
   )
   .unwrap();
   let transition = model.finish_for_publication().unwrap();
-  let next_bytes = manifest_bytes(algorithm, 201, 2_000, &basis, &lifecycle.key, 0, 0, &[]);
+  let next_bytes = manifest_bytes(algorithm, 201, 2_000, &basis, &lifecycle.key, (0, 0), &[]);
   let mut next = decode_quarantine_manifest_v1(&next_bytes, algorithm).unwrap();
   let closure = QuarantineClosureValidatorV1::new(
     &next,

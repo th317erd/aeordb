@@ -291,12 +291,14 @@ impl MigrationStateOwnerV1 {
         let receipt = match publish_control(
           &publisher,
           &permit,
-          SystemControlKindV1::MigrationLease,
-          None,
-          &[],
-          &encoded,
-          request.publication_timestamp_ms,
-          request.monotonic_now_ms,
+          MigrationControlPublicationV1 {
+            kind: SystemControlKindV1::MigrationLease,
+            expected: None,
+            guards: &[],
+            encoded_control: &encoded,
+            publication_timestamp_ms: request.publication_timestamp_ms,
+            monotonic_now_ms: request.monotonic_now_ms,
+          },
           retirement_owner,
         ) {
           Ok(receipt) => receipt,
@@ -351,12 +353,14 @@ impl MigrationStateOwnerV1 {
         let receipt = match publish_control(
           &publisher,
           &permit,
-          SystemControlKindV1::MigrationProgress,
-          None,
-          &[],
-          &encoded,
-          progress_publication_timestamp,
-          progress_monotonic_now,
+          MigrationControlPublicationV1 {
+            kind: SystemControlKindV1::MigrationProgress,
+            expected: None,
+            guards: &[],
+            encoded_control: &encoded,
+            publication_timestamp_ms: progress_publication_timestamp,
+            monotonic_now_ms: progress_monotonic_now,
+          },
           retirement_owner,
         ) {
           Ok(receipt) => receipt,
@@ -446,12 +450,14 @@ impl MigrationStateOwnerV1 {
     let receipt = publish_owned_control(
       &self.publisher,
       &self.permit,
-      SystemControlKindV1::MigrationLease,
-      Some(control_expectation(&loaded_lease)),
-      &guards,
-      &encoded,
-      request.publication_timestamp_ms,
-      request.monotonic_now_ms,
+      MigrationControlPublicationV1 {
+        kind: SystemControlKindV1::MigrationLease,
+        expected: Some(control_expectation(&loaded_lease)),
+        guards: &guards,
+        encoded_control: &encoded,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
       retirement_owner,
       MigrationCommittedControlV1::Lease,
     )?;
@@ -1278,12 +1284,14 @@ impl MigrationStateOwnerV1 {
       let receipt = match publish_control(
         &self.publisher,
         &self.permit,
-        SystemControlKindV1::MigrationLease,
-        Some(control_expectation(&loaded_lease)),
-        &progress_guards,
-        encoded_releasing,
-        request.publication_timestamp_ms,
-        request.monotonic_now_ms,
+        MigrationControlPublicationV1 {
+          kind: SystemControlKindV1::MigrationLease,
+          expected: Some(control_expectation(&loaded_lease)),
+          guards: &progress_guards,
+          encoded_control: encoded_releasing,
+          publication_timestamp_ms: request.publication_timestamp_ms,
+          monotonic_now_ms: request.monotonic_now_ms,
+        },
         retirement_owner,
       ) {
         Ok(receipt) => receipt,
@@ -1308,12 +1316,14 @@ impl MigrationStateOwnerV1 {
     let receipt = match publish_control(
       &self.publisher,
       &self.permit,
-      SystemControlKindV1::MigrationLease,
-      Some(releasing_expectation),
-      &progress_guards,
-      &encoded_released,
-      released_publication_timestamp_ms,
-      released_monotonic_now_ms,
+      MigrationControlPublicationV1 {
+        kind: SystemControlKindV1::MigrationLease,
+        expected: Some(releasing_expectation),
+        guards: &progress_guards,
+        encoded_control: &encoded_released,
+        publication_timestamp_ms: released_publication_timestamp_ms,
+        monotonic_now_ms: released_monotonic_now_ms,
+      },
       retirement_owner,
     ) {
       Ok(receipt) => receipt,
@@ -1437,12 +1447,14 @@ impl MigrationStateOwnerV1 {
       let receipt = match publish_control(
         &publisher,
         &permit,
-        SystemControlKindV1::MigrationLease,
-        Some(control_expectation(&loaded_lease)),
-        &progress_guards,
-        encoded_target_lease,
-        request.publication_timestamp_ms,
-        request.monotonic_now_ms,
+        MigrationControlPublicationV1 {
+          kind: SystemControlKindV1::MigrationLease,
+          expected: Some(control_expectation(&loaded_lease)),
+          guards: &progress_guards,
+          encoded_control: encoded_target_lease,
+          publication_timestamp_ms: request.publication_timestamp_ms,
+          monotonic_now_ms: request.monotonic_now_ms,
+        },
         retirement_owner,
       ) {
         Ok(receipt) => receipt,
@@ -1471,12 +1483,14 @@ impl MigrationStateOwnerV1 {
     let receipt = match publish_control(
       &publisher,
       &permit,
-      SystemControlKindV1::MigrationProgress,
-      Some(control_expectation(&loaded_progress)),
-      &lease_guards,
-      &encoded_target_progress,
-      clocks.progress_publication_timestamp_ms,
-      clocks.progress_monotonic_now_ms,
+      MigrationControlPublicationV1 {
+        kind: SystemControlKindV1::MigrationProgress,
+        expected: Some(control_expectation(&loaded_progress)),
+        guards: &lease_guards,
+        encoded_control: &encoded_target_progress,
+        publication_timestamp_ms: clocks.progress_publication_timestamp_ms,
+        monotonic_now_ms: clocks.progress_monotonic_now_ms,
+      },
       retirement_owner,
     ) {
       Ok(receipt) => receipt,
@@ -2457,18 +2471,23 @@ enum MigrationCommittedControlV1 {
   Progress,
 }
 
+struct MigrationControlPublicationV1<'a> {
+  kind: SystemControlKindV1,
+  expected: Option<MutableSystemControlExpectationV1>,
+  guards: &'a [MutableSystemControlGuardV1<'a>],
+  encoded_control: &'a [u8],
+  publication_timestamp_ms: u64,
+  monotonic_now_ms: u64,
+}
+
 fn publish_owned_control(
   publisher: &V4FirstAuthorityPublisher,
   permit: &MigrationPreflightPermitV1,
-  kind: SystemControlKindV1,
-  expected: Option<MutableSystemControlExpectationV1>,
-  guards: &[MutableSystemControlGuardV1<'_>],
-  encoded_control: &[u8],
-  publication_timestamp_ms: u64,
-  monotonic_now_ms: u64,
+  publication: MigrationControlPublicationV1<'_>,
   retirement_owner: &mut RetirementJournalOwnerV1,
   committed_control: MigrationCommittedControlV1,
 ) -> Result<MutableSystemControlPublicationReceiptV1, MigrationStateOwnerErrorV1> {
+  let MigrationControlPublicationV1 { kind, expected, guards, encoded_control, publication_timestamp_ms, monotonic_now_ms } = publication;
   publish_owned_control_inner(
     publisher,
     permit,
@@ -2522,14 +2541,10 @@ fn publish_owned_control_inner(
 fn publish_control(
   publisher: &V4FirstAuthorityPublisher,
   permit: &MigrationPreflightPermitV1,
-  kind: SystemControlKindV1,
-  expected: Option<MutableSystemControlExpectationV1>,
-  guards: &[MutableSystemControlGuardV1<'_>],
-  encoded_control: &[u8],
-  publication_timestamp_ms: u64,
-  monotonic_now_ms: u64,
+  publication: MigrationControlPublicationV1<'_>,
   retirement_owner: &mut RetirementJournalOwnerV1,
 ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+  let MigrationControlPublicationV1 { kind, expected, guards, encoded_control, publication_timestamp_ms, monotonic_now_ms } = publication;
   publish_control_inner(
     publisher,
     permit,

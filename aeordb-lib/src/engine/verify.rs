@@ -548,156 +548,6 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
   Ok(RepairOutcome { messages: repairs, progress })
 }
 
-#[cfg(test)]
-mod repair_tests {
-  use super::*;
-  use crate::engine::directory_ops::{directory_path_hash, DirectoryOps};
-  use crate::engine::entry_type::EntryType;
-  use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
-  use crate::engine::request_context::RequestContext;
-  use crate::server::create_temp_engine_for_tests;
-
-  #[test]
-  fn checked_repair_propagates_rebuild_pressure_without_shutting_down_engine() {
-    let (engine, temp) = create_temp_engine_for_tests();
-    let coordinator = engine.memory_coordinator();
-    let snapshot = coordinator.snapshot().unwrap();
-    let policy = snapshot.policy.unwrap();
-    let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
-    let pressure = coordinator
-      .reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery))
-      .unwrap();
-
-    let db_path = temp.path().join("test.aeordb");
-    let mut report = VerifyReport::new(db_path.to_str().unwrap());
-    report.missing_kv_entries = 1;
-    let error = repair_verified_report(&engine, &report).unwrap_err();
-    assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected repair failure: {error}");
-
-    drop(pressure);
-    let key = engine.compute_hash(b"repair-pressure-released").unwrap();
-    engine.store_entry(EntryType::Chunk, &key, b"still-writable").unwrap();
-    assert!(engine.has_entry(&key).unwrap());
-  }
-
-  #[test]
-  fn checked_repair_preserves_an_acknowledged_stale_locator_when_a_later_repair_fails() {
-    let (engine, temp) = create_temp_engine_for_tests();
-    let context = RequestContext::system();
-    let operations = DirectoryOps::new(&engine);
-    operations.store_file_buffered(&context, "/good/file.txt", b"body", Some("text/plain")).unwrap();
-
-    let hash_algorithm = engine.hash_algo();
-    let hash_length = hash_algorithm.hash_length();
-    let root_key = directory_path_hash("/", &hash_algorithm).unwrap();
-    let bad_key = directory_path_hash("/bad", &hash_algorithm).unwrap();
-    let root_hash = engine.head_hash().unwrap();
-    let stale_target = vec![0x5a; hash_length];
-    engine.store_entry(EntryType::DirectoryIndex, &root_key, &stale_target).unwrap();
-    engine.store_entry(EntryType::DirectoryIndex, &bad_key, &stale_target).unwrap();
-    engine.store_entry(EntryType::DirectoryIndex, &root_hash, b"malformed directory bytes").unwrap();
-
-    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
-    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
-    report.stale_dir_path_keys = vec!["/".to_string(), "/bad".to_string()];
-
-    let error = repair_verified_report(&engine, &report).expect_err("the later corrupt canonical walk must fail");
-    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
-      panic!("acknowledged repair evidence was erased: {error}");
-    };
-    assert_eq!(operation, "verify and repair");
-    assert_eq!(completed, 1);
-    assert_eq!(failed, 1);
-    assert!(evidence.contains("stale_locators=1"), "missing exact repair class: {evidence}");
-    assert!(evidence.contains("phase=stale_directory_locator"), "missing failure phase: {evidence}");
-    assert!(evidence.contains("path=/bad"), "missing bounded failing path: {evidence}");
-    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
-    assert_eq!(engine.get_entry(&root_key).unwrap().unwrap().2, root_hash);
-  }
-
-  #[test]
-  fn repair_progress_merges_collectable_and_nested_partial_cardinality() {
-    let mut progress = RepairProgress { targeted_directories: 2, ..RepairProgress::default() };
-    progress.record_failed_attempt(
-      "targeted_directory_repair",
-      "/damaged",
-      &EngineError::CorruptEntry { offset: 17, reason: "damaged node".to_string() },
-    );
-    let error = progress.preserve_error(
-      EngineError::PartialOperation {
-        operation: "directory tree repair".to_string(),
-        completed: 3,
-        failed: 2,
-        evidence: "directories_written=3".to_string(),
-      },
-      "full_directory_rebuild",
-      "/",
-    );
-
-    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
-      panic!("nested partial outcome was not retained: {error}");
-    };
-    assert_eq!(operation, "verify and repair");
-    assert_eq!(completed, 5);
-    assert_eq!(failed, 3);
-    assert!(evidence.contains("failed_attempts=1"));
-    assert!(evidence.contains("targeted_directory_repair /damaged"));
-    assert!(evidence.contains("nested_completed=3"));
-    assert!(evidence.contains("nested_failed=2"));
-  }
-
-  #[test]
-  fn repair_progress_preserves_prior_acknowledgements_across_a_durability_failure() {
-    let progress = RepairProgress { stale_locators: 2, ..RepairProgress::default() };
-
-    let error = progress.preserve_error(
-      EngineError::PostMutationDurabilityFailure("forced publication failed".to_string()),
-      "durability_publication",
-      "/database.aeordb",
-    );
-
-    let EngineError::PartialOperation { completed, failed, evidence, .. } = error else {
-      panic!("durability failure erased prior repair acknowledgements: {error}");
-    };
-    assert_eq!(completed, 2);
-    assert_eq!(failed, 1);
-    assert!(evidence.contains("stale_locators=2"));
-    assert!(evidence.contains("phase=durability_publication"));
-    assert!(evidence.contains("Post-mutation durability failure"));
-  }
-
-  #[test]
-  fn void_snapshot_staging_failure_does_not_claim_a_publication() {
-    let (engine, temp) = create_temp_engine_for_tests();
-    std::thread::scope(|scope| {
-      let result = scope
-        .spawn(|| {
-          let _guard = engine.void_manager.write().unwrap();
-          panic!("inject void-manager poison before repair staging");
-        })
-        .join();
-      assert!(result.is_err());
-    });
-    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
-    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
-    report.invalid_hot_tail_voids.push("invalid void".to_string());
-
-    let error = repair_verified_report(&engine, &report).expect_err("Void staging must surface its authority read failure");
-
-    assert!(!matches!(error, EngineError::PartialOperation { .. }), "unpublished Void state must not count as completed");
-    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
-  }
-
-  #[test]
-  fn every_completed_repair_routes_through_the_shared_maintenance_admission() {
-    let source = include_str!("verify.rs");
-    let call = ["admit_implicit_index_maintenance_v1", "("].concat();
-    let class = ["IndexProducerMaintenanceClassV1", "::Repair"].concat();
-    assert_eq!(source.matches(&call).count(), 1);
-    assert_eq!(source.matches(&class).count(), 1);
-  }
-}
-
 /// Scan the WAL, accumulating per-type counts, integrity counts, and
 /// the set of KV hash keys expected to be live. Void entries are storage
 /// bookkeeping, not user/content records, so they are counted in the storage
@@ -1521,5 +1371,155 @@ fn walk_snapshot_child(
       record_snapshot_missing(missing_count, missing_details, format!("{} (invalid entry type: {})", child_path, error));
       Ok(())
     }
+  }
+}
+
+#[cfg(test)]
+mod repair_tests {
+  use super::*;
+  use crate::engine::directory_ops::{directory_path_hash, DirectoryOps};
+  use crate::engine::entry_type::EntryType;
+  use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+  use crate::engine::request_context::RequestContext;
+  use crate::server::create_temp_engine_for_tests;
+
+  #[test]
+  fn checked_repair_propagates_rebuild_pressure_without_shutting_down_engine() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let coordinator = engine.memory_coordinator();
+    let snapshot = coordinator.snapshot().unwrap();
+    let policy = snapshot.policy.unwrap();
+    let remaining_critical = policy.emergency_reserve_bytes.checked_sub(snapshot.critical_reserved_bytes).unwrap();
+    let pressure = coordinator
+      .reserve(MemoryOwner::Repair, remaining_critical, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery))
+      .unwrap();
+
+    let db_path = temp.path().join("test.aeordb");
+    let mut report = VerifyReport::new(db_path.to_str().unwrap());
+    report.missing_kv_entries = 1;
+    let error = repair_verified_report(&engine, &report).unwrap_err();
+    assert!(matches!(error, EngineError::ResourceExhausted(_)), "unexpected repair failure: {error}");
+
+    drop(pressure);
+    let key = engine.compute_hash(b"repair-pressure-released").unwrap();
+    engine.store_entry(EntryType::Chunk, &key, b"still-writable").unwrap();
+    assert!(engine.has_entry(&key).unwrap());
+  }
+
+  #[test]
+  fn checked_repair_preserves_an_acknowledged_stale_locator_when_a_later_repair_fails() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let context = RequestContext::system();
+    let operations = DirectoryOps::new(&engine);
+    operations.store_file_buffered(&context, "/good/file.txt", b"body", Some("text/plain")).unwrap();
+
+    let hash_algorithm = engine.hash_algo();
+    let hash_length = hash_algorithm.hash_length();
+    let root_key = directory_path_hash("/", &hash_algorithm).unwrap();
+    let bad_key = directory_path_hash("/bad", &hash_algorithm).unwrap();
+    let root_hash = engine.head_hash().unwrap();
+    let stale_target = vec![0x5a; hash_length];
+    engine.store_entry(EntryType::DirectoryIndex, &root_key, &stale_target).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &bad_key, &stale_target).unwrap();
+    engine.store_entry(EntryType::DirectoryIndex, &root_hash, b"malformed directory bytes").unwrap();
+
+    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
+    report.stale_dir_path_keys = vec!["/".to_string(), "/bad".to_string()];
+
+    let error = repair_verified_report(&engine, &report).expect_err("the later corrupt canonical walk must fail");
+    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
+      panic!("acknowledged repair evidence was erased: {error}");
+    };
+    assert_eq!(operation, "verify and repair");
+    assert_eq!(completed, 1);
+    assert_eq!(failed, 1);
+    assert!(evidence.contains("stale_locators=1"), "missing exact repair class: {evidence}");
+    assert!(evidence.contains("phase=stale_directory_locator"), "missing failure phase: {evidence}");
+    assert!(evidence.contains("path=/bad"), "missing bounded failing path: {evidence}");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before + 1);
+    assert_eq!(engine.get_entry(&root_key).unwrap().unwrap().2, root_hash);
+  }
+
+  #[test]
+  fn repair_progress_merges_collectable_and_nested_partial_cardinality() {
+    let mut progress = RepairProgress { targeted_directories: 2, ..RepairProgress::default() };
+    progress.record_failed_attempt(
+      "targeted_directory_repair",
+      "/damaged",
+      &EngineError::CorruptEntry { offset: 17, reason: "damaged node".to_string() },
+    );
+    let error = progress.preserve_error(
+      EngineError::PartialOperation {
+        operation: "directory tree repair".to_string(),
+        completed: 3,
+        failed: 2,
+        evidence: "directories_written=3".to_string(),
+      },
+      "full_directory_rebuild",
+      "/",
+    );
+
+    let EngineError::PartialOperation { operation, completed, failed, evidence } = error else {
+      panic!("nested partial outcome was not retained: {error}");
+    };
+    assert_eq!(operation, "verify and repair");
+    assert_eq!(completed, 5);
+    assert_eq!(failed, 3);
+    assert!(evidence.contains("failed_attempts=1"));
+    assert!(evidence.contains("targeted_directory_repair /damaged"));
+    assert!(evidence.contains("nested_completed=3"));
+    assert!(evidence.contains("nested_failed=2"));
+  }
+
+  #[test]
+  fn repair_progress_preserves_prior_acknowledgements_across_a_durability_failure() {
+    let progress = RepairProgress { stale_locators: 2, ..RepairProgress::default() };
+
+    let error = progress.preserve_error(
+      EngineError::PostMutationDurabilityFailure("forced publication failed".to_string()),
+      "durability_publication",
+      "/database.aeordb",
+    );
+
+    let EngineError::PartialOperation { completed, failed, evidence, .. } = error else {
+      panic!("durability failure erased prior repair acknowledgements: {error}");
+    };
+    assert_eq!(completed, 2);
+    assert_eq!(failed, 1);
+    assert!(evidence.contains("stale_locators=2"));
+    assert!(evidence.contains("phase=durability_publication"));
+    assert!(evidence.contains("Post-mutation durability failure"));
+  }
+
+  #[test]
+  fn void_snapshot_staging_failure_does_not_claim_a_publication() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    std::thread::scope(|scope| {
+      let result = scope
+        .spawn(|| {
+          let _guard = engine.void_manager.write().unwrap();
+          panic!("inject void-manager poison before repair staging");
+        })
+        .join();
+      assert!(result.is_err());
+    });
+    let sequence_before = engine.durability_snapshot().unwrap().next_sequence;
+    let mut report = VerifyReport::new(temp.path().join("test.aeordb").to_str().unwrap());
+    report.invalid_hot_tail_voids.push("invalid void".to_string());
+
+    let error = repair_verified_report(&engine, &report).expect_err("Void staging must surface its authority read failure");
+
+    assert!(!matches!(error, EngineError::PartialOperation { .. }), "unpublished Void state must not count as completed");
+    assert_eq!(engine.durability_snapshot().unwrap().next_sequence, sequence_before);
+  }
+
+  #[test]
+  fn every_completed_repair_routes_through_the_shared_maintenance_admission() {
+    let source = include_str!("verify.rs");
+    let call = ["admit_implicit_index_maintenance_v1", "("].concat();
+    let class = ["IndexProducerMaintenanceClassV1", "::Repair"].concat();
+    assert_eq!(source.matches(&call).count(), 1);
+    assert_eq!(source.matches(&class).count(), 1);
   }
 }

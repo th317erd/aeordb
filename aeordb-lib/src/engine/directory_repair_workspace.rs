@@ -269,7 +269,7 @@ impl DirectoryRepairWorkspace {
     let mut writer = RunWriter::create(&output, self.hash_algo, self.hash_length, count)?;
     let mut written = 0u64;
     while let Some(item) = heap.pop() {
-      if written % 4_096 == 0 {
+      if written.is_multiple_of(4_096) {
         check_cancelled(&self.cancellation)?;
       }
       writer.write_record(&item.record)?;

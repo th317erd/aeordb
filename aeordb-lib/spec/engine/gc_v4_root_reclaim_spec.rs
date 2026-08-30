@@ -87,10 +87,10 @@ fn reclaim_support(
   authority_root_set_digest: &[u8],
   generation: u64,
   published_at_ms: i64,
-  retention_ms: u64,
-  optional_byte_budget: u64,
+  retention: (u64, u64),
   expiry_record: &[u8],
 ) -> ReclaimSupport {
+  let (retention_ms, optional_byte_budget) = retention;
   let hash_width = algorithm.hash_length();
   let decoded_record = decode_root_expiry_record_v1(expiry_record, algorithm).unwrap();
   let catalog_id = [0xb1; 16];
@@ -384,8 +384,7 @@ fn reclaim_support_closure_binds_the_exact_proof_and_rebuilt_expiry_graph_at_bot
       &authority_root_set_digest,
       42,
       values.reclaimed_at_ms + 1,
-      RETENTION_MS,
-      16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+      (RETENTION_MS, 16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap()),
       qualified.encoded_expiry_record(),
     );
     let lifecycle = decode_root_lifecycle_manifest_v1(&support.lifecycle_manifest.value, algorithm).unwrap();
@@ -471,8 +470,7 @@ fn reclaim_support_closure_rejects_missing_mandatory_or_mismatched_target_eviden
     &authority_root_set_digest,
     42,
     values.reclaimed_at_ms + 1,
-    RETENTION_MS,
-    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    (RETENTION_MS, 16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap()),
     &values.prior_expiry_bytes,
   );
   assert_reclaim_closure_error(&mandatory_support, &proof, "root_expiry_reclaim_proof");
@@ -493,8 +491,7 @@ fn reclaim_support_closure_rejects_missing_mandatory_or_mismatched_target_eviden
     &authority_root_set_digest,
     42,
     values.reclaimed_at_ms + 1,
-    RETENTION_MS,
-    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    (RETENTION_MS, 16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap()),
     &other_row,
   );
   assert_reclaim_closure_error(&missing_support, &proof, "root_lifecycle_support_reclaim_closure");
@@ -505,8 +502,7 @@ fn reclaim_support_closure_rejects_missing_mandatory_or_mismatched_target_eviden
     &authority_root_set_digest,
     42,
     values.reclaimed_at_ms + 1,
-    RETENTION_MS,
-    16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap(),
+    (RETENTION_MS, 16 * u64::try_from(40 + 3 * algorithm.hash_length()).unwrap()),
     qualified.encoded_expiry_record(),
   );
   let mut mismatched_proof = proof.clone();
@@ -642,7 +638,7 @@ fn retention_stream_drops_expired_and_oldest_optional_rows_while_preserving_ever
     let retirement_hash = digest_parts(algorithm, &[b"other retirement"]);
     let proof_hash = digest_parts(algorithm, &[b"other reclaim proof"]);
     let row_bytes = u64::try_from(40 + 3 * hash_width).unwrap();
-    let rows = vec![
+    let rows = [
       expiry_row(
         algorithm,
         &vec![0x10; hash_width],
@@ -777,7 +773,7 @@ fn retention_stream_rejects_nonmaximal_cutoffs_missing_targets_ordering_and_canc
   let target_expires_at_ms = qualified.evidence_expires_at_ms();
   let retirement_hash = digest_parts(algorithm, &[b"other retirement"]);
   let proof_hash = digest_parts(algorithm, &[b"other reclaim proof"]);
-  let rows = vec![
+  let rows = [
     expiry_row(
       algorithm,
       &vec![0x10; hash_width],

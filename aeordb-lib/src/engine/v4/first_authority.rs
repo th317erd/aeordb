@@ -3697,8 +3697,7 @@ impl V4FirstAuthorityPublisher {
         EntryTypeV4::Chunk,
         WHOLE_ENTITY_V1_FLAG_SYSTEM,
         header.hash_algorithm,
-        request.publication_timestamp_ms,
-        chunk_sequence,
+        EntityPublicationOrder { timestamp_ms: request.publication_timestamp_ms, write_sequence: chunk_sequence },
         &chunk_key,
         request.encoded_control,
       )?;
@@ -3710,8 +3709,7 @@ impl V4FirstAuthorityPublisher {
       EntryTypeV4::FileRecord,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
-      request.publication_timestamp_ms,
-      file_record_write_sequence,
+      EntityPublicationOrder { timestamp_ms: request.publication_timestamp_ms, write_sequence: file_record_write_sequence },
       &path_key,
       &prepared_record.record_value,
     )?;
@@ -4691,8 +4689,7 @@ impl V4FirstAuthorityPublisher {
         incoming.entry_type,
         incoming.flags,
         header.hash_algorithm,
-        request.publication_timestamp_ms,
-        next_write_sequence,
+        EntityPublicationOrder { timestamp_ms: request.publication_timestamp_ms, write_sequence: next_write_sequence },
         incoming.key,
         incoming.stored_value,
       )?;
@@ -4928,8 +4925,7 @@ impl V4FirstAuthorityPublisher {
       EntryTypeV4::IndexArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
-      request.publication_timestamp_ms,
-      write_sequence,
+      EntityPublicationOrder { timestamp_ms: request.publication_timestamp_ms, write_sequence },
       &request.pointer.key,
       &request.pointer.value,
     )?;
@@ -5251,8 +5247,10 @@ impl V4FirstAuthorityPublisher {
         EntryTypeV4::IndexArtifact,
         WHOLE_ENTITY_V1_FLAG_SYSTEM,
         header.hash_algorithm,
-        header.updated_at_ms.max(request.publication_timestamp_ms),
-        next_write_sequence,
+        EntityPublicationOrder {
+          timestamp_ms: header.updated_at_ms.max(request.publication_timestamp_ms),
+          write_sequence: next_write_sequence,
+        },
         &artifact.key,
         &artifact.value,
       )?;
@@ -5903,8 +5901,7 @@ impl V4FirstAuthorityPublisher {
       EntryTypeV4::GcArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
-      header.updated_at_ms.max(publication_timestamp_ms),
-      write_sequence,
+      EntityPublicationOrder { timestamp_ms: header.updated_at_ms.max(publication_timestamp_ms), write_sequence },
       &encoded_control.key,
       &encoded_control.value,
     )?;
@@ -9102,8 +9099,7 @@ impl V4FirstAuthorityPublisher {
       EntryTypeV4::GcArtifact,
       WHOLE_ENTITY_V1_FLAG_SYSTEM,
       header.hash_algorithm,
-      publication_timestamp_ms,
-      write_sequence,
+      EntityPublicationOrder { timestamp_ms: publication_timestamp_ms, write_sequence },
       request.artifact_key,
       request.value,
     )?;
@@ -9824,8 +9820,7 @@ fn prepare_namespace_root_parts(
     EntryTypeV4::DirectoryIndex,
     0,
     algorithm,
-    created_at_ms,
-    tree_sequence,
+    EntityPublicationOrder { timestamp_ms: created_at_ms, write_sequence: tree_sequence },
     &namespace_tree.root_hash,
     &namespace_tree.stored_value,
   )?;
@@ -10650,7 +10645,15 @@ fn append_entity(
   let write_sequence = previous_sequence
     .checked_add(1)
     .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_write_sequence_exhausted", "write sequence exhausted"))?;
-  let bytes = encode_entity(entity_version, entry_type, flags, algorithm, timestamp_ms, write_sequence, key, stored_value)?;
+  let bytes = encode_entity(
+    entity_version,
+    entry_type,
+    flags,
+    algorithm,
+    EntityPublicationOrder { timestamp_ms, write_sequence },
+    key,
+    stored_value,
+  )?;
   entities.push(PreparedWholeEntityV1 { key: key.to_vec(), kv_type, bytes });
   Ok(write_sequence)
 }
@@ -10713,16 +10716,22 @@ fn append_system_file(
   )
 }
 
+#[derive(Clone, Copy)]
+struct EntityPublicationOrder {
+  timestamp_ms: u64,
+  write_sequence: u64,
+}
+
 fn encode_entity(
   entity_version: u8,
   entry_type: EntryTypeV4,
   flags: u8,
   algorithm: HashAlgorithm,
-  timestamp_ms: u64,
-  write_sequence: u64,
+  order: EntityPublicationOrder,
   key: &[u8],
   stored_value: &[u8],
 ) -> Result<Vec<u8>, FirstAuthorityPublicationErrorV1> {
+  let EntityPublicationOrder { timestamp_ms, write_sequence } = order;
   encode_whole_entity(&WholeEntityWriteV1 {
     entity_version,
     entry_type,
@@ -13802,7 +13811,7 @@ fn load_canonical_system_file_at_path(
   content_type: &str,
   maximum_body_length: usize,
 ) -> Result<Option<LoadedSystemFileV1>, FirstAuthorityPublicationErrorV1> {
-  let path_key = first_authority_file_path_hash(&path, header.hash_algorithm);
+  let path_key = first_authority_file_path_hash(path, header.hash_algorithm);
   let Some(locator) = kv.get(&path_key)? else {
     return Ok(None);
   };

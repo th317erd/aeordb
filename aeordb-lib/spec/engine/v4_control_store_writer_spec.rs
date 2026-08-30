@@ -147,7 +147,6 @@ fn v4_control_store_immutable_publication_is_byte_exact_and_idempotent() {
   assert_eq!(engine.durability_snapshot().unwrap().next_sequence, durability_before_retry);
   assert_current_control_file(&engine, &path, &bytes);
 
-  drop(store);
   engine.shutdown().unwrap();
   drop(engine);
   let reopened = StorageEngine::open(database_path.to_str().unwrap()).unwrap();

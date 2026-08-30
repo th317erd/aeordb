@@ -233,7 +233,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     println!();
 
     match run_repair_pass(&engine, &work_path, &emergency_spills, spill_apply_report.as_ref(), true) {
-      RepairPass::Complete(report) => report,
+      RepairPass::Complete(report) => *report,
       RepairPass::Expand { needed_stage, hash_length, current_size, needed_size } => {
         println!("Expanding KV block: {} → {} bytes (stage {})", current_size, needed_size, needed_stage);
         drop(engine);
@@ -453,7 +453,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     println!("Status: OK");
     if repair && !force_fix_in_place {
       println!();
-      println!("Repaired copy: {}", format!("{}.repaired", database));
+      println!("Repaired copy: {}.repaired", database);
       println!("To use it, replace the original:");
       println!("  mv {}.repaired {}", database, database);
     }
@@ -461,13 +461,13 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
 }
 
 enum RepairPass {
-  Complete(verify::VerifyReport),
+  Complete(Box<verify::VerifyReport>),
   Expand { needed_stage: usize, hash_length: usize, current_size: u64, needed_size: u64 },
 }
 
 fn require_complete_second_repair_pass(pass: RepairPass) -> Result<verify::VerifyReport, String> {
   match pass {
-    RepairPass::Complete(report) => Ok(report),
+    RepairPass::Complete(report) => Ok(*report),
     RepairPass::Expand { needed_stage, current_size, needed_size, .. } => {
       Err(format!("second repair pass still requires KV expansion from {current_size} to {needed_size} bytes (stage {needed_stage})"))
     }
@@ -555,7 +555,7 @@ fn run_repair_pass(
     }
   };
   complete_durability_repair(engine, database, durability_repair, &report);
-  RepairPass::Complete(report)
+  RepairPass::Complete(Box::new(report))
 }
 
 fn begin_durability_repair(engine: &StorageEngine) -> ExplicitDurabilityRepair<'_> {

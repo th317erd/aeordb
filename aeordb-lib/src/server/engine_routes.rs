@@ -20,7 +20,7 @@ use super::root_api::{
   RouteRootRequestPlanV1, parse_root_selector_v1, root_error_response_v1, root_response_headers_v1,
 };
 use super::route_permissions::{reject_share_key, require_generic_data_path, RoutePermissionChecker};
-use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse};
+use super::responses::{engine_error_response, EngineFileResponse, ErrorResponse, RouteResponseError};
 use super::search_locators::{
   broad_query_terms, terms_from_query_node, try_generate_selected_locators_with_budget, LocatorOptions, LocatorOptionsRequest, LocatorTerm,
 };
@@ -119,22 +119,6 @@ impl EngineGetQuery {
       &RootSelectorFieldsV1 { root_hash: self.root_hash.clone(), snapshot: self.snapshot.clone(), version: self.version.clone() },
       engine.hash_algo(),
     )
-  }
-}
-
-pub(super) struct RouteResponseError {
-  response: Box<Response>,
-}
-
-impl RouteResponseError {
-  pub(super) fn into_response(self) -> Response {
-    *self.response
-  }
-}
-
-impl From<Response> for RouteResponseError {
-  fn from(response: Response) -> Self {
-    Self { response: Box::new(response) }
   }
 }
 
@@ -434,7 +418,7 @@ pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<T
   let normalized = crate::engine::path_utils::normalize_path(&body.path);
 
   if let Err(response) = require_generic_data_path(&state, &normalized) {
-    return response;
+    return response.into_response();
   }
 
   if normalized == "/" {
@@ -448,11 +432,11 @@ pub async fn mkdir(State(state): State<AppState>, Extension(claims): Extension<T
   // key-rule enforcement upstream and don't carry user permissions; we
   // refuse them here.
   if let Err(response) = reject_share_key(&claims, "Share keys cannot create directories") {
-    return response;
+    return response.into_response();
   }
   let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
     Ok(permissions) => permissions,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   if !permissions.is_root() {
     let parent = crate::engine::path_utils::parent_path(&normalized).unwrap_or_else(|| "/".to_string());
@@ -503,7 +487,7 @@ pub async fn engine_store_file(
   body: Body,
 ) -> Response {
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   // Stream the body in 256KB chunks — each chunk is stored to disk as it
@@ -584,7 +568,7 @@ pub async fn engine_store_file(
   .await
   {
     Ok(record) => record,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   // Auto-trigger reindex when indexes.json is stored. The file mutation is
@@ -945,7 +929,7 @@ enum CoalescedStreamBuild {
 }
 
 impl CoalescedEngineByteRangeStream {
-  fn new(
+  fn build(
     chunk_hashes: Vec<Vec<u8>>,
     engine: std::sync::Arc<StorageEngine>,
     range: HttpByteRange,
@@ -1198,7 +1182,7 @@ impl EngineByteRangeStream {
     if include_deleted {
       Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, true, range)?))
     } else {
-      match CoalescedEngineByteRangeStream::new(chunk_hashes, std::sync::Arc::clone(&engine), range, total_size, limits)? {
+      match CoalescedEngineByteRangeStream::build(chunk_hashes, std::sync::Arc::clone(&engine), range, total_size, limits)? {
         CoalescedStreamBuild::Ready(stream) => Ok(Self::Coalesced(stream)),
         CoalescedStreamBuild::Legacy(chunk_hashes) => {
           Ok(Self::Legacy(LegacyEngineByteRangeStream::new(chunk_hashes, engine, false, range)?))
@@ -1308,7 +1292,7 @@ async fn build_file_streaming_response(
     .await
     {
       Ok(stream) => stream,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
     engine_stream_body(stream)
   } else {
@@ -1504,20 +1488,20 @@ fn add_selected_locator_fields(
   Ok(())
 }
 
-fn required_dispatch_value<T>(value: Option<T>, entry_type: &str, hash: &str) -> Result<T, Response> {
+fn required_dispatch_value<T>(value: Option<T>, entry_type: &str, hash: &str) -> Result<T, RouteResponseError> {
   match value {
     Some(value) => Ok(value),
     None => {
       tracing::error!(entry_type, hash, "entry hash dispatch state is incomplete");
-      Err(ErrorResponse::new("Failed to retrieve entry").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response())
+      Err(ErrorResponse::new("Failed to retrieve entry").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response().into())
     }
   }
 }
 
-fn serialize_response_value<T: serde::Serialize>(value: &T, context: &str) -> Result<serde_json::Value, Response> {
+fn serialize_response_value<T: serde::Serialize>(value: &T, context: &str) -> Result<serde_json::Value, RouteResponseError> {
   serde_json::to_value(value).map_err(|error| {
     tracing::error!(context, %error, "HTTP response serialization failed");
-    ErrorResponse::new(format!("{context} serialization failed")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response()
+    ErrorResponse::new(format!("{context} serialization failed")).with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response().into()
   })
 }
 
@@ -1539,14 +1523,15 @@ fn apply_listing_filters(
   key_rules: Option<&[crate::engine::api_key_rules::KeyRule]>,
   _user_id_str: &str,
   filtered_listing: Option<&crate::auth::permission_middleware::FilteredListing>,
-) -> Result<(), Response> {
+) -> Result<(), RouteResponseError> {
   if let Some(rules) = key_rules {
     if !rules.is_empty() {
       filter_listing_by_key_rules(listing, rules, 'l');
     }
   }
 
-  filter_generic_data_items(engine, listing).map_err(|error| engine_error_response("Failed to classify listing paths", &error))?;
+  filter_generic_data_items(engine, listing)
+    .map_err(|error| RouteResponseError::from(engine_error_response("Failed to classify listing paths", &error)))?;
 
   // Ancestor-navigation filter: when the user reached this directory by
   // virtue of having a grant somewhere below, only show the children that
@@ -1686,7 +1671,7 @@ async fn handle_selected_symlink_resolution(
       let mut listing = selected_entries_json(directory.entries);
       match apply_listing_filters(&state.engine, &mut listing, key_rules, &claims.sub, target_filter.as_ref()) {
         Ok(()) => paginated_listing_response(listing, limit, offset, None, None, selected.root()),
-        Err(response) => response,
+        Err(response) => response.into_response(),
       }
     }
     Err(EngineError::NotFound(msg)) => {
@@ -1818,7 +1803,7 @@ fn handle_recursive_listing(
             selected.root(),
           )
         }
-        Err(response) => response,
+        Err(response) => response.into_response(),
       }
     }
     Err(EngineError::NotFound(_)) => ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
@@ -1869,7 +1854,7 @@ fn handle_directory_listing(
           }
           paginated_listing_response(listing, limit, offset, sort, order, selected.root())
         }
-        Err(response) => response,
+        Err(response) => response.into_response(),
       }
     }
     Err(EngineError::NotFound(_)) => ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response(),
@@ -1922,7 +1907,7 @@ pub async fn engine_get(
     return error.into_response();
   }
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   // Deleted files are invisible to users without 'd' permission
@@ -2039,7 +2024,7 @@ pub async fn engine_delete_file(
   Path(path): Path<String>,
 ) -> Response {
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -2103,18 +2088,18 @@ pub async fn restore_deleted_file(
   };
 
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   // User/group permission check: /files/restore is exempt from path-aware
   // middleware. Restoring a file is an inverse Delete operation — require
   // the 'd' (Delete) permission on the path, matching list_deleted_files.
   if let Err(response) = reject_share_key(&claims, "Share keys cannot restore deleted files") {
-    return response;
+    return response.into_response();
   };
   let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
     Ok(permissions) => permissions,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   if !permissions.is_root() {
     let permitted = match permissions.has_path_permission(&path, CrudlifyOp::Delete) {
@@ -2152,13 +2137,13 @@ pub async fn list_deleted_files(
   let dir_path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
 
   if let Err(response) = require_generic_data_path(&state, dir_path) {
-    return response;
+    return response.into_response();
   }
 
   // Deleted files require 'd' permission — check on the directory
   let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user ID") {
     Ok(permissions) => permissions,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   if !permissions.is_root() {
     let permitted = match permissions.has_permission(dir_path, CrudlifyOp::Delete) {
@@ -2276,7 +2261,7 @@ pub async fn engine_get_by_hash(
     .await
     {
       Ok(header) => header,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     }
   };
 
@@ -2294,7 +2279,7 @@ pub async fn engine_get_by_hash(
     .await
     {
       Ok(record) => Some(record),
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     }
   } else {
     None
@@ -2348,7 +2333,7 @@ pub async fn engine_get_by_hash(
     .await
     {
       Ok(value) => Some(value),
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     }
   };
 
@@ -2384,7 +2369,7 @@ pub async fn engine_get_by_hash(
         .await
         {
           Ok(data) => data,
-          Err(response) => return response,
+          Err(response) => return response.into_response(),
         }
       };
       state.engine.counters().record_read(data.len() as u64);
@@ -2402,7 +2387,7 @@ pub async fn engine_get_by_hash(
     EntryType::DirectoryIndex => {
       let value = match required_dispatch_value(raw_value, "DirectoryIndex", &hex_hash) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       state.engine.counters().record_read(value.len() as u64);
       let response = axum::http::Response::builder()
@@ -2419,7 +2404,7 @@ pub async fn engine_get_by_hash(
       // Other types: return raw value bytes.
       let value = match required_dispatch_value(raw_value, "raw", &hex_hash) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       let response = axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -2971,7 +2956,7 @@ fn public_query_page_v1(
     ..PublicCollectionMetadataV1::default()
   };
   let envelope = PublicItemsResponseV1::new(context.root.clone(), items, metadata);
-  let response = serialize_response_value(&envelope, "Query response").map_err(boxed_response_v1)?;
+  let response = serialize_response_value(&envelope, "Query response").map_err(RouteResponseError::into_boxed_response)?;
   Ok(PublicQueryPageResultV1 { response, total_results, results_returned })
 }
 
@@ -3300,8 +3285,8 @@ fn public_aggregate_page_v1(
         .into_response(),
     ));
   }
-  let mut response = serialize_response_value(&result, "Aggregation response").map_err(boxed_response_v1)?;
-  response["root"] = serialize_response_value(context.root, "Query root response").map_err(boxed_response_v1)?;
+  let mut response = serialize_response_value(&result, "Aggregation response").map_err(RouteResponseError::into_boxed_response)?;
+  response["root"] = serialize_response_value(context.root, "Query root response").map_err(RouteResponseError::into_boxed_response)?;
   if let Some(cursor) = next_cursor {
     response["next_cursor"] = serde_json::Value::String(cursor);
   }
@@ -3367,7 +3352,7 @@ pub async fn query_endpoint(
     Err(error) => return public_schema_error_response(error),
   };
   if let Err(response) = require_generic_data_path(&state, &admitted.path) {
-    return response;
+    return response.into_response();
   }
 
   let key_rules = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());
@@ -3500,7 +3485,7 @@ pub async fn query_endpoint(
       }
       let mut response = match serialize_response_value(&plan, "Explain response") {
         Ok(response) => response,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       response["execution"] = serde_json::json!({
         "total_duration_ms": execution_start.elapsed().as_secs_f64() * 1000.0,
@@ -3510,7 +3495,7 @@ pub async fn query_endpoint(
       response["items"] = item_response;
       response["root"] = match serialize_response_value(selected.root(), "Query root response") {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       return (StatusCode::OK, Json(response)).into_response();
     }
@@ -3555,7 +3540,7 @@ pub async fn query_endpoint(
       }
       let mut response = match serialize_response_value(&plan, "Explain response") {
         Ok(response) => response,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       response["execution"] = serde_json::json!({
         "total_duration_ms": execution_start.elapsed().as_secs_f64() * 1000.0,
@@ -3565,7 +3550,7 @@ pub async fn query_endpoint(
       response["items"] = item_response;
       response["root"] = match serialize_response_value(selected.root(), "Query root response") {
         Ok(root) => root,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       return (StatusCode::OK, Json(response)).into_response();
     }
@@ -3575,11 +3560,11 @@ pub async fn query_endpoint(
       Ok(result) => {
         let mut response = match serialize_response_value(&result, "Explain response") {
           Ok(response) => response,
-          Err(response) => return response,
+          Err(response) => return response.into_response(),
         };
         response["root"] = match serialize_response_value(selected.root(), "Query root response") {
           Ok(root) => root,
-          Err(response) => return response,
+          Err(response) => return response.into_response(),
         };
         (StatusCode::OK, Json(response)).into_response()
       }
@@ -3698,13 +3683,15 @@ const MAX_MERGE_PATCH_BYTES: usize = 10 * 1024 * 1024;
 #[derive(Deserialize, Default)]
 pub struct MergePatchQuery {
   /// Signed merge depth.
-  ///   * `None`          → strict RFC 7396 (unbounded recursion).
-  ///   * `Some(0)`       → wholesale document replace (PUT semantics).
-  ///   * `Some(N > 0)`   → merge N levels deep; object values beyond
-  ///                       that boundary REPLACE the target subtree.
-  ///   * `Some(N < 0)`   → merge |N| levels deep; object values beyond
-  ///                       that boundary PRESERVE the existing target
-  ///                       subtree (patch's deeper objects ignored).
+  ///
+  /// * `None` → strict RFC 7396 (unbounded recursion).
+  /// * `Some(0)` → wholesale document replace (PUT semantics).
+  /// * `Some(N > 0)` → merge N levels deep; object values beyond
+  ///   that boundary REPLACE the target subtree.
+  /// * `Some(N < 0)` → merge |N| levels deep; object values beyond
+  ///   that boundary PRESERVE the existing target subtree
+  ///   (patch's deeper objects ignored).
+  ///
   /// Scalars and `null` patch values always behave the same regardless
   /// of sign — `null` deletes, scalars insert/replace at the merge level.
   depth: Option<i64>,
@@ -3745,7 +3732,7 @@ async fn do_merge_patch(
   use crate::engine::merge_patch::MergeDepth;
 
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   let depth = match merge_q.depth {
@@ -3860,10 +3847,10 @@ async fn do_rename(
   };
 
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
   if let Err(response) = require_generic_data_path(&state, destination) {
-    return response;
+    return response.into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -3955,11 +3942,11 @@ pub async fn copy_files(
   let dest_normalized = crate::engine::path_utils::normalize_path(&payload.destination);
 
   if let Err(response) = require_generic_data_path(&state, &dest_normalized) {
-    return response;
+    return response.into_response();
   }
   for path in &payload.paths {
     if let Err(response) = require_generic_data_path(&state, path) {
-      return response;
+      return response.into_response();
     }
   }
 
@@ -3968,11 +3955,11 @@ pub async fn copy_files(
   // file to any location. Required: Read on each source AND Create on
   // the destination directory.
   if let Err(response) = reject_share_key(&claims, "Share keys cannot copy files") {
-    return response;
+    return response.into_response();
   };
   let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
     Ok(permissions) => permissions,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   if !permissions.is_root() {
     // Source check first so a 404 on an unauthorized source isn't masked
@@ -4058,7 +4045,7 @@ pub async fn global_search_endpoint(
     Err(error) => return public_schema_error_response(error),
   };
   if let Err(response) = require_generic_data_path(&state, &admitted.path) {
-    return response;
+    return response.into_response();
   }
 
   let key_rules = active_key_rules.as_ref().map(|Extension(rules)| rules.0.as_slice());

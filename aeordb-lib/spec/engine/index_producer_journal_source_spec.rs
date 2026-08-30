@@ -11,7 +11,7 @@ use aeordb::engine::v4::index_task::{
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
 fn memory() -> MemoryCoordinator {
-  MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap())
+  MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap())
 }
 
 fn encoded_journal(discriminator: u8) -> Vec<u8> {
@@ -62,15 +62,15 @@ fn exact_journal_read_retains_task_memory_until_drop() {
   let encoded = encoded_journal(0x51);
   let journal_head = head(&encoded);
   let request = IndexProducerJournalReadRequestV1 { hash_algorithm: ALGORITHM, journal_head: &journal_head, is_cancelled: &|| false };
-  let reservation = memory.reserve(MemoryOwner::Task, 1 * 1_024 * 1_024, AdmissionClass::Workload).unwrap();
+  let reservation = memory.reserve(MemoryOwner::Task, 1_024 * 1_024, AdmissionClass::Workload).unwrap();
 
   let read = IndexProducerJournalReadV1::new(&request, encoded.clone(), reservation).unwrap();
 
   assert_eq!(read.encoded(), encoded);
   assert_eq!(read.decode_journal(ALGORITHM, &journal_head).unwrap().key, journal_head);
   assert_eq!(read.decode_journal(ALGORITHM, &[0x11; 31]).err().unwrap().code(), "journal_request_identity");
-  assert_eq!(read.reserved_bytes(), 1 * 1_024 * 1_024);
-  assert_eq!(reserved(&memory, MemoryOwner::Task), 1 * 1_024 * 1_024);
+  assert_eq!(read.reserved_bytes(), 1_024 * 1_024);
+  assert_eq!(reserved(&memory, MemoryOwner::Task), 1_024 * 1_024);
   drop(read);
   assert_eq!(reserved(&memory, MemoryOwner::Task), 0);
 }
@@ -86,7 +86,7 @@ fn journal_read_rejects_cancellation_and_absent_or_wrong_width_identity() {
   ] {
     let memory = memory();
     let request = IndexProducerJournalReadRequestV1 { hash_algorithm: ALGORITHM, journal_head: &candidate, is_cancelled: &|| cancelled };
-    let reservation = memory.reserve(MemoryOwner::Task, 1 * 1_024 * 1_024, AdmissionClass::Workload).unwrap();
+    let reservation = memory.reserve(MemoryOwner::Task, 1_024 * 1_024, AdmissionClass::Workload).unwrap();
     let error = IndexProducerJournalReadV1::new(&request, encoded.clone(), reservation).err().unwrap();
     assert_eq!(error.code(), expected_code);
     assert_eq!(reserved(&memory, MemoryOwner::Task), 0);
@@ -100,7 +100,7 @@ fn journal_read_rejects_wrong_memory_owner_and_undersized_reservation() {
   let request = IndexProducerJournalReadRequestV1 { hash_algorithm: ALGORITHM, journal_head: &journal_head, is_cancelled: &|| false };
 
   let wrong_owner_memory = memory();
-  let wrong_owner = wrong_owner_memory.reserve(MemoryOwner::Query, 1 * 1_024 * 1_024, AdmissionClass::Workload).unwrap();
+  let wrong_owner = wrong_owner_memory.reserve(MemoryOwner::Query, 1_024 * 1_024, AdmissionClass::Workload).unwrap();
   let error = IndexProducerJournalReadV1::new(&request, encoded.clone(), wrong_owner).err().unwrap();
   assert_eq!(error.code(), "journal_memory_owner");
   assert_eq!(reserved(&wrong_owner_memory, MemoryOwner::Query), 0);
@@ -120,7 +120,7 @@ fn journal_read_rejects_malformed_and_wrong_identity_content() {
 
   for (encoded, expected_code) in [(vec![0x99; 128], "journal_format"), (encoded_journal(0x55), "journal_identity")] {
     let memory = memory();
-    let reservation = memory.reserve(MemoryOwner::Task, 1 * 1_024 * 1_024, AdmissionClass::Workload).unwrap();
+    let reservation = memory.reserve(MemoryOwner::Task, 1_024 * 1_024, AdmissionClass::Workload).unwrap();
     let read = IndexProducerJournalReadV1::new(&request, encoded, reservation).unwrap();
     let error = read.decode_journal(ALGORITHM, &expected_head).err().unwrap();
     assert_eq!(error.class(), IndexProducerJournalReadErrorClassV1::Corrupt);

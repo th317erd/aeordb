@@ -130,8 +130,10 @@ impl CurrentPathAuthorizationSourceV1 for FakeCurrentSource {
 struct FakeSelectedSource {
   result: Result<Option<PathAuthorizationDecisionV1>, ReadViewAuthorizationFailureV1>,
   calls: Arc<AtomicUsize>,
-  requests: Arc<std::sync::Mutex<Vec<(String, CrudlifyOp, Vec<String>)>>>,
+  requests: SelectedAuthorizationRequests,
 }
+
+type SelectedAuthorizationRequests = Arc<std::sync::Mutex<Vec<(String, CrudlifyOp, Vec<String>)>>>;
 
 struct CancelingSelectedSource {
   calls: Arc<AtomicUsize>,

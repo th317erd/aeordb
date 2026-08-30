@@ -702,8 +702,14 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
     }
   }
 
-  let (dirs_written, dirs_mutated, root_hash) =
-    write_transfer_directories(tree, source, output, resolver, operation, destination_mode, locator_batch.as_mut(), budget)?;
+  let (dirs_written, dirs_mutated, root_hash) = write_transfer_directories(
+    tree,
+    source,
+    output,
+    TransferDirectoryPolicy { resolver, operation, destination_mode },
+    locator_batch.as_mut(),
+    budget,
+  )?;
 
   // Write symlink entries at both content-hash and path-hash keys.
   let symlink_algo = output.hash_algo();
@@ -771,13 +777,18 @@ fn write_tree_to_engine<S: HistoricalEntrySource + ?Sized>(
   })
 }
 
+#[derive(Clone, Copy)]
+struct TransferDirectoryPolicy {
+  resolver: SystemFamilyPolicyResolver,
+  operation: SystemFamilyTransferOperationV1,
+  destination_mode: TransferDestinationMode,
+}
+
 fn write_transfer_directories<S: HistoricalEntrySource + ?Sized>(
   tree: &VersionTree,
   source: &S,
   output: &StorageEngine,
-  resolver: SystemFamilyPolicyResolver,
-  operation: SystemFamilyTransferOperationV1,
-  destination_mode: TransferDestinationMode,
+  policy: TransferDirectoryPolicy,
   locator_batch: Option<&mut ImportLocatorBatch<'_>>,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64, Vec<u8>)> {
@@ -801,7 +812,7 @@ fn write_transfer_directories<S: HistoricalEntrySource + ?Sized>(
       .and_then(|bytes| bytes.checked_add(retained_path_bytes))
       .ok_or_else(|| EngineError::ResourceExhausted("transfer directory workspace estimate overflow".to_string()))?;
     budget.reserve(workspace_charge, "transfer directory routing workspace admission failed")?;
-    write_transfer_directories_admitted(tree, source, output, resolver, operation, destination_mode, locator_batch, budget)
+    write_transfer_directories_admitted(tree, source, output, policy, locator_batch, budget)
   })();
   let release_result = budget.release_to(checkpoint, "transfer directory routing workspace release failed");
   match result {
@@ -819,12 +830,11 @@ fn write_transfer_directories_admitted<S: HistoricalEntrySource + ?Sized>(
   tree: &VersionTree,
   source: &S,
   output: &StorageEngine,
-  resolver: SystemFamilyPolicyResolver,
-  operation: SystemFamilyTransferOperationV1,
-  destination_mode: TransferDestinationMode,
+  policy: TransferDirectoryPolicy,
   mut locator_batch: Option<&mut ImportLocatorBatch<'_>>,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<(u64, u64, Vec<u8>)> {
+  let TransferDirectoryPolicy { resolver, operation, destination_mode } = policy;
   let algorithm = output.hash_algo();
   let hash_length = algorithm.hash_length();
   let mut paths = tree.directories.keys().collect::<Vec<_>>();
@@ -1540,9 +1550,11 @@ fn create_patch_inner(
     &base_tree,
     source,
     &output,
-    resolver,
-    SystemFamilyTransferOperationV1::LogicalBackup,
-    TransferDestinationMode::Artifact,
+    TransferDirectoryPolicy {
+      resolver,
+      operation: SystemFamilyTransferOperationV1::LogicalBackup,
+      destination_mode: TransferDestinationMode::Artifact,
+    },
     None,
     budget,
   )?;
@@ -1550,9 +1562,11 @@ fn create_patch_inner(
     &target_tree,
     source,
     &output,
-    resolver,
-    SystemFamilyTransferOperationV1::LogicalBackup,
-    TransferDestinationMode::Artifact,
+    TransferDirectoryPolicy {
+      resolver,
+      operation: SystemFamilyTransferOperationV1::LogicalBackup,
+      destination_mode: TransferDestinationMode::Artifact,
+    },
     None,
     budget,
   )?;
@@ -2237,7 +2251,14 @@ pub fn import_backup_with_mode(
   budget.release(deletion_inventory_charge, "deletion import inventory release failed")?;
 
   if backup_type == 1 {
-    import_full_export_with_policy(ctx, target, &backup, &target_hash, include_system, force, promote, &starting_root_hash, &mut budget)
+    import_full_export_with_policy(
+      ctx,
+      target,
+      &backup,
+      &target_hash,
+      FullImportPolicy { include_system, force, promote, starting_root_hash: &starting_root_hash },
+      &mut budget,
+    )
   } else {
     import_sparse_patch_with_policy(
       ctx,
@@ -2452,17 +2473,22 @@ fn release_selected_patch_deletions(deletions: Vec<SelectedPatchDeletion>, budge
   Ok(())
 }
 
+struct FullImportPolicy<'a> {
+  include_system: bool,
+  force: bool,
+  promote: bool,
+  starting_root_hash: &'a [u8],
+}
+
 fn import_full_export_with_policy(
   ctx: &RequestContext,
   target: &StorageEngine,
   backup: &StorageEngine,
   target_hash: &[u8],
-  include_system: bool,
-  force: bool,
-  promote: bool,
-  starting_root_hash: &[u8],
+  policy: FullImportPolicy<'_>,
   budget: &mut OperationMemoryBudget,
 ) -> EngineResult<ImportResult> {
+  let FullImportPolicy { include_system, force, promote, starting_root_hash } = policy;
   let operation = if include_system { SystemFamilyTransferOperationV1::Import } else { SystemFamilyTransferOperationV1::DataExport };
   let resolver = SystemFamilyPolicyResolver::new(backup.hash_algo())?;
   let snapshots_checkpoint = budget.checkpoint();

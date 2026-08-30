@@ -231,12 +231,12 @@ fn resolve_file_conflict(
 }
 
 /// Create a modify-delete conflict entry where the modify side wins.
-fn make_modify_delete_conflict(path: &str, winner_hash: &Vec<u8>, winner_record: &FileRecord) -> ConflictEntry {
+fn make_modify_delete_conflict(path: &str, winner_hash: &[u8], winner_record: &FileRecord) -> ConflictEntry {
   ConflictEntry {
     path: path.to_string(),
     conflict_type: ConflictType::ModifyDelete,
     winner: ConflictVersion {
-      hash: winner_hash.clone(),
+      hash: winner_hash.to_vec(),
       virtual_time: winner_record.updated_at.max(0) as u64,
       node_id: 0,
       size: winner_record.total_size,

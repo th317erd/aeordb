@@ -107,7 +107,7 @@ pub async fn export_backup(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let mut artifact = match unique_temp_artifact(&state.engine, "aeordb-export") {
@@ -169,7 +169,7 @@ pub async fn diff_backup(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let mut artifact = match unique_temp_artifact(&state.engine, "aeordb-patch") {
@@ -213,7 +213,7 @@ pub async fn import_backup(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let mode = match crate::engine::backup::ImportMode::parse(params.mode.as_deref()) {
@@ -433,7 +433,7 @@ pub async fn promote_head(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let hash_bytes = match hex::decode(&params.hash) {

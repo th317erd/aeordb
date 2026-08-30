@@ -22,7 +22,7 @@ use crate::engine::EngineError;
 pub async fn get_email_config(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match load_email_config(&state.engine) {
@@ -53,7 +53,7 @@ pub async fn put_email_config(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   if let Err(e) = save_email_config(&state.engine, &config) {
@@ -94,7 +94,7 @@ pub async fn send_test_email(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let config = match load_email_config(&state.engine) {

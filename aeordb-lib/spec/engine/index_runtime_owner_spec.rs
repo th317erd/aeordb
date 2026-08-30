@@ -190,8 +190,10 @@ struct SemanticSource {
 
 struct RecordingSemanticSource {
   semantic_state_root: Vec<u8>,
-  observed: Arc<Mutex<Vec<([u8; 16], u64, String)>>>,
+  observed: RecordedSemanticRequests,
 }
+
+type RecordedSemanticRequests = Arc<Mutex<Vec<([u8; 16], u64, String)>>>;
 
 impl IndexSemanticScopeSourceV1 for SemanticSource {
   fn resolve_scopes(
@@ -329,8 +331,10 @@ enum CompactionBehavior {
 
 struct CompactionExecutor {
   behavior: CompactionBehavior,
-  observed: Arc<Mutex<Vec<([u8; 16], u64, Vec<u8>, Vec<u8>, String, u64)>>>,
+  observed: RecordedCompactionRequests,
 }
+
+type RecordedCompactionRequests = Arc<Mutex<Vec<([u8; 16], u64, Vec<u8>, Vec<u8>, String, u64)>>>;
 
 impl IndexRuntimeCompactionExecutorV1 for CompactionExecutor {
   fn execute(
@@ -388,8 +392,10 @@ impl IndexProducerJournalSourceV1 for PanickingJournalSource {
 
 struct MaintenanceSource {
   pages: Mutex<VecDeque<(Vec<IndexMaintenanceScanDocumentV1>, bool)>>,
-  observed: Arc<Mutex<Vec<(Vec<u8>, String, Option<String>)>>>,
+  observed: RecordedMaintenanceRequests,
 }
+
+type RecordedMaintenanceRequests = Arc<Mutex<Vec<(Vec<u8>, String, Option<String>)>>>;
 
 impl IndexMaintenanceScanSourceV1 for MaintenanceSource {
   fn scan(&self, request: IndexMaintenanceScanRequestV1<'_>) -> Result<IndexMaintenanceScanReadV1, IndexMaintenanceScanReadErrorV1> {
@@ -2371,7 +2377,9 @@ fn prepared_cadence_owner(runtime_options: IndexRuntimeOwnerOptionsV1, coordinat
   owner
 }
 
-fn cadence_publisher(failures: usize) -> (CadencePublisher, Arc<AtomicUsize>, Arc<Mutex<Vec<(IndexFlushReasonV1, u64, u64)>>>) {
+type CadencePublisherFixture = (CadencePublisher, Arc<AtomicUsize>, Arc<Mutex<Vec<(IndexFlushReasonV1, u64, u64)>>>);
+
+fn cadence_publisher(failures: usize) -> CadencePublisherFixture {
   let failures_remaining = Arc::new(AtomicUsize::new(failures));
   let observed = Arc::new(Mutex::new(Vec::new()));
   (CadencePublisher { failures_remaining: Arc::clone(&failures_remaining), observed: Arc::clone(&observed) }, failures_remaining, observed)

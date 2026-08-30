@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::engine::{DirectoryOps, EngineError, EngineResult, StorageEngine};
+use crate::server::responses::RouteResponseError;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CorsRule {
@@ -71,10 +72,10 @@ pub fn build_cors_state(cors_flag: Option<&str>, engine: &StorageEngine) -> Engi
   Ok(CorsState { default_origins, rules })
 }
 
-fn response_header(value: &str, name: &'static str) -> Result<HeaderValue, Response> {
+fn response_header(value: &str, name: &'static str) -> Result<HeaderValue, RouteResponseError> {
   HeaderValue::from_str(value).map_err(|error| {
     tracing::error!(header = name, %error, "CORS policy produced an invalid response header");
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    StatusCode::INTERNAL_SERVER_ERROR.into_response().into()
   })
 }
 
@@ -124,19 +125,19 @@ pub async fn cors_middleware(axum::extract::State(cors_state): axum::extract::St
   if is_preflight {
     let allow_origin = match response_header(&allow_origin, "access-control-allow-origin") {
       Ok(value) => value,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
     let methods = match response_header(&methods, "access-control-allow-methods") {
       Ok(value) => value,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
     let headers = match response_header(&headers, "access-control-allow-headers") {
       Ok(value) => value,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
     let max_age = match response_header(&max_age.to_string(), "access-control-max-age") {
       Ok(value) => value,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
     let mut response = StatusCode::NO_CONTENT.into_response();
     let hdrs = response.headers_mut();
@@ -148,13 +149,13 @@ pub async fn cors_middleware(axum::extract::State(cors_state): axum::extract::St
     if credentials {
       hdrs.insert("access-control-allow-credentials", HeaderValue::from_static("true"));
     }
-    return response;
+    return response.into_response();
   }
 
   // Normal request -- run handler then attach CORS headers
   let allow_origin = match response_header(&allow_origin, "access-control-allow-origin") {
     Ok(value) => value,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   let mut response = next.run(request).await;
   let hdrs = response.headers_mut();

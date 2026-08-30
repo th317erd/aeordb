@@ -80,17 +80,25 @@ fn journal_for(
   .unwrap()
 }
 
+struct CheckpointProgress<'a> {
+  source_root: &'a [u8],
+  target_root: &'a [u8],
+  floor: u64,
+  audited: u64,
+}
+
+fn checkpoint_progress<'a>(source_root: &'a [u8], target_root: &'a [u8], floor: u64, audited: u64) -> CheckpointProgress<'a> {
+  CheckpointProgress { source_root, target_root, floor, audited }
+}
+
 fn checkpoint(
   owner: &IndexRecoveryOwnerV1,
   journal: &EncodedImmutableIndexArtifactV1,
   sequence: u64,
   generation: u64,
-  source_root: &[u8],
-  target_root: &[u8],
-  floor: u64,
-  audited: u64,
+  progress: CheckpointProgress<'_>,
 ) -> EncodedImmutableIndexArtifactV1 {
-  checkpoint_for(ALGORITHM, owner, journal, sequence, generation, source_root, target_root, floor, audited)
+  checkpoint_for(ALGORITHM, owner, journal, sequence, generation, progress)
 }
 
 fn checkpoint_for(
@@ -99,11 +107,9 @@ fn checkpoint_for(
   journal: &EncodedImmutableIndexArtifactV1,
   sequence: u64,
   generation: u64,
-  source_root: &[u8],
-  target_root: &[u8],
-  floor: u64,
-  audited: u64,
+  progress: CheckpointProgress<'_>,
 ) -> EncodedImmutableIndexArtifactV1 {
+  let CheckpointProgress { source_root, target_root, floor, audited } = progress;
   let attachment_owner = hash_for(algorithm, 0x71);
   let attachments = [IndexTaskAttachmentWriteV1 {
     role: IndexTaskAttachmentRoleV1::MutationJournalHead,
@@ -258,7 +264,7 @@ fn dependencies_and_checkpoint_are_synced_before_selector_and_recover_exactly() 
   let target = hash(0x12);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint_artifact = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint_artifact = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   let mut store = RecordingStore::default();
   let receipt = publish_index_recovery_checkpoint_v1(
     &mut store,
@@ -304,7 +310,7 @@ fn publication_and_restart_recovery_support_every_database_hash_profile() {
     let target = hash_for(algorithm, 0x12);
     let zero = vec![0; algorithm.hash_length()];
     let journal = journal_for(algorithm, &zero, 1, 7, 11, &source, &target);
-    let checkpoint = checkpoint_for(algorithm, &owner, &journal, 1, 7, &source, &target, 10, 11);
+    let checkpoint = checkpoint_for(algorithm, &owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
     let mut store = RecordingStore::default();
     let receipt = publish_index_recovery_checkpoint_v1(
       &mut store,
@@ -346,7 +352,7 @@ fn absent_missing_corrupt_and_discontinuous_recovery_never_become_empty_success(
   let target = hash(0x12);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint_artifact = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint_artifact = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   for expected in [IndexRecoveryReasonV1::CheckpointMissing, IndexRecoveryReasonV1::JournalMissing, IndexRecoveryReasonV1::JournalCorrupt] {
     let mut store = RecordingStore::default();
     let root = IndexCheckpointRootV1::new(1, checkpoint_artifact.key.clone()).unwrap();
@@ -369,7 +375,7 @@ fn absent_missing_corrupt_and_discontinuous_recovery_never_become_empty_success(
     );
   }
 
-  let wrong_target = checkpoint(&owner, &journal, 1, 7, &source, &hash(0x13), 10, 11);
+  let wrong_target = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &hash(0x13), 10, 11));
   let mut store = RecordingStore::default();
   store.artifacts.insert(journal.key.clone(), journal.value.clone());
   store.artifacts.insert(wrong_target.key.clone(), wrong_target.value.clone());
@@ -389,7 +395,7 @@ fn publication_failure_or_incomplete_closure_never_advances_the_old_selector() {
   let target = hash(0x12);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let initial_checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let initial_checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
 
   let mut no_dependency = RecordingStore::default();
   let error = publish_index_recovery_checkpoint_v1(
@@ -410,7 +416,7 @@ fn publication_failure_or_incomplete_closure_never_advances_the_old_selector() {
   assert!(no_dependency.selected.is_empty());
 
   let old = IndexCheckpointRootV1::new(9, hash(0x91)).unwrap();
-  let next_checkpoint = checkpoint(&owner, &journal, 10, 7, &source, &target, 10, 11);
+  let next_checkpoint = checkpoint(&owner, &journal, 10, 7, checkpoint_progress(&source, &target, 10, 11));
   for event in ["sync", "publish-selected"] {
     let mut store = RecordingStore::default().fail_at(event);
     store.selected.insert((owner.index_id().to_vec(), owner.operation_id()), old.clone());
@@ -440,7 +446,7 @@ fn cancellation_and_memory_pressure_fail_before_selection_changes() {
   let target = hash(0x12);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   let cancellation = CancellationToken::new();
   cancellation.cancel();
   let mut store = RecordingStore::default();
@@ -521,7 +527,7 @@ fn malformed_recovery_contracts_fail_before_storage_and_bad_selected_roots_requi
   let target = hash(0x12);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let second = checkpoint(&owner, &journal, 2, 7, &source, &target, 10, 11);
+  let second = checkpoint(&owner, &journal, 2, 7, checkpoint_progress(&source, &target, 10, 11));
   let mut invalid_first = RecordingStore::default();
   let result = publish_index_recovery_checkpoint_v1(
     &mut invalid_first,
@@ -539,7 +545,7 @@ fn malformed_recovery_contracts_fail_before_storage_and_bad_selected_roots_requi
   assert!(matches!(result, Err(IndexRecoveryErrorV1::Invalid(_))));
   assert!(invalid_first.events.iter().all(|event| !event.starts_with("put:")));
 
-  let first = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let first = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   for dependencies in [vec![&journal, &journal], vec![&first]] {
     let mut invalid_dependencies = RecordingStore::default();
     let result = publish_index_recovery_checkpoint_v1(
@@ -567,7 +573,7 @@ fn every_store_failure_is_preserved_and_never_advances_selection() {
   let target = hash(0x52);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   let publication_failures = [
     "load-selected".to_string(),
     format!("put:{}", hex::encode(&journal.key)),
@@ -635,7 +641,7 @@ fn cancellation_during_publication_or_restart_releases_memory_and_preserves_sele
   let target = hash(0x62);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
 
   let publication_cancellation = CancellationToken::new();
   let mut publishing =
@@ -687,7 +693,7 @@ fn two_segment_restart_requires_the_complete_chain_and_obeys_replay_bounds() {
   let zero = vec![0; ALGORITHM.hash_length()];
   let first = journal(&zero, 1, 7, 11, &source, &middle);
   let second = journal(&first.key, 2, 7, 12, &middle, &target);
-  let checkpoint = checkpoint(&owner, &second, 1, 7, &source, &target, 10, 12);
+  let checkpoint = checkpoint(&owner, &second, 1, 7, checkpoint_progress(&source, &target, 10, 12));
   let selected = IndexCheckpointRootV1::new(1, checkpoint.key.clone()).unwrap();
   let mut store = RecordingStore::default();
   for artifact in [&first, &second, &checkpoint] {
@@ -724,7 +730,7 @@ fn idempotent_retry_revalidates_bytes_without_republishing_the_selector() {
   let target = hash(0x32);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   let memory = memory(128 * 1_024 * 1_024);
   let cancellation = CancellationToken::new();
   let mut store = RecordingStore::default();
@@ -768,7 +774,7 @@ fn commit_unknown_selector_error_reopens_as_exact_new_and_retries_idempotently()
   let target = hash(0x72);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
+  let checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
   let memory = memory(128 * 1_024 * 1_024);
   let cancellation = CancellationToken::new();
   let mut store = RecordingStore { fail_after_publish: true, ..RecordingStore::default() };
@@ -817,8 +823,8 @@ fn stale_selection_and_changed_after_probe_bytes_fail_closed() {
   let target = hash(0x42);
   let zero = vec![0; ALGORITHM.hash_length()];
   let journal = journal(&zero, 1, 7, 11, &source, &target);
-  let first_checkpoint = checkpoint(&owner, &journal, 1, 7, &source, &target, 10, 11);
-  let second_checkpoint = checkpoint(&owner, &journal, 2, 7, &source, &target, 10, 11);
+  let first_checkpoint = checkpoint(&owner, &journal, 1, 7, checkpoint_progress(&source, &target, 10, 11));
+  let second_checkpoint = checkpoint(&owner, &journal, 2, 7, checkpoint_progress(&source, &target, 10, 11));
   let current = IndexCheckpointRootV1::new(1, first_checkpoint.key.clone()).unwrap();
   let mut stale = RecordingStore::default();
   stale.selected.insert((owner.index_id().to_vec(), owner.operation_id()), current.clone());

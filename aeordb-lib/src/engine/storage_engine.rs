@@ -2840,12 +2840,12 @@ impl StorageEngine {
       .saturating_add(report.index_runtime_state_bytes)
       .saturating_add(report.wal_tail_bytes)
       .saturating_add(report.manifest_bytes);
-    if let Err(error) = std::fs::remove_file(&pending_path) {
+    if let Err(error) = std::fs::remove_file(pending_path) {
       Self::push_spill_error(
         report,
         format!("failed to remove completed emergency spill pending record {}: {error}", pending_path.display()),
       );
-    } else if let Err(error) = crate::engine::durability::sync_parent_dir(&pending_path) {
+    } else if let Err(error) = crate::engine::durability::sync_parent_dir(pending_path) {
       Self::push_spill_error(report, format!("failed to sync pending-record removal for {}: {error}", pending_path.display()));
     }
     Ok(())
@@ -3018,7 +3018,7 @@ impl StorageEngine {
     // mutex is acquired: a holder can finish nested work, and every waiter is
     // visible to maintenance before it can become a lock dependency.
     let operation = self.write_operation_guard("namespace_authority")?;
-    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().contains(&engine_id));
     if already_held {
       NAMESPACE_WRITE_STACK.with(|stack| stack.borrow_mut().push(engine_id));
       return Ok(NamespaceWriteGuard { engine_id, _guard: None, _operation: operation });
@@ -3035,7 +3035,7 @@ impl StorageEngine {
   /// existing hard frontier drain before it can admit another ticket.
   pub(crate) fn direct_hard_authority_guard(&self) -> EngineResult<NamespaceWriteGuard<'_>> {
     let engine_id = self as *const StorageEngine as usize;
-    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().contains(&engine_id));
     if already_held {
       let transaction_active =
         self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
@@ -3083,7 +3083,7 @@ impl StorageEngine {
   /// the timer simply defers to a later tick.
   fn try_direct_hard_authority_guard(&self) -> EngineResult<Option<NamespaceWriteGuard<'_>>> {
     let engine_id = self as *const StorageEngine as usize;
-    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().iter().any(|held| *held == engine_id));
+    let already_held = NAMESPACE_WRITE_STACK.with(|stack| stack.borrow().contains(&engine_id));
     if already_held {
       let transaction_active =
         self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.transaction_depth > 0;
@@ -4243,8 +4243,13 @@ impl StorageEngine {
       // hot-tail-flush durability path as appends. The whole point of this
       // plumbing is to AVOID per-entry random fsyncs.
       let write_result = (|| -> EngineResult<u32> {
-        let written =
-          writer.write_entry_at_nosync_full_with_version(void_offset, entry_type, key, value, flags, compression_algo, entry_version)?;
+        let written = writer.write_entry_at_nosync_full_with_version(
+          void_offset,
+          entry_type,
+          key,
+          value,
+          crate::engine::append_writer::EntryWriteOptions::new(flags, compression_algo, entry_version),
+        )?;
         if written != needed {
           return Err(EngineError::PostMutationDurabilityFailure(format!(
             "reusable void write encoded {written} bytes but preflight required {needed}"
@@ -8050,7 +8055,7 @@ fn pop_engine_operation_stack(engine_id: usize) {
   ENGINE_OPERATION_STACK.with(|stack| {
     let mut stack = stack.borrow_mut();
     let popped = stack.pop();
-    if !popped.is_some_and(|entry| entry.engine_id == engine_id) {
+    if popped.is_none_or(|entry| entry.engine_id != engine_id) {
       debug_assert!(popped.is_some_and(|entry| entry.engine_id == engine_id), "engine operation guard stack out of order");
       if let Some(other_entry) = popped {
         stack.push(other_entry);

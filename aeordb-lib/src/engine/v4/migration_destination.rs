@@ -107,7 +107,7 @@ impl MigrationDestinationArtifactV1 {
 pub struct MigrationDestinationInitializationErrorV1 {
   code: &'static str,
   message: String,
-  artifact: Option<MigrationDestinationArtifactV1>,
+  artifact: Option<Box<MigrationDestinationArtifactV1>>,
 }
 
 impl MigrationDestinationInitializationErrorV1 {
@@ -116,7 +116,10 @@ impl MigrationDestinationInitializationErrorV1 {
   }
 
   pub const fn artifact(&self) -> Option<&MigrationDestinationArtifactV1> {
-    self.artifact.as_ref()
+    match self.artifact.as_ref() {
+      Some(artifact) => Some(artifact),
+      None => None,
+    }
   }
 
   fn before(code: &'static str, message: impl Into<String>) -> Self {
@@ -138,7 +141,7 @@ impl MigrationDestinationInitializationErrorV1 {
     Self {
       code,
       message: message.into(),
-      artifact: Some(MigrationDestinationArtifactV1 {
+      artifact: Some(Box::new(MigrationDestinationArtifactV1 {
         path: destination.path.clone(),
         path_digest: destination.path_digest,
         expected_database_id: permit.database_id(),
@@ -146,7 +149,7 @@ impl MigrationDestinationInitializationErrorV1 {
         file_identity,
         file_identity_error,
         first_authority,
-      }),
+      })),
     }
   }
 }

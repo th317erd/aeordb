@@ -49,7 +49,7 @@ pub async fn file_history(
 ) -> Response {
   let max_snapshots = query.limit.unwrap_or(200).min(1000);
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   // User/group permission check: /versions/history/* is exempt from
@@ -216,7 +216,7 @@ pub async fn file_restore(
   Json(payload): Json<RestoreRequest>,
 ) -> Response {
   if let Err(response) = require_generic_data_path(&state, &path) {
-    return response;
+    return response.into_response();
   }
 
   // Auth: Restore requires root (snapshot permission)

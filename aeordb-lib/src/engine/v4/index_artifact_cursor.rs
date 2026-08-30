@@ -1084,30 +1084,6 @@ fn clone_path_prefix(path: &[RetainedArtifactBytesV1], length: usize) -> Result<
   Ok(cloned)
 }
 
-#[cfg(test)]
-mod tests {
-  use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
-
-  use super::*;
-
-  #[test]
-  fn accounted_retained_bytes_own_their_reservation_until_the_last_clone_drops() {
-    let memory = MemoryCoordinator::new(MemoryPolicy::new(1024, 2048, 1, 256).unwrap());
-    let mut bytes = Vec::with_capacity(8);
-    bytes.extend_from_slice(b"artifact");
-    let reservation = memory.reserve(MemoryOwner::Query, bytes.capacity() as u64, AdmissionClass::Workload).unwrap();
-
-    let retained = RetainedArtifactBytesV1::from_accounted(bytes, reservation);
-    let clone = retained.clone();
-    assert_eq!(clone.bytes(), b"artifact");
-    drop(retained);
-    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 8);
-
-    drop(clone);
-    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
-  }
-}
-
 fn clone_selected_entries(entries: &[usize]) -> Result<Vec<usize>, ArtifactPageCursorErrorV1> {
   let mut cloned = Vec::new();
   cloned
@@ -1170,4 +1146,28 @@ fn amplification_error(context: impl Into<String>) -> ArtifactPageCursorErrorV1 
 
 fn invalid_limits(context: impl Into<String>) -> ArtifactPageCursorErrorV1 {
   ArtifactPageCursorErrorV1::InvalidLimits(context.into())
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+
+  use super::*;
+
+  #[test]
+  fn accounted_retained_bytes_own_their_reservation_until_the_last_clone_drops() {
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(1024, 2048, 1, 256).unwrap());
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(b"artifact");
+    let reservation = memory.reserve(MemoryOwner::Query, bytes.capacity() as u64, AdmissionClass::Workload).unwrap();
+
+    let retained = RetainedArtifactBytesV1::from_accounted(bytes, reservation);
+    let clone = retained.clone();
+    assert_eq!(clone.bytes(), b"artifact");
+    drop(retained);
+    assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, 8);
+
+    drop(clone);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
 }

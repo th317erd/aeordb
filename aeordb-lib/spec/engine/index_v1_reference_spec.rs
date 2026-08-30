@@ -1862,7 +1862,7 @@ fn typed_record_codecs_reject_reserved_ordinals_owner_confusion_and_unbounded_ev
       decode_canonical_value_record(&value_record, hash_algorithm).unwrap_err().class(),
       MalformedInputClass::TruncationOrTrailingBytes
     );
-    let decoded_value = decode_canonical_value_record(&value_page.records.iter().next().unwrap().unwrap().encoded, hash_algorithm).unwrap();
+    let decoded_value = decode_canonical_value_record(value_page.records.iter().next().unwrap().unwrap().encoded, hash_algorithm).unwrap();
     let ambiguous_tombstone = aeordb::engine::v4::index_record::CanonicalValueRecordV1 {
       tombstone: true,
       document_ordinal: decoded_value.document_ordinal,

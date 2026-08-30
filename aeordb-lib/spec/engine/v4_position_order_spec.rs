@@ -42,7 +42,7 @@ fn route_builders_freeze_complete_directory_query_search_and_aggregate_orders() 
   let directory_desc =
     compile_directory_listing_order_v1(HashAlgorithm::Blake3_256, DirectoryOrderFieldV1::Name, PositionSortDirectionV1::Descending)
       .unwrap();
-  let mut directory_rows = vec![
+  let mut directory_rows = [
     row(
       PositionRouteV1::DirectoryListing,
       vec![
@@ -90,7 +90,7 @@ fn route_builders_freeze_complete_directory_query_search_and_aggregate_orders() 
   let query_fields =
     [PositionOrderFieldV1 { field: "age", direction: PositionSortDirectionV1::Descending, comparator: PositionComparatorV1::U64 }];
   let query = compile_query_order_v1(HashAlgorithm::Blake3_256, &query_fields).unwrap();
-  let mut query_rows = vec![
+  let mut query_rows = [
     row(PositionRouteV1::Query, vec![LogicalOrderComponentOwnedV1::missing(), present(PositionComparatorV1::Utf8Binary, b"/missing")], 4),
     row(
       PositionRouteV1::Query,
@@ -108,7 +108,7 @@ fn route_builders_freeze_complete_directory_query_search_and_aggregate_orders() 
   assert_eq!(query_rows.iter().map(|value| value.file_key_tie[0]).collect::<Vec<_>>(), [1, 2, 3, 4]);
 
   let search = compile_global_search_order_v1(HashAlgorithm::Blake3_256).unwrap();
-  let mut search_rows = vec![
+  let mut search_rows = [
     row(
       PositionRouteV1::GlobalSearch,
       vec![present(PositionComparatorV1::FiniteF64, 0.5f64.to_le_bytes()), present(PositionComparatorV1::Utf8Binary, b"/b")],
@@ -129,7 +129,7 @@ fn route_builders_freeze_complete_directory_query_search_and_aggregate_orders() 
   assert_eq!(search_rows.iter().map(|value| value.file_key_tie[0]).collect::<Vec<_>>(), [7, 9, 8]);
 
   let aggregate = compile_aggregate_group_order_v1(HashAlgorithm::Blake3_256, &[]).unwrap();
-  let mut aggregate_rows = vec![
+  let mut aggregate_rows = [
     row(
       PositionRouteV1::AggregateGroups,
       vec![present(PositionComparatorV1::U64, 2u64.to_le_bytes()), present(PositionComparatorV1::BytesBinary, b"b")],

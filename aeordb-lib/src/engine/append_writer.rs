@@ -30,6 +30,19 @@ use crate::engine::file_header::{
 };
 use crate::engine::hash_algorithm::HashAlgorithm;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryWriteOptions {
+  pub flags: u8,
+  pub compression_algorithm: CompressionAlgorithm,
+  pub entry_version: u8,
+}
+
+impl EntryWriteOptions {
+  pub const fn new(flags: u8, compression_algorithm: CompressionAlgorithm, entry_version: u8) -> Self {
+    Self { flags, compression_algorithm, entry_version }
+  }
+}
+
 pub struct AppendWriter {
   file: File,
   reader: File,
@@ -304,7 +317,13 @@ impl AppendWriter {
     flags: u8,
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<u32> {
-    self.write_entry_at_nosync_full_with_version(offset, entry_type, key, value, flags, compression_algo, CURRENT_ENTRY_VERSION)
+    self.write_entry_at_nosync_full_with_version(
+      offset,
+      entry_type,
+      key,
+      value,
+      EntryWriteOptions::new(flags, compression_algo, CURRENT_ENTRY_VERSION),
+    )
   }
 
   pub fn write_entry_at_nosync_full_with_version(
@@ -313,10 +332,9 @@ impl AppendWriter {
     entry_type: EntryType,
     key: &[u8],
     value: &[u8],
-    flags: u8,
-    compression_algo: CompressionAlgorithm,
-    entry_version: u8,
+    options: EntryWriteOptions,
   ) -> EngineResult<u32> {
+    let EntryWriteOptions { flags, compression_algorithm: compression_algo, entry_version } = options;
     let hash_algo = self.file_header.hash_algo;
     EntryHeader::validate_key_length(entry_type, key.len(), hash_algo)?;
     let hash = EntryHeader::compute_hash(entry_type, key, value, hash_algo)?;
@@ -436,7 +454,7 @@ impl AppendWriter {
 
   /// Write a void at a specific offset WITHOUT syncing.
   pub fn write_void_at_nosync(&mut self, offset: u64, size: u32) -> EngineResult<()> {
-    const ZERO_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+    static ZERO_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
 
     let hash_algo = self.file_header.hash_algo;
     let header_size = EntryHeader::FIXED_HEADER_SIZE + hash_algo.hash_length();

@@ -322,11 +322,9 @@ fn extract_chars_from_stream(stream: EngineFileStream<'_>, start: u64, end: Opti
     if end.map(|end| current_char >= end).unwrap_or(false) {
       return Ok(false);
     }
-    if current_char >= start {
-      if !push_limited(&mut text, character, max_bytes) {
-        truncated = true;
-        return Ok(false);
-      }
+    if current_char >= start && !push_limited(&mut text, character, max_bytes) {
+      truncated = true;
+      return Ok(false);
     }
     current_char += 1;
     Ok(true)
@@ -398,34 +396,30 @@ where
     let chunk = chunk?;
     pending.extend_from_slice(&chunk);
 
-    loop {
-      match std::str::from_utf8(&pending) {
-        Ok(valid) => {
+    match std::str::from_utf8(&pending) {
+      Ok(valid) => {
+        for character in valid.chars() {
+          if !handle(character)? {
+            return Ok(());
+          }
+        }
+        pending.clear();
+      }
+      Err(error) if error.error_len().is_none() => {
+        let valid_up_to = error.valid_up_to();
+        if valid_up_to > 0 {
+          let valid =
+            std::str::from_utf8(&pending[..valid_up_to]).map_err(|error| EngineError::InvalidInput(format!("Invalid UTF-8: {}", error)))?;
           for character in valid.chars() {
             if !handle(character)? {
               return Ok(());
             }
           }
-          pending.clear();
-          break;
         }
-        Err(error) if error.error_len().is_none() => {
-          let valid_up_to = error.valid_up_to();
-          if valid_up_to > 0 {
-            let valid = std::str::from_utf8(&pending[..valid_up_to])
-              .map_err(|error| EngineError::InvalidInput(format!("Invalid UTF-8: {}", error)))?;
-            for character in valid.chars() {
-              if !handle(character)? {
-                return Ok(());
-              }
-            }
-          }
-          pending = pending[valid_up_to..].to_vec();
-          break;
-        }
-        Err(error) => {
-          return Err(EngineError::InvalidInput(format!("Invalid UTF-8: {}", error)));
-        }
+        pending = pending[valid_up_to..].to_vec();
+      }
+      Err(error) => {
+        return Err(EngineError::InvalidInput(format!("Invalid UTF-8: {}", error)));
       }
     }
   }

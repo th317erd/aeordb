@@ -133,8 +133,8 @@ fn reference_osa_distance(a: &str, b: &str) -> usize {
   for (index, row) in matrix.iter_mut().enumerate() {
     row[0] = index;
   }
-  for index in 0..=b.len() {
-    matrix[0][index] = index;
+  for (index, value) in matrix[0].iter_mut().enumerate() {
+    *value = index;
   }
   for i in 1..=a.len() {
     for j in 1..=b.len() {

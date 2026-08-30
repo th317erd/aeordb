@@ -51,6 +51,18 @@ struct PipelineMemoryBudget {
   cancellation: Option<CancellationToken>,
 }
 
+struct IndexDocumentParseRequest<'a> {
+  config: &'a PathIndexConfig,
+  config_dir: &'a str,
+  path: &'a str,
+  data: &'a [u8],
+  content_type: Option<&'a str>,
+  explicit_parser: Option<String>,
+  registry_parser: Option<String>,
+  content_type_fallback: &'a str,
+  filename: &'a str,
+}
+
 impl PipelineMemoryBudget {
   fn new_with_cancellation(engine: &StorageEngine, cancellation: Option<&CancellationToken>) -> EngineResult<Self> {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -303,15 +315,17 @@ impl<'a> IndexingPipeline<'a> {
     let mut memory = PipelineMemoryBudget::new_with_cancellation(self.engine, cancellation)?;
 
     let Some(json_data) = self.parse_index_document(
-      &config,
-      &config_dir,
-      path,
-      data,
-      content_type,
-      explicit_parser,
-      registry_parser,
-      ct,
-      filename,
+      IndexDocumentParseRequest {
+        config: &config,
+        config_dir: &config_dir,
+        path,
+        data,
+        content_type,
+        explicit_parser,
+        registry_parser,
+        content_type_fallback: ct,
+        filename,
+      },
       &mut memory,
     )?
     else {
@@ -335,24 +349,27 @@ impl<'a> IndexingPipeline<'a> {
 
   fn parse_index_document(
     &self,
-    config: &PathIndexConfig,
-    config_dir: &str,
-    path: &str,
-    data: &[u8],
-    content_type: Option<&str>,
-    explicit_parser: Option<String>,
-    registry_parser: Option<String>,
-    content_type_fallback: &str,
-    filename: &str,
+    request: IndexDocumentParseRequest<'_>,
     memory: &mut PipelineMemoryBudget,
   ) -> EngineResult<Option<serde_json::Value>> {
+    let IndexDocumentParseRequest {
+      config,
+      config_dir,
+      path,
+      data,
+      content_type,
+      explicit_parser,
+      registry_parser,
+      content_type_fallback,
+      filename,
+    } = request;
     // Priority order for the indexing pipeline:
     // 1. Explicit parser in config — always honored (user's intent)
     // 2. Content-type registry parser — user mapped this content type
     // 3. Raw JSON parse — preserves actual field structure for indexing
     // 4. Native parser — extracts metadata for non-JSON content.
     if let Some(ref parser) = explicit_parser {
-      match self.invoke_parser(parser, data, path, content_type, &config, memory) {
+      match self.invoke_parser(parser, data, path, content_type, config, memory) {
         Ok(json) => Ok(Some(json)),
         Err(e @ EngineError::ResourceExhausted(_)) => Err(e),
         Err(e) => {
@@ -363,7 +380,7 @@ impl<'a> IndexingPipeline<'a> {
         }
       }
     } else if let Some(ref parser) = registry_parser {
-      match self.invoke_parser(parser, data, path, content_type, &config, memory) {
+      match self.invoke_parser(parser, data, path, content_type, config, memory) {
         Ok(json) => Ok(Some(json)),
         Err(e @ EngineError::ResourceExhausted(_)) => Err(e),
         Err(e) => {
@@ -589,9 +606,7 @@ impl<'a> IndexingPipeline<'a> {
   }
 
   fn extract_metadata_field_value(field_config: &IndexFieldConfig, record: &FileRecord) -> Option<(&'static str, Vec<u8>)> {
-    let Some(index_field_name) = canonical_metadata_field_name(&field_config.name) else {
-      return None;
-    };
+    let index_field_name = canonical_metadata_field_name(&field_config.name)?;
 
     let extracted: Vec<u8> = match index_field_name {
       "@path" => record.path.as_bytes().to_vec(),

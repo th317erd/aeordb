@@ -1786,8 +1786,8 @@ fn decode_root_lifecycle_manifest_body(body: &[u8], algorithm: HashAlgorithm, ge
   let expiry_bytes = u64_at(body, 100 + 3 * h)?;
   if next_page == 0
     || candidate_count != pending_count
-    || !all_zero(candidate_root) != (candidate_count != 0)
-    || !all_zero(expiry_root) != (retired_count != 0)
+    || all_zero(candidate_root) == (candidate_count != 0)
+    || all_zero(expiry_root) == (retired_count != 0)
     || (candidate_count == 0) != (candidate_bytes == 0)
     || (retired_count == 0) != (expiry_bytes == 0)
   {
@@ -2251,7 +2251,7 @@ pub fn decode_physical_inventory_record_v1(row: &[u8], algorithm: HashAlgorithm)
     return Err(closure_error("inventory_row_time_or_sequence", "inventory observed time/sequence is invalid"));
   }
   let receipt = &row[tail + 16..tail + 16 + h];
-  if (flags & 2 != 0) != !all_zero(receipt) || (state == 5) != (flags & 2 != 0) {
+  if (flags & 2 != 0) == all_zero(receipt) || (state == 5) != (flags & 2 != 0) {
     return Err(closure_error("inventory_row_receipt", "inventory receipt/state flags disagree"));
   }
   Ok(PhysicalInventoryRecordV1 {

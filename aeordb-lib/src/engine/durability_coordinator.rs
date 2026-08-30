@@ -295,7 +295,7 @@ fn classify_raw_os_error(raw: Option<i32>) -> Option<DurabilityFailureDispositio
       libc::ETIMEDOUT => DurabilityFailureDisposition::uncertain(OsErrorClass::TimeoutUnknown),
       _ => return None,
     };
-    return Some(disposition);
+    Some(disposition)
   }
   #[cfg(windows)]
   {

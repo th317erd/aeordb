@@ -851,14 +851,11 @@ fn btree_list_hash_with_mode(
       );
     }
     btree_list_loaded_node(
-      Some(root_hash),
-      &node_data.2,
-      node_data.0.entry_version,
+      LoadedBTreeNode { hash: Some(root_hash), data: &node_data.2, entry_version: node_data.0.entry_version, is_root },
       engine,
       hash_length,
       include_deleted,
       mode,
-      is_root,
       state,
     )
   })();
@@ -877,7 +874,14 @@ pub fn btree_list_from_node_with_mode(
 ) -> EngineResult<BTreeListResult> {
   let mut state = BTreeWalkState::default();
   state.enter(None)?;
-  btree_list_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, true, &mut state)
+  btree_list_loaded_node(
+    LoadedBTreeNode { hash: None, data: root_data, entry_version: 0, is_root: true },
+    engine,
+    hash_length,
+    include_deleted,
+    mode,
+    &mut state,
+  )
 }
 
 /// Visit directory entries in key order without collecting the entire B-tree.
@@ -895,7 +899,23 @@ where
 {
   let mut state = BTreeWalkState::default();
   state.enter(None)?;
-  btree_visit_loaded_node(None, root_data, 0, engine, hash_length, include_deleted, mode, true, visitor, &mut state)
+  btree_visit_loaded_node(
+    LoadedBTreeNode { hash: None, data: root_data, entry_version: 0, is_root: true },
+    engine,
+    hash_length,
+    include_deleted,
+    mode,
+    visitor,
+    &mut state,
+  )
+}
+
+#[derive(Clone, Copy)]
+struct LoadedBTreeNode<'a> {
+  hash: Option<&'a [u8]>,
+  data: &'a [u8],
+  entry_version: u8,
+  is_root: bool,
 }
 
 fn btree_visit_hash_with_mode<F>(
@@ -937,14 +957,11 @@ where
       );
     }
     btree_visit_loaded_node(
-      Some(node_hash),
-      &node_data.2,
-      node_data.0.entry_version,
+      LoadedBTreeNode { hash: Some(node_hash), data: &node_data.2, entry_version: node_data.0.entry_version, is_root: false },
       engine,
       hash_length,
       include_deleted,
       mode,
-      false,
       visitor,
       state,
     )
@@ -954,20 +971,18 @@ where
 }
 
 fn btree_visit_loaded_node<F>(
-  node_hash: Option<&[u8]>,
-  node_data: &[u8],
-  entry_version: u8,
+  loaded: LoadedBTreeNode<'_>,
   engine: &StorageEngine,
   hash_length: usize,
   include_deleted: bool,
   mode: BTreeWalkMode,
-  is_root: bool,
   visitor: &mut F,
   state: &mut BTreeWalkState,
 ) -> EngineResult<BTreeVisitResult>
 where
   F: FnMut(&ChildEntry) -> EngineResult<bool>,
 {
+  let LoadedBTreeNode { hash: node_hash, data: node_data, entry_version, is_root } = loaded;
   let node = match BTreeNode::deserialize(node_data, hash_length, entry_version) {
     Ok(node) => node,
     Err(error) => return btree_visit_error(mode, node_hash, error, is_root),
@@ -1018,16 +1033,14 @@ fn btree_visit_error(mode: BTreeWalkMode, node_hash: Option<&[u8]>, error: Engin
 }
 
 fn btree_list_loaded_node(
-  node_hash: Option<&[u8]>,
-  node_data: &[u8],
-  entry_version: u8,
+  loaded: LoadedBTreeNode<'_>,
   engine: &StorageEngine,
   hash_length: usize,
   include_deleted: bool,
   mode: BTreeWalkMode,
-  is_root: bool,
   state: &mut BTreeWalkState,
 ) -> EngineResult<BTreeListResult> {
+  let LoadedBTreeNode { hash: node_hash, data: node_data, entry_version, is_root } = loaded;
   let node = match BTreeNode::deserialize(node_data, hash_length, entry_version) {
     Ok(node) => node,
     Err(error) => return btree_walk_error(mode, node_hash, error, is_root),

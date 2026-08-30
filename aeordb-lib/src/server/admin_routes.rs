@@ -43,7 +43,7 @@ pub async fn create_user(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -62,7 +62,7 @@ pub async fn create_user(
 pub async fn list_users(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match system_store::list_users(&state.engine) {
@@ -85,7 +85,7 @@ pub async fn get_user(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
@@ -118,7 +118,7 @@ pub async fn update_user(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
@@ -174,7 +174,7 @@ pub async fn deactivate_user(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let user_id = match Uuid::parse_str(&user_id_string) {
@@ -251,7 +251,7 @@ pub async fn create_group(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let group = match Group::new(
@@ -281,7 +281,7 @@ pub async fn create_group(
 pub async fn list_groups(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match system_store::list_groups(&state.engine) {
@@ -301,7 +301,7 @@ pub async fn list_groups(State(state): State<AppState>, Extension(claims): Exten
 pub async fn get_group(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(name): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match system_store::get_group(&state.engine, &name) {
@@ -325,7 +325,7 @@ pub async fn update_group(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let mut group = match system_store::get_group(&state.engine, &name) {
@@ -378,7 +378,7 @@ pub async fn update_group(
 pub async fn delete_group(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(name): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   // Check if the group exists first.

@@ -30,8 +30,10 @@ fn hash(label: &[u8]) -> Vec<u8> {
   aeordb::engine::v4::hash::digest_parts(ALGORITHM, &[b"producer-source:", label])
 }
 
+type ObservedSemanticRequest = Option<([u8; 16], u64, Vec<u8>, String, IndexSemanticScopeLimitsV1)>;
+
 struct RecordingSemanticSource {
-  observed: Mutex<Option<([u8; 16], u64, Vec<u8>, String, IndexSemanticScopeLimitsV1)>>,
+  observed: Mutex<ObservedSemanticRequest>,
 }
 
 impl IndexSemanticScopeSourceV1 for RecordingSemanticSource {
@@ -112,7 +114,7 @@ fn encoded_journal(path: &str) -> Vec<u8> {
 }
 
 fn producer() -> IndexProducerCoordinatorV1 {
-  let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap());
   IndexProducerCoordinatorV1::new(
     ALGORITHM,
     memory,
@@ -150,7 +152,7 @@ impl IndexSemanticScopeSourceV1 for SemanticSource {
     _request: IndexSemanticScopeReadRequestV1<'_>,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
     let resolution = self.result.clone()?;
-    let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap());
     let reservation = memory
       .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
       .map_err(|error| IndexSemanticScopeReadErrorV1::retryable("test_memory", error.to_string()))?;
@@ -206,7 +208,11 @@ fn resolve_semantic_scope_work(
   limits: IndexSemanticScopeLimitsV1,
   is_cancelled: &dyn Fn() -> bool,
 ) -> Result<IndexSemanticScopeReadV1, IndexProducerSourceErrorV1> {
-  resolve_semantic_scope_work_with_sequence(hash_algorithm, operation_id, 7, semantic_state_root, transition, source, limits, is_cancelled)
+  resolve_semantic_scope_work_with_sequence(
+    hash_algorithm,
+    source,
+    IndexSemanticScopeReadRequestV1 { operation_id, source_publication_sequence: 7, semantic_state_root, transition, limits, is_cancelled },
+  )
 }
 
 #[test]
@@ -280,7 +286,7 @@ impl IndexFileRevisionSourceV1 for RevisionSource {
 }
 
 fn test_revision_read(revision: LoadedIndexFileRevisionV1) -> Result<IndexFileRevisionReadV1, IndexFileRevisionReadErrorV1> {
-  let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap());
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap());
   let reservation = memory
     .reserve(MemoryOwner::Task, 2 * 1_024 * 1_024, AdmissionClass::Workload)
     .map_err(|error| IndexFileRevisionReadErrorV1::retryable("test_memory", error.to_string()))?;
@@ -594,13 +600,15 @@ fn semantic_resolution_rejects_invalid_inputs_and_cancels_during_validation() {
   assert!(matches!(
     resolve_semantic_scope_work_with_sequence(
       ALGORITHM,
-      [1; 16],
-      0,
-      &root,
-      &resolved_transition(),
       &source,
-      semantic_limits(),
-      &|| false
+      IndexSemanticScopeReadRequestV1 {
+        operation_id: [1; 16],
+        source_publication_sequence: 0,
+        semantic_state_root: &root,
+        transition: &resolved_transition(),
+        limits: semantic_limits(),
+        is_cancelled: &|| false,
+      },
     ),
     Err(IndexProducerSourceErrorV1::InvalidSemanticResolution(message)) if message.contains("publication sequence")
   ));

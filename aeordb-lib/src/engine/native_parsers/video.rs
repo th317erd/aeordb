@@ -561,8 +561,8 @@ fn read_vint(data: &[u8]) -> Option<(u64, usize)> {
   }
 
   let mut value = (first as u64) & ((1 << (8 - length)) - 1);
-  for i in 1..length {
-    value = (value << 8) | (data[i] as u64);
+  for byte in data.iter().take(length).skip(1) {
+    value = (value << 8) | (*byte as u64);
   }
 
   Some((value, length))
@@ -586,8 +586,8 @@ fn read_ebml_element_id(data: &[u8]) -> Option<(u64, usize)> {
 
   // For IDs we keep the leading bits (VINT marker included)
   let mut value = first as u64;
-  for i in 1..length {
-    value = (value << 8) | (data[i] as u64);
+  for byte in data.iter().take(length).skip(1) {
+    value = (value << 8) | (*byte as u64);
   }
 
   Some((value, length))

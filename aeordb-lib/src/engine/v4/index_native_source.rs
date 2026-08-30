@@ -497,10 +497,7 @@ impl<'engine> NativeIndexMaintenanceScanSourceV1<'engine> {
   ) -> Result<Option<(String, ChildEntry)>, IndexMaintenanceScanReadErrorV1> {
     let mut best: Option<(String, ChildEntry)> = None;
     if let Some(lower) = lower {
-      let component = match lower.split('/').next() {
-        Some(component) => component,
-        None => "",
-      };
+      let component = lower.split('/').next().map_or("", |component| component);
       for (end, _) in component.char_indices().skip(1).chain(std::iter::once((component.len(), '\0'))) {
         let prefix = &component[..end];
         if prefix.is_empty() {

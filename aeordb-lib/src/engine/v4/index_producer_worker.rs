@@ -317,13 +317,15 @@ impl IndexProducerMutationWorkerV1 {
   ) -> Result<IndexProducerMutationCollectionOutcomeV1, IndexProducerMutationCollectionErrorV1> {
     let scope_read = match resolve_semantic_scope_work(
       self.hash_algorithm,
-      operation_id,
-      publication_sequence,
-      semantic_state_root,
-      transition,
       semantic_source,
-      self.semantic_limits,
-      is_cancelled,
+      crate::engine::v4::index_producer_source::IndexSemanticScopeReadRequestV1 {
+        operation_id,
+        source_publication_sequence: publication_sequence,
+        semantic_state_root,
+        transition,
+        limits: self.semantic_limits,
+        is_cancelled,
+      },
     ) {
       Ok(scopes) => scopes,
       Err(error) => return Err(IndexProducerMutationCollectionErrorV1::Source(error)),

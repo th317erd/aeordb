@@ -685,7 +685,7 @@ fn decode_detail(bytes: &[u8], algorithm: HashAlgorithm) -> FormatResult<AuditDe
     || occurred_at_ms <= 0
     || all_zero(run_id)
     || payload.is_empty()
-    || event_kind.requires_batch() != !all_zero(batch_id)
+    || event_kind.requires_batch() == all_zero(batch_id)
   {
     return Err(closure_error("audit_detail_fields", "audit detail identity, time, batch, payload, or reserve is invalid"));
   }
@@ -1094,11 +1094,11 @@ fn decode_corrupt_evidence(
     && presence(flags, 2) == (physical_length != 0)
     && (!presence(flags, 2) || physical_offset.checked_add(u64::from(physical_length)).is_some())
     && presence(flags, 3) == (write_sequence != 0)
-    && presence(flags, 4) == !all_zero(expected_hash)
-    && presence(flags, 5) == !all_zero(observed_hash)
-    && presence(flags, 6) == !all_zero(run_id)
+    && presence(flags, 4) != all_zero(expected_hash)
+    && presence(flags, 5) != all_zero(observed_hash)
+    && presence(flags, 6) != all_zero(run_id)
     && presence(flags, 7) == (control_kind != 0)
-    && presence(flags, 7) == !all_zero(control_digest);
+    && presence(flags, 7) != all_zero(control_digest);
   let detected_at_ms = i64_at(body, 0)?;
   let observed_artifact_kind = GcArtifactKindV1::from_u16(observed_kind);
   let control_artifact_kind = GcArtifactKindV1::from_u16(control_kind);

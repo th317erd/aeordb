@@ -244,7 +244,7 @@ fn value_store_compaction_carries_its_dependent_field_selector_parent_before_chi
   assert_eq!((value_successor_body.value_page_count, value_successor_body.live_value_count), (1, 2));
   assert_eq!(field_successor_body.value_store_manifest, value_successor.key);
   assert_eq!(field_successor_body.coverage, value_successor_body.coverage);
-  assert!(plan.owner_plans()[0].dependency_range().len() > 0);
+  assert!(!plan.owner_plans()[0].dependency_range().is_empty());
   assert!(plan.owner_plans()[1].dependency_range().is_empty());
 
   let duplicate_fields = [source_field.value.as_slice(), source_field.value.as_slice()];

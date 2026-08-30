@@ -40,6 +40,8 @@ const SYSTEM_FILE_ALIAS_WORKSPACE_BYTES: u64 = SYSTEM_FILE_ALIAS_RECORD_MAX_BYTE
 const DIRECTORY_REPAIR_FAILURE_PATH_BYTES: usize = 768;
 const DIRECTORY_REPAIR_FAILURE_ERROR_BYTES: usize = 512;
 
+type CurrentDirectoryData = (Vec<u8>, crate::engine::entry_header::EntryHeader, Vec<u8>);
+
 /// One bounded, live window from a directory listing.
 pub struct DirectoryListWindow {
   pub entries: Vec<ChildEntry>,
@@ -583,6 +585,22 @@ struct PreparedFileRecordPublication {
   previous_identity: Option<Vec<u8>>,
 }
 
+struct BufferedPublicationAccumulators<'a> {
+  chunk_dependencies: &'a mut std::collections::BTreeMap<Vec<u8>, (Vec<u8>, u8)>,
+  counter_delta: &'a mut DirectoryMutationCounterDelta,
+}
+
+struct FileContentDetection<'a> {
+  content_type: Option<&'a str>,
+  first_bytes: &'a [u8],
+}
+
+#[derive(Clone, Copy)]
+struct FileStorageOptions {
+  file_record_version: u8,
+  emit_event: bool,
+}
+
 fn prepare_buffered_file_publication(
   engine: &StorageEngine,
   normalized_path: String,
@@ -590,9 +608,9 @@ fn prepare_buffered_file_publication(
   content_type: String,
   flags: u8,
   chunk_owner: &str,
-  chunk_dependencies: &mut std::collections::BTreeMap<Vec<u8>, (Vec<u8>, u8)>,
-  counter_delta: &mut DirectoryMutationCounterDelta,
+  accumulators: &mut BufferedPublicationAccumulators<'_>,
 ) -> EngineResult<PreparedFileRecordPublication> {
+  let BufferedPublicationAccumulators { chunk_dependencies, counter_delta } = accumulators;
   let algorithm = engine.hash_algo();
   let mut chunk_hashes = Vec::new();
   for chunk_data in data.chunks(DEFAULT_CHUNK_SIZE) {
@@ -2416,8 +2434,7 @@ impl<'a> DirectoryOps<'a> {
         detected_content_type,
         flags,
         &chunk_owner,
-        &mut chunk_dependencies,
-        &mut counter_delta,
+        &mut BufferedPublicationAccumulators { chunk_dependencies: &mut chunk_dependencies, counter_delta: &mut counter_delta },
       )?;
 
       let mut batch = NamespaceMutationBatch::new(kind);
@@ -2459,8 +2476,7 @@ impl<'a> DirectoryOps<'a> {
       data,
       Some("application/octet-stream"),
       CompressionAlgorithm::None,
-      0,
-      false,
+      FileStorageOptions { file_record_version: 0, emit_event: false },
     )
   }
 
@@ -2480,8 +2496,7 @@ impl<'a> DirectoryOps<'a> {
       data,
       Some(SYSTEM_CONTROL_CONTENT_TYPE),
       CompressionAlgorithm::None,
-      CURRENT_FILE_RECORD_VERSION,
-      false,
+      FileStorageOptions { file_record_version: CURRENT_FILE_RECORD_VERSION, emit_event: false },
     )
   }
 
@@ -2499,8 +2514,7 @@ impl<'a> DirectoryOps<'a> {
       data,
       Some(SEMANTIC_OBJECT_CONTENT_TYPE),
       CompressionAlgorithm::None,
-      CURRENT_FILE_RECORD_VERSION,
-      false,
+      FileStorageOptions { file_record_version: CURRENT_FILE_RECORD_VERSION, emit_event: false },
     )
   }
 
@@ -2599,8 +2613,7 @@ impl<'a> DirectoryOps<'a> {
           "application/json".to_string(),
           flags,
           &chunk_owner,
-          &mut chunk_dependencies,
-          &mut counter_delta,
+          &mut BufferedPublicationAccumulators { chunk_dependencies: &mut chunk_dependencies, counter_delta: &mut counter_delta },
         )?;
         counter_delta.throughput_bytes = counter_delta
           .throughput_bytes
@@ -2736,7 +2749,14 @@ impl<'a> DirectoryOps<'a> {
     }
 
     let content_hash = content_hasher.finalize();
-    self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, &first_bytes, content_hash)
+    self.finalize_file_with_content_hash(
+      ctx,
+      path,
+      chunk_hashes,
+      total_size,
+      FileContentDetection { content_type, first_bytes: &first_bytes },
+      content_hash,
+    )
   }
 
   /// Store a single data chunk and return its hash. Deduplicates automatically.
@@ -2768,7 +2788,14 @@ impl<'a> DirectoryOps<'a> {
     first_bytes: &[u8],
   ) -> EngineResult<FileRecord> {
     let content_hash = whole_file_content_hash_from_chunks(self.engine, &chunk_hashes)?;
-    self.finalize_file_with_content_hash(ctx, path, chunk_hashes, total_size, content_type, first_bytes, content_hash)
+    self.finalize_file_with_content_hash(
+      ctx,
+      path,
+      chunk_hashes,
+      total_size,
+      FileContentDetection { content_type, first_bytes },
+      content_hash,
+    )
   }
 
   fn finalize_file_with_content_hash(
@@ -2777,10 +2804,10 @@ impl<'a> DirectoryOps<'a> {
     path: &str,
     chunk_hashes: Vec<Vec<u8>>,
     total_size: u64,
-    content_type: Option<&str>,
-    first_bytes: &[u8],
+    detection: FileContentDetection<'_>,
     content_hash: Vec<u8>,
   ) -> EngineResult<FileRecord> {
+    let FileContentDetection { content_type, first_bytes } = detection;
     let _mem = PhaseSampler::start("finalize_file", std::time::Duration::from_millis(50));
     let timer_start = std::time::Instant::now();
     let normalized = normalize_path(path);
@@ -2847,7 +2874,14 @@ impl<'a> DirectoryOps<'a> {
     compression_algo: CompressionAlgorithm,
   ) -> EngineResult<FileRecord> {
     let timer_start = std::time::Instant::now();
-    let result = self.store_file_internal_inner(ctx, path, data, content_type, compression_algo, CURRENT_FILE_RECORD_VERSION, true);
+    let result = self.store_file_internal_inner(
+      ctx,
+      path,
+      data,
+      content_type,
+      compression_algo,
+      FileStorageOptions { file_record_version: CURRENT_FILE_RECORD_VERSION, emit_event: true },
+    );
     let elapsed = timer_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::metrics::definitions::FILE_STORE_DURATION).record(elapsed);
     result
@@ -2861,9 +2895,9 @@ impl<'a> DirectoryOps<'a> {
     data: &[u8],
     content_type: Option<&str>,
     compression_algo: CompressionAlgorithm,
-    file_record_version: u8,
-    emit_event: bool,
+    options: FileStorageOptions,
   ) -> EngineResult<FileRecord> {
+    let FileStorageOptions { file_record_version, emit_event } = options;
     let normalized = normalize_path(path);
 
     // M15: Reject storing at root path — it would create a ghost entry.
@@ -5429,11 +5463,7 @@ impl<'a> DirectoryOps<'a> {
     Ok(Some((identity, record)))
   }
 
-  fn resolve_current_directory_data_from(
-    &self,
-    engine: &StorageEngine,
-    normalized: &str,
-  ) -> EngineResult<Option<(Vec<u8>, crate::engine::entry_header::EntryHeader, Vec<u8>)>> {
+  fn resolve_current_directory_data_from(&self, engine: &StorageEngine, normalized: &str) -> EngineResult<Option<CurrentDirectoryData>> {
     if Self::path_uses_namespace_root_from(engine, normalized)? {
       let head_hash = engine.head_hash()?;
       return match crate::engine::version_access::resolve_directory_at_version(engine, &head_hash, normalized) {
@@ -6208,9 +6238,9 @@ mod engine_file_stream_tests {
     // chunk so we can identify which chunk we got back.
     let mut data = Vec::with_capacity(DEFAULT_CHUNK_SIZE * 5 + 1024);
     for i in 0..5 {
-      data.extend(std::iter::repeat(i as u8).take(DEFAULT_CHUNK_SIZE));
+      data.extend(std::iter::repeat_n(i as u8, DEFAULT_CHUNK_SIZE));
     }
-    data.extend(std::iter::repeat(0xFFu8).take(1024));
+    data.extend(std::iter::repeat_n(0xFFu8, 1024));
     data
   }
 
@@ -6351,7 +6381,7 @@ mod engine_file_stream_tests {
     ops.store_file_buffered(&ctx, "/big.bin", &payload, Some("application/octet-stream")).unwrap();
 
     let stream = ops.read_file_streaming("/big.bin").unwrap();
-    let expected_chunks = (payload.len() + DEFAULT_CHUNK_SIZE - 1) / DEFAULT_CHUNK_SIZE;
+    let expected_chunks = payload.len().div_ceil(DEFAULT_CHUNK_SIZE);
     assert_eq!(stream.chunk_count(), expected_chunks);
 
     let mut assembled = Vec::with_capacity(payload.len());

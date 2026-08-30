@@ -222,8 +222,7 @@ pub fn spawn_task_worker(
       &event_bus,
       &worker_cancel,
       Some(run_configuration),
-      || {},
-      || {},
+      TaskExecutionHooks { post_dequeue: || {}, pre_execute: || {} },
     )
   });
   tokio::spawn(run_task_scheduler(
@@ -339,7 +338,15 @@ pub fn process_next_task(
   // Tests + sync callers without a cancel token get a dummy "never-cancelled"
   // token. Production goes through process_next_task_internal_with_cancel.
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, || {}, || {})
+  process_next_task_internal_with_cancel(
+    queue,
+    engine,
+    plugin_manager,
+    event_bus,
+    &dummy_cancel,
+    None,
+    TaskExecutionHooks { post_dequeue: || {}, pre_execute: || {} },
+  )
 }
 
 /// Deterministic scheduler-boundary hook used by integration tests to prove
@@ -356,7 +363,15 @@ where
   F: FnOnce(),
 {
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, post_dequeue_hook, || {})
+  process_next_task_internal_with_cancel(
+    queue,
+    engine,
+    plugin_manager,
+    event_bus,
+    &dummy_cancel,
+    None,
+    TaskExecutionHooks { post_dequeue: post_dequeue_hook, pre_execute: || {} },
+  )
 }
 
 /// Deterministic execution-boundary hook used by integration tests to prove
@@ -373,7 +388,15 @@ where
   F: FnOnce(),
 {
   let dummy_cancel = tokio_util::sync::CancellationToken::new();
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, &dummy_cancel, None, || {}, pre_execute_hook)
+  process_next_task_internal_with_cancel(
+    queue,
+    engine,
+    plugin_manager,
+    event_bus,
+    &dummy_cancel,
+    None,
+    TaskExecutionHooks { post_dequeue: || {}, pre_execute: pre_execute_hook },
+  )
 }
 
 /// Deterministic production-cancellation hook used by integration tests to
@@ -390,7 +413,20 @@ pub fn process_next_task_with_cancel_and_pre_execute_hook<F>(
 where
   F: FnOnce(),
 {
-  process_next_task_internal_with_cancel(queue, engine, plugin_manager, event_bus, cancel, None, || {}, pre_execute_hook)
+  process_next_task_internal_with_cancel(
+    queue,
+    engine,
+    plugin_manager,
+    event_bus,
+    cancel,
+    None,
+    TaskExecutionHooks { post_dequeue: || {}, pre_execute: pre_execute_hook },
+  )
+}
+
+struct TaskExecutionHooks<F, G> {
+  post_dequeue: F,
+  pre_execute: G,
 }
 
 fn process_next_task_internal_with_cancel<F, G>(
@@ -400,13 +436,13 @@ fn process_next_task_internal_with_cancel<F, G>(
   event_bus: &EventBus,
   cancel: &tokio_util::sync::CancellationToken,
   captured_run_configuration: Option<MaintenanceRunConfiguration>,
-  post_dequeue_hook: F,
-  pre_execute_hook: G,
+  hooks: TaskExecutionHooks<F, G>,
 ) -> EngineResult<bool>
 where
   F: FnOnce(),
   G: FnOnce(),
 {
+  let TaskExecutionHooks { post_dequeue: post_dequeue_hook, pre_execute: pre_execute_hook } = hooks;
   if cancel.is_cancelled() {
     return Ok(false);
   }
@@ -1238,9 +1274,7 @@ fn flush_reindex_before_retry(
   index_buffer: &mut IndexWriteBuffer<'_>,
   checkpoint_path: Option<&str>,
 ) -> EngineResult<()> {
-  if let Err(error) = index_buffer.flush_all() {
-    return Err(error);
-  }
+  flush_reindex_index_buffer(index_buffer)?;
   if let Some(path) = checkpoint_path {
     return queue.update_checkpoint(&task.id, path);
   }
@@ -1605,3 +1639,7 @@ mod direct_reindex_path_tests {
 #[cfg(test)]
 #[path = "../../spec/engine/task_worker_retention_internal_spec.rs"]
 mod retention_internal_spec;
+
+fn flush_reindex_index_buffer(index_buffer: &mut IndexWriteBuffer<'_>) -> EngineResult<()> {
+  index_buffer.flush_all().map(|_| ())
+}

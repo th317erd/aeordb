@@ -1167,7 +1167,6 @@ fn rebuild_kv_skips_keyless_physical_void_records() {
   assert!(!report.has_issues(), "rebuilding across physical voids damaged the live KV view: {report:?}");
   assert_eq!(ops.read_file_buffered("/gc/rebuild.txt").unwrap(), b"version-11");
 
-  drop(ops);
   engine.shutdown().unwrap();
   drop(engine);
   let reopened = StorageEngine::open(&db_path).unwrap();
@@ -1648,7 +1647,7 @@ fn kv_expansion_preflight_failure_preserves_the_published_kv_view() {
 
   let error = engine.expand_kv_block_online(1).expect_err("corrupt WAL boundary must refuse expansion before mutation");
   assert!(error.to_string().to_ascii_lowercase().contains("magic"), "unexpected preflight error: {error}");
-  assert_eq!(engine.is_entry_deleted(&key).unwrap(), false, "preflight refusal must leave the old KV snapshot readable");
+  assert!(!engine.is_entry_deleted(&key).unwrap(), "preflight refusal must leave the old KV snapshot readable");
   assert!(engine.kv_page_provider_stats().unwrap().is_some(), "preflight refusal must keep the bounded provider active");
 }
 

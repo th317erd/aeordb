@@ -159,11 +159,14 @@ impl ManifestChain {
 struct FakeSource {
   algorithm: Option<HashAlgorithm>,
   database_id: [u8; 16],
-  pairs: BTreeMap<(u16, Vec<u8>), VecDeque<Result<LoadedIndexActivePointerPairV1, IndexCoverageRegistrySourceErrorV1>>>,
+  pairs: ActivePointerResponses,
   artifacts: BTreeMap<Vec<u8>, Result<Option<Vec<u8>>, IndexCoverageRegistrySourceErrorV1>>,
   loaded_artifacts: Vec<Vec<u8>>,
   cancel_on_artifact: Option<(Vec<u8>, CancellationToken)>,
 }
+
+type ActivePointerResponses =
+  BTreeMap<(u16, Vec<u8>), VecDeque<Result<LoadedIndexActivePointerPairV1, IndexCoverageRegistrySourceErrorV1>>>;
 
 struct ReentrantSource {
   registry: Arc<IndexCoverageRegistryV1>,
@@ -278,7 +281,7 @@ impl IndexCoverageRegistrySourceV1 for FakeSource {
     kind: ActivePointerKindV1,
     owner_id: &[u8],
   ) -> Result<LoadedIndexActivePointerPairV1, IndexCoverageRegistrySourceErrorV1> {
-    self.pairs.get_mut(&(kind.id(), owner_id.to_vec())).and_then(VecDeque::pop_front).unwrap_or_else(|| {
+    self.pairs.get_mut(&(kind.id(), owner_id.to_vec())).and_then(VecDeque::pop_front).unwrap_or({
       Ok(LoadedIndexActivePointerPairV1 {
         slots: [None, None],
         selected: None,
@@ -630,7 +633,7 @@ fn nvt_absence_staleness_or_source_failure_cannot_remove_field_coverage() {
     absent.insert_artifact(artifact);
   }
   absent.set_stable_pair(ActivePointerKindV1::FieldIndex, &chain.field, false);
-  let snapshot = registry.refresh(&mut absent, &[request.clone()], &CancellationToken::new()).unwrap();
+  let snapshot = registry.refresh(&mut absent, std::slice::from_ref(&request), &CancellationToken::new()).unwrap();
   assert!(matches!(snapshot.entries()[0].selection(), IndexCoverageRegistrySelectionV1::Selected(_)));
   assert_eq!(snapshot.entries()[0].nvt_status(), &IndexCoverageNvtStatusV1::Unavailable(IndexCoverageNvtUnavailableReasonV1::Absent));
 
@@ -655,7 +658,7 @@ fn nvt_absence_staleness_or_source_failure_cannot_remove_field_coverage() {
   stale.insert_artifact(&stale_nvt);
   stale.set_stable_pair(ActivePointerKindV1::FieldIndex, &chain.field, false);
   stale.set_stable_pair(ActivePointerKindV1::FieldNvt, &stale_nvt, false);
-  let snapshot = registry.refresh(&mut stale, &[request.clone()], &CancellationToken::new()).unwrap();
+  let snapshot = registry.refresh(&mut stale, std::slice::from_ref(&request), &CancellationToken::new()).unwrap();
   assert!(matches!(snapshot.entries()[0].selection(), IndexCoverageRegistrySelectionV1::Selected(_)));
   assert_eq!(
     snapshot.entries()[0].nvt_status(),

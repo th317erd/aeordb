@@ -2890,7 +2890,7 @@ fn destination_observation_refuses_existing_symlink_and_noncanonical_paths() {
   {
     std::os::unix::fs::symlink(&existing, directory.path().join("link.aeordb")).unwrap();
     assert_eq!(
-      observe_migration_destination_path_v1(&directory.path().join("link.aeordb")).unwrap_err().code(),
+      observe_migration_destination_path_v1(directory.path().join("link.aeordb")).unwrap_err().code(),
       "migration_destination_symlink",
     );
   }

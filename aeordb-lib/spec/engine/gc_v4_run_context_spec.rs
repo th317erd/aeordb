@@ -350,9 +350,7 @@ fn duplicate_or_late_basis_and_malformed_incomplete_outcomes_fail_closed() {
   struct LateBasis;
   impl GcRunOperationV1 for LateBasis {
     fn execute_phase(&mut self, phase: GcRunPhaseV1, reporter: &mut GcRunPhaseReporterV1<'_>) -> Result<GcRunPhaseOutcomeV1, GcRunErrorV1> {
-      if phase == GcRunPhaseV1::Prepare {
-        reporter.capture_basis(test_basis())?;
-      } else if phase == GcRunPhaseV1::Inventory {
+      if matches!(phase, GcRunPhaseV1::Prepare | GcRunPhaseV1::Inventory) {
         reporter.capture_basis(test_basis())?;
       }
       Ok(GcRunPhaseOutcomeV1::Continue)

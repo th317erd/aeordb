@@ -64,9 +64,8 @@ pub struct CountersSnapshot {
   pub void_count: u64,
 }
 
-impl EngineCounters {
-  /// Create new counters with all fields initialized to zero.
-  pub fn new() -> Self {
+impl Default for EngineCounters {
+  fn default() -> Self {
     EngineCounters {
       files: AtomicU64::new(0),
       directories: AtomicU64::new(0),
@@ -85,6 +84,13 @@ impl EngineCounters {
       write_buffer_depth: AtomicU64::new(0),
       void_count: AtomicU64::new(0),
     }
+  }
+}
+
+impl EngineCounters {
+  /// Create new counters with all fields initialized to zero.
+  pub fn new() -> Self {
+    Self::default()
   }
 
   // ── Count increment/decrement helpers ────────────────────────────────

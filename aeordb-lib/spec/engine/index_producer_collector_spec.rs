@@ -122,9 +122,11 @@ enum ParserBehavior {
   Cancelled,
 }
 
+type ObservedParserCalls = Mutex<Vec<(Vec<u8>, Vec<u8>, String, u64, bool)>>;
+
 struct Parser {
   calls: AtomicUsize,
-  observed: Mutex<Vec<(Vec<u8>, Vec<u8>, String, u64, bool)>>,
+  observed: ObservedParserCalls,
   behavior: ParserBehavior,
 }
 

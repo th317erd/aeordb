@@ -696,7 +696,12 @@ fn every_ordered_page_and_directory_fixture_matches_the_independent_oracle() {
         directory.key,
       ),
       OrderedIndexArtifactV1::Page(page) => {
-        assert_eq!(page.records.iter().map(|record| record.unwrap()).count(), page.records.len(), "fixture {} record iterator", row.id);
+        assert_eq!(
+          page.records.iter().map(Result::unwrap).collect::<Vec<_>>().len(),
+          page.records.len(),
+          "fixture {} record iterator",
+          row.id
+        );
         let observed = match page.role {
           OrderedIndexRoleV1::ScopeOrdinal => format!("index:page:scope-catalog:ordinal:records={}", page.records.len()),
           OrderedIndexRoleV1::ScopeReverse => format!("index:page:scope-catalog:reverse:records={}", page.records.len()),
@@ -864,7 +869,7 @@ fn every_sparse_nvt_tile_fixture_matches_the_independent_oracle() {
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();
     let tile = decode_nvt_tile(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
-    assert_eq!(tile.entries.iter().map(|entry| entry.unwrap()).count(), tile.entries.len(), "fixture {} entry iterator", row.id);
+    assert_eq!(tile.entries.iter().map(Result::unwrap).collect::<Vec<_>>().len(), tile.entries.len(), "fixture {} entry iterator", row.id);
     let first = tile.entries.entry_at(0).unwrap();
     let last = tile.entries.entry_at(tile.entries.len() - 1).unwrap();
     let observed = format!(
@@ -971,7 +976,7 @@ fn every_index_journal_and_checkpoint_fixture_matches_the_independent_oracle() {
       ),
       IndexTaskArtifactV1::Checkpoint(checkpoint) => {
         assert_eq!(
-          checkpoint.attachments.iter().map(|attachment| attachment.unwrap()).count(),
+          checkpoint.attachments.iter().map(Result::unwrap).collect::<Vec<_>>().len(),
           checkpoint.attachments.len(),
           "fixture {} attachment iterator",
           row.id
@@ -1072,7 +1077,7 @@ fn index_journals_and_checkpoints_reject_broken_chains_batches_bounds_and_extern
   let IndexTaskArtifactV1::Journal(journal) = decode_index_task_artifact(&task, HashAlgorithm::Blake3_256).unwrap() else {
     panic!("expected journal");
   };
-  assert_eq!(journal.records.iter().map(|record| record.unwrap()).count(), journal.records.len());
+  assert_eq!(journal.records.iter().map(Result::unwrap).collect::<Vec<_>>().len(), journal.records.len());
   assert_eq!(validate_journal_chain(&journal, &journal).unwrap_err().class(), MalformedInputClass::CrossRecordClosureMismatch);
 
   let checkpoint = fs::read(root.join("index-artifact-v1/aidx-blake3-256-index-task-checkpoint-embedded-valid.bin")).unwrap();
@@ -1192,7 +1197,7 @@ fn every_logical_position_fixture_matches_the_independent_oracle() {
   for row in rows {
     let token = fs::read(root.join(row.binary)).unwrap();
     let position = decode_logical_position(&token, hash_algorithm(&row.hash_algorithm)).unwrap();
-    assert_eq!(position.components().map(|component| component.unwrap()).count(), position.component_count as usize);
+    assert_eq!(position.components().map(Result::unwrap).collect::<Vec<_>>().len(), position.component_count as usize);
     let identity = format!(
       "tuple={}:order={}:root={}:file={}:revision={}",
       position.sort_tuple().len(),
@@ -1452,7 +1457,7 @@ fn every_gc_active_control_fixture_matches_the_independent_oracle() {
     );
     assert_eq!(observed, row.expected, "fixture {}", row.id);
     assert_eq!(hex::encode(control.key), row.canonical_key.unwrap(), "fixture {}", row.id);
-    assert_eq!(control.kind.control_target().unwrap().is_control(), false);
+    assert!(!control.kind.control_target().unwrap().is_control());
   }
 }
 

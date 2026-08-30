@@ -199,7 +199,7 @@ fn publisher(algorithm: HashAlgorithm) -> (tempfile::TempDir, PathBuf, V4FirstAu
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("read-view-native.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
-  let kv_block_length = initial_block_size() as u64;
+  let kv_block_length = initial_block_size();
   let header = initial_header(algorithm, kv_block_length);
   let slot = encode_database_header_slot(&header).unwrap();
   file.seek(SeekFrom::Start(0)).unwrap();
@@ -1307,6 +1307,12 @@ fn selected_artifact_root_request<'a>(
   }
 }
 
+struct SelectedArtifactFixtureOptions {
+  field_required_reader_capabilities: [u8; 32],
+  capability_profile: BinaryCapabilityProfileV1,
+  layout: SelectedArtifactLayoutV1,
+}
+
 fn selected_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixture {
   selected_artifact_fixture_with_options(
     algorithm,
@@ -1314,14 +1320,23 @@ fn selected_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifactFixtur
     true,
     false,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::SinglePage,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::SinglePage,
+    },
   )
 }
 
 fn selected_artifact_fixture_with_layout(algorithm: HashAlgorithm, layout: SelectedArtifactLayoutV1) -> SelectedArtifactFixture {
-  selected_artifact_fixture_with_options(algorithm, 0, true, false, false, [0; 32], all_capabilities_profile(), layout)
+  selected_artifact_fixture_with_options(
+    algorithm,
+    0,
+    true,
+    false,
+    false,
+    SelectedArtifactFixtureOptions { field_required_reader_capabilities: [0; 32], capability_profile: all_capabilities_profile(), layout },
+  )
 }
 
 fn selected_artifact_fixture_with_manifest_live_delta(algorithm: HashAlgorithm, manifest_live_delta: u64) -> SelectedArtifactFixture {
@@ -1331,9 +1346,11 @@ fn selected_artifact_fixture_with_manifest_live_delta(algorithm: HashAlgorithm, 
     true,
     false,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::SinglePage,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::SinglePage,
+    },
   )
 }
 
@@ -1344,9 +1361,11 @@ fn selected_partial_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArtifa
     true,
     true,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::SinglePage,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::SinglePage,
+    },
   )
 }
 
@@ -1357,9 +1376,11 @@ fn selected_stale_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArti
     true,
     false,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::StaleNvtPageHint,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::StaleNvtPageHint,
+    },
   )
 }
 
@@ -1370,9 +1391,11 @@ fn selected_valid_nvt_artifact_fixture(algorithm: HashAlgorithm) -> SelectedArti
     true,
     false,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::ValidNvtPageHint,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::ValidNvtPageHint,
+    },
   )
 }
 
@@ -1385,9 +1408,11 @@ fn selected_artifact_fixture_with_unadmitted_capability(algorithm: HashAlgorithm
     true,
     false,
     false,
-    required_reader_capabilities,
-    BinaryCapabilityProfileV1::new(baseline, baseline),
-    SelectedArtifactLayoutV1::SinglePage,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: required_reader_capabilities,
+      capability_profile: BinaryCapabilityProfileV1::new(baseline, baseline),
+      layout: SelectedArtifactLayoutV1::SinglePage,
+    },
   )
 }
 
@@ -1441,10 +1466,9 @@ fn selected_artifact_fixture_with_options(
   publish_posting_page: bool,
   advance_target_root: bool,
   target_files: bool,
-  field_required_reader_capabilities: [u8; 32],
-  capability_profile: BinaryCapabilityProfileV1,
-  layout: SelectedArtifactLayoutV1,
+  options: SelectedArtifactFixtureOptions,
 ) -> SelectedArtifactFixture {
+  let SelectedArtifactFixtureOptions { field_required_reader_capabilities, capability_profile, layout } = options;
   selected_artifact_fixture_with_namespace_options(
     algorithm,
     manifest_live_delta,
@@ -1821,13 +1845,7 @@ fn selected_artifact_fixture_with_namespace_options(
     }),
   })
   .unwrap();
-  let nvt_hint_page_id = if layout == SelectedArtifactLayoutV1::StaleNvtPageHint {
-    2
-  } else if layout.has_three_posting_pages() {
-    2
-  } else {
-    1
-  };
+  let nvt_hint_page_id = if layout == SelectedArtifactLayoutV1::StaleNvtPageHint || layout.has_three_posting_pages() { 2 } else { 1 };
   let nvt_entries = if layout == SelectedArtifactLayoutV1::LargeNvt {
     (0..128u32)
       .map(|relative_cell| NvtEntryWriteV1 {
@@ -2704,9 +2722,11 @@ fn native_partition_fixture(
     primary_scope,
     extra_scopes,
     body,
-    true,
-    SelectedFileBodyShape::Exact,
-    QueryExpressionV1::And(Vec::new()),
+    NativePartitionFixtureOptions {
+      publish_chunk: true,
+      body_shape: SelectedFileBodyShape::Exact,
+      expression: QueryExpressionV1::And(Vec::new()),
+    },
   )
 }
 
@@ -2736,10 +2756,14 @@ fn native_query_body_fixture_configured(
     semantic_scope_definition(algorithm, "/docs", Some("*.json")),
     &[],
     body,
-    publish_chunk,
-    body_shape,
-    expression,
+    NativePartitionFixtureOptions { publish_chunk, body_shape, expression },
   )
+}
+
+struct NativePartitionFixtureOptions {
+  publish_chunk: bool,
+  body_shape: SelectedFileBodyShape,
+  expression: QueryExpressionV1,
 }
 
 fn native_partition_fixture_with_algorithm_and_expression(
@@ -2748,10 +2772,9 @@ fn native_partition_fixture_with_algorithm_and_expression(
   primary_scope: Vec<u8>,
   extra_scopes: &[Vec<u8>],
   body: &[u8],
-  publish_chunk: bool,
-  body_shape: SelectedFileBodyShape,
-  expression: QueryExpressionV1,
+  options: NativePartitionFixtureOptions,
 ) -> NativePartitionFixture {
+  let NativePartitionFixtureOptions { publish_chunk, body_shape, expression } = options;
   let fixture = selected_source_fixture_with_algorithm_and_scopes(
     algorithm,
     value_store_fixture,
@@ -2825,12 +2848,14 @@ fn native_partition_fixture_with_algorithm_and_expression(
   }
 }
 
+type NativePartitionExpectation = (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>);
+
 fn native_partition_many_fixture(
   algorithm: HashAlgorithm,
   file_record_version: u8,
   btree: bool,
   names: &[&str],
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+) -> NativePartitionExpectation {
   native_partition_many_fixture_configured(
     algorithm,
     file_record_version,
@@ -2845,11 +2870,7 @@ fn native_partition_many_fixture(
   )
 }
 
-fn native_auxiliary_size_fixture(
-  algorithm: HashAlgorithm,
-  names: &[&str],
-  sizes: &[u64],
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+fn native_auxiliary_size_fixture(algorithm: HashAlgorithm, names: &[&str], sizes: &[u64]) -> NativePartitionExpectation {
   native_partition_many_fixture_configured(
     algorithm,
     1,
@@ -2869,7 +2890,7 @@ fn native_authoritative_size_fixture(
   names: &[&str],
   sizes: &[u64],
   minimum_size: u64,
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+) -> NativePartitionExpectation {
   native_partition_many_fixture_configured(
     algorithm,
     1,
@@ -2884,7 +2905,7 @@ fn native_authoritative_size_fixture(
   )
 }
 
-fn native_auxiliary_size_fieldless_fixture(algorithm: HashAlgorithm) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+fn native_auxiliary_size_fieldless_fixture(algorithm: HashAlgorithm) -> NativePartitionExpectation {
   let nearer = [semantic_scope_definition(algorithm, "/docs", None)];
   native_partition_many_fixture_configured(
     algorithm,
@@ -2912,7 +2933,7 @@ fn native_partition_many_fixture_configured(
   primary_scope: Vec<u8>,
   extra_scopes: &[Vec<u8>],
   predicate_minimum: Option<u64>,
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+) -> NativePartitionExpectation {
   native_partition_many_fixture_configured_with_cache(
     algorithm,
     file_record_version,
@@ -2934,7 +2955,7 @@ fn native_two_field_cache_fixture(
   names: &[&str],
   sizes: &[u64],
   maximum_prepared_source_cache_entries: usize,
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+) -> NativePartitionExpectation {
   native_partition_many_fixture_configured_with_cache(
     algorithm,
     1,
@@ -2965,7 +2986,7 @@ fn native_partition_many_fixture_configured_with_cache(
   predicate_minimum: Option<u64>,
   include_hash_predicate: bool,
   maximum_prepared_source_cache_entries: usize,
-) -> (NativePartitionFixture, Vec<(Vec<u8>, Vec<u8>, String)>) {
+) -> NativePartitionExpectation {
   let (directory, path, publisher) = publisher(algorithm);
   let first = publisher.publish(&first_request(algorithm)).unwrap();
   let (content_root, identities) = publish_file_tree_with_sizes(
@@ -3643,7 +3664,6 @@ fn root_aware_plugin_read_preserves_exact_captured_identity_and_bytes_after_head
     assert!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes > baseline);
     drop(read);
     assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-    drop(adapter);
     drop(page);
     drop(reader);
     fixture.assert_released();
@@ -3675,7 +3695,6 @@ fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_
   assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "selected_file_body_bytes");
   assert_eq!(bounded.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-  drop(adapter);
   drop(page);
   drop(reader);
   bounded.assert_released();
@@ -3698,7 +3717,6 @@ fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_
   assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::CorruptSource);
   assert_eq!(error.code(), "selected_file_body_row_authority");
   assert_eq!(left.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, left_baseline);
-  drop(adapter);
   drop(right_page);
   drop(left_page);
   drop(right_reader);
@@ -3721,7 +3739,6 @@ fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_
   assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::Cancelled);
   assert_eq!(error.code(), "native_plugin_read_cancelled");
   assert_eq!(request_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-  drop(adapter);
   drop(page);
   drop(reader);
   request_cancelled.assert_released();
@@ -3740,7 +3757,6 @@ fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_
   assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::Cancelled);
   assert_eq!(error.code(), "selected_namespace_cancelled");
   assert_eq!(view_cancelled.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-  drop(adapter);
   drop(page);
   drop(reader);
   view_cancelled.assert_released();
@@ -3762,7 +3778,6 @@ fn root_aware_plugin_read_rejects_limits_foreign_rows_cancellation_and_pressure_
   assert_eq!(retry.bytes(), b"plugin pressure retry");
   drop(retry);
   assert_eq!(pressured.memory.snapshot().unwrap().reserved_bytes, baseline.reserved_bytes);
-  drop(adapter);
   drop(page);
   drop(reader);
   pressured.assert_released();
@@ -3796,7 +3811,6 @@ fn root_aware_plugin_read_preserves_selected_body_fault_direction_and_release() 
     ));
     assert_eq!(error.code(), expected_code);
     assert_eq!(fixture.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-    drop(adapter);
     drop(page);
     drop(reader);
     fixture.assert_released();
@@ -3820,7 +3834,6 @@ fn root_aware_plugin_read_preserves_selected_body_fault_direction_and_release() 
   ));
   assert_eq!(error.class(), NativeRootAwarePluginReadErrorClassV1::CorruptSource);
   assert_eq!(corrupt.memory.snapshot().unwrap().owner(MemoryOwner::Query).unwrap().reserved_bytes, baseline);
-  drop(adapter);
   drop(page);
   drop(reader);
   corrupt.assert_released();
@@ -4468,8 +4481,10 @@ struct NativeCandidateDocumentCollector {
   scope_id: Vec<u8>,
   field_name: String,
   cancellation: CancellationToken,
-  documents: Vec<(Vec<u8>, Vec<u8>, String, Vec<Vec<u8>>)>,
+  documents: CollectedNativeDocuments,
 }
+
+type CollectedNativeDocuments = Vec<(Vec<u8>, Vec<u8>, String, Vec<Vec<u8>>)>;
 
 impl QueryAuthoritativeDocumentVisitorV1 for NativeCandidateDocumentCollector {
   fn visit(
@@ -8156,9 +8171,11 @@ fn selected_artifact_cursor_rejects_catalog_manifest_and_root_closure_drift() {
     false,
     false,
     false,
-    [0; 32],
-    all_capabilities_profile(),
-    SelectedArtifactLayoutV1::SinglePage,
+    SelectedArtifactFixtureOptions {
+      field_required_reader_capabilities: [0; 32],
+      capability_profile: all_capabilities_profile(),
+      layout: SelectedArtifactLayoutV1::SinglePage,
+    },
   );
   let reader = missing_page.reader();
   let missing_page_error = reader

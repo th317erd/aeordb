@@ -370,7 +370,7 @@ fn successful_mutation_reuses_the_hard_publication_sequence_and_fans_out_once_af
   assert!(!acknowledgement.operation_id.is_nil());
   assert!(acknowledgement.publication_sequence > 0);
   assert_eq!(acknowledgement.kind, NamespaceMutationKind::FileWrite);
-  assert_eq!(fanout.calls.lock().unwrap().as_slice(), &[acknowledgement.clone()]);
+  assert_eq!(fanout.calls.lock().unwrap().as_slice(), std::slice::from_ref(&acknowledgement));
   assert_eq!(acknowledgement.locator_replacements.len(), 1);
   assert!(acknowledgement.locator_replacements[0].old_incarnation.is_none());
   assert_eq!(acknowledgement.locator_replacements[0].ordinal, 0);

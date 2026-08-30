@@ -30,7 +30,7 @@ pub fn collect_configuration_overrides(matches: &ArgMatches) -> Result<CommandLi
     return CommandLineConfigOverrides::from_registered(values);
   };
   for property in CONFIGURATION_PROPERTIES {
-    if let Some(value) = start.get_raw(property.path).and_then(|values| values.last()) {
+    if let Some(value) = start.get_raw(property.path).and_then(|mut values| values.next_back()) {
       values.insert(property.cli.to_string(), value.to_os_string());
     }
   }

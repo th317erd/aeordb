@@ -73,7 +73,7 @@ fn atomic_visibility_batch_keeps_staged_entries_hidden_until_hard_authority() {
   store.publish_atomic_visibility_after_authority(batch, &hard_receipt(1)).unwrap();
 
   assert_eq!(store.snapshot_handle().load().get(&staged.hash).unwrap(), Some(staged));
-  assert!(prior_snapshot.get(&vec![0x41; 32]).unwrap().is_none(), "an already captured read view must remain exact");
+  assert!(prior_snapshot.get(&[0x41; 32]).unwrap().is_none(), "an already captured read view must remain exact");
 }
 
 #[test]

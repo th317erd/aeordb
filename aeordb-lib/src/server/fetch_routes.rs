@@ -10,10 +10,10 @@ use std::io::Write;
 
 use super::engine_routes::{
   attach_root_metadata_headers, current_path_read_is_authorized, legacy_root_adapter_error_response, reject_historical_share_selector,
-  require_legacy_root_plan, root_api_error_response, selected_path_is_authorized, RouteResponseError,
+  require_legacy_root_plan, root_api_error_response, selected_path_is_authorized,
 };
 use super::legacy_v3_root_adapter::{LegacyV3RootAdapterErrorV1, LegacyV3SelectedRootAdapterV1};
-use super::responses::{engine_error_response, ErrorResponse};
+use super::responses::{engine_error_response, ErrorResponse, RouteResponseError};
 use super::root_api::{RequestedRootSelectorV1, RootRequestAdapterV1, RootSelectorFieldsV1, RouteRootRequestPlanV1, parse_root_selector_v1};
 use super::state::AppState;
 use super::temp_response::{body_from_tempfile, tempfile_for_engine, ResponseBuildCancellation, ResponseBuildGuard};
@@ -71,16 +71,14 @@ pub async fn batch_fetch(
   }
   let selector_fields = RootSelectorFieldsV1 { root_hash: body.root_hash, snapshot: body.snapshot, version: body.version };
   match (body.paths, body.items) {
-    (Some(_), Some(_)) => {
-      return ErrorResponse::new("Provide either 'paths' for whole-file fetch or 'items' for range fetch, not both")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
+    (Some(_), Some(_)) => ErrorResponse::new("Provide either 'paths' for whole-file fetch or 'items' for range fetch, not both")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response(),
     (Some(paths), None) => {
-      return batch_fetch_paths(state, claims, active_key_rules.map(|Extension(rules)| rules), paths, body.max_bytes, selector_fields).await
+      batch_fetch_paths(state, claims, active_key_rules.map(|Extension(rules)| rules), paths, body.max_bytes, selector_fields).await
     }
     (None, Some(items)) => {
-      return batch_fetch_range_items(
+      batch_fetch_range_items(
         state,
         claims,
         active_key_rules.map(|Extension(rules)| rules),
@@ -89,13 +87,11 @@ pub async fn batch_fetch(
         body.continue_on_error.unwrap_or(false),
         selector_fields,
       )
-      .await;
+      .await
     }
-    (None, None) => {
-      return ErrorResponse::new("Provide either a non-empty 'paths' array or a non-empty 'items' array")
-        .with_status(StatusCode::BAD_REQUEST)
-        .into_response();
-    }
+    (None, None) => ErrorResponse::new("Provide either a non-empty 'paths' array or a non-empty 'items' array")
+      .with_status(StatusCode::BAD_REQUEST)
+      .into_response(),
   }
 }
 
@@ -469,7 +465,11 @@ fn incomplete_utf8_suffix_len(bytes: &[u8]) -> usize {
     _ => return 0,
   };
   let available = bytes.len() - lead_index;
-  (available < expected).then_some(available).unwrap_or(0)
+  if available < expected {
+    available
+  } else {
+    0
+  }
 }
 
 fn write_json_escaped(writer: &mut impl Write, text: &str) -> std::io::Result<()> {

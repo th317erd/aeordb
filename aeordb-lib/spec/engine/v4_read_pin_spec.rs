@@ -226,7 +226,7 @@ fn hash_validation_covers_both_widths_and_precedes_lifecycle_lookup() {
   }
   assert_eq!(lookups.load(Ordering::SeqCst), 0);
 
-  let admission = sha512.admit_read(&vec![2; 64], &cancellation, || Ok(RootLifecycleObservationV1::Live)).unwrap();
+  let admission = sha512.admit_read(&[2; 64], &cancellation, || Ok(RootLifecycleObservationV1::Live)).unwrap();
   assert_eq!(admission.state, ReadableRootStateV1::Live);
   drop(admission);
   assert_eq!(sha512.tracked_root_count().unwrap(), 0);

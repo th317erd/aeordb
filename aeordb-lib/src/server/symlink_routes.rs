@@ -46,12 +46,12 @@ pub async fn create_symlink(
 
   let normalized_target = normalize_path(target);
   if let Err(response) = require_generic_data_path(&state, &normalized_target) {
-    return response;
+    return response.into_response();
   }
 
   let normalized_path = normalize_path(&path);
   if let Err(response) = require_generic_data_path(&state, &normalized_path) {
-    return response;
+    return response.into_response();
   }
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -93,7 +93,7 @@ pub async fn get_symlink(
   }
   let normalized_path = normalize_path(&path);
   if let Err(response) = require_generic_data_path(&state, &normalized_path) {
-    return response;
+    return response.into_response();
   }
   let selector = match query.selector(&state.engine) {
     Ok(selector) => selector,
@@ -159,7 +159,7 @@ pub async fn delete_symlink(
 ) -> Response {
   let normalized_path = normalize_path(&path);
   if let Err(response) = require_generic_data_path(&state, &normalized_path) {
-    return response;
+    return response.into_response();
   }
 
   let ctx = RequestContext::from_claims(&_claims.sub, state.event_bus.clone());

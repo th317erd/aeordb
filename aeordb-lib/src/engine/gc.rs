@@ -1392,6 +1392,110 @@ fn check_gc_token(cancellation: Option<&CancellationToken>) -> EngineResult<()> 
   Ok(())
 }
 
+fn check_gc_quantum(engine: &StorageEngine, cancellation: Option<&CancellationToken>, index: usize) -> EngineResult<()> {
+  if index.is_multiple_of(256) {
+    check_gc_cancellation(engine, cancellation)?;
+  }
+  Ok(())
+}
+
+fn reserve_gc_workspace(engine: &StorageEngine, run_configuration: &GcRunConfiguration) -> EngineResult<MemoryReservation> {
+  let mut reservation = engine
+    .memory_coordinator()
+    .reserve(MemoryOwner::GarbageCollection, GC_ADMISSION_BYTES, AdmissionClass::Maintenance)
+    .map_err(gc_memory_error)?;
+  let kv_entries = u64::try_from(engine.kv_entry_count()?)
+    .map_err(|_| EngineError::ResourceExhausted("garbage collection KV population does not fit memory accounting".to_string()))?;
+  let retained_bytes = kv_entries
+    .checked_mul(GC_RETAINED_BYTES_PER_KV_ENTRY)
+    .ok_or_else(|| EngineError::ResourceExhausted("garbage collection retained workspace estimate overflow".to_string()))?;
+  if retained_bytes > run_configuration.mark_memory_preferred_bytes {
+    tracing::warn!(
+      required_bytes = retained_bytes,
+      preferred_bytes = run_configuration.mark_memory_preferred_bytes,
+      configuration_generation = run_configuration.generation,
+      "Legacy in-memory GC mark exceeds the captured preferred memory budget; the v4 bounded mark pipeline will replace this path"
+    );
+  }
+  reservation.grow(retained_bytes).map_err(gc_memory_error)?;
+  Ok(reservation)
+}
+
+fn gc_memory_error(error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::PolicyUnavailable
+    | MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
+      EngineError::ResourceExhausted(format!("garbage collection memory admission failed: {error}"))
+    }
+    _ => EngineError::IoError(std::io::Error::other(format!("garbage collection memory admission failed: {error}"))),
+  }
+}
+
+/// Build an authoritative CountersSnapshot by scanning the current KV state.
+/// Used by GC to reconcile counters after sweep.
+fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<CountersSnapshot> {
+  let all_entries = engine.iter_kv_entries()?;
+  let hash_length = engine.hash_algo().hash_length();
+
+  let mut symlinks: u64 = 0;
+  let mut chunks: u64 = 0;
+  let mut snapshots: u64 = 0;
+  let mut forks: u64 = 0;
+  let mut chunk_data_size: u64 = 0;
+
+  for entry in &all_entries {
+    match entry.entry_type() {
+      KV_TYPE_FILE_RECORD => {}
+      KV_TYPE_DIRECTORY => {}
+      KV_TYPE_SYMLINK => {
+        symlinks += 1;
+      }
+      KV_TYPE_CHUNK => {
+        chunks += 1;
+        chunk_data_size = chunk_data_size.saturating_add(estimated_chunk_payload_bytes(entry, hash_length));
+      }
+      KV_TYPE_SNAPSHOT => {
+        snapshots += 1;
+      }
+      KV_TYPE_FORK => {
+        forks += 1;
+      }
+      _ => {}
+    }
+  }
+
+  let live_tree = crate::engine::directory_listing::measure_live_tree(engine)?;
+  let void_space = engine
+    .void_manager
+    .read()
+    .map_err(|error| EngineError::IoError(std::io::Error::other(format!("GC counter reconciliation could not read void state: {error}"))))?
+    .total_void_space();
+
+  // Preserve current throughput counters (they are monotonic, not reconciled)
+  let current = engine.counters().snapshot();
+
+  Ok(CountersSnapshot {
+    files: live_tree.files,
+    directories: live_tree.directories,
+    symlinks,
+    chunks,
+    snapshots,
+    forks,
+    logical_data_size: live_tree.logical_data_size,
+    chunk_data_size,
+    void_space,
+    writes_total: current.writes_total,
+    reads_total: current.reads_total,
+    bytes_written_total: current.bytes_written_total,
+    bytes_read_total: current.bytes_read_total,
+    chunks_deduped_total: current.chunks_deduped_total,
+    write_buffer_depth: current.write_buffer_depth,
+    void_count: current.void_count,
+  })
+}
+
 #[cfg(test)]
 mod recheck_teardown_tests {
   use super::*;
@@ -1523,108 +1627,4 @@ mod recheck_teardown_tests {
     engine.begin_gc_recheck().expect("the completed run must leave later GC usable");
     engine.end_gc_recheck().unwrap();
   }
-}
-
-fn check_gc_quantum(engine: &StorageEngine, cancellation: Option<&CancellationToken>, index: usize) -> EngineResult<()> {
-  if index % 256 == 0 {
-    check_gc_cancellation(engine, cancellation)?;
-  }
-  Ok(())
-}
-
-fn reserve_gc_workspace(engine: &StorageEngine, run_configuration: &GcRunConfiguration) -> EngineResult<MemoryReservation> {
-  let mut reservation = engine
-    .memory_coordinator()
-    .reserve(MemoryOwner::GarbageCollection, GC_ADMISSION_BYTES, AdmissionClass::Maintenance)
-    .map_err(gc_memory_error)?;
-  let kv_entries = u64::try_from(engine.kv_entry_count()?)
-    .map_err(|_| EngineError::ResourceExhausted("garbage collection KV population does not fit memory accounting".to_string()))?;
-  let retained_bytes = kv_entries
-    .checked_mul(GC_RETAINED_BYTES_PER_KV_ENTRY)
-    .ok_or_else(|| EngineError::ResourceExhausted("garbage collection retained workspace estimate overflow".to_string()))?;
-  if retained_bytes > run_configuration.mark_memory_preferred_bytes {
-    tracing::warn!(
-      required_bytes = retained_bytes,
-      preferred_bytes = run_configuration.mark_memory_preferred_bytes,
-      configuration_generation = run_configuration.generation,
-      "Legacy in-memory GC mark exceeds the captured preferred memory budget; the v4 bounded mark pipeline will replace this path"
-    );
-  }
-  reservation.grow(retained_bytes).map_err(gc_memory_error)?;
-  Ok(reservation)
-}
-
-fn gc_memory_error(error: MemoryCoordinatorError) -> EngineError {
-  match error {
-    MemoryCoordinatorError::PolicyUnavailable
-    | MemoryCoordinatorError::HardLimitExceeded { .. }
-    | MemoryCoordinatorError::SoftPressureDeferred { .. }
-    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
-      EngineError::ResourceExhausted(format!("garbage collection memory admission failed: {error}"))
-    }
-    _ => EngineError::IoError(std::io::Error::other(format!("garbage collection memory admission failed: {error}"))),
-  }
-}
-
-/// Build an authoritative CountersSnapshot by scanning the current KV state.
-/// Used by GC to reconcile counters after sweep.
-fn build_authoritative_snapshot(engine: &StorageEngine) -> EngineResult<CountersSnapshot> {
-  let all_entries = engine.iter_kv_entries()?;
-  let hash_length = engine.hash_algo().hash_length();
-
-  let mut symlinks: u64 = 0;
-  let mut chunks: u64 = 0;
-  let mut snapshots: u64 = 0;
-  let mut forks: u64 = 0;
-  let mut chunk_data_size: u64 = 0;
-
-  for entry in &all_entries {
-    match entry.entry_type() {
-      KV_TYPE_FILE_RECORD => {}
-      KV_TYPE_DIRECTORY => {}
-      KV_TYPE_SYMLINK => {
-        symlinks += 1;
-      }
-      KV_TYPE_CHUNK => {
-        chunks += 1;
-        chunk_data_size = chunk_data_size.saturating_add(estimated_chunk_payload_bytes(entry, hash_length));
-      }
-      KV_TYPE_SNAPSHOT => {
-        snapshots += 1;
-      }
-      KV_TYPE_FORK => {
-        forks += 1;
-      }
-      _ => {}
-    }
-  }
-
-  let live_tree = crate::engine::directory_listing::measure_live_tree(engine)?;
-  let void_space = engine
-    .void_manager
-    .read()
-    .map_err(|error| EngineError::IoError(std::io::Error::other(format!("GC counter reconciliation could not read void state: {error}"))))?
-    .total_void_space();
-
-  // Preserve current throughput counters (they are monotonic, not reconciled)
-  let current = engine.counters().snapshot();
-
-  Ok(CountersSnapshot {
-    files: live_tree.files,
-    directories: live_tree.directories,
-    symlinks,
-    chunks,
-    snapshots,
-    forks,
-    logical_data_size: live_tree.logical_data_size,
-    chunk_data_size,
-    void_space,
-    writes_total: current.writes_total,
-    reads_total: current.reads_total,
-    bytes_written_total: current.bytes_written_total,
-    bytes_read_total: current.bytes_read_total,
-    chunks_deduped_total: current.chunks_deduped_total,
-    write_buffer_depth: current.write_buffer_depth,
-    void_count: current.void_count,
-  })
 }

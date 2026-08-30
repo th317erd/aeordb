@@ -211,10 +211,9 @@ pub fn dmetaphone_primary(s: &str) -> String {
         if next == Some('H') {
           result.push('X');
           i += 2;
-        } else if next == Some('C') && matches!(chars.get(i + 2), Some(&'H')) {
-          result.push('X');
-          i += 3;
-        } else if matches!(next, Some('I') | Some('E')) && matches!(chars.get(i + 2), Some(&'O') | Some(&'A')) {
+        } else if (next == Some('C') && matches!(chars.get(i + 2), Some(&'H')))
+          || (matches!(next, Some('I') | Some('E')) && matches!(chars.get(i + 2), Some(&'O') | Some(&'A')))
+        {
           result.push('X');
           i += 3;
         } else {

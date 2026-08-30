@@ -7,7 +7,7 @@ use axum::Extension;
 use crate::auth::TokenClaims;
 use crate::engine::config_resolver::ConfigurationFamily;
 use crate::engine::configuration_observability::{configuration_envelope, ConfigurationVisibility};
-use crate::server::responses::{engine_error_response, require_root, ErrorResponse};
+use crate::server::responses::{engine_error_response, require_root, ErrorResponse, RouteResponseError};
 use crate::server::state::AppState;
 
 pub async fn get_runtime(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
@@ -21,10 +21,10 @@ pub async fn put_runtime(
   body: Bytes,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   if let Err(response) = require_json_content_type(&headers, false) {
-    return response;
+    return response.into_response();
   }
   put_configuration(state, ConfigurationFamily::Runtime, body)
 }
@@ -36,10 +36,10 @@ pub async fn patch_runtime(
   body: Bytes,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   if let Err(response) = require_json_content_type(&headers, true) {
-    return response;
+    return response.into_response();
   }
   patch_configuration(state, ConfigurationFamily::Runtime, body)
 }
@@ -55,10 +55,10 @@ pub async fn put_lifecycle(
   body: Bytes,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   if let Err(response) = require_json_content_type(&headers, false) {
-    return response;
+    return response.into_response();
   }
   put_configuration(state, ConfigurationFamily::Lifecycle, body)
 }
@@ -70,15 +70,15 @@ pub async fn patch_lifecycle(
   body: Bytes,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   if let Err(response) = require_json_content_type(&headers, true) {
-    return response;
+    return response.into_response();
   }
   patch_configuration(state, ConfigurationFamily::Lifecycle, body)
 }
 
-fn require_json_content_type(headers: &HeaderMap, merge_patch: bool) -> Result<(), Response> {
+fn require_json_content_type(headers: &HeaderMap, merge_patch: bool) -> Result<(), RouteResponseError> {
   let media_type = headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).and_then(|value| value.split(';').next()).map(str::trim);
   let accepted = media_type.is_some_and(|media_type| {
     media_type.eq_ignore_ascii_case("application/json") || (merge_patch && media_type.eq_ignore_ascii_case("application/merge-patch+json"))
@@ -90,13 +90,14 @@ fn require_json_content_type(headers: &HeaderMap, merge_patch: bool) -> Result<(
   Err(
     ErrorResponse::new(format!("configuration request Content-Type must be {expected}"))
       .with_status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-      .into_response(),
+      .into_response()
+      .into(),
   )
 }
 
 fn get_configuration(state: AppState, claims: TokenClaims, family: ConfigurationFamily) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   Json(configuration_envelope(&state.engine.configuration_snapshot(), family, ConfigurationVisibility::Root)).into_response()
 }

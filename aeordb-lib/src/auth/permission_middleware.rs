@@ -12,7 +12,7 @@ use crate::auth::api_key::ApiKeyRecord;
 use crate::engine::api_key_rules::{match_rules, check_operation_permitted, operation_to_flag_char, KeyRule};
 use crate::engine::errors::EngineResult;
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
-use crate::server::responses::ErrorResponse;
+use crate::server::responses::{ErrorResponse, RouteResponseError};
 use crate::server::route_permissions::require_generic_data_path;
 use crate::server::state::AppState;
 
@@ -92,7 +92,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
     if let Some(ref key_id) = claims.as_ref().and_then(|claims| claims.key_id.clone()) {
       let key_record = match require_active_api_key(&state, key_id) {
         Ok(record) => record,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
       if !key_record.rules.is_empty() {
         request.extensions_mut().insert(ActiveKeyRules(key_record.rules));
@@ -135,7 +135,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   // the check.
   let abs_check_path = if engine_path.starts_with('/') { engine_path.to_string() } else { format!("/{}", engine_path) };
   if let Err(response) = require_generic_data_path(&state, &abs_check_path) {
-    return response;
+    return response.into_response();
   }
 
   // Parse user_id from claims.sub.
@@ -173,7 +173,7 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   if let Some(ref key_id) = claims.key_id {
     let key_record = match require_active_api_key(&state, key_id) {
       Ok(record) => record,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
 
     // If key has rules, enforce them.
@@ -295,27 +295,32 @@ pub async fn permission_middleware(State(state): State<AppState>, mut request: R
   (StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Permission denied".to_string(), code: None })).into_response()
 }
 
-pub(crate) fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, Response> {
+pub(crate) fn require_active_api_key(state: &AppState, key_id: &str) -> Result<ApiKeyRecord, RouteResponseError> {
   let key_record = match state.api_key_cache.get(&key_id.to_string(), &state.auth_engine) {
     Ok(Some(record)) => record,
     Ok(None) => {
-      return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response());
+      return Err(
+        (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key not found".to_string(), code: None })).into_response().into(),
+      );
     }
     Err(error) => {
       tracing::error!(key_id, %error, "Failed to load API key authority");
       return Err(
         (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to verify API key".to_string(), code: None }))
-          .into_response(),
+          .into_response()
+          .into(),
       );
     }
   };
   if key_record.is_revoked {
     return Err(
-      (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key has been revoked".to_string(), code: None })).into_response(),
+      (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key has been revoked".to_string(), code: None })).into_response().into(),
     );
   }
   if key_record.expires_at <= chrono::Utc::now().timestamp_millis() {
-    return Err((StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key expired".to_string(), code: None })).into_response());
+    return Err(
+      (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "API key expired".to_string(), code: None })).into_response().into(),
+    );
   }
   Ok(key_record)
 }

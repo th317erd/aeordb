@@ -148,7 +148,7 @@ fn peer_to_json(peer: &crate::engine::peer_connection::PeerConnection, peer_mana
 pub async fn cluster_status(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let node_id = match system_store::get_node_id(&state.engine) {
@@ -182,7 +182,7 @@ pub async fn add_peer(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let address = match payload.get("address").and_then(|value| value.as_str()) {
@@ -241,7 +241,7 @@ pub async fn add_peer(
 pub async fn list_peers(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let peers: Vec<serde_json::Value> = state.peer_manager.all_peers().iter().map(|peer| peer_to_json(peer, &state.peer_manager)).collect();
@@ -257,7 +257,7 @@ pub async fn remove_peer(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let node_id: u64 = match node_id_string.parse() {
@@ -322,7 +322,7 @@ pub async fn join_cluster(
   Json(payload): Json<serde_json::Value>,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
 
   let caller_ip = caller_ip_from_headers(&headers);
@@ -442,7 +442,7 @@ pub async fn trigger_sync(
   Query(params): Query<TriggerSyncParams>,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
 
   let sync_engine = match &state.sync_engine {

@@ -25,7 +25,7 @@ pub fn docs_built_with_mdbook() -> bool {
 }
 
 fn serve_docs_path(path: &str, request_headers: HeaderMap) -> Response {
-  let requested = normalize_docs_path(&path);
+  let requested = normalize_docs_path(path);
   let Some(asset) = find_doc_asset(&requested) else {
     return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "Documentation asset not found").into_response();
   };

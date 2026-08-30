@@ -42,9 +42,9 @@ fn task<'a>(
   before: &'a [u8],
   after: &'a [u8],
   semantic: &'a [u8],
-  journal: Option<&'a [u8]>,
-  scope: Option<&'a str>,
+  authority: (Option<&'a [u8]>, Option<&'a str>),
 ) -> IndexProducerTaskRequestV1<'a> {
+  let (journal, scope) = authority;
   IndexProducerTaskRequestV1 {
     operation_id,
     kind,
@@ -177,14 +177,14 @@ fn options_and_exact_source_identity_fail_closed_without_retention() {
   let semantic = hash(b"semantic");
   let journal = hash(b"journal");
   for invalid in [
-    task([0; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, Some(&journal), None),
-    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 0, &before, &after, &semantic, Some(&journal), None),
-    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before[..31], &after, &semantic, Some(&journal), None),
-    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, None, None),
-    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, Some(&journal), Some("/docs")),
-    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, None, None),
-    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, None, Some("//docs")),
-    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, None, Some("/docs/../private")),
+    task([0; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, (Some(&journal), None)),
+    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 0, &before, &after, &semantic, (Some(&journal), None)),
+    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before[..31], &after, &semantic, (Some(&journal), None)),
+    task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, (None, None)),
+    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, (Some(&journal), Some("/docs"))),
+    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, (None, None)),
+    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, (None, Some("//docs"))),
+    task([1; 16], IndexProducerTaskKindV1::Rebuild, 1, &after, &after, &semantic, (None, Some("/docs/../private"))),
   ] {
     assert!(coordinator.admit(invalid, 10).is_err());
     assert_eq!(coordinator.snapshot().pending_tasks, 0);
@@ -200,7 +200,7 @@ fn admission_is_bounded_body_free_deduplicated_and_canonical() {
   let after = hash(b"after");
   let semantic = hash(b"semantic");
   let journal = hash(b"journal");
-  let request = task([2; 16], IndexProducerTaskKindV1::MutationWindow, 2, &before, &after, &semantic, Some(&journal), None);
+  let request = task([2; 16], IndexProducerTaskKindV1::MutationWindow, 2, &before, &after, &semantic, (Some(&journal), None));
   assert_eq!(coordinator.admit(request, 10).unwrap(), IndexProducerAdmissionV1::Queued);
   let retained = coordinator.snapshot();
   assert_eq!(retained.pending_tasks, 1);
@@ -208,10 +208,10 @@ fn admission_is_bounded_body_free_deduplicated_and_canonical() {
 
   assert_eq!(coordinator.admit(request, 11).unwrap(), IndexProducerAdmissionV1::Duplicate);
   assert_eq!(coordinator.snapshot(), retained);
-  let conflicting = task([2; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
+  let conflicting = task([2; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, (Some(&journal), None));
   assert!(matches!(coordinator.admit(conflicting, 12), Err(IndexProducerCoordinatorErrorV1::ConflictingTask { .. })));
 
-  let earlier = task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, Some(&journal), None);
+  let earlier = task([1; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, (Some(&journal), None));
   coordinator.admit(earlier, 13).unwrap();
   let lease = coordinator.lease_next(13, false).unwrap().expect("earliest canonical task");
   assert_eq!(lease.operation_id(), [1; 16]);
@@ -220,7 +220,7 @@ fn admission_is_bounded_body_free_deduplicated_and_canonical() {
   coordinator.cancel(&lease).unwrap();
   assert_eq!(coordinator.snapshot().pending_tasks, 2);
 
-  let overflow = task([3; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
+  let overflow = task([3; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, (Some(&journal), None));
   assert!(matches!(coordinator.admit(overflow, 14), Err(IndexProducerCoordinatorErrorV1::SpillRequired { .. })));
   assert_eq!(coordinator.snapshot().pending_tasks, 2);
 }
@@ -232,8 +232,8 @@ fn durable_admission_persists_before_queueing_duplicate_or_pressure_outcomes() {
   let after = hash(b"after");
   let semantic = hash(b"semantic");
   let journal = hash(b"journal");
-  let first = task([0x21; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, Some(&journal), None);
-  let second = task([0x22; 16], IndexProducerTaskKindV1::MutationWindow, 2, &before, &after, &semantic, Some(&journal), None);
+  let first = task([0x21; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &after, &semantic, (Some(&journal), None));
+  let second = task([0x22; 16], IndexProducerTaskKindV1::MutationWindow, 2, &before, &after, &semantic, (Some(&journal), None));
   let mut store = SpillStore::default();
 
   assert_eq!(coordinator.admit_durable_or_spill(first, 10, &mut store).unwrap(), IndexProducerAdmissionV1::Queued);
@@ -249,11 +249,11 @@ fn durable_admission_persists_before_queueing_duplicate_or_pressure_outcomes() {
   assert_eq!(coordinator.snapshot().spilled_tasks, 1);
 
   store.fail = true;
-  let third = task([0x23; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, Some(&journal), None);
+  let third = task([0x23; 16], IndexProducerTaskKindV1::MutationWindow, 3, &before, &after, &semantic, (Some(&journal), None));
   assert!(matches!(coordinator.admit_durable_or_spill(third, 13, &mut store), Err(IndexProducerCoordinatorErrorV1::SpillFailed { .. })));
   assert_eq!(coordinator.snapshot().pending_tasks, 1, "durability refusal must precede queue admission");
 
-  let invalid = task([0; 16], IndexProducerTaskKindV1::MutationWindow, 4, &before, &after, &semantic, Some(&journal), None);
+  let invalid = task([0; 16], IndexProducerTaskKindV1::MutationWindow, 4, &before, &after, &semantic, (Some(&journal), None));
   let persisted_before = store.persisted.len();
   assert!(matches!(coordinator.admit_durable_or_spill(invalid, 14, &mut store), Err(IndexProducerCoordinatorErrorV1::InvalidTask(_))));
   assert_eq!(store.persisted.len(), persisted_before, "invalid tasks must not reach durable storage");
@@ -269,7 +269,7 @@ fn maintenance_document_progress_is_memory_bounded_and_uses_the_document_operati
   let revision = hash(b"revision-a");
   let parent_operation_id = [0x31; 16];
   producer
-    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100)
+    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100)
     .unwrap();
   let retained_before = producer.snapshot().pending_bytes;
   let lease = producer.lease_next(100, false).unwrap().unwrap();
@@ -316,7 +316,7 @@ fn maintenance_document_progress_is_memory_bounded_and_uses_the_document_operati
   producer.cancel(&lease).unwrap();
   assert_eq!(
     producer
-      .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 102,)
+      .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 102,)
       .unwrap(),
     IndexProducerAdmissionV1::Duplicate,
     "duplicate durable replay must not reset in-memory progress",
@@ -338,7 +338,7 @@ fn maintenance_cursor_does_not_advance_past_partial_mutation_admission_and_repla
   let revision = hash(b"revision-a");
   let parent_operation_id = [0x32; 16];
   producer
-    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100)
+    .admit(task(parent_operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100)
     .unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let first_owner = vec![0x10; HASH_ALGORITHM.hash_length()];
@@ -391,7 +391,7 @@ fn maintenance_restart_replays_from_scope_without_duplicating_document_mutations
   let operation_id = [0x33; 16];
 
   let mut first = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
-  first.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  first.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100).unwrap();
   let lease = first.lease_next(100, false).unwrap().unwrap();
   let report = || IndexProducerReportV1 { outcomes: vec![IndexProducerOwnerOutcomeV1::ready(owner.clone(), vec![mutation(&owner, 1)])] };
   first
@@ -408,7 +408,7 @@ fn maintenance_restart_replays_from_scope_without_duplicating_document_mutations
   drop(first);
 
   let mut recovered = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
-  recovered.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 200).unwrap();
+  recovered.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 200).unwrap();
   let lease = recovered.lease_next(200, false).unwrap().unwrap();
   assert_eq!(recovered.leased_maintenance_resume_after(&lease).unwrap(), None, "the restart cursor is intentionally not durable");
   recovered
@@ -437,8 +437,8 @@ fn maintenance_progress_rejects_wrong_mode_revision_scope_order_and_lease_before
   let mut mutations = mutation_coordinator(memory(500_000));
 
   for (ordinal, request) in [
-    task([0x41; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &root, &semantic, Some(&journal), None),
-    task([0x42; 16], IndexProducerTaskKindV1::Compact, 1, &root, &root, &semantic, None, Some("/docs")),
+    task([0x41; 16], IndexProducerTaskKindV1::MutationWindow, 1, &before, &root, &semantic, (Some(&journal), None)),
+    task([0x42; 16], IndexProducerTaskKindV1::Compact, 1, &root, &root, &semantic, (None, Some("/docs"))),
   ]
   .into_iter()
   .enumerate()
@@ -470,7 +470,7 @@ fn maintenance_progress_rejects_wrong_mode_revision_scope_order_and_lease_before
   }
 
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
-  producer.admit(task([0x43; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  producer.admit(task([0x43; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let oversized = format!("/docs/{}", "a".repeat(16 * 1024));
   for (revision_hash, path) in [
@@ -546,7 +546,7 @@ fn maintenance_progress_rejects_wrong_mode_revision_scope_order_and_lease_before
   assert_eq!(mutations.snapshot().active_records, 0);
 
   let mut other = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
-  other.admit(task([0x44; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  other.admit(task([0x44; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, (None, Some("/docs"))), 100).unwrap();
   let foreign = other.lease_next(100, false).unwrap().unwrap();
   assert!(matches!(
     producer.advance_maintenance_document(
@@ -572,7 +572,7 @@ fn maintenance_progress_rejects_wrong_mode_revision_scope_order_and_lease_before
 fn maintenance_continuation_pressure_fails_before_mutation_or_progress() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
-  let request = task([0x45; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs"));
+  let request = task([0x45; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs")));
   let mut probe = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
   probe.admit(request, 100).unwrap();
   let base_bytes = probe.snapshot().pending_bytes;
@@ -642,7 +642,7 @@ fn maintenance_retry_keeps_prior_progress_and_success_resets_the_task_attempt_bu
   let operation_id = [0x46; 16];
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(2, 100_000, 3)).unwrap();
   let mut mutations = mutation_coordinator(memory(500_000));
-  producer.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  producer.admit(task(operation_id, IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   producer
     .advance_maintenance_document(
@@ -723,7 +723,7 @@ fn maintenance_cancellation_and_spill_refusal_retain_the_last_completed_document
   let retry_owner = hash(b"retry-owner");
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, task_memory.clone(), options(2, 100_000, 1)).unwrap();
   let mut mutations = mutation_coordinator(memory(500_000));
-  producer.admit(task([0x47; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some("/docs")), 100).unwrap();
+  producer.admit(task([0x47; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some("/docs"))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   producer
     .advance_maintenance_document(
@@ -812,7 +812,9 @@ fn ready_and_frozen_outcomes_feed_the_single_mutation_coordinator() {
   let after = hash(b"after");
   let semantic = hash(b"semantic");
   let journal = hash(b"journal");
-  producer.admit(task([3; 16], IndexProducerTaskKindV1::MutationWindow, 7, &before, &after, &semantic, Some(&journal), None), 100).unwrap();
+  producer
+    .admit(task([3; 16], IndexProducerTaskKindV1::MutationWindow, 7, &before, &after, &semantic, (Some(&journal), None)), 100)
+    .unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let ready_id = hash(b"ready-index");
   let frozen_id = hash(b"frozen-index");
@@ -841,7 +843,7 @@ fn authoritative_owner_membership_feeds_one_atomic_semantic_group() {
   let semantic = hash(b"semantic");
   let journal = hash(b"journal");
   producer
-    .admit(task([0x33; 16], IndexProducerTaskKindV1::MutationWindow, 7, &before, &after, &semantic, Some(&journal), None), 100)
+    .admit(task([0x33; 16], IndexProducerTaskKindV1::MutationWindow, 7, &before, &after, &semantic, (Some(&journal), None)), 100)
     .unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let owner_id = hash(b"scope-owner");
@@ -870,7 +872,7 @@ fn mixed_operational_failure_retries_without_losing_successful_index_work() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
   let scope = "/docs";
-  producer.admit(task([4; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, None, Some(scope)), 100).unwrap();
+  producer.admit(task([4; 16], IndexProducerTaskKindV1::Rebuild, 9, &root, &root, &semantic, (None, Some(scope))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let scope_id = hash(b"scope");
   let value_store_id = hash(b"value-store");
@@ -903,7 +905,7 @@ fn retry_exhaustion_spills_and_spill_failure_retains_recoverable_work() {
   };
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 1)).unwrap();
   let mut mutations = mutation_coordinator(memory(500_000));
-  producer.admit(task([5; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  producer.admit(task([5; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
   let lease = producer.lease_next(1, false).unwrap().unwrap();
   let mut spills = SpillStore::default();
   let completion = producer.complete(&lease, report(), &mut mutations, 2, false, &mut spills).unwrap();
@@ -911,7 +913,7 @@ fn retry_exhaustion_spills_and_spill_failure_retains_recoverable_work() {
   assert_eq!(spills.calls, vec![([5; 16], IndexProducerSpillReasonV1::RetryExhausted)]);
   assert_eq!(producer.snapshot().pending_tasks, 0);
 
-  producer.admit(task([6; 16], IndexProducerTaskKindV1::Rebuild, 11, &root, &root, &semantic, None, Some("/")), 3).unwrap();
+  producer.admit(task([6; 16], IndexProducerTaskKindV1::Rebuild, 11, &root, &root, &semantic, (None, Some("/"))), 3).unwrap();
   let lease = producer.lease_next(3, false).unwrap().unwrap();
   spills.fail = true;
   let error = producer.complete(&lease, report(), &mut mutations, 4, false, &mut spills).unwrap_err();
@@ -923,7 +925,7 @@ fn retry_exhaustion_spills_and_spill_failure_retains_recoverable_work() {
   producer.cancel(&retry_lease).unwrap();
 
   let mut malformed_producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 1)).unwrap();
-  malformed_producer.admit(task([7; 16], IndexProducerTaskKindV1::Rebuild, 12, &root, &root, &semantic, None, Some("/")), 1_005).unwrap();
+  malformed_producer.admit(task([7; 16], IndexProducerTaskKindV1::Rebuild, 12, &root, &root, &semantic, (None, Some("/"))), 1_005).unwrap();
   let lease = malformed_producer.lease_next(1_005, false).unwrap().unwrap();
   assert_eq!(lease.operation_id(), [7; 16]);
   spills.fail = false;
@@ -946,7 +948,7 @@ fn task_level_retry_uses_the_same_backoff_and_exhaustion_path() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
-  producer.admit(task([0x51; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), 100).unwrap();
+  producer.admit(task([0x51; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, (None, Some("/"))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   let mut spills = SpillStore::default();
 
@@ -974,7 +976,7 @@ fn task_level_retry_cancellation_and_spill_refusal_retain_recoverable_work() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 1)).unwrap();
-  producer.admit(task([0x52; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), 100).unwrap();
+  producer.admit(task([0x52; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, (None, Some("/"))), 100).unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   assert!(matches!(
     producer.retry_task(&lease, 25, 101, true, &mut SpillStore::default()),
@@ -999,7 +1001,7 @@ fn retry_deadline_overflow_releases_the_lease_and_retains_recoverable_work() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
-  producer.admit(task([0x53; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, None, Some("/")), u64::MAX).unwrap();
+  producer.admit(task([0x53; 16], IndexProducerTaskKindV1::Rebuild, 10, &root, &root, &semantic, (None, Some("/"))), u64::MAX).unwrap();
   let lease = producer.lease_next(u64::MAX, false).unwrap().unwrap();
 
   assert!(matches!(
@@ -1016,7 +1018,7 @@ fn retry_deadline_overflow_releases_the_lease_and_retains_recoverable_work() {
 fn pressure_can_spill_before_cloning_and_cancellation_never_consumes_a_task() {
   let root = hash(b"root");
   let semantic = hash(b"semantic");
-  let request = task([7; 16], IndexProducerTaskKindV1::Rebuild, 12, &root, &root, &semantic, None, Some("/large-scope"));
+  let request = task([7; 16], IndexProducerTaskKindV1::Rebuild, 12, &root, &root, &semantic, (None, Some("/large-scope")));
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(100_000), options(1, 1, 2)).unwrap();
   let mut spills = SpillStore::default();
   let admission = producer.admit_or_spill(request, 1, &mut spills).unwrap();
@@ -1037,7 +1039,7 @@ fn malformed_or_oversized_reports_fail_before_mutating_either_coordinator() {
   let mut mutations = mutation_coordinator(memory(500_000));
   let root = hash(b"root");
   let semantic = hash(b"semantic");
-  producer.admit(task([8; 16], IndexProducerTaskKindV1::Rebuild, 13, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  producer.admit(task([8; 16], IndexProducerTaskKindV1::Rebuild, 13, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
   let lease = producer.lease_next(1, false).unwrap().unwrap();
   let id = hash(b"index");
   let wrong_id = hash(b"wrong");
@@ -1125,7 +1127,7 @@ fn outcome_state_classes_are_validated_against_their_frozen_registries() {
   let mut mutations = mutation_coordinator(memory(500_000));
   let root = hash(b"root");
   let semantic = hash(b"semantic");
-  producer.admit(task([11; 16], IndexProducerTaskKindV1::Rebuild, 14, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  producer.admit(task([11; 16], IndexProducerTaskKindV1::Rebuild, 14, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
   let lease = producer.lease_next(1, false).unwrap().unwrap();
   let owner_id = hash(b"index");
 
@@ -1168,8 +1170,8 @@ fn lease_identity_and_cancellation_fail_closed() {
   let semantic = hash(b"semantic");
   let mut first = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(100_000), options(2, 20_000, 2)).unwrap();
   let mut second = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(100_000), options(2, 20_000, 2)).unwrap();
-  first.admit(task([9; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, None, Some("/")), 1).unwrap();
-  second.admit(task([10; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  first.admit(task([9; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
+  second.admit(task([10; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
   let lease = first.lease_next(1, false).unwrap().unwrap();
   let foreign = second.lease_next(1, false).unwrap().unwrap();
   assert!(matches!(second.cancel(&lease), Err(IndexProducerCoordinatorErrorV1::ForeignLease)));
@@ -1185,7 +1187,7 @@ fn lease_identity_and_cancellation_fail_closed() {
   ));
   second.cancel(&foreign).unwrap();
 
-  first.admit(task([12; 16], IndexProducerTaskKindV1::Build, 2, &root, &root, &semantic, None, Some("/")), 3).unwrap();
+  first.admit(task([12; 16], IndexProducerTaskKindV1::Build, 2, &root, &root, &semantic, (None, Some("/"))), 3).unwrap();
   let lease = first.lease_next(3, false).unwrap().unwrap();
   assert!(matches!(
     first.complete(&lease, IndexProducerReportV1 { outcomes: Vec::new() }, &mut mutations, 1, true, &mut SpillStore::default()),
@@ -1201,7 +1203,7 @@ fn stale_completion_cannot_consume_or_cancel_a_replacement_lease() {
   let mut coordinator = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(2, 20_000, 2)).unwrap();
   let root = hash(b"root");
   let semantic = hash(b"semantic");
-  coordinator.admit(task([11; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, None, Some("/")), 1).unwrap();
+  coordinator.admit(task([11; 16], IndexProducerTaskKindV1::Build, 1, &root, &root, &semantic, (None, Some("/"))), 1).unwrap();
   let stale = coordinator.lease_next(1, false).unwrap().unwrap();
   coordinator.cancel(&stale).unwrap();
   let replacement = coordinator.lease_next(2, false).unwrap().unwrap();
@@ -1251,7 +1253,7 @@ fn every_producer_kind_uses_the_same_leased_path() {
       (root.as_slice(), root.as_slice())
     };
     producer
-      .admit(task(operation_id, kind, ordinal as u64 + 1, task_before, task_after, &semantic, journal, scope), ordinal as u64)
+      .admit(task(operation_id, kind, ordinal as u64 + 1, task_before, task_after, &semantic, (journal, scope)), ordinal as u64)
       .unwrap();
   }
   let mut now = 100u64;
@@ -1280,7 +1282,7 @@ fn reconcile_continuation_advances_exact_records_and_only_completes_at_page_end(
   let operation_id = [0x71; 16];
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(4, 200_000, 3)).unwrap();
   producer
-    .admit(task(operation_id, IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, Some(&journal), None), 100)
+    .admit(task(operation_id, IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, (Some(&journal), None)), 100)
     .unwrap();
   let mut mutations = mutation_coordinator(memory(500_000));
   let mut spill = SpillStore::default();
@@ -1346,7 +1348,9 @@ fn reconcile_cancellation_releases_the_lease_without_losing_the_exact_continuati
   let semantic = hash(b"cancel-reconcile-semantic");
   let journal = hash(b"cancel-reconcile-journal");
   let mut producer = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(500_000), options(4, 200_000, 3)).unwrap();
-  producer.admit(task([0x74; 16], IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, Some(&journal), None), 100).unwrap();
+  producer
+    .admit(task([0x74; 16], IndexProducerTaskKindV1::Reconcile, 12, &before, &after, &semantic, (Some(&journal), None)), 100)
+    .unwrap();
   let lease = producer.lease_next(100, false).unwrap().unwrap();
   producer
     .advance_reconcile_record(
@@ -1385,7 +1389,7 @@ fn reconcile_restart_replays_from_zero_without_duplicating_exact_record_mutation
 
   let mut first = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
   first
-    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, Some(&journal), None), 100)
+    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, (Some(&journal), None)), 100)
     .unwrap();
   let lease = first.lease_next(100, false).unwrap().unwrap();
   first
@@ -1403,7 +1407,7 @@ fn reconcile_restart_replays_from_zero_without_duplicating_exact_record_mutation
 
   let mut recovered = IndexProducerCoordinatorV1::new(HASH_ALGORITHM, memory(200_000), options(4, 100_000, 3)).unwrap();
   recovered
-    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, Some(&journal), None), 200)
+    .admit(task(task_operation_id, IndexProducerTaskKindV1::Reconcile, 11, &before, &after, &semantic, (Some(&journal), None)), 200)
     .unwrap();
   let lease = recovered.lease_next(200, false).unwrap().unwrap();
   assert_eq!(recovered.leased_reconcile_next_record(&lease).unwrap(), 0);

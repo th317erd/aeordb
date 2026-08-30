@@ -204,8 +204,10 @@ impl IndexProducerSpillStoreV1 for UnusedPublisher {
   }
 }
 
+type RecordedSpills = Arc<std::sync::Mutex<Vec<([u8; 16], IndexProducerSpillReasonV1)>>>;
+
 struct RecordingPublisher {
-  spilled: Arc<std::sync::Mutex<Vec<([u8; 16], IndexProducerSpillReasonV1)>>>,
+  spilled: RecordedSpills,
 }
 
 impl IndexRuntimeBatchPublisherV1 for RecordingPublisher {
@@ -521,7 +523,7 @@ fn bounded_service_stops_at_the_attempt_limit_and_retains_remaining_work() {
 
   let unused = UnusedSources;
   let maintenance = EmptyMaintenanceSource {
-    memory: MemoryCoordinator::new(MemoryPolicy::new(4 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap()),
+    memory: MemoryCoordinator::new(MemoryPolicy::new(4 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap()),
     delay: std::time::Duration::ZERO,
   };
   let sources = IndexRuntimeProducerServiceSourcesV1 {
@@ -570,7 +572,7 @@ fn bounded_service_stops_at_the_elapsed_limit_between_complete_attempts() {
 
   let unused = UnusedSources;
   let maintenance = EmptyMaintenanceSource {
-    memory: MemoryCoordinator::new(MemoryPolicy::new(4 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap()),
+    memory: MemoryCoordinator::new(MemoryPolicy::new(4 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap()),
     delay: std::time::Duration::from_millis(10),
   };
   let sources = IndexRuntimeProducerServiceSourcesV1 {

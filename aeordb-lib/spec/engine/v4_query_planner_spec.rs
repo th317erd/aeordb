@@ -1020,7 +1020,7 @@ fn malformed_catalog_identity_order_and_definition_closure_fail_closed() {
   assert_eq!(error.code(), "query_index_order");
 
   let one_definition_byte = QueryPlanningLimitsV1::new(1_024, 32, 4_096, 1, 4_096, 64, 1_000).unwrap();
-  let error = error_for(&[base.clone()], one_definition_byte);
+  let error = error_for(std::slice::from_ref(&base), one_definition_byte);
   assert_eq!(error.class(), QueryPlanningErrorClassV1::ResourceLimit);
   assert_eq!(error.code(), "query_definition_bytes_limit");
 

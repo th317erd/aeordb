@@ -104,10 +104,9 @@ fn manifest_bytes(
   basis: &BasisV1,
   lifecycle_hash: &[u8],
   candidate_directory_root: &[u8],
-  next_candidate_page_id: u64,
-  candidate_count: u64,
-  eligible_count: u64,
+  counts: (u64, u64, u64),
 ) -> Vec<u8> {
+  let (next_candidate_page_id, candidate_count, eligible_count) = counts;
   let record_bytes = u64::try_from(52 + 2 * algorithm.hash_length()).unwrap();
   encode_quarantine_manifest_v1(&QuarantineManifestWriteV1 {
     hash_algorithm: algorithm,
@@ -151,7 +150,7 @@ fn exact_eligible_intents_qualify_one_bounded_proposal_at_both_hash_widths() {
     assert_eq!(candidates.len(), 2);
     let prior_basis = BasisV1::new(algorithm, 0x51);
     let next_candidate_page_id = directory.maximum_page_id + 1;
-    let prior_bytes = manifest_bytes(algorithm, 100, 1_000, &prior_basis, &lifecycle.key, &directory.key, next_candidate_page_id, 2, 0);
+    let prior_bytes = manifest_bytes(algorithm, 100, 1_000, &prior_basis, &lifecycle.key, &directory.key, (next_candidate_page_id, 2, 0));
     let prior = decode_quarantine_manifest_v1(&prior_bytes, algorithm).unwrap();
     let next_basis = BasisV1::new(algorithm, 0x52);
     let cancellation = CancellationToken::new();
@@ -202,7 +201,7 @@ fn exact_eligible_intents_qualify_one_bounded_proposal_at_both_hash_widths() {
     assert_ne!(transition.eligible_intent_digest(), vec![0; algorithm.hash_length()]);
 
     let next_bytes =
-      manifest_bytes(algorithm, 101, completed_at_ms, &next_basis, &lifecycle.key, &directory.key, next_candidate_page_id, 2, 2);
+      manifest_bytes(algorithm, 101, completed_at_ms, &next_basis, &lifecycle.key, &directory.key, (next_candidate_page_id, 2, 2));
     let next = decode_quarantine_manifest_v1(&next_bytes, algorithm).unwrap();
     let mut closure = QuarantineClosureValidatorV1::new(
       &next,

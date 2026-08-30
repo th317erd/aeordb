@@ -246,7 +246,9 @@ fn build_complete_graph(
   }
 }
 
-fn aggregate_limit_graph() -> (CompleteGraph, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+type AggregateLimitGraph = (CompleteGraph, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+fn aggregate_limit_graph() -> AggregateLimitGraph {
   let scope_one = scope_definition("/", Some("**/*.json"));
   let scope_one_id = decode_scope_definition(&scope_one, ALGORITHM).unwrap().scope_id;
   let scope_two = scope_definition("/docs", None);
@@ -406,8 +408,11 @@ fn effective_scope_winner_rejects_ambiguous_or_malformed_authority_and_excludes_
       EffectiveScopeResolverV1::from_encoded(algorithm, &malformed_candidate).err().expect("malformed definition must fail").code(),
       "scope_reserved"
     );
-    assert_eq!(resolve_scope_fixture(algorithm, "/", &[all.clone()]).unwrap_err().code(), "scope_file_path_root");
-    assert_eq!(resolve_scope_fixture(algorithm, "docs/file.json", &[all.clone()]).unwrap_err().code(), "scope_owner_noncanonical");
+    assert_eq!(resolve_scope_fixture(algorithm, "/", std::slice::from_ref(&all)).unwrap_err().code(), "scope_file_path_root");
+    assert_eq!(
+      resolve_scope_fixture(algorithm, "docs/file.json", std::slice::from_ref(&all)).unwrap_err().code(),
+      "scope_owner_noncanonical"
+    );
 
     for path in [
       "/.aeordb-system/users/a.json",
@@ -415,7 +420,7 @@ fn effective_scope_winner_rejects_ambiguous_or_malformed_authority_and_excludes_
       "/docs/.aeordb-indexes/field/page",
       "/docs/.aeordb-logs/index.log",
     ] {
-      assert_eq!(resolve_scope_fixture(algorithm, path, &[all.clone()]).unwrap(), None, "internal path {path} entered a scope");
+      assert_eq!(resolve_scope_fixture(algorithm, path, std::slice::from_ref(&all)).unwrap(), None, "internal path {path} entered a scope");
     }
     assert_eq!(
       resolve_scope_fixture(algorithm, "/docs/.aeordb-indexes/page.json", &[all.clone(), duplicate_owner]).unwrap(),
@@ -571,8 +576,10 @@ impl IndexScopeOrdinalAuthorityV1 for UnexpectedOrdinals {
   }
 }
 
+type RecordedOrdinalClaims = Mutex<Vec<([u8; 16], Vec<u8>, bool, bool)>>;
+
 struct RecordingOrdinals {
-  calls: Mutex<Vec<([u8; 16], Vec<u8>, bool, bool)>>,
+  calls: RecordedOrdinalClaims,
   ordinal: u64,
 }
 
@@ -1179,7 +1186,6 @@ fn file_backed_semantic_store_resolves_the_complete_catalog_through_the_producti
   assert_eq!(scope_work[0].scope.scope_id, graph.scope_id);
   drop(read);
   drop(source);
-  drop(objects);
   engine.shutdown().unwrap();
 }
 

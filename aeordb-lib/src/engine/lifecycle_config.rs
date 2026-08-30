@@ -21,7 +21,7 @@ pub const SNAPSHOT_TYPE_AUTO: &str = "auto";
 pub const SNAPSHOT_TYPE_MANUAL: &str = "manual";
 
 /// Retention policy for snapshots. A value of 0 means "never prune".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SnapshotRetention {
   /// Months after which auto-snapshots are eligible for pruning. 0 = never.
   #[serde(default)]
@@ -29,12 +29,6 @@ pub struct SnapshotRetention {
   /// Months after which manual snapshots are eligible for pruning. 0 = never.
   #[serde(default)]
   pub manual_months: u32,
-}
-
-impl Default for SnapshotRetention {
-  fn default() -> Self {
-    SnapshotRetention { auto_months: 0, manual_months: 0 }
-  }
 }
 
 fn default_snapshot_writes_enabled() -> bool {

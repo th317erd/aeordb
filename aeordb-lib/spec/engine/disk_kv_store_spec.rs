@@ -131,8 +131,16 @@ fn open_test_kv_at_stage(dir: &std::path::Path, stage: usize) -> DiskKVStore {
   let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
   let kv_block_offset = 256u64;
   let hot_tail_offset = kv_block_offset + block_size;
-  DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, stage, vec![], vec![], DiskKVStore::CURRENT_KV_BLOCK_VERSION)
-    .unwrap()
+  DiskKVStore::open(
+    file,
+    hash_algo,
+    kv_block_offset,
+    hot_tail_offset,
+    stage,
+    aeordb::engine::disk_kv_store::HotTailReplay::default(),
+    DiskKVStore::CURRENT_KV_BLOCK_VERSION,
+  )
+  .unwrap()
 }
 
 #[test]
@@ -988,8 +996,7 @@ fn reopen_entry_count_merges_hot_tail_overrides_without_double_counting() {
     kv_block_offset,
     hot_tail_offset,
     0,
-    vec![replacement],
-    vec![],
+    aeordb::engine::disk_kv_store::HotTailReplay { entries: vec![replacement], voids: vec![] },
     DiskKVStore::CURRENT_KV_BLOCK_VERSION,
   )
   .unwrap();
@@ -1000,9 +1007,16 @@ fn reopen_entry_count_merges_hot_tail_overrides_without_double_counting() {
   let mut tombstone = original;
   tombstone.type_flags |= KV_FLAG_DELETED;
   let file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
-  let store =
-    DiskKVStore::open(file, hash_algo, kv_block_offset, hot_tail_offset, 0, vec![tombstone], vec![], DiskKVStore::CURRENT_KV_BLOCK_VERSION)
-      .unwrap();
+  let store = DiskKVStore::open(
+    file,
+    hash_algo,
+    kv_block_offset,
+    hot_tail_offset,
+    0,
+    aeordb::engine::disk_kv_store::HotTailReplay { entries: vec![tombstone], voids: vec![] },
+    DiskKVStore::CURRENT_KV_BLOCK_VERSION,
+  )
+  .unwrap();
   assert_eq!(store.len(), 0, "a hot-tail tombstone removes the overridden page row from the effective view");
   assert_eq!(store.snapshot_handle().load().len(), 0);
 }
@@ -1231,7 +1245,16 @@ fn expansion_persists_target_bucket_overflow_in_hot_tail() {
     })
     .collect::<Vec<_>>();
 
-  store.finalize_expansion(1, old_kv_end, old_kv_end, 0, new_hot_tail, Vec::new(), entries.clone()).unwrap();
+  store
+    .finalize_expansion(
+      1,
+      old_kv_end,
+      old_kv_end,
+      0,
+      new_hot_tail,
+      aeordb::engine::disk_kv_store::KvExpansionEntries { pending_voids: Vec::new(), all_entries: entries.clone() },
+    )
+    .unwrap();
   assert_eq!(store.write_buffer_len(), 1, "one colliding key should remain outside the full target page");
 
   let mut file = OpenOptions::new().read(true).open(&db_path).unwrap();
@@ -1249,8 +1272,7 @@ fn expansion_persists_target_bucket_overflow_in_hot_tail() {
     256,
     new_hot_tail,
     1,
-    payload.writes,
-    payload.voids,
+    aeordb::engine::disk_kv_store::HotTailReplay { entries: payload.writes, voids: payload.voids },
     DiskKVStore::CURRENT_KV_BLOCK_VERSION,
   )
   .unwrap();

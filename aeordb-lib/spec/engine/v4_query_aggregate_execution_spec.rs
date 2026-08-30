@@ -127,7 +127,7 @@ fn aggregate_plan_for_limit(
   let expression = QueryExpressionV1::And(Vec::new());
   let aggregates =
     aggregate_kinds.iter().map(|kind| QueryAggregateFieldV1 { field_name: field_name.to_string(), kind: *kind }).collect::<Vec<_>>();
-  let groups = grouped.then(|| vec![field_name.to_string()]).unwrap_or_default();
+  let groups = if grouped { vec![field_name.to_string()] } else { Default::default() };
   plan_root_aware_query_v1(&QueryPlanningRequestV1 {
     context: &context,
     query_path: "/",
@@ -1545,9 +1545,12 @@ fn grouped_reducer_matches_independent_bounded_model_for_both_hash_widths() {
       let tuple = independent_group_tuple(&[(updated_at_state, &updated_at_values), (size_state, &size_values)]);
       let group = expected.entry(tuple).or_default();
       group.document_count += 1;
-      group.values.extend(size_values.iter().filter_map(|value| {
-        (value.state == PositionComponentStateV1::Present).then(|| u64::from_le_bytes(value.payload.as_slice().try_into().unwrap()))
-      }));
+      group.values.extend(
+        size_values
+          .iter()
+          .filter(|&value| value.state == PositionComponentStateV1::Present)
+          .map(|value| u64::from_le_bytes(value.payload.as_slice().try_into().unwrap())),
+      );
       examined_field_values += u64::try_from(size_values.len() + updated_at_values.len()).unwrap();
       rows.push_back(Ok(found_two_field_state_row(
         &input,

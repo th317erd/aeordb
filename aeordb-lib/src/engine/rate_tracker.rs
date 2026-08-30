@@ -38,10 +38,16 @@ pub struct RateSetSnapshot {
   pub bytes_read: RateSnapshot,
 }
 
+impl Default for RateTracker {
+  fn default() -> Self {
+    Self { samples: Mutex::new(VecDeque::new()), max_samples: 900, poison_reported: AtomicBool::new(false) }
+  }
+}
+
 impl RateTracker {
   /// Create an empty tracker.  Retains up to 900 samples (15 minutes at 1 Hz).
   pub fn new() -> Self {
-    Self { samples: Mutex::new(VecDeque::new()), max_samples: 900, poison_reported: AtomicBool::new(false) }
+    Self::default()
   }
 
   /// Push a new `(timestamp_ms, counter_value)` sample.
@@ -153,13 +159,7 @@ impl RateTracker {
 
     // Walk backwards to find the sample closest to (but not after) the cutoff.
     // If all samples are within the window, use the oldest one.
-    let mut oldest_index = 0;
-    for i in 0..samples.len() {
-      if samples[i].0 >= cutoff {
-        oldest_index = i;
-        break;
-      }
-    }
+    let oldest_index = samples.iter().position(|(timestamp, _)| *timestamp >= cutoff).map_or(0, |index| index);
 
     let (oldest_time, oldest_value) = samples[oldest_index];
     let time_delta_ms = newest_time.saturating_sub(oldest_time);

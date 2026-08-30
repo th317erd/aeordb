@@ -391,8 +391,8 @@ fn compute_common_prefix(paths: &[String]) -> String {
 fn strip_prefix(path: &str, prefix: &str) -> String {
   let stripped = if prefix == "/" {
     path.trim_start_matches('/')
-  } else if path.starts_with(prefix) {
-    &path[prefix.len()..]
+  } else if let Some(stripped) = path.strip_prefix(prefix) {
+    stripped
   } else {
     path.trim_start_matches('/')
   };

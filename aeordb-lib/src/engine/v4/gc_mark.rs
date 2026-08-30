@@ -1288,8 +1288,8 @@ fn validate_workspace_record<'a>(
       let physical = &record[12 + 2 * hash_width..];
       if (record_kind == 3) != (family != 0)
         || all_zero(object_hash)
-        || (flags & 1 != 0) != !all_zero(path_hash)
-        || (flags & 2 != 0) != !all_zero(physical)
+        || (flags & 1 != 0) == all_zero(path_hash)
+        || (flags & 2 != 0) == all_zero(physical)
       {
         return Err(closure_error("mark_workspace_frontier_fields", "frontier identity and presence fields disagree"));
       }

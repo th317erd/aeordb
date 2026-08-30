@@ -401,9 +401,8 @@ fn test_store_non_json_data_with_config_does_not_crash() {
   let index_manager = IndexManager::new(&engine);
   let result = index_manager.load_index("/data", "age").unwrap();
   // Index may not exist or may be empty
-  match result {
-    Some(index) => assert_eq!(index.len(), 0),
-    None => {} // also fine
+  if let Some(index) = result {
+    assert_eq!(index.len(), 0);
   }
 }
 

@@ -21,7 +21,7 @@ fn hash(label: &[u8]) -> Vec<u8> {
 }
 
 fn memory() -> MemoryCoordinator {
-  MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1 * 1_024 * 1_024).unwrap())
+  MemoryCoordinator::new(MemoryPolicy::new(6 * 1_024 * 1_024, 8 * 1_024 * 1_024, 1, 1_024 * 1_024).unwrap())
 }
 
 fn producer(max_pending_tasks: u32) -> IndexProducerCoordinatorV1 {

@@ -35,10 +35,9 @@ fn physical_incarnation(
   digest_byte: u8,
   wal_offset: u64,
   write_sequence: u64,
-  entity_length: u32,
-  entry_type: u8,
-  entity_version: u8,
+  entity: (u32, u8, u8),
 ) -> Vec<u8> {
+  let (entity_length, entry_type, entity_version) = entity;
   let hash_width = algorithm.hash_length();
   let mut bytes = Vec::with_capacity(24 + 2 * hash_width);
   bytes.extend_from_slice(&vec![logical_key_byte; hash_width]);
@@ -54,8 +53,8 @@ fn physical_incarnation(
 
 fn replacement_pair(algorithm: HashAlgorithm, ordinal: u8, reason: RetirementReasonV1) -> (Vec<u8>, Vec<u8>, RetirementReasonV1) {
   let old_offset = 10_000 + u64::from(ordinal) * 1_000;
-  let old = physical_incarnation(algorithm, ordinal, 0x40 + ordinal, old_offset, 100 + u64::from(ordinal), 300, 2, 1);
-  let replacement = physical_incarnation(algorithm, ordinal, 0x60 + ordinal, old_offset + 500, 200 + u64::from(ordinal), 320, 2, 1);
+  let old = physical_incarnation(algorithm, ordinal, 0x40 + ordinal, old_offset, 100 + u64::from(ordinal), (300, 2, 1));
+  let replacement = physical_incarnation(algorithm, ordinal, 0x60 + ordinal, old_offset + 500, 200 + u64::from(ordinal), (320, 2, 1));
   (old, replacement, reason)
 }
 
@@ -498,8 +497,8 @@ fn hard_memory_pressure_refuses_the_complete_batch_before_admission_or_activatio
 #[test]
 fn a_legacy_incarnation_can_converge_forward_through_migration() {
   let algorithm = HashAlgorithm::Blake3_256;
-  let old = physical_incarnation(algorithm, 1, 0x41, 10_000, 0, 300, 2, 0);
-  let replacement = physical_incarnation(algorithm, 1, 0x61, 11_000, 1, 320, 2, 1);
+  let old = physical_incarnation(algorithm, 1, 0x41, 10_000, 0, (300, 2, 0));
+  let replacement = physical_incarnation(algorithm, 1, 0x61, 11_000, 1, (320, 2, 1));
   let pairs = [(old, replacement, RetirementReasonV1::Migration)];
   let records = replacements(&pairs);
   let cancellation = CancellationToken::new();

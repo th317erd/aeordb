@@ -37,7 +37,7 @@ fn initialized_publisher(algorithm: HashAlgorithm) -> (tempfile::TempDir, Arc<Du
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("migration-execution.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
-  let kv_block_length = initial_block_size() as u64;
+  let kv_block_length = initial_block_size();
   let hash_width = algorithm.hash_length();
   let header = DatabaseHeaderV4 {
     hash_algorithm: algorithm,

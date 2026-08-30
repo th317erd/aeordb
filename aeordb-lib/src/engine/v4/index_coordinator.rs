@@ -1432,7 +1432,7 @@ impl IndexCoordinatorV1 {
           .iter()
           .filter(|record| {
             let position = active.records.partition_point(|candidate| candidate.key < record.key);
-            !active.records.get(position).is_some_and(|candidate| candidate.key == record.key)
+            active.records.get(position).is_none_or(|candidate| candidate.key != record.key)
           })
           .count();
         active.records.try_reserve_exact(missing).map_err(|error| allocation_error("failed semantic-flush record restore", error))?;

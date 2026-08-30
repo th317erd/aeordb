@@ -544,7 +544,7 @@ pub async fn create_api_key(
 ) -> Response {
   let caller_user_id = match require_root(&claims) {
     Ok(user_id) => user_id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   // Determine which user this key is for.
@@ -614,7 +614,7 @@ pub async fn create_api_key(
 /// GET /admin/api-keys -- list all API key metadata (no secrets).
 pub async fn list_api_keys(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
 
   let keys = match state.auth_provider.list_api_keys() {
@@ -675,7 +675,7 @@ pub async fn revoke_api_key(
   Path(key_id): Path<String>,
 ) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
 
   let parsed_key_id = match Uuid::parse_str(&key_id) {
@@ -1232,7 +1232,7 @@ pub async fn refresh_token(State(state): State<AppState>, Json(payload): Json<Re
 /// GET /system/metrics -- render root-only Prometheus metrics.
 pub async fn metrics_endpoint(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   if let Err(response) = require_root(&claims) {
-    return response;
+    return response.into_response();
   }
   let runtime = match crate::engine::runtime_observability::collect_runtime_observability_with_identity_engine(
     &state.engine,

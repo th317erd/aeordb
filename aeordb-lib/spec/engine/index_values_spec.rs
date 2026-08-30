@@ -35,21 +35,6 @@ fn load_plaintext_parser_wasm() -> Option<Vec<u8>> {
   None
 }
 
-macro_rules! require_wasm_parser {
-  () => {
-    match load_plaintext_parser_wasm() {
-      Some(bytes) => bytes,
-      None => {
-        eprintln!(
-          "SKIPPED: Plaintext parser WASM not built. Run:\n  \
-                     cd aeordb-parsers/plaintext && cargo build --target wasm32-unknown-unknown --release"
-        );
-        return;
-      }
-    }
-  };
-}
-
 fn deploy_plaintext_parser(engine: &Arc<StorageEngine>, wasm_bytes: Vec<u8>) -> PluginManager {
   let pm = PluginManager::new(engine.clone());
   pm.deploy_plugin("plaintext-parser", "plaintext-parser", PluginType::Wasm, wasm_bytes).expect("deploy parser");

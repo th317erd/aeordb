@@ -7,6 +7,39 @@ use serde::Serialize;
 
 use crate::auth::TokenClaims;
 
+/// Heap-boxed route failure used by internal helpers so a successful `Result`
+/// does not reserve stack space for Axum's comparatively large `Response`.
+#[derive(Debug)]
+pub struct RouteResponseError {
+  response: Box<Response>,
+}
+
+impl RouteResponseError {
+  pub fn status(&self) -> StatusCode {
+    self.response.status()
+  }
+
+  pub fn into_response(self) -> Response {
+    *self.response
+  }
+
+  pub fn into_boxed_response(self) -> Box<Response> {
+    self.response
+  }
+}
+
+impl From<Response> for RouteResponseError {
+  fn from(response: Response) -> Self {
+    Self { response: Box::new(response) }
+  }
+}
+
+impl IntoResponse for RouteResponseError {
+  fn into_response(self) -> Response {
+    *self.response
+  }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ErrorResponse {
   pub error: String,
@@ -68,15 +101,18 @@ impl IntoResponse for ErrorResponse {
 
 /// Check that the caller is root. Returns the parsed UUID on success,
 /// or a 403 Forbidden Response on failure.
-pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, Response> {
+pub fn require_root(claims: &TokenClaims) -> Result<uuid::Uuid, RouteResponseError> {
   let user_id = uuid::Uuid::parse_str(&claims.sub).map_err(|_| {
-    ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID").with_status(StatusCode::FORBIDDEN).into_response()
+    RouteResponseError::from(
+      ErrorResponse::new("Invalid user identity: token 'sub' claim is not a valid UUID").with_status(StatusCode::FORBIDDEN).into_response(),
+    )
   })?;
   if !crate::engine::user::is_root(&user_id) {
     return Err(
       ErrorResponse::new("root access required. This endpoint is restricted to the root user")
         .with_status(StatusCode::FORBIDDEN)
-        .into_response(),
+        .into_response()
+        .into(),
     );
   }
   Ok(user_id)

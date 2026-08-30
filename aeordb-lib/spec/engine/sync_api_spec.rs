@@ -517,7 +517,7 @@ fn test_full_library_sync_cycle() {
     // Reconstruct file data from chunks
     let mut file_data = Vec::new();
     for chunk_hash in &file_entry.chunk_hashes {
-      let chunk_results = get_needed_chunks(&engine_b, &[chunk_hash.clone()]).unwrap();
+      let chunk_results = get_needed_chunks(&engine_b, std::slice::from_ref(chunk_hash)).unwrap();
       if let Some(chunk) = chunk_results.first() {
         file_data.extend_from_slice(&chunk.data);
       }

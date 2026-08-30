@@ -138,11 +138,9 @@ fn journal_run(
   run_id: &[u8; 16],
   segment_ordinal: u64,
   previous_segment_hash: Option<&[u8]>,
-  publication_sequence: u64,
-  mutation_value: u8,
-  root_before: &[u8],
-  root_after: &[u8],
+  mutation: (u64, u8, &[u8], &[u8]),
 ) -> (Vec<u8>, Vec<u8>) {
+  let (publication_sequence, mutation_value, root_before, root_after) = mutation;
   let mutation_id = repeated_hash(algorithm, mutation_value);
   let logical_key = repeated_hash(algorithm, mutation_value.wrapping_add(1));
   let incarnation = physical_incarnation(algorithm, mutation_value.wrapping_add(2), publication_sequence);
@@ -506,8 +504,8 @@ fn catch_up_reaches_a_moving_boundary_in_bounded_rounds() {
     let initial_root = repeated_hash(algorithm, 0x81);
     let middle_root = repeated_hash(algorithm, 0x82);
     let final_root = repeated_hash(algorithm, 0x83);
-    let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &middle_root);
-    let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), 12, 0x31, &middle_root, &final_root);
+    let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &middle_root));
+    let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), (12, 0x31, &middle_root, &final_root));
     let mut source = ScriptedMutationSource {
       boundaries: VecDeque::from([
         boundary(&layout, &middle_root, 11, Some(0x21)),
@@ -543,8 +541,8 @@ fn catch_up_accepts_a_boundary_advancing_within_one_publication() {
   let layout = repeated_hash(algorithm, 0x71);
   let initial_root = repeated_hash(algorithm, 0x81);
   let final_root = repeated_hash(algorithm, 0x82);
-  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &final_root);
-  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), 11, 0x31, &initial_root, &final_root);
+  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &final_root));
+  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), (11, 0x31, &initial_root, &final_root));
   let first_boundary = boundary(&layout, &final_root, 11, Some(0x21));
   let final_boundary = boundary(&layout, &final_root, 11, Some(0x31));
   let mut source = ScriptedMutationSource {
@@ -575,8 +573,8 @@ fn exact_boundary_rejects_an_omitted_same_publication_tail() {
   let layout = repeated_hash(algorithm, 0x71);
   let initial_root = repeated_hash(algorithm, 0x81);
   let final_root = repeated_hash(algorithm, 0x82);
-  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &final_root);
-  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), 11, 0x31, &initial_root, &final_root);
+  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &final_root));
+  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), (11, 0x31, &initial_root, &final_root));
   let target = boundary(&layout, &final_root, 11, Some(0x31));
   let cancellation = CancellationToken::new();
 
@@ -616,8 +614,8 @@ fn catch_up_starvation_and_apply_failure_latch_restart_without_advancing_false_s
   let middle_root = repeated_hash(algorithm, 0x82);
   let final_root = repeated_hash(algorithm, 0x83);
   let later_root = repeated_hash(algorithm, 0x84);
-  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &middle_root);
-  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), 12, 0x31, &middle_root, &final_root);
+  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &middle_root));
+  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), (12, 0x31, &middle_root, &final_root));
   let cancellation = CancellationToken::new();
   let memory = memory_coordinator();
   let mut starving = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
@@ -663,7 +661,7 @@ fn gap_malformed_source_cancellation_and_memory_pressure_all_require_restart() {
   let layout = repeated_hash(algorithm, 0x71);
   let initial_root = repeated_hash(algorithm, 0x81);
   let later_root = repeated_hash(algorithm, 0x83);
-  let (gap, _) = journal_run(algorithm, &database_id, &run_id, 1, None, 12, 0x31, &initial_root, &later_root);
+  let (gap, _) = journal_run(algorithm, &database_id, &run_id, 1, None, (12, 0x31, &initial_root, &later_root));
   let cancellation = CancellationToken::new();
 
   let memory = memory_coordinator();
@@ -780,7 +778,7 @@ fn final_publication_occurs_once_inside_the_guard_after_an_empty_second_drain() 
     let layout = repeated_hash(algorithm, 0x71);
     let initial_root = repeated_hash(algorithm, 0x81);
     let final_root = repeated_hash(algorithm, 0x82);
-    let (journal, journal_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &final_root);
+    let (journal, journal_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &final_root));
     let cancellation = CancellationToken::new();
     let memory = memory_coordinator();
     let mut reconciler = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
@@ -833,8 +831,8 @@ fn final_guard_refuses_layout_drift_nonempty_second_drain_and_dishonest_receipts
   assert!(matches!(error, MarkMutationConvergenceErrorV1::RestartRequired(MarkMutationRestartReasonV1::LayoutChanged)));
   assert_eq!(authority.source.publication_count, 0);
 
-  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, 11, 0x21, &initial_root, &middle_root);
-  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), 12, 0x31, &middle_root, &final_root);
+  let (first, first_key) = journal_run(algorithm, &database_id, &run_id, 1, None, (11, 0x21, &initial_root, &middle_root));
+  let (second, _) = journal_run(algorithm, &database_id, &run_id, 2, Some(&first_key), (12, 0x31, &middle_root, &final_root));
   let memory = memory_coordinator();
   let mut raced = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);
   let first_boundary = boundary(&layout, &middle_root, 11, Some(0x21));
@@ -961,7 +959,7 @@ fn malformed_predecessors_and_ignored_visitor_failures_cannot_complete_catch_up(
   let final_root = repeated_hash(algorithm, 0x82);
   let false_predecessor = repeated_hash(algorithm, 0x91);
   let (malformed_chain, _) =
-    journal_run(algorithm, &database_id, &run_id, 1, Some(&false_predecessor), 11, 0x21, &initial_root, &final_root);
+    journal_run(algorithm, &database_id, &run_id, 1, Some(&false_predecessor), (11, 0x21, &initial_root, &final_root));
   let cancellation = CancellationToken::new();
   let memory = memory_coordinator();
   let mut malformed = reconciler(algorithm, &cancellation, &memory, &initial_root, &layout, 10, 2);

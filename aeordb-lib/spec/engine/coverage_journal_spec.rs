@@ -324,7 +324,7 @@ fn whole_root_notice_requires_authoritative_diff_instead_of_a_synthetic_file_rec
 #[test]
 fn replay_is_bounded_chain_checked_and_never_treats_missing_or_corrupt_bytes_as_empty() {
   let cancellation = CancellationToken::new();
-  let options = CoverageJournalReplayOptionsV1::new(8, 1 * 1_024 * 1_024).unwrap();
+  let options = CoverageJournalReplayOptionsV1::new(8, 1_024 * 1_024).unwrap();
   let expectation = CoverageJournalReplayExpectationV1 {
     generation: 7,
     first_segment_ordinal: 0,
@@ -391,7 +391,7 @@ fn replay_is_bounded_chain_checked_and_never_treats_missing_or_corrupt_bytes_as_
       HashAlgorithm::Blake3_256,
       &chain,
       &expectation,
-      CoverageJournalReplayOptionsV1::new(1, 1 * 1_024 * 1_024).unwrap(),
+      CoverageJournalReplayOptionsV1::new(1, 1_024 * 1_024).unwrap(),
       &cancellation,
     ),
     CoverageJournalReplayOutcomeV1::rebuild(CoverageRebuildReasonV1::JournalLimitExceeded)

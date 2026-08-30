@@ -467,14 +467,17 @@ pub enum IndexProducerSourceErrorV1 {
 
 pub fn resolve_semantic_scope_work(
   hash_algorithm: HashAlgorithm,
-  operation_id: [u8; 16],
-  source_publication_sequence: u64,
-  semantic_state_root: &[u8],
-  transition: &ResolvedIndexDocumentTransitionV1,
   source: &dyn IndexSemanticScopeSourceV1,
-  limits: IndexSemanticScopeLimitsV1,
-  is_cancelled: &dyn Fn() -> bool,
+  request: IndexSemanticScopeReadRequestV1<'_>,
 ) -> Result<IndexSemanticScopeReadV1, IndexProducerSourceErrorV1> {
+  let IndexSemanticScopeReadRequestV1 {
+    operation_id: _,
+    source_publication_sequence,
+    semantic_state_root,
+    transition,
+    limits,
+    is_cancelled,
+  } = request;
   if is_cancelled() {
     return Err(IndexProducerSourceErrorV1::Cancelled);
   }
@@ -491,14 +494,7 @@ pub fn resolve_semantic_scope_work(
   if source_publication_sequence == 0 {
     return Err(IndexProducerSourceErrorV1::InvalidSemanticResolution("source publication sequence is zero".to_string()));
   }
-  let resolution = match source.resolve_scopes(IndexSemanticScopeReadRequestV1 {
-    operation_id,
-    source_publication_sequence,
-    semantic_state_root,
-    transition,
-    limits,
-    is_cancelled,
-  }) {
+  let resolution = match source.resolve_scopes(request) {
     Ok(resolution) => resolution,
     Err(error) if error.class() == IndexSemanticScopeReadErrorClassV1::Cancelled => {
       return Err(IndexProducerSourceErrorV1::Cancelled);

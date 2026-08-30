@@ -229,7 +229,7 @@ fn run_stress_iteration(
         checkpoint_committed(checkpoint_file, &path, &body)?;
       }
     }
-    1 | 2 | 3 | 4 => {
+    1..=4 => {
       let path = format!("/stress/state/doc-{:03}.json", counter % 64);
       ops
         .merge_json_file(ctx, &path, stress_patch(counter, counter % 64), MergeDepth::Unbounded)

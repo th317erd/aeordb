@@ -2,10 +2,10 @@
 
 ## Landing State
 
-- **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt plus operator/documentation closure are green, and strict Clippy is next. Copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
-- **Current landing unit:** P9 migration/operator/bot documentation, precise stale-plan supersession, and the retained hot-dir compatibility contract are green; repository-wide strict Clippy is next.
-- **Entry commit:** `30cee29f8deeecda48419ddc31c697178ac375b9` (`record P8 native release qualification`).
-- **Last pushed green commit:** `bbe6f265f50ab177bc09b89c5fbd469d4ffbb2f7` on `development` and `origin/development`.
+- **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt, operator/documentation closure, and repository-wide strict Clippy are green. Final broad/native/crash-soak/resource/real-world qualification remains; copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
+- **Current landing unit:** P9 repository-wide strict Clippy closure, green and awaiting final diff review/commit.
+- **Entry commit:** `f386403f5656c10295cc48c9a2ce10e90bf93947` (`publish P9 migration operator guidance`).
+- **Last pushed green commit:** `f386403f5656c10295cc48c9a2ce10e90bf93947` on `development` and `origin/development`.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** Safe P8 migration workspaces, cutover fault target, exact-source native release candidates, live documentation routes, and integrated Linux workspace qualification are green and pushed.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
@@ -32,9 +32,20 @@
 - A real release server under `/home/wyatt/.cache` proved healthy startup, embedded docs/migration/CLI/SKILL `200` responses, a missing-doc `404`, byte-exact file PUT/GET, missing-value parser refusal before database creation, no creation of the deliberately nonexistent compatibility hot path, clean SIGINT exit, and offline verification of 195 valid entries with zero reported defects. The first harness attempt is truthfully retained: public health returned `200` with `status=starting` while every protected route returned the expected `503`; the final harness waits for `status=healthy`.
 - Durable failure, build, link, contract, live, hash, and authorization evidence is recorded in `evidence/p9-documentation-report.json`. No production or production-derived database, install, download artifact, deployment, canary, cutover, acceptance, first v4 write, or destructive GC boundary was touched.
 
+## P9 Strict Clippy Qualification
+
+- The exact clean-worktree baseline at `f386403f5656c10295cc48c9a2ce10e90bf93947` reported 132 diagnostics across 61 source/test files: 25 `result_large_err`, 21 production `too_many_arguments`, 15 `nonminimal_bool`, and 71 diagnostics across 32 smaller lint families. The run used untracked lockfile SHA-256 `06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec`; the baseline log SHA-256 is `0a15b0fc3d383999988ad27342ec74d180e23ec7d684d3b60fccbe18284b539e`.
+- The cleanup uses no lint suppression and does not weaken the lint policy. Mechanical fixes cover the smaller lint families; typed request/options/context structures replace all 36 oversized signatures across 21 production helpers and 15 test fixtures. Large Axum route failures use one boxed `RouteResponseError`, and the migration destination error boxes its large artifact while retaining exact status, response, and diagnostic behavior.
+- `cargo clippy --locked -j6 --workspace --all-targets -- -D warnings` is green with zero diagnostics in 2m25s. Preserved log: `/home/wyatt/.cache/codex/aeordb-tests/logs/p9-clippy-f386403f-strict-final.log`, SHA-256 `b6be66392879b3012e00d998bf8d211d16a5c5e7874a12cb5e1e64795684ba8f`.
+- The reviewed error-squelch inventory shrinks from 1,508 to 1,507 occurrences with no pending review, no changed review assignment for any retained stable identity, and no policy change. All 29 architecture/error-squelch tests pass; the final complete workspace run independently includes the same green target.
+- Broad verification used build artifacts under `/media/Data/AeorDB/Tests/` and a permission-capable ext4 `TMPDIR` under `wyatt-desktop:~/.cache`. This avoids the desktop `/tmp` filesystem's frozen reserve-capacity mismatch and the data volume's fixed `0777` mode, while leaving all heavy compilation and target I/O on the designated data disk. The three required default/echo WASM fixtures were built in their remote-only target trees and were never synchronized.
+- Failure-first broad evidence caught and corrected one Clippy rewrite that changed the architecture-visible reindex flush propagation shape. The corrected exact guard passes 1/1 and retains `preserve_reindex_partial_on_terminal` as the failure owner; log SHA-256 `d4d67f7321fd9b05dcce2eaf9d4e2572ade2ba4d731be3483f8bf108578f0d17`. The echo-plugin target passes 30/30 after its documented fixture build; log SHA-256 `76881de760fe1ed9d8509c2a2f77e9137d0b7a9798d95caa8b2407d9a95e2a14`.
+- The final uninterrupted `cargo test --locked -j6 --workspace` passes 7,361 tests across 347 result groups with zero failures, nine intentional ignores, and 126 filtered tests. Preserved log: `/home/wyatt/.cache/codex/aeordb-tests/logs/p9-clippy-f386403f-workspace-tests-green.log`, SHA-256 `f6f7161ce1bb3ee6902e5ab7b4afde1c9663867cd2b0fae42e8e795fe2eb698f`.
+- The landing touches no production or production-derived database, install, download artifact, deployment, canary, service activation, cutover, acceptance, first v4 write, or destructive GC boundary.
+
 ## P9 Next Action
 
-Eliminate the repository-wide strict-Clippy backlog without suppressions or weakened lint policy, then run the final broad/native/crash-soak/resource qualification. Keep copied-production, canary, installation/deployment, operational cutover, acceptance, monitoring, and destructive GC behind their exact separate authorization gates.
+Commit and push this coherent green strict-Clippy unit, then run the campaign's final broad/native/crash-soak/resource/real-world qualification and adversarial DoD audit. Keep copied-production, canary, installation/deployment, operational cutover, acceptance, monitoring, first v4 write, and destructive GC behind their exact separate authorization gates.
 
 ## Inventory Contract
 

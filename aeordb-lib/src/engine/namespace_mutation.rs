@@ -437,7 +437,7 @@ fn validate_namespace_root_value(
 ) -> EngineResult<()> {
   let algorithm = engine.hash_algo();
   let hash_length = algorithm.hash_length();
-  let canonical_hash = if !value.is_empty() && crate::engine::btree::is_btree_format(&value) {
+  let canonical_hash = if !value.is_empty() && crate::engine::btree::is_btree_format(value) {
     crate::engine::btree::BTreeNode::deserialize(value, hash_length, entry_version)
       .and_then(|node| node.content_hash(hash_length, &algorithm))
       .map_err(|error| EngineError::CorruptEntry {

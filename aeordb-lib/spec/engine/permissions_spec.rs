@@ -83,16 +83,16 @@ fn link_with_others(group: &str, allow: &str, deny: &str, others_allow: &str, ot
 #[test]
 fn test_parse_crudlify_flags_all_letters() {
   let flags = parse_crudlify_flags("crudlify");
-  for index in 0..8 {
-    assert_eq!(flags[index], Some(true), "Position {} should be Some(true)", index);
+  for (index, flag) in flags.iter().enumerate() {
+    assert_eq!(*flag, Some(true), "Position {} should be Some(true)", index);
   }
 }
 
 #[test]
 fn test_parse_crudlify_flags_all_dots() {
   let flags = parse_crudlify_flags("........");
-  for index in 0..8 {
-    assert_eq!(flags[index], None, "Position {} should be None", index);
+  for (index, flag) in flags.iter().enumerate() {
+    assert_eq!(*flag, None, "Position {} should be None", index);
   }
 }
 
@@ -131,8 +131,8 @@ fn test_parse_crudlify_flags_partial() {
   let flags = parse_crudlify_flags("cr");
   assert_eq!(flags[0], Some(true)); // c
   assert_eq!(flags[1], Some(true)); // r
-  for index in 2..8 {
-    assert_eq!(flags[index], None);
+  for flag in flags.iter().skip(2) {
+    assert_eq!(*flag, None);
   }
 }
 

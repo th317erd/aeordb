@@ -713,7 +713,7 @@ fn legacy_v1_evidence_remains_scannable_replayable_and_markable() {
   });
   fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 
-  let artifacts = scan_for_database_with_dirs(&database, &[base.clone()]).unwrap();
+  let artifacts = scan_for_database_with_dirs(&database, std::slice::from_ref(&base)).unwrap();
   assert_eq!(artifacts.len(), 1);
   assert_eq!(artifacts[0].format_version, EmergencySpillFormatVersion::V1);
   let report = apply_wal_tails_to_database(&database, &artifacts).unwrap();

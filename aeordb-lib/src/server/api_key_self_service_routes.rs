@@ -8,7 +8,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::responses::ErrorResponse;
+use super::responses::{ErrorResponse, RouteResponseError};
 use super::state::AppState;
 use crate::auth::TokenClaims;
 use crate::auth::api_key::{
@@ -17,14 +17,14 @@ use crate::auth::api_key::{
 use crate::engine::api_key_rules::{parse_rules_from_json, validate_rules};
 use crate::engine::user::is_root;
 
-fn resolve_caller_username(state: &AppState, caller_id: &Uuid) -> Result<String, Response> {
+fn resolve_caller_username(state: &AppState, caller_id: &Uuid) -> Result<String, RouteResponseError> {
   match crate::engine::system_store::get_user(&state.engine, caller_id) {
     Ok(Some(user)) => Ok(user.username),
     Ok(None) if is_root(caller_id) => Ok("root".to_string()),
     Ok(None) => Ok(caller_id.to_string()),
     Err(error) => {
       tracing::error!(user_id = %caller_id, %error, "Failed to resolve API-key caller identity");
-      Err(ErrorResponse::new("Failed to resolve caller identity").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response())
+      Err(ErrorResponse::new("Failed to resolve caller identity").with_status(StatusCode::INTERNAL_SERVER_ERROR).into_response().into())
     }
   }
 }
@@ -177,7 +177,7 @@ pub async fn list_own_keys(State(state): State<AppState>, Extension(claims): Ext
       // Resolve caller's username once
       let caller_username = match resolve_caller_username(&state, &caller_id) {
         Ok(username) => username,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
       };
 
       let own_keys: Vec<serde_json::Value> = keys
@@ -307,7 +307,7 @@ pub async fn list_key_assignable_users(State(state): State<AppState>, Extension(
     // Non-root sees only themselves
     let username = match resolve_caller_username(&state, &caller_id) {
       Ok(username) => username,
-      Err(response) => return response,
+      Err(response) => return response.into_response(),
     };
 
     (

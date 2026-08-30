@@ -737,7 +737,7 @@ fn xml_parser_extracts_root_and_namespaces() {
   assert_eq!(result["metadata"]["format"], "xml");
   assert_eq!(result["metadata"]["root_element"], "root");
   let namespaces = result["metadata"]["namespaces"].as_array().unwrap();
-  assert!(namespaces.len() >= 1);
+  assert!(!namespaces.is_empty());
 }
 
 #[test]
@@ -894,7 +894,7 @@ fn build_docx_zip(body_text: &str, core_xml: Option<&str>) -> Vec<u8> {
   }
 
   // Convert to slices for build_zip
-  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
+  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(name, data)| (*name, data.as_slice())).collect();
   build_zip(&entry_refs)
 }
 
@@ -909,7 +909,7 @@ fn build_xlsx_zip(shared_string: &str, core_xml: Option<&str>) -> Vec<u8> {
     entries.push(("docProps/core.xml", core_owned));
   }
 
-  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
+  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(name, data)| (*name, data.as_slice())).collect();
   build_zip(&entry_refs)
 }
 
@@ -923,7 +923,7 @@ fn build_odt_zip(content_xml: &str, meta_xml: Option<&str>) -> Vec<u8> {
     entries.push(("meta.xml", meta_owned));
   }
 
-  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
+  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(name, data)| (*name, data.as_slice())).collect();
   build_zip(&entry_refs)
 }
 
@@ -937,7 +937,7 @@ fn build_ods_zip(content_xml: &str, meta_xml: Option<&str>) -> Vec<u8> {
     entries.push(("meta.xml", meta_owned));
   }
 
-  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_ref(), d.as_slice())).collect();
+  let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(name, data)| (*name, data.as_slice())).collect();
   build_zip(&entry_refs)
 }
 
@@ -1176,7 +1176,7 @@ fn exif_parses_new_textual_tags() {
 
 #[test]
 fn exif_parses_big_endian() {
-  let ifd_end = 8 + 2 + (1 * 12) + 4;
+  let ifd_end = 8 + 2 + 12 + 4;
   let make = b"Nikon\0";
   let make_offset = ifd_end as u32;
 

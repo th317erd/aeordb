@@ -2266,7 +2266,7 @@ async fn snapshot_restore_then_gc_reads_head_without_healing_stale_dir_keys() {
   for path in ["/A/B/file_v1_a.txt", "/A/B/file_v1_b.txt"] {
     let req = Request::builder()
       .method("PUT")
-      .uri(&format!("/files{}", path))
+      .uri(format!("/files{}", path))
       .header("content-type", "text/plain")
       .header("authorization", &auth)
       .body(Body::from("v1"))
@@ -2285,7 +2285,7 @@ async fn snapshot_restore_then_gc_reads_head_without_healing_stale_dir_keys() {
   for path in ["/A/B/file_v2.txt"] {
     let req = Request::builder()
       .method("PUT")
-      .uri(&format!("/files{}", path))
+      .uri(format!("/files{}", path))
       .header("content-type", "text/plain")
       .header("authorization", &auth)
       .body(Body::from("v2"))
@@ -2362,7 +2362,7 @@ async fn directory_listing_with_space_in_name_repro() {
   for i in 0..5 {
     let put = Request::builder()
       .method("PUT")
-      .uri(&format!("/files/A/Coloring%20pages/file{}.txt", i))
+      .uri(format!("/files/A/Coloring%20pages/file{}.txt", i))
       .header("content-type", "text/plain")
       .header("authorization", &auth)
       .body(Body::from(format!("content {}", i)))

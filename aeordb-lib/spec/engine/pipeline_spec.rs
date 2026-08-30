@@ -570,9 +570,8 @@ fn test_pipeline_non_json_data_skips() {
   // No index entries for the binary file
   let index_manager = IndexManager::new(&engine);
   let idx = index_manager.load_index("/bindata", "name").unwrap();
-  match idx {
-    Some(index) => assert_eq!(index.len(), 0),
-    None => {} // also fine
+  if let Some(index) = idx {
+    assert_eq!(index.len(), 0);
   }
 }
 

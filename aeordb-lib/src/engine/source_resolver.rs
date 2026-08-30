@@ -8,7 +8,7 @@ use regex::Regex;
 ///   - Integer → array index if current is array, else object key as stringified integer
 ///   - Empty string `""` → fan out to ALL array elements or ALL object values
 ///   - Regex `/pattern/flags` → fan out, filtering by regex
-///       (objects: match keys, arrays: match stringified elements). Flag `i` = case-insensitive.
+///     (objects: match keys, arrays: match stringified elements). Flag `i` = case-insensitive.
 ///   - Other types (bool, null, object, array) → resolution failure (returns empty)
 ///
 /// Returns every resolved value as bytes (via `json_value_to_bytes`).

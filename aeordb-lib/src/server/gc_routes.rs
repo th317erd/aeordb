@@ -39,7 +39,7 @@ pub async fn run_gc_endpoint(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let dry_run = params.dry_run.unwrap_or(false);

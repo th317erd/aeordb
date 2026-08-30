@@ -67,7 +67,7 @@ pub(crate) fn json_to_tempfile<T: serde::Serialize>(
   engine: &StorageEngine,
   prefix: &str,
 ) -> EngineResult<tempfile::NamedTempFile> {
-  let mut file = tempfile_for_engine(&engine, prefix)?;
+  let mut file = tempfile_for_engine(engine, prefix)?;
   serde_json::to_writer(file.as_file_mut(), value).map_err(|error| {
     if error.is_io() {
       crate::engine::EngineError::IoError(std::io::Error::other(error.to_string()))
@@ -102,8 +102,7 @@ pub(crate) fn body_from_tempfile(mut file: tempfile::NamedTempFile, engine: Arc<
           }
         },
       };
-      let mut data = Vec::with_capacity(RESPONSE_FRAME_BYTES);
-      data.resize(RESPONSE_FRAME_BYTES, 0);
+      let mut data = vec![0; RESPONSE_FRAME_BYTES];
       let read = loop {
         match file.as_file_mut().read(&mut data) {
           Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,

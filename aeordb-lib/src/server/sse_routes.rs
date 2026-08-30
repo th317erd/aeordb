@@ -30,7 +30,7 @@ use crate::engine::engine_event::{
 };
 use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::{ProjectedEvent, StorageEngine, SystemFamilyPolicyResolver};
-use crate::server::responses::{engine_error_response, ErrorResponse};
+use crate::server::responses::{engine_error_response, ErrorResponse, RouteResponseError};
 use crate::server::route_permissions::parse_user_id;
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +81,7 @@ struct SseSubscriberAuthority {
 }
 
 impl SseSubscriberAuthority {
-  fn from_request(state: &AppState, claims: &TokenClaims) -> Result<Self, Response> {
+  fn from_request(state: &AppState, claims: &TokenClaims) -> Result<Self, RouteResponseError> {
     let identity = if claims.sub.starts_with("share:") {
       SseSubscriberIdentity::Share
     } else {
@@ -92,13 +92,13 @@ impl SseSubscriberAuthority {
       let record = require_active_api_key(state, key_id)?;
       if !Self::record_matches_identity(&identity, &claims.sub, &record) {
         tracing::warn!(sub = %claims.sub, key_id, "Rejected SSE subscriber with mismatched API-key identity");
-        return Err(ErrorResponse::new("API key identity mismatch").with_status(StatusCode::FORBIDDEN).into_response());
+        return Err(ErrorResponse::new("API key identity mismatch").with_status(StatusCode::FORBIDDEN).into_response().into());
       }
       if matches!(identity, SseSubscriberIdentity::Share) && record.rules.is_empty() {
-        return Err(ErrorResponse::new("Share key has no permission rules").with_status(StatusCode::FORBIDDEN).into_response());
+        return Err(ErrorResponse::new("Share key has no permission rules").with_status(StatusCode::FORBIDDEN).into_response().into());
       }
     } else if matches!(identity, SseSubscriberIdentity::Share) {
-      return Err(ErrorResponse::new("Share key has no permission rules").with_status(StatusCode::FORBIDDEN).into_response());
+      return Err(ErrorResponse::new("Share key has no permission rules").with_status(StatusCode::FORBIDDEN).into_response().into());
     }
 
     Ok(Self {
@@ -452,7 +452,7 @@ pub async fn event_stream(
   Extension(claims): Extension<TokenClaims>,
   Query(params): Query<SseParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
-  let authority = SseSubscriberAuthority::from_request(&state, &claims)?;
+  let authority = SseSubscriberAuthority::from_request(&state, &claims).map_err(RouteResponseError::into_response)?;
   let family_policy = SystemFamilyPolicyResolver::new(state.engine.hash_algo())
     .map_err(|error| engine_error_response("Cannot establish SSE path policy", &error))?;
 
@@ -494,7 +494,7 @@ pub async fn user_event_stream(
   State(state): State<AppState>,
   Extension(claims): Extension<TokenClaims>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
-  let authority = SseSubscriberAuthority::from_request(&state, &claims)?;
+  let authority = SseSubscriberAuthority::from_request(&state, &claims).map_err(RouteResponseError::into_response)?;
   let SseSubscriberIdentity::User(user_id) = authority.identity else {
     return Err(ErrorResponse::new("Per-user events require a user identity").with_status(StatusCode::FORBIDDEN).into_response());
   };

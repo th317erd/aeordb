@@ -74,7 +74,7 @@ fn fixture_live_document_count(hash_algorithm: HashAlgorithm, suffix: &str, role
   let ordinals = page
     .records
     .iter()
-    .map(|record| {
+    .filter_map(|record| {
       let record = record.unwrap();
       match role {
         OrderedIndexRoleV1::Value => {
@@ -88,7 +88,6 @@ fn fixture_live_document_count(hash_algorithm: HashAlgorithm, suffix: &str, role
         _ => panic!("fixture live-document count requires a value or posting page"),
       }
     })
-    .flatten()
     .collect::<BTreeSet<_>>();
   u64::try_from(ordinals.len()).unwrap()
 }

@@ -377,7 +377,7 @@ fn index_workspace_manifest_rejects_every_malformed_boundary() {
   trailing.push(0);
   assert!(decode_index_workspace_manifest_v1(&trailing).is_err());
   for offset in [0usize, 4, 6, 8, 12, 120, 122, 204] {
-    let mut corrupt = valid.clone();
+    let mut corrupt = valid;
     corrupt[offset] ^= 0xff;
     assert!(decode_index_workspace_manifest_v1(&corrupt).is_err(), "accepted corruption at {offset}");
   }

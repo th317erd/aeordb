@@ -1400,8 +1400,7 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
     )
     .unwrap();
   let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory)
-    .err()
-    .expect("missing selected page must refuse the reader");
+    .expect_err("missing selected page must refuse the reader");
   assert_eq!(error.code(), "migration_root_map_selected_page_missing");
 
   let page_identity = [MIGRATION_ID.as_slice(), &0u64.to_le_bytes()].concat();
@@ -1439,8 +1438,7 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
     })
     .unwrap();
   let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, MIGRATION_ID, &cancellation, &memory)
-    .err()
-    .expect("inconsistent selected page chain must refuse the reader");
+    .expect_err("inconsistent selected page chain must refuse the reader");
   assert_eq!(error.code(), "legacy_root_map_chain_digest");
 
   let foreign_migration_id = [0x73; 16];
@@ -1478,7 +1476,6 @@ fn selected_reader_rejects_missing_inconsistent_and_foreign_incarnation_authorit
     )
     .unwrap();
   let error = VerifiedLegacyRootMapReaderV1::open(&publisher, DATABASE_ID, foreign_migration_id, &cancellation, &memory)
-    .err()
-    .expect("foreign destination incarnation must refuse the reader");
+    .expect_err("foreign destination incarnation must refuse the reader");
   assert_eq!(error.code(), "migration_root_map_selected_identity");
 }

@@ -148,7 +148,7 @@ pub fn decode_invocation_policy(value: &[u8]) -> FormatResult<InvocationPolicyV1
         || [policy.max_wasm_instances, policy.max_wasm_memories, policy.max_wasm_tables].contains(&0)
         || [policy.max_wasm_instances, policy.max_wasm_memories, policy.max_wasm_tables].contains(&u32::MAX)
         || policy.max_linear_memory_bytes > WASM32_ADDRESS_SPACE
-        || policy.max_linear_memory_bytes % WASM_PAGE_SIZE != 0
+        || !policy.max_linear_memory_bytes.is_multiple_of(WASM_PAGE_SIZE)
       {
         return Err(error(
           MalformedInputClass::CrossRecordClosureMismatch,

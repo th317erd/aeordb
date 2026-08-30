@@ -140,6 +140,18 @@ pub(crate) struct DiskKvMemoryStats {
   pub mutable_nvt_bytes: u64,
 }
 
+#[derive(Debug, Default)]
+pub struct HotTailReplay {
+  pub entries: Vec<KVEntry>,
+  pub voids: Vec<crate::engine::hot_tail::VoidRecord>,
+}
+
+#[derive(Debug, Default)]
+pub struct KvExpansionEntries {
+  pub pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+  pub all_entries: Vec<KVEntry>,
+}
+
 impl DiskKvMemoryStats {
   pub fn total_bytes(self) -> u64 {
     self
@@ -397,10 +409,10 @@ impl DiskKVStore {
     kv_block_offset: u64,
     hot_tail_offset: u64,
     stage: usize,
-    hot_entries: Vec<KVEntry>,
-    hot_voids: Vec<crate::engine::hot_tail::VoidRecord>,
+    replay: HotTailReplay,
     kv_block_version: u8,
   ) -> EngineResult<Self> {
+    let HotTailReplay { entries: hot_entries, voids: hot_voids } = replay;
     Self::open_with_coordinator(
       db_file,
       hash_algo,
@@ -1570,9 +1582,9 @@ impl DiskKVStore {
     relocation_end: u64,
     offset_delta: i64,
     new_hot_tail: u64,
-    pending_voids: Vec<crate::engine::hot_tail::VoidRecord>,
-    all_entries: Vec<KVEntry>,
+    entries: KvExpansionEntries,
   ) -> EngineResult<()> {
+    let KvExpansionEntries { pending_voids, all_entries } = entries;
     let target_block_length = stage_params(target_stage, page_size(self.hash_algo.hash_length())).0;
     self.finalize_expansion_with_block_length(
       target_stage,

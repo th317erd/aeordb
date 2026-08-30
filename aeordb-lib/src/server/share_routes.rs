@@ -95,6 +95,7 @@ struct ShareInfo {
 ///     with a `path_pattern` matching the filename.
 ///   - If the path is a directory, permissions are stored on that directory
 ///     with no `path_pattern` (applies to everything inside).
+///
 /// Derive an absolute base URL (scheme + host + optional port, no path)
 /// from the request headers. Used for embedding clickable links in
 /// outbound emails — relative URLs render dead in most mail clients.
@@ -234,7 +235,7 @@ pub async fn list_shares(
 ) -> Response {
   // Share tokens cannot list shares
   if let Err(response) = reject_share_key(&claims, "Not available for share links") {
-    return response;
+    return response.into_response();
   }
   let normalized = normalize_path(&query.path);
 
@@ -245,7 +246,7 @@ pub async fn list_shares(
   // so the response shape doesn't reveal existence on its own.
   let permissions = match RoutePermissionChecker::from_claims(&state, &claims, "Invalid user identity") {
     Ok(permissions) => permissions,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
   if !permissions.is_root() {
     let permitted = match permissions.has_any_path_permission(&normalized, &[CrudlifyOp::Read, CrudlifyOp::List]) {
@@ -388,12 +389,12 @@ pub async fn unshare(
 pub async fn shared_with_me(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   // Share tokens don't use .aeordb-permissions; they have scoped key rules.
   if let Err(response) = reject_share_key(&claims, "Not available for share links") {
-    return response;
+    return response.into_response();
   }
 
   let caller_id = match parse_user_id(&claims, "Invalid identity") {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   // Root sees everything — no need for this endpoint

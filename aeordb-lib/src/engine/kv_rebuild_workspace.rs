@@ -465,7 +465,7 @@ impl KvRebuildWorkspace {
     let mut writer = RunWriter::create(&output_path, self.hash_algo, self.hash_length, self.record_length, output_count)?;
     let mut merged_count = 0u64;
     while let Some(item) = heap.pop() {
-      if merged_count % 4_096 == 0 {
+      if merged_count.is_multiple_of(4_096) {
         self.check_cancelled()?;
       }
       writer.write_record(&item.record)?;
@@ -547,9 +547,7 @@ fn should_replace_value(existing: &WorkspaceRecord, candidate: &WorkspaceRecord)
 }
 
 fn resolve_record(selected: Option<WorkspaceRecord>, deletion: Option<RebuildOrder>) -> Option<ResolvedKvRecord> {
-  let Some(mut selected) = selected else {
-    return None;
-  };
+  let mut selected = selected?;
   if deletion.is_some_and(|order| order.is_after(selected.order)) {
     selected.type_flags = (selected.type_flags & 0x0f) | KV_FLAG_DELETED;
   }

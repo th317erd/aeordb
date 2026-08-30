@@ -916,7 +916,7 @@ fn find_literal_case_insensitive(text: &str, literal: &str, from: usize) -> Opti
   }
 
   let needle = literal.as_bytes();
-  let relative = text[from..].as_bytes().windows(needle.len()).position(|candidate| candidate.eq_ignore_ascii_case(needle))?;
+  let relative = text.as_bytes()[from..].windows(needle.len()).position(|candidate| candidate.eq_ignore_ascii_case(needle))?;
   let start = from + relative;
   let end = start + literal.len();
   if text.is_char_boundary(start) && text.is_char_boundary(end) {

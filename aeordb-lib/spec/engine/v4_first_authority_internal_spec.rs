@@ -682,7 +682,7 @@ fn prepare_void_catalog_publication(
         resulting_void_length: candidate.entity_length,
       }],
     },
-    reserve_sweep_locator_removal_results_v1(&completion_memory, 1).unwrap(),
+    reserve_sweep_locator_removal_results_v1(completion_memory, 1).unwrap(),
   )
   .unwrap();
   let mut encoded_incarnation = vec![0u8; 24 + 2 * algorithm.hash_length()];
@@ -4052,8 +4052,7 @@ fn seed_namespace_tree_collision(publisher: &V4FirstAuthorityPublisher, request:
     EntryTypeV4::DirectoryIndex,
     0,
     observation.selected.header.hash_algorithm,
-    request.created_at_ms,
-    sequence,
+    EntityPublicationOrder { timestamp_ms: request.created_at_ms, write_sequence: sequence },
     &request.namespace_tree.root_hash,
     &request.namespace_tree.stored_value,
   )

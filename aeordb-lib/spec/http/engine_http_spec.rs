@@ -560,9 +560,9 @@ async fn test_engine_get_file_byte_range_handles_compressed_chunks() {
   let (_app, jwt_manager, engine, _temp_dir) = test_app();
   let auth = bearer_token(&jwt_manager);
   let mut data = Vec::with_capacity(DEFAULT_CHUNK_SIZE * 3 + 97);
-  data.extend(std::iter::repeat(b'a').take(DEFAULT_CHUNK_SIZE));
-  data.extend(std::iter::repeat(b'b').take(DEFAULT_CHUNK_SIZE));
-  data.extend(std::iter::repeat(b'c').take(DEFAULT_CHUNK_SIZE + 97));
+  data.extend(std::iter::repeat_n(b'a', DEFAULT_CHUNK_SIZE));
+  data.extend(std::iter::repeat_n(b'b', DEFAULT_CHUNK_SIZE));
+  data.extend(std::iter::repeat_n(b'c', DEFAULT_CHUNK_SIZE + 97));
 
   DirectoryOps::new(&engine)
     .store_file_compressed(

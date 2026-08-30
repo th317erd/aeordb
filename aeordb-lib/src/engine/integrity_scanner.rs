@@ -142,7 +142,8 @@ pub fn run_integrity_scan_cycle(engine: &StorageEngine, cancellation: &Cancellat
 }
 
 fn compute_sample_size(total: usize) -> usize {
-  ((total as f64 * 0.01).ceil() as usize).max(MIN_SAMPLE).min(MAX_SAMPLE).min(total)
+  let target = (total as f64 * 0.01).ceil() as usize;
+  target.clamp(MIN_SAMPLE.min(total), MAX_SAMPLE.min(total))
 }
 
 fn integrity_sample_bytes(sample_size: usize, hash_length: usize) -> EngineResult<u64> {

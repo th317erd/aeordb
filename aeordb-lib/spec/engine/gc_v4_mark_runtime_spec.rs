@@ -108,8 +108,11 @@ fn captured_slot_visitor_reports_exact_bucket_slot_identity_without_materializin
   let first = entry_for_bucket(&table, 0, 1, false);
   let deleted = entry_for_bucket(&table, 0, 100_001, true);
   let second = entry_for_bucket(&table, 2, 200_001, false);
-  let pages =
-    Arc::new(vec![page_arc(&[first.clone(), deleted], hash_length), empty_page(hash_length), page_arc(&[second.clone()], hash_length)]);
+  let pages = Arc::new(vec![
+    page_arc(&[first.clone(), deleted], hash_length),
+    empty_page(hash_length),
+    page_arc(std::slice::from_ref(&second), hash_length),
+  ]);
   let snapshot = ReadSnapshot::new(HashMap::new(), table, 3, algorithm, 2, pages).unwrap();
   let cancellation = CancellationToken::new();
   let mut observed = Vec::new();

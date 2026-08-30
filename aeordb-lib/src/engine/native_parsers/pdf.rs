@@ -418,7 +418,7 @@ fn parse_pdf_date(raw: &str) -> String {
   let date_string = raw.trim();
 
   // Strip the "D:" prefix if present
-  let stripped = if date_string.starts_with("D:") { &date_string[2..] } else { date_string };
+  let stripped = date_string.strip_prefix("D:").map_or(date_string, |stripped| stripped);
 
   if stripped.len() < 4 {
     return date_string.to_string();

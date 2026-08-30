@@ -459,11 +459,12 @@ fn reconstruct_selected_void_state(
 
 #[test]
 fn restart_reconstruction_has_one_disconnected_first_authority_owner() {
-  let pointer: fn(
+  type ReconstructionFunction = fn(
     &V4FirstAuthorityPublisher,
     VoidReusableStateReconstructionRequestV1<'_>,
     &mut dyn VoidReclaimReceiptAuthorityV1,
-  ) -> Result<Option<VoidReusableSpaceStateV1>, VoidReusableStateErrorV1> = reconstruct_selected_void_state;
+  ) -> Result<Option<VoidReusableSpaceStateV1>, VoidReusableStateErrorV1>;
+  let pointer: ReconstructionFunction = reconstruct_selected_void_state;
   assert_eq!(std::mem::size_of_val(&pointer), std::mem::size_of::<usize>());
 
   let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/v4/first_authority.rs")).unwrap();

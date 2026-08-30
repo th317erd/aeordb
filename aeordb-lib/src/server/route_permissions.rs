@@ -1,7 +1,4 @@
-use axum::{
-  http::StatusCode,
-  response::{IntoResponse, Response},
-};
+use axum::{http::StatusCode, response::IntoResponse};
 use uuid::Uuid;
 
 use crate::auth::TokenClaims;
@@ -11,38 +8,38 @@ use crate::engine::permission_resolver::{CrudlifyOp, PermissionResolver};
 use crate::engine::user::is_root;
 use crate::engine::SystemFamilyPolicyResolver;
 use crate::engine::StorageEngine;
-use crate::server::responses::{engine_error_response, ErrorResponse};
+use crate::server::responses::{engine_error_response, ErrorResponse, RouteResponseError};
 use crate::server::state::AppState;
 
 /// Enforce the registry's generic-data visibility policy while preserving the
 /// public API's concealment contract for known protected state.
-pub fn require_generic_data_path(state: &AppState, path: &str) -> Result<(), Response> {
+pub fn require_generic_data_path(state: &AppState, path: &str) -> Result<(), RouteResponseError> {
   require_generic_data_engine_path(&state.engine, path)
 }
 
-pub fn require_generic_data_engine_path(engine: &StorageEngine, path: &str) -> Result<(), Response> {
+pub fn require_generic_data_engine_path(engine: &StorageEngine, path: &str) -> Result<(), RouteResponseError> {
   let selection = SystemFamilyPolicyResolver::new(engine.hash_algo())
     .and_then(|resolver| resolver.generic_data_path_selection(path))
-    .map_err(|error| engine_error_response("Failed to classify data path", &error))?;
+    .map_err(|error| RouteResponseError::from(engine_error_response("Failed to classify data path", &error)))?;
 
   match selection {
     GenericDataPathSelection::Include => Ok(()),
     GenericDataPathSelection::Conceal | GenericDataPathSelection::StructuralContainer => {
-      Err(ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response())
+      Err(ErrorResponse::new(format!("Not found: {}", path)).with_status(StatusCode::NOT_FOUND).into_response().into())
     }
   }
 }
 
-pub fn reject_share_key(claims: &TokenClaims, message: &'static str) -> Result<(), Response> {
+pub fn reject_share_key(claims: &TokenClaims, message: &'static str) -> Result<(), RouteResponseError> {
   if claims.sub.starts_with("share:") {
-    Err(ErrorResponse::new(message).with_status(StatusCode::FORBIDDEN).into_response())
+    Err(ErrorResponse::new(message).with_status(StatusCode::FORBIDDEN).into_response().into())
   } else {
     Ok(())
   }
 }
 
-pub fn parse_user_id(claims: &TokenClaims, invalid_message: &'static str) -> Result<Uuid, Response> {
-  Uuid::parse_str(&claims.sub).map_err(|_| ErrorResponse::new(invalid_message).with_status(StatusCode::FORBIDDEN).into_response())
+pub fn parse_user_id(claims: &TokenClaims, invalid_message: &'static str) -> Result<Uuid, RouteResponseError> {
+  Uuid::parse_str(&claims.sub).map_err(|_| ErrorResponse::new(invalid_message).with_status(StatusCode::FORBIDDEN).into_response().into())
 }
 
 /// Route-local permission checker that centralizes claim parsing and
@@ -54,7 +51,7 @@ pub struct RoutePermissionChecker<'a> {
 }
 
 impl<'a> RoutePermissionChecker<'a> {
-  pub fn from_claims(state: &'a AppState, claims: &TokenClaims, invalid_message: &'static str) -> Result<Self, Response> {
+  pub fn from_claims(state: &'a AppState, claims: &TokenClaims, invalid_message: &'static str) -> Result<Self, RouteResponseError> {
     let user_id = parse_user_id(claims, invalid_message)?;
     Ok(Self::for_user(state, user_id))
   }

@@ -17,7 +17,7 @@ use crate::server::state::AppState;
 pub async fn list_conflicts(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let engine = state.engine.clone();
@@ -39,7 +39,7 @@ pub async fn list_conflicts(State(state): State<AppState>, Extension(claims): Ex
 pub async fn get_conflict(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(path): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let full_path = format!("/{}", path);
@@ -75,7 +75,7 @@ pub async fn resolve_conflict(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let full_path = format!("/{}", path);
@@ -116,7 +116,7 @@ pub async fn dismiss_conflict(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let full_path = format!("/{}", path);

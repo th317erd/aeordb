@@ -81,9 +81,11 @@ fn producer_task<'a>(
 
 #[derive(Default)]
 struct RecoveredTasks {
-  tasks: Vec<([u8; 16], IndexProducerTaskKindV1, u64, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>)>,
+  tasks: RecoveredTaskRows,
   reject_after: Option<usize>,
 }
+
+type RecoveredTaskRows = Vec<([u8; 16], IndexProducerTaskKindV1, u64, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>)>;
 
 struct MemoryObservingRecoveredTaskSink<'a> {
   memory: &'a MemoryCoordinator,

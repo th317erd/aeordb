@@ -865,8 +865,7 @@ fn test_aggregate_result_serialization() {
     std::collections::HashMap::new(),
     std::collections::HashMap::new(),
     None,
-    false,
-    false,
+    aeordb::engine::query_engine::AggregateLimitState::default(),
   );
 
   let json = serde_json::to_value(&result).unwrap();

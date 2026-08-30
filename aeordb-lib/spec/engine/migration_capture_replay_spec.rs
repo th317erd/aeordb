@@ -260,7 +260,9 @@ impl MigrationBaseCloneEntrySourceV1 for FakeSource {
   }
 }
 
-fn source_fingerprint(source: &FakeSource) -> Vec<(Vec<u8>, u8, u8, u8, u32, u32, i64, u32, Vec<u8>, Vec<u8>, Vec<u8>)> {
+type SourceFingerprint = Vec<(Vec<u8>, u8, u8, u8, u32, u32, i64, u32, Vec<u8>, Vec<u8>, Vec<u8>)>;
+
+fn source_fingerprint(source: &FakeSource) -> SourceFingerprint {
   let mut entries = source
     .entries
     .iter()
@@ -683,8 +685,10 @@ fn retirement_owner(algorithm: HashAlgorithm, cancellation: &CancellationToken, 
 
 #[derive(Default)]
 struct RootSink {
-  rows: Vec<(u64, Vec<u8>, Vec<u8>, Vec<u8>)>,
+  rows: RootMappings,
 }
+
+type RootMappings = Vec<(u64, Vec<u8>, Vec<u8>, Vec<u8>)>;
 
 impl MigrationCaptureReplayRootSinkV1 for RootSink {
   fn record_root_mapping(&mut self, sequence: u64, source_root: &[u8], namespace_root: &[u8], tree_root: &[u8]) -> EngineResult<()> {

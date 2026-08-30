@@ -132,7 +132,7 @@ fn create_publisher(algorithm: HashAlgorithm) -> (tempfile::TempDir, PathBuf, Ar
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("retirement-storage.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
-  let header = initial_header(algorithm, initial_block_size() as u64);
+  let header = initial_header(algorithm, initial_block_size());
   let slot = encode_database_header_slot(&header).unwrap();
   file.write_all(&slot).unwrap();
   file.write_all(&slot).unwrap();

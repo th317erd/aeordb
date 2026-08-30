@@ -500,6 +500,12 @@ pub struct AggregateResult {
   memory_lease: Option<Arc<QueryMemoryLease>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AggregateLimitState {
+  pub has_more: bool,
+  pub default_limit_hit: bool,
+}
+
 impl AggregateResult {
   pub fn new(
     count: Option<u64>,
@@ -508,9 +514,9 @@ impl AggregateResult {
     min: HashMap<String, serde_json::Value>,
     max: HashMap<String, serde_json::Value>,
     groups: Option<Vec<GroupResult>>,
-    has_more: bool,
-    default_limit_hit: bool,
+    limits: AggregateLimitState,
   ) -> Self {
+    let AggregateLimitState { has_more, default_limit_hit } = limits;
     Self { count, sum, avg, min, max, groups, has_more, default_limit_hit, memory_lease: None }
   }
 
@@ -1860,7 +1866,7 @@ impl<'a> QueryEngine<'a> {
   /// indexed fields with order-preserving converters.
   fn sort_results(
     &self,
-    results: &mut Vec<QueryResult>,
+    results: &mut [QueryResult],
     order_by: &[SortField],
     path: &str,
     budget: &mut QueryMemoryBudget,
@@ -3216,7 +3222,7 @@ impl<'a> QueryEngine<'a> {
     // If no GROUP BY, compute flat aggregates
     if agg.group_by.is_empty() {
       let ComputedAggregates { sum, avg, min, max } = compute_aggregates(&result_hash_set, agg, &field_indexes, &mut budget)?;
-      let mut result = AggregateResult::new(count, sum, avg, min, max, None, false, false);
+      let mut result = AggregateResult::new(count, sum, avg, min, max, None, AggregateLimitState::default());
       drop(field_indexes);
       drop(result_hash_set);
       drop(result_hashes);
@@ -3305,8 +3311,7 @@ impl<'a> QueryEngine<'a> {
       HashMap::new(),
       HashMap::new(),
       Some(group_results),
-      has_more,
-      default_limit_hit,
+      AggregateLimitState { has_more, default_limit_hit },
     );
     drop(groups);
     drop(group_field_data);

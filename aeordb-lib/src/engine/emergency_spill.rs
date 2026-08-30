@@ -20,6 +20,8 @@ pub const INDEX_RUNTIME_EMERGENCY_STATE_FORMAT_V1: &str = "aeordb-index-runtime-
 pub(crate) const MANIFEST_SIZE_CAP: u64 = 1024 * 1024;
 const INDEX_RUNTIME_STATE_SIZE_CAP: u64 = 64 * 1024;
 
+type TypedFailureEvidence = (u16, u16, i32, u64, u64, u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmergencySpillFormatVersion {
   V1,
@@ -884,7 +886,7 @@ fn parse_manifest(manifest_path: &Path, source_location_class: SpillLocationClas
   }))
 }
 
-fn parse_optional_typed_failure_evidence(manifest: &serde_json::Value) -> EngineResult<Option<(u16, u16, i32, u64, u64, u64)>> {
+fn parse_optional_typed_failure_evidence(manifest: &serde_json::Value) -> EngineResult<Option<TypedFailureEvidence>> {
   const FIELDS: [&str; 6] = [
     "failed_operation",
     "os_error_class",

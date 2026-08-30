@@ -80,8 +80,7 @@ impl<K, V> CleanCache<K, V> {
   }
 
   pub fn new_bounded(coordinator: MemoryCoordinator, owner: MemoryOwner, max_bytes: u64) -> Self {
-    let mut state = CleanCacheState::default();
-    state.policy = Some(CleanCachePolicy { coordinator, owner, max_bytes });
+    let state = CleanCacheState { policy: Some(CleanCachePolicy { coordinator, owner, max_bytes }), ..Default::default() };
     Self::from_state(state)
   }
 
@@ -430,9 +429,11 @@ impl<V> CacheLoad<V> {
 /// invokes the loader once, not N times.
 pub struct Cache<L: CacheLoader> {
   entries: CleanCache<L::Key, L::Value>,
-  in_flight: Mutex<HashMap<L::Key, Arc<CacheLoad<L::Value>>>>,
+  in_flight: InFlightLoads<L::Key, L::Value>,
   loader: L,
 }
+
+type InFlightLoads<K, V> = Mutex<HashMap<K, Arc<CacheLoad<V>>>>;
 
 impl<L: CacheLoader> Cache<L> {
   /// Create a new cache with the given loader.

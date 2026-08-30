@@ -10,7 +10,7 @@ use crate::engine::{
   CronScheduleUpdate, EngineError, RequestContext,
 };
 use crate::engine::system_store;
-use crate::server::responses::{ErrorResponse, engine_error_response, error_codes, require_root};
+use crate::server::responses::{ErrorResponse, RouteResponseError, engine_error_response, error_codes, require_root};
 use crate::server::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -38,12 +38,13 @@ pub struct GcTaskRequest {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine::TaskQueue>, Response> {
+fn require_task_queue(state: &AppState) -> Result<&std::sync::Arc<crate::engine::TaskQueue>, RouteResponseError> {
   state.task_queue.as_ref().ok_or_else(|| {
     ErrorResponse::new("Task queue not available. The task system may not be enabled in this configuration")
       .with_code(error_codes::SERVICE_UNAVAILABLE)
       .with_status(StatusCode::SERVICE_UNAVAILABLE)
       .into_response()
+      .into()
   })
 }
 
@@ -75,12 +76,12 @@ fn task_response_value(
 pub async fn list_tasks(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let queue = match require_task_queue(&state) {
     Ok(q) => q,
-    Err(resp) => return resp,
+    Err(response) => return response.into_response(),
   };
 
   match queue.list_tasks() {
@@ -106,12 +107,12 @@ pub async fn trigger_reindex(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let queue = match require_task_queue(&state) {
     Ok(q) => q,
-    Err(resp) => return resp,
+    Err(response) => return response.into_response(),
   };
 
   let mut args = serde_json::json!({
@@ -150,12 +151,12 @@ pub async fn trigger_gc(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let queue = match require_task_queue(&state) {
     Ok(q) => q,
-    Err(resp) => return resp,
+    Err(response) => return response.into_response(),
   };
 
   match queue.enqueue("gc", serde_json::json!({"dry_run": body.dry_run})) {
@@ -179,7 +180,7 @@ pub async fn trigger_gc(
 pub async fn trigger_cleanup(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let ctx = RequestContext::from_claims(&claims.sub, state.event_bus.clone());
@@ -204,12 +205,12 @@ pub async fn trigger_cleanup(State(state): State<AppState>, Extension(claims): E
 pub async fn get_task(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(id): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let queue = match require_task_queue(&state) {
     Ok(q) => q,
-    Err(resp) => return resp,
+    Err(response) => return response.into_response(),
   };
 
   match queue.get_task(&id) {
@@ -230,12 +231,12 @@ pub async fn get_task(State(state): State<AppState>, Extension(claims): Extensio
 pub async fn cancel_task(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(id): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   let queue = match require_task_queue(&state) {
     Ok(q) => q,
-    Err(resp) => return resp,
+    Err(response) => return response.into_response(),
   };
 
   match queue.cancel(&id) {
@@ -259,7 +260,7 @@ pub async fn cancel_task(State(state): State<AppState>, Extension(claims): Exten
 pub async fn list_cron(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match load_cron_config(&state.engine) {
@@ -278,7 +279,7 @@ pub async fn create_cron(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   // Validate expression
@@ -309,7 +310,7 @@ pub async fn create_cron(
 pub async fn delete_cron(State(state): State<AppState>, Extension(claims): Extension<TokenClaims>, Path(id): Path<String>) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   match delete_cron_schedule(&state.engine, &id) {
@@ -341,7 +342,7 @@ pub async fn update_cron(
 ) -> Response {
   let _user_id = match require_root(&claims) {
     Ok(id) => id,
-    Err(response) => return response,
+    Err(response) => return response.into_response(),
   };
 
   if let Some(ref expression) = body.schedule {

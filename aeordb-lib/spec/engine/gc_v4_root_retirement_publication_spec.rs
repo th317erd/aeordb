@@ -88,7 +88,7 @@ fn prepare_retirement_support_for(
   let retirement = encode_root_retirement_commit_v1(&RootRetirementCommitWriteV1 {
     hash_algorithm: algorithm,
     database_id: &DATABASE_ID,
-    namespace_root_hash: &namespace_root_hash,
+    namespace_root_hash,
     retirement_id: &[0x81; 16],
     committed_at_ms,
     pending_since_ms: committed_at_ms - 86_400_000,
@@ -97,12 +97,12 @@ fn prepare_retirement_support_for(
     reason: 1,
     prior_lifecycle_manifest_hash,
     authority_root_set_digest: &authority_root_set_digest,
-    admission_commit_payload_hash: &admission_commit_payload_hash,
+    admission_commit_payload_hash,
   })
   .unwrap();
   let expiry_record = encode_root_expiry_record_v1(&RootExpiryRecordWriteV1 {
     hash_algorithm: algorithm,
-    namespace_root_hash: &namespace_root_hash,
+    namespace_root_hash,
     retired_at_ms: committed_at_ms,
     last_pending_since_ms: committed_at_ms - 86_400_000,
     final_mark_generation: 5,
@@ -237,7 +237,7 @@ fn publisher() -> (tempfile::TempDir, V4FirstAuthorityPublisher) {
   let path = directory.path().join("root-retirement.aeordb");
   let mut file = OpenOptions::new().create_new(true).read(true).write(true).open(path).unwrap();
   let algorithm = HashAlgorithm::Blake3_256;
-  let kv_block_length = initial_block_size() as u64;
+  let kv_block_length = initial_block_size();
   let header = initial_header(algorithm, kv_block_length);
   let slot = encode_database_header_slot(&header).unwrap();
   file.seek(SeekFrom::Start(0)).unwrap();

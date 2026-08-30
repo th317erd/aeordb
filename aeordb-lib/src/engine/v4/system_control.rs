@@ -1151,8 +1151,8 @@ fn validate_root_map_control(body: &[u8], algorithm: HashAlgorithm) -> FormatRes
   let record_count = u32_at(body, 100)?;
   let populated = page_count != 0;
   if populated != (record_count != 0)
-    || populated != !all_zero(&body[104..104 + hash_width])
-    || populated != !all_zero(&body[104 + hash_width..104 + 2 * hash_width])
+    || populated == all_zero(&body[104..104 + hash_width])
+    || populated == all_zero(&body[104 + hash_width..104 + 2 * hash_width])
     || (record_count > 0 && all_zero(&body[104 + 2 * hash_width..104 + 3 * hash_width]))
   {
     return Err(closure_error("legacy_root_map_control_fields", "legacy root-map counts, roots, or digest disagree"));
@@ -1434,7 +1434,7 @@ fn validate_spill_catalog(body: &[u8], algorithm: HashAlgorithm) -> FormatResult
     return Err(amplification_error("spill_catalog_count", count, maximum_count));
   }
   let receipt = &body[44..44 + hash_width];
-  if (state == 3) != !all_zero(receipt) {
+  if (state == 3) == all_zero(receipt) {
     return Err(boolean_error("spill_catalog_receipt_presence", "spill receipt presence disagrees with state"));
   }
   let mut cursor = fixed;

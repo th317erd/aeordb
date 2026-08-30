@@ -953,7 +953,7 @@ fn test_stress_query_many_results() {
   // default debug-mode test suite bounded. Larger crash/write stress lives in
   // scripts/soak.sh S3.
   let file_count = 300u64;
-  let rare_count = (file_count + 9) / 10;
+  let rare_count = file_count.div_ceil(10);
   let common_count = file_count - rare_count;
 
   // Most files have tag "common", every 10th has "rare".

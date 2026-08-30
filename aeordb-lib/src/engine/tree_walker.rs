@@ -24,6 +24,7 @@ pub(crate) trait HistoricalEntrySource {
 }
 
 pub(crate) type HistoricalEntry = (crate::engine::entry_header::EntryHeader, Vec<u8>, Vec<u8>);
+type DirectoryStateMap = HashMap<String, (Vec<u8>, Vec<u8>)>;
 
 impl HistoricalEntrySource for StorageEngine {
   fn hash_algo(&self) -> HashAlgorithm {
@@ -286,6 +287,13 @@ enum PendingDirectoryWork {
   Exit { hash: Vec<u8>, active_charge: u64 },
 }
 
+struct DirectoryVisitState<'state, 'budget> {
+  hash_length: usize,
+  tree: &'state mut VersionTree,
+  pending: &'state mut Vec<PendingDirectoryWork>,
+  control: &'state mut TreeWalkControl<'budget>,
+}
+
 fn walk_directory<S, F>(
   source: &S,
   dir_hash: &[u8],
@@ -352,7 +360,13 @@ where
 
     pending.push(PendingDirectoryWork::Exit { hash: directory.hash.clone(), active_charge });
     if !dir_data.is_empty() {
-      visit_directory_children(source, &directory.path, &dir_data, hash_length, tree, &mut pending, control, path_filter)?;
+      visit_directory_children(
+        source,
+        &directory.path,
+        &dir_data,
+        &mut DirectoryVisitState { hash_length, tree, pending: &mut pending, control },
+        path_filter,
+      )?;
     }
     tree.directories.insert(directory.path, (directory.hash, dir_data));
     let _retained_charge = directory.retained_charge.saturating_add(loaded_charge);
@@ -364,10 +378,7 @@ fn visit_directory_children<S, F>(
   source: &S,
   current_path: &str,
   dir_data: &[u8],
-  hash_length: usize,
-  tree: &mut VersionTree,
-  pending: &mut Vec<PendingDirectoryWork>,
-  control: &mut TreeWalkControl<'_>,
+  state: &mut DirectoryVisitState<'_, '_>,
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
@@ -375,15 +386,15 @@ where
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
   if crate::engine::btree::is_btree_format(dir_data) {
-    visit_btree_children(source, current_path, dir_data, hash_length, tree, pending, control, path_filter)
+    visit_btree_children(source, current_path, dir_data, state, path_filter)
   } else {
     let scratch = scratch_charge(dir_data.len())?;
-    control.reserve(scratch, "flat directory parse admission failed")?;
-    let children = deserialize_child_entries(dir_data, hash_length, 0)?;
+    state.control.reserve(scratch, "flat directory parse admission failed")?;
+    let children = deserialize_child_entries(dir_data, state.hash_length, 0)?;
     for child in &children {
-      process_child(source, current_path, child, hash_length, tree, pending, control, path_filter)?;
+      process_child(source, current_path, child, state, path_filter)?;
     }
-    control.release(scratch, "flat directory parse release failed")
+    state.control.release(scratch, "flat directory parse release failed")
   }
 }
 
@@ -391,10 +402,7 @@ fn visit_btree_children<S, F>(
   source: &S,
   current_path: &str,
   root_data: &[u8],
-  hash_length: usize,
-  tree: &mut VersionTree,
-  pending: &mut Vec<PendingDirectoryWork>,
-  control: &mut TreeWalkControl<'_>,
+  state: &mut DirectoryVisitState<'_, '_>,
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
@@ -404,12 +412,23 @@ where
   let mut node_hashes: Vec<(Vec<u8>, u64)> = Vec::new();
   let mut visited_node_hashes = HashSet::new();
   let mut visited_node_charge = 0u64;
-  process_btree_node(source, current_path, root_data, 0, hash_length, tree, pending, &mut node_hashes, control, path_filter)?;
+  process_btree_node(
+    source,
+    current_path,
+    root_data,
+    0,
+    state.hash_length,
+    state.tree,
+    state.pending,
+    &mut node_hashes,
+    state.control,
+    path_filter,
+  )?;
   while let Some((node_hash, frontier_charge)) = node_hashes.pop() {
-    control.record_work(1)?;
-    control.release(frontier_charge, "B-tree frontier release failed")?;
+    state.control.record_work(1)?;
+    state.control.release(frontier_charge, "B-tree frontier release failed")?;
     if visited_node_hashes.contains(&node_hash) {
-      if control.strict_missing {
+      if state.control.strict_missing {
         return Err(EngineError::CorruptEntry {
           offset: 0,
           reason: format!("B-tree cycle or duplicate node {} under '{}'", hex::encode(&node_hash), current_path),
@@ -418,12 +437,12 @@ where
       continue;
     }
     let seen_charge = collection_charge(0, node_hash.len())?;
-    control.reserve(seen_charge, "B-tree visited-set admission failed")?;
+    state.control.reserve(seen_charge, "B-tree visited-set admission failed")?;
     visited_node_charge = visited_node_charge
       .checked_add(seen_charge)
       .ok_or_else(|| EngineError::ResourceExhausted("B-tree visited-set accounting overflow".to_string()))?;
     visited_node_hashes.insert(node_hash.clone());
-    let Some(((header, _key, node_data), loaded_charge)) = load_historical_entry(source, &node_hash, control)? else {
+    let Some(((header, _key, node_data), loaded_charge)) = load_historical_entry(source, &node_hash, state.control)? else {
       return Err(missing_tree_entry("B-tree node", current_path, &node_hash));
     };
     if header.entry_type != EntryType::DirectoryIndex {
@@ -437,21 +456,21 @@ where
       current_path,
       &node_data,
       header.entry_version,
-      hash_length,
-      tree,
-      pending,
+      state.hash_length,
+      state.tree,
+      state.pending,
       &mut node_hashes,
-      control,
+      state.control,
       path_filter,
     )?;
-    if tree.btree_nodes.contains_key(&node_hash) {
-      control.release(loaded_charge, "shared B-tree node buffer release failed")?;
-    } else {
-      tree.btree_nodes.insert(node_hash, node_data);
+    if let std::collections::hash_map::Entry::Vacant(e) = state.tree.btree_nodes.entry(node_hash) {
+      e.insert(node_data);
       let _retained_charge = loaded_charge;
+    } else {
+      state.control.release(loaded_charge, "shared B-tree node buffer release failed")?;
     }
   }
-  control.release(visited_node_charge, "B-tree visited-set release failed")
+  state.control.release(visited_node_charge, "B-tree visited-set release failed")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -476,7 +495,7 @@ where
   match crate::engine::btree::BTreeNode::deserialize(node_data, hash_length, entry_version)? {
     crate::engine::btree::BTreeNode::Leaf(leaf) => {
       for child in &leaf.entries {
-        process_child(source, current_path, child, hash_length, tree, pending, control, path_filter)?;
+        process_child(source, current_path, child, &mut DirectoryVisitState { hash_length, tree, pending, control }, path_filter)?;
       }
     }
     crate::engine::btree::BTreeNode::Internal(internal) => {
@@ -494,17 +513,14 @@ fn process_child<S, F>(
   source: &S,
   current_path: &str,
   child: &crate::engine::directory_entry::ChildEntry,
-  hash_length: usize,
-  tree: &mut VersionTree,
-  pending: &mut Vec<PendingDirectoryWork>,
-  control: &mut TreeWalkControl<'_>,
+  state: &mut DirectoryVisitState<'_, '_>,
   path_filter: &mut F,
 ) -> EngineResult<()>
 where
   S: HistoricalEntrySource + ?Sized,
   F: FnMut(&str) -> EngineResult<TransferPathSelection>,
 {
-  control.record_work(1)?;
+  state.control.record_work(1)?;
   let path_len = joined_path_len(current_path, child.name.len())?;
   let child_path = join_child_path(current_path, &child.name);
   let selection = path_filter(&child_path)?;
@@ -521,15 +537,19 @@ where
   match child_entry_type {
     EntryType::DirectoryIndex => {
       let charge = collection_charge(path_len, child.hash.len())?;
-      control.reserve(charge, "directory frontier admission failed")?;
-      pending.push(PendingDirectoryWork::Enter(PendingDirectory { hash: child.hash.clone(), path: child_path, retained_charge: charge }));
+      state.control.reserve(charge, "directory frontier admission failed")?;
+      state.pending.push(PendingDirectoryWork::Enter(PendingDirectory {
+        hash: child.hash.clone(),
+        path: child_path,
+        retained_charge: charge,
+      }));
     }
     EntryType::FileRecord => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
-      control.reserve(map_charge, "file tree admission failed")?;
-      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, control)? else {
-        control.release(map_charge, "missing file tree release failed")?;
-        if control.strict_missing {
+      state.control.reserve(map_charge, "file tree admission failed")?;
+      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, state.control)? else {
+        state.control.release(map_charge, "missing file tree release failed")?;
+        if state.control.strict_missing {
           return Err(missing_tree_entry("file", &child_path, &child.hash));
         }
         return Ok(());
@@ -540,29 +560,29 @@ where
           reason: format!("file '{}' resolved to {:?} instead of FileRecord", child_path, header.entry_type),
         });
       }
-      let file_record = FileRecord::deserialize(&value, hash_length, header.entry_version)
+      let file_record = FileRecord::deserialize(&value, state.hash_length, header.entry_version)
         .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("FileRecord '{}' is malformed: {error}", child_path) })?;
-      if control.strict_missing && file_record.path != child_path {
+      if state.control.strict_missing && file_record.path != child_path {
         return Err(EngineError::CorruptEntry {
           offset: 0,
           reason: format!("FileRecord path '{}' does not match traversed path '{}'", file_record.path, child_path),
         });
       }
       for chunk_hash in &file_record.chunk_hashes {
-        if !tree.chunks.contains(chunk_hash) {
+        if !state.tree.chunks.contains(chunk_hash) {
           let charge = collection_charge(0, chunk_hash.len())?;
-          control.reserve(charge, "chunk set admission failed")?;
-          tree.chunks.insert(chunk_hash.clone());
+          state.control.reserve(charge, "chunk set admission failed")?;
+          state.tree.chunks.insert(chunk_hash.clone());
         }
       }
-      tree.files.insert(child_path, (child.hash.clone(), file_record));
+      state.tree.files.insert(child_path, (child.hash.clone(), file_record));
     }
     EntryType::Symlink => {
       let map_charge = collection_charge(path_len, child.hash.len())?;
-      control.reserve(map_charge, "symlink tree admission failed")?;
-      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, control)? else {
-        control.release(map_charge, "missing symlink tree release failed")?;
-        if control.strict_missing {
+      state.control.reserve(map_charge, "symlink tree admission failed")?;
+      let Some(((header, _key, value), _loaded_charge)) = load_historical_entry(source, &child.hash, state.control)? else {
+        state.control.release(map_charge, "missing symlink tree release failed")?;
+        if state.control.strict_missing {
           return Err(missing_tree_entry("symlink", &child_path, &child.hash));
         }
         return Ok(());
@@ -575,13 +595,13 @@ where
       }
       let symlink_record = SymlinkRecord::deserialize(&value, header.entry_version)
         .map_err(|error| EngineError::CorruptEntry { offset: 0, reason: format!("symlink '{}' is malformed: {error}", child_path) })?;
-      if control.strict_missing && symlink_record.path != child_path {
+      if state.control.strict_missing && symlink_record.path != child_path {
         return Err(EngineError::CorruptEntry {
           offset: 0,
           reason: format!("Symlink path '{}' does not match traversed path '{}'", symlink_record.path, child_path),
         });
       }
-      tree.symlinks.insert(child_path, (child.hash.clone(), symlink_record));
+      state.tree.symlinks.insert(child_path, (child.hash.clone(), symlink_record));
     }
     _ => {}
   }
@@ -781,10 +801,10 @@ fn diff_trees_controlled(base: &VersionTree, target: &VersionTree, control: &mut
 /// Find directories that changed between base and target.
 /// Compares raw data (not hash) because directory hashes are path-based.
 fn diff_directories(
-  base: &HashMap<String, (Vec<u8>, Vec<u8>)>,
-  target: &HashMap<String, (Vec<u8>, Vec<u8>)>,
+  base: &DirectoryStateMap,
+  target: &DirectoryStateMap,
   control: &mut TreeWalkControl<'_>,
-) -> EngineResult<HashMap<String, (Vec<u8>, Vec<u8>)>> {
+) -> EngineResult<DirectoryStateMap> {
   let mut changed = HashMap::new();
   for (path, (target_hash, target_data)) in target {
     control.record_work(1)?;

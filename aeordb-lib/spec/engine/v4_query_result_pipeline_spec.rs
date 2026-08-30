@@ -625,12 +625,22 @@ fn expected_groups(fixture: &PipelineFixture, input: &CompiledQueryAggregateInpu
     let tuple = independent_group_tuple(&[&document.updated_at, &document.size]);
     let group = expected.entry(tuple).or_default();
     group.document_count += 1;
-    group.unsigned_values.extend(document.size.values.iter().filter_map(|value| {
-      (value.state == PositionComponentStateV1::Present).then(|| u64::from_le_bytes(value.payload.as_slice().try_into().unwrap()))
-    }));
-    group.signed_values.extend(document.updated_at.values.iter().filter_map(|value| {
-      (value.state == PositionComponentStateV1::Present).then(|| i64::from_le_bytes(value.payload.as_slice().try_into().unwrap()))
-    }));
+    group.unsigned_values.extend(
+      document
+        .size
+        .values
+        .iter()
+        .filter(|&value| value.state == PositionComponentStateV1::Present)
+        .map(|value| u64::from_le_bytes(value.payload.as_slice().try_into().unwrap())),
+    );
+    group.signed_values.extend(
+      document
+        .updated_at
+        .values
+        .iter()
+        .filter(|&value| value.state == PositionComponentStateV1::Present)
+        .map(|value| i64::from_le_bytes(value.payload.as_slice().try_into().unwrap())),
+    );
     aggregate_values_examined += (document.size.values.len() + document.updated_at.values.len()) as u64;
   }
   let total = expected.len();

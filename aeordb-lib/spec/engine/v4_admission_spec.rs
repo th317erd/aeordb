@@ -292,27 +292,27 @@ fn system_family_classification_follows_frozen_specificity_and_unknown_rules() {
     (SystemFamilySubjectV1::Path("/docs/readme.md"), None),
   ];
   for (subject, expected) in cases {
-    let actual = classify_system_family(&read.registry, subject).unwrap();
+    let actual = classify_system_family(read.registry, subject).unwrap();
     assert_eq!(actual.family_id(), expected);
   }
 
-  let unknown = classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/docs/.aeordb-unknown/value")).unwrap();
+  let unknown = classify_system_family(read.registry, SystemFamilySubjectV1::Path("/docs/.aeordb-unknown/value")).unwrap();
   assert_eq!(unknown, SystemFamilyClassificationV1::UnknownProtected);
   assert_eq!(require_complete_system_family(unknown, "logical backup").unwrap_err().code(), "unknown_protected_system_family");
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/docs/")).unwrap_err().code(),
+    classify_system_family(read.registry, SystemFamilySubjectV1::Path("/docs/")).unwrap_err().code(),
     "system_family_matcher_exact_shape"
   );
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/.aeordb-indexes/page.bin")).unwrap().family_id(),
+    classify_system_family(read.registry, SystemFamilySubjectV1::Path("/.aeordb-indexes/page.bin")).unwrap().family_id(),
     Some(0x0060)
   );
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::Path("/.aeordb-logs/index.log")).unwrap().family_id(),
+    classify_system_family(read.registry, SystemFamilySubjectV1::Path("/.aeordb-logs/index.log")).unwrap().family_id(),
     Some(0x0061)
   );
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::EntryType(0xffff)).unwrap(),
+    classify_system_family(read.registry, SystemFamilySubjectV1::EntryType(0xffff)).unwrap(),
     SystemFamilyClassificationV1::Ordinary
   );
   for subject in [
@@ -320,14 +320,14 @@ fn system_family_classification_follows_frozen_specificity_and_unknown_rules() {
     SystemFamilySubjectV1::ControlTag(0xffff),
     SystemFamilySubjectV1::ExternalWorkspaceKind(0xffff),
   ] {
-    assert_eq!(classify_system_family(&read.registry, subject).unwrap(), SystemFamilyClassificationV1::UnknownProtected);
+    assert_eq!(classify_system_family(read.registry, subject).unwrap(), SystemFamilyClassificationV1::UnknownProtected);
   }
   assert_eq!(
-    classify_system_family(&read.registry, SystemFamilySubjectV1::KvKey(b"ordinary-path-key")).unwrap(),
+    classify_system_family(read.registry, SystemFamilySubjectV1::KvKey(b"ordinary-path-key")).unwrap(),
     SystemFamilyClassificationV1::Ordinary
   );
   for malformed in ["relative", "/docs//file", "/docs/../file", "/docs/./file"] {
-    assert!(classify_system_family(&read.registry, SystemFamilySubjectV1::Path(malformed)).is_err());
+    assert!(classify_system_family(read.registry, SystemFamilySubjectV1::Path(malformed)).is_err());
   }
 }
 
