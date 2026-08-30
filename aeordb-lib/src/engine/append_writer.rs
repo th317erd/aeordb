@@ -688,6 +688,14 @@ impl AppendWriter {
     EntryScanner::new_dirty_recovery(file)
   }
 
+  pub(crate) fn scan_entries_dirty_namespace_rollback(
+    &self,
+    memory_coordinator: Arc<crate::engine::memory_coordinator::MemoryCoordinator>,
+  ) -> EngineResult<EntryScanner> {
+    let file = File::open(&self.file_path)?;
+    EntryScanner::new_dirty_namespace_rollback(file, memory_coordinator)
+  }
+
   pub fn file_header(&self) -> &FileHeader {
     &self.file_header
   }

@@ -165,6 +165,19 @@ fn test_register_dedup_same_offset() {
 }
 
 #[test]
+fn registering_overlapping_voids_preserves_one_non_overlapping_union() {
+  let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
+
+  manager.register_void(1000, 500);
+  manager.register_void(1600, 400);
+  manager.register_void(1200, 100);
+  manager.register_void(1400, 300);
+
+  assert_eq!(manager.iter().collect::<Vec<_>>(), vec![(1000, 1000)]);
+  assert_eq!(manager.total_void_space(), 1000, "overlapping GC/recovery evidence must not double-count reusable bytes");
+}
+
+#[test]
 fn test_total_void_space() {
   let mut manager = VoidManager::new(HashAlgorithm::Blake3_256);
 

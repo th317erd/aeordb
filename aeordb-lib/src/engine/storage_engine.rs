@@ -1031,6 +1031,95 @@ fn classify_index_runtime_flush(
 }
 
 impl StorageEngine {
+  fn dirty_recovery_entry_is_rollback_authority(scanned: &crate::engine::entry_scanner::ScannedRebuildEntry) -> EngineResult<bool> {
+    let Some(value) = scanned.value.as_deref() else {
+      return Ok(matches!(scanned.header.entry_type, EntryType::Snapshot | EntryType::Fork));
+    };
+    let algorithm = scanned.header.hash_algo;
+    match scanned.header.entry_type {
+      EntryType::DeletionRecord | EntryType::Snapshot | EntryType::Fork => Ok(true),
+      EntryType::FileRecord => {
+        if let Some(task) = crate::engine::task_queue::validate_task_storage_record(&scanned.key, value) {
+          task?;
+          return Ok(true);
+        }
+        // A complete hash-valid row with malformed namespace metadata is not
+        // safe to destroy or admit into rebuilt authority. Fail startup so an
+        // operator can preserve and diagnose the original evidence.
+        let record = crate::engine::file_record::FileRecord::deserialize(value, algorithm.hash_length(), scanned.header.entry_version)?;
+        Ok(scanned.key == crate::engine::directory_ops::file_path_hash(&record.path, &algorithm)?)
+      }
+      EntryType::DirectoryIndex => {
+        // Every stable directory locator is either the legacy empty root alias
+        // or a hard link containing exactly one content hash. Immutable flat
+        // directory dependencies are stored under the hash of their own body.
+        Ok(scanned.key != crate::engine::directory_ops::directory_content_hash(value, &algorithm)?)
+      }
+      EntryType::Symlink => {
+        let record = crate::engine::symlink_record::SymlinkRecord::deserialize(value, scanned.header.entry_version)?;
+        Ok(scanned.key == crate::engine::symlink_record::symlink_path_hash(&record.path, &algorithm)?)
+      }
+      EntryType::Chunk | EntryType::Void => Ok(false),
+    }
+  }
+
+  fn materialize_dirty_namespace_rollback(&self, expected_count: u64) -> EngineResult<()> {
+    if expected_count == 0 {
+      return Ok(());
+    }
+
+    let mut rewritten = 0u64;
+    let (scan_result, sync_result) = {
+      let mut writer = self.writer.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let selected_frontier = writer.file_header().hot_tail_offset;
+      let scan_result = (|| -> EngineResult<()> {
+        let mut scanner = writer.scan_entries_dirty_namespace_rollback(self.memory_coordinator())?;
+        while let Some(result) = scanner.next_rebuild_entry() {
+          match result {
+            Ok(scanned) => {
+              if scanned.offset >= selected_frontier && Self::dirty_recovery_entry_is_rollback_authority(&scanned)? {
+                writer.write_void_at_nosync(scanned.offset, scanned.header.total_length)?;
+                rewritten = rewritten
+                  .checked_add(1)
+                  .ok_or_else(|| EngineError::ResourceExhausted("dirty namespace rollback entry count overflow".to_string()))?;
+              }
+            }
+            Err(RebuildScanError::DiscardedRecoveryTail { offset, error }) => {
+              tracing::warn!(offset, error = %error, "Dirty namespace rollback stopped at non-authoritative tail residue");
+              break;
+            }
+            Err(RebuildScanError::Fatal(error)) => return Err(error),
+          }
+        }
+        if rewritten != expected_count {
+          return Err(EngineError::PostMutationDurabilityFailure(format!(
+            "dirty namespace rollback preflight selected {expected_count} records but materialized {rewritten}"
+          )));
+        }
+        Ok(())
+      })();
+      let sync_result = if rewritten == 0 { Ok(()) } else { writer.sync() };
+      (scan_result, sync_result)
+    };
+
+    match (scan_result, sync_result) {
+      (Ok(()), Ok(())) => {
+        tracing::warn!(rewritten, "Rolled back namespace authority beyond the selected header frontier");
+        Ok(())
+      }
+      (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(self.record_durability_failure(
+        DurabilityOperation::DataBarrier,
+        "Dirty namespace rollback failed after in-place recovery may have begun",
+        error,
+      )),
+      (Err(error), Err(sync_error)) => Err(self.record_durability_failure(
+        DurabilityOperation::DataBarrier,
+        "Dirty namespace rollback and its recovery barrier both failed",
+        format!("{error}; rollback barrier also failed: {sync_error}"),
+      )),
+    }
+  }
+
   fn initialize_configuration_authority(
     &self,
     command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
@@ -3199,6 +3288,7 @@ impl StorageEngine {
       );
     }
 
+    crate::engine::hot_tail::sort_void_records_by_offset(&mut adjusted);
     adjusted
   }
 
@@ -4208,7 +4298,13 @@ impl StorageEngine {
     let needed = crate::engine::entry_header::EntryHeader::compute_total_length(self.hash_algo, key.len(), value.len())?;
     let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
     let mut voids_changed_via_consume = false;
-    let mut void_manager = if Self::can_reuse_void_for_entry(entry_type) {
+    // V3 has no selected catalog/claim transaction that can atomically replace
+    // one durable Void extent with an in-place entry plus a remainder Void.
+    // A first crash can tear that remainder while the old hot-tail snapshot
+    // still masks it; a later hot-tail publication and crash then exposes an
+    // unframed WAL hole. Keep this path closed until the receipt-backed v4
+    // authority can make reuse crash-atomic across repeated restarts.
+    let mut void_manager = if Self::can_reuse_void_for_entry(entry_type) && kv.transaction_depth == 0 {
       Some(self.void_manager.write().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?)
     } else {
       None
@@ -4330,8 +4426,8 @@ impl StorageEngine {
     Ok(offset)
   }
 
-  fn can_reuse_void_for_entry(entry_type: EntryType) -> bool {
-    matches!(entry_type, EntryType::Chunk)
+  fn can_reuse_void_for_entry(_entry_type: EntryType) -> bool {
+    false
   }
 
   fn take_ready_kv_expansion(kv: &mut DiskKVStore) -> Option<usize> {
@@ -6041,9 +6137,10 @@ impl StorageEngine {
     // workspace spills sorted runs beside the database, so WAL cardinality no
     // longer determines resident memory. Entry chronology remains
     // (timestamp, offset) because GC can reuse lower physical offsets.
-    let (scanned_count, dirty_max_end) = {
+    let (scanned_count, dirty_max_end, rollback_authority_count) = {
       let writer = self.writer.read().map_err(|e| EngineError::IoError(std::io::Error::other(e.to_string())))?;
       let voids = self.void_manager.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+      let selected_frontier = writer.file_header().hot_tail_offset;
       tracing::debug!(
         writer_offset = writer.current_offset(),
         file_path = %writer.file_path().display(),
@@ -6051,7 +6148,7 @@ impl StorageEngine {
         "rebuild_kv: scanning authoritative WAL"
       );
       let mut scanner = match scan_boundary {
-        KvRebuildScanBoundary::PhysicalEof => writer.scan_entries_dirty_recovery()?,
+        KvRebuildScanBoundary::PhysicalEof => writer.scan_entries_dirty_namespace_rollback(self.memory_coordinator())?,
         KvRebuildScanBoundary::SelectedWal => writer.scan_entries_reporting_current_wal(Some(Arc::clone(&self.shutdown_started)))?,
       };
       let scan_start_offset = scanner.current_offset();
@@ -6062,6 +6159,7 @@ impl StorageEngine {
       let mut deletion_count = 0u64;
       let mut corrupt_entry_count = 0u64;
       let mut dirty_max_end = 0u64;
+      let mut rollback_authority_count = 0u64;
       Self::report_startup_progress(
         &progress_callback,
         EngineStartupProgress {
@@ -6088,6 +6186,15 @@ impl StorageEngine {
             dirty_max_end = dirty_max_end.max(entry_end);
             if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
               skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
+            }
+            if scan_boundary == KvRebuildScanBoundary::PhysicalEof
+              && scanned.offset >= selected_frontier
+              && Self::dirty_recovery_entry_is_rollback_authority(&scanned)?
+            {
+              rollback_authority_count = rollback_authority_count
+                .checked_add(1)
+                .ok_or_else(|| EngineError::ResourceExhausted("dirty namespace rollback entry count overflow".to_string()))?;
+              continue;
             }
             if scanned.header.entry_type == EntryType::Void || voids.overlaps_range(scanned.offset, scanned.header.total_length) {
               continue;
@@ -6158,13 +6265,15 @@ impl StorageEngine {
         entries_collected = scanned_count,
         deletion_records = deletion_count,
         corrupt_entries = corrupt_entry_count,
+        rollback_authority_entries = rollback_authority_count,
         skipped_payload_bytes,
         duration_ms = scan_timer.elapsed().as_millis() as u64,
         "rebuild_kv: WAL scan complete"
       );
-      (scanned_count, dirty_max_end)
+      (scanned_count, dirty_max_end, rollback_authority_count)
     };
     // Writer lock released here
+    self.materialize_dirty_namespace_rollback(rollback_authority_count)?;
     rebuild_workspace.finish()?;
     let workspace_record_count = rebuild_workspace.raw_record_count();
     let resolved_count = rebuild_workspace.resolved_record_count()?;
@@ -6962,6 +7071,166 @@ mod tests {
 
   fn test_entry_key(engine: &StorageEngine, label: &[u8]) -> Vec<u8> {
     engine.compute_hash(label).unwrap()
+  }
+
+  fn recovery_entry(
+    entry_type: EntryType,
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+    entry_version: u8,
+  ) -> crate::engine::entry_scanner::ScannedRebuildEntry {
+    let algorithm = HashAlgorithm::Blake3_256;
+    let encoded_value = value.as_deref().unwrap_or_default();
+    let total_length = EntryHeader::compute_total_length(algorithm, key.len(), encoded_value.len()).unwrap();
+    crate::engine::entry_scanner::ScannedRebuildEntry {
+      offset: 4096,
+      header: EntryHeader {
+        entry_version,
+        entry_type,
+        flags: 0,
+        hash_algo: algorithm,
+        compression_algo: CompressionAlgorithm::None,
+        encryption_algo: 0,
+        key_length: key.len() as u32,
+        value_length: encoded_value.len() as u32,
+        timestamp: 1,
+        total_length,
+        hash: EntryHeader::compute_hash(entry_type, &key, encoded_value, algorithm).unwrap(),
+      },
+      key,
+      value,
+      _retained_value_memory: None,
+    }
+  }
+
+  #[test]
+  fn dirty_recovery_classifier_covers_every_namespace_locator_family() {
+    let algorithm = HashAlgorithm::Blake3_256;
+    let file_record = crate::engine::file_record::FileRecord {
+      path: "/classified.txt".to_string(),
+      content_type: Some("text/plain".to_string()),
+      total_size: 0,
+      created_at: 1,
+      updated_at: 1,
+      metadata: Vec::new(),
+      content_hash: vec![0xA1; algorithm.hash_length()],
+      chunk_hashes: Vec::new(),
+    };
+    let file_value = file_record.serialize(algorithm.hash_length()).unwrap();
+    let file_path_key = crate::engine::directory_ops::file_path_hash(&file_record.path, &algorithm).unwrap();
+    let file_identity_key = crate::engine::directory_ops::file_identity_hash(
+      &file_record.path,
+      file_record.content_type.as_deref(),
+      &file_record.chunk_hashes,
+      &algorithm,
+    )
+    .unwrap();
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::FileRecord,
+      file_path_key,
+      Some(file_value.clone()),
+      1,
+    ))
+    .unwrap());
+    assert!(!StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::FileRecord,
+      file_identity_key,
+      Some(file_value),
+      1,
+    ))
+    .unwrap());
+
+    let directory_value = Vec::new();
+    let directory_content_key = crate::engine::directory_ops::directory_content_hash(&directory_value, &algorithm).unwrap();
+    let directory_path_key = crate::engine::directory_ops::directory_path_hash("/classified", &algorithm).unwrap();
+    assert!(!StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::DirectoryIndex,
+      directory_content_key,
+      Some(directory_value.clone()),
+      0,
+    ))
+    .unwrap());
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::DirectoryIndex,
+      directory_path_key,
+      Some(directory_value),
+      0,
+    ))
+    .unwrap());
+
+    let symlink = crate::engine::symlink_record::SymlinkRecord::new("/classified-link".to_string(), "/target".to_string());
+    let symlink_value = symlink.serialize().unwrap();
+    let symlink_path_key = crate::engine::symlink_record::symlink_path_hash(&symlink.path, &algorithm).unwrap();
+    let symlink_content_key = crate::engine::symlink_record::symlink_content_hash(&symlink_value, &algorithm).unwrap();
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::Symlink,
+      symlink_path_key,
+      Some(symlink_value.clone()),
+      0,
+    ))
+    .unwrap());
+    assert!(!StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::Symlink,
+      symlink_content_key,
+      Some(symlink_value),
+      0,
+    ))
+    .unwrap());
+
+    let task = crate::engine::task_queue::TaskRecord {
+      id: "task-classifier".to_string(),
+      task_type: "proof".to_string(),
+      args: serde_json::json!({"bounded": true}),
+      origin: crate::engine::task_queue::TaskOriginV1::Direct,
+      status: crate::engine::task_queue::TaskStatus::Pending,
+      created_at: 1,
+      started_at: None,
+      completed_at: None,
+      error: None,
+      checkpoint: None,
+      retry_at: None,
+      deferral_count: 0,
+    };
+    let task_value = serde_json::to_vec(&task).unwrap();
+    let task_key = blake3::hash(format!("::aeordb:task:{}", task.id).as_bytes()).as_bytes().to_vec();
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::FileRecord,
+      task_key,
+      Some(task_value),
+      0,
+    ))
+    .unwrap());
+
+    for entry_type in [EntryType::DeletionRecord, EntryType::Snapshot, EntryType::Fork] {
+      assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+        entry_type,
+        vec![entry_type.to_u8(); algorithm.hash_length()],
+        (entry_type == EntryType::DeletionRecord).then(Vec::new),
+        0,
+      ))
+      .unwrap());
+    }
+    assert!(!StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::Chunk,
+      vec![0xC1; algorithm.hash_length()],
+      None,
+      0,
+    ))
+    .unwrap());
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::FileRecord,
+      vec![0xF1; algorithm.hash_length()],
+      Some(b"ambiguous malformed FileRecord".to_vec()),
+      0,
+    ))
+    .is_err());
+    assert!(StorageEngine::dirty_recovery_entry_is_rollback_authority(&recovery_entry(
+      EntryType::Symlink,
+      vec![0xF2; algorithm.hash_length()],
+      Some(b"ambiguous malformed Symlink".to_vec()),
+      0,
+    ))
+    .is_err());
   }
 
   #[test]

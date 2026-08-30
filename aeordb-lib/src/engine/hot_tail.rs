@@ -76,6 +76,14 @@ pub struct VoidRecord {
   pub size: u32,
 }
 
+/// Restore canonical offset order after a layout transform changes only a
+/// subset of reusable ranges. Hot-tail verification and startup consumers
+/// require monotonically ordered records even when every range is otherwise
+/// valid and non-overlapping.
+pub(crate) fn sort_void_records_by_offset(voids: &mut [VoidRecord]) {
+  voids.sort_unstable_by_key(|void| void.offset);
+}
+
 /// Combined hot tail payload: the in-flight KV writes that haven't been
 /// flushed to bucket pages yet, plus the current `void_manager` snapshot.
 #[derive(Debug, Default, Clone)]

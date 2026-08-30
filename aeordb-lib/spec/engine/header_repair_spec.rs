@@ -262,6 +262,54 @@ fn repair_refuses_to_hide_corrupt_durable_wal_behind_a_recovered_hot_tail_bounda
 }
 
 #[test]
+fn repair_discards_only_a_truncated_terminal_wal_entry() {
+  let (_directory, path) = make_temp_db();
+  {
+    let engine = StorageEngine::create(&path).unwrap();
+    let operations = DirectoryOps::new(&engine);
+    let context = RequestContext::system();
+    for index in 0..40 {
+      operations
+        .store_file_buffered(
+          &context,
+          &format!("/truncated/data-{index:04}.txt"),
+          format!("payload-{index:04}").as_bytes(),
+          Some("text/plain"),
+        )
+        .unwrap();
+    }
+    engine.shutdown().unwrap();
+  }
+
+  let original_header = {
+    let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+    read_active_header(&mut file).unwrap().0
+  };
+  let truncated_length = original_header.hot_tail_offset.checked_sub(8).expect("fixture WAL is longer than eight bytes");
+  {
+    let file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(truncated_length).unwrap();
+    file.sync_all().unwrap();
+  }
+
+  assert!(StorageEngine::open(&path).is_err(), "selected header must reject a WAL frontier beyond physical EOF");
+  let report = repair_header_in_place(&path).expect("a terminal partial WAL entry is recoverable by discarding only that entry");
+  assert!(report.repaired);
+  assert!(report.hot_tail_past_eof.is_some());
+
+  let repaired_header = {
+    let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+    read_active_header(&mut file).unwrap().0
+  };
+  assert!(repaired_header.hot_tail_offset < truncated_length, "repair must select the start of the partial terminal entry");
+
+  let reopened = StorageEngine::open(&path).unwrap();
+  let operations = DirectoryOps::new(&reopened);
+  let surviving = (0..39).filter(|index| operations.read_file_buffered(&format!("/truncated/data-{index:04}.txt")).is_ok()).count();
+  assert!(surviving >= 35, "repair should preserve the verified WAL prefix; only {surviving} earlier files survived");
+}
+
+#[test]
 fn header_crc_catches_single_byte_corruption_in_one_slot() {
   // A/B double-buffer: corrupting ONE slot is recoverable — the engine
   // reads the other slot. inspect_header (which reads slot A only) reports

@@ -75,6 +75,67 @@ fn legacy_soak_builds_are_job_bounded_and_diagnostics_use_owned_scratch() {
 }
 
 #[test]
+fn legacy_soak_propagates_diagnostic_failures_to_process_status() {
+  let soak = read_script("scripts/soak.sh");
+
+  assert_eq!(soak.matches("verify_status=0").count(), 2, "both crash modes must capture a failing verifier exit status");
+  assert_eq!(soak.matches("|| verify_status=$?").count(), 2, "both crash modes must retain the verifier exit status");
+  assert_eq!(
+    soak.matches("SOAK_FAILURES=$((SOAK_FAILURES + 1))").count(),
+    2,
+    "each crash mode must accumulate failed iterations instead of printing and forgetting them"
+  );
+  assert!(soak.contains("finish_chaos_soak"), "the soak harness must centralize its final pass/fail exit contract");
+  assert!(soak.contains("if [ \"$SOAK_FAILURES\" -gt 0 ]; then"), "retained diagnostic failures must produce a failing process status");
+  assert!(soak.contains("if ! finish_chaos_soak \"S2\" \"$iteration\"; then"));
+  assert!(soak.contains("if ! finish_chaos_soak \"S3\" \"$iteration\"; then"));
+  assert_eq!(soak.matches("dangling_records=$(get_field \"Dangling records\")").count(), 2);
+  assert_eq!(soak.matches("btree_issues=$(get_field \"B-tree issues\")").count(), 2);
+  assert_eq!(soak.matches("verification_errors=$(count_report_lines \"  Verification error:\")").count(), 2);
+  assert_eq!(soak.matches("stale_dir_keys=$(count_report_lines \"Stale dir_key entries (\")").count(), 2);
+  assert_eq!(
+    soak.matches("if verify_report_is_acceptable; then").count(),
+    2,
+    "both crash modes must reject every verifier issue except an explicitly counted torn terminal header"
+  );
+}
+
+#[test]
+fn legacy_soak_checkpoint_intents_are_durable_before_database_mutation() {
+  let worker = read_script("aeordb-cli/src/bin/soak-worker.rs");
+  let append_start = worker.find("fn append_checkpoint(").expect("soak worker must centralize checkpoint publication");
+  let append_end =
+    worker[append_start..].find("\n#[cfg(test)]").map(|offset| append_start + offset).expect("checkpoint helper boundary changed");
+  let append = &worker[append_start..append_end];
+
+  assert!(append.contains("writer.flush()"), "checkpoint publication must flush userspace buffers");
+  assert!(
+    append.contains("sync_file_data_native"),
+    "checkpoint publication must cross a native durability barrier before a pending delete can be followed by a database commit"
+  );
+}
+
+#[test]
+fn aggressive_soak_waits_for_the_initial_durable_startup_checkpoint() {
+  let soak = read_script("scripts/soak.sh");
+  let spawn = soak.find("\"$CRASH_WORKER\" \\").expect("S3 worker spawn is present");
+  let recorder = soak[spawn..].find("start_pmap_recorder").map(|offset| spawn + offset).expect("S3 pmap recorder is present");
+  let startup_wait = soak[spawn..]
+    .find("wait_for_s3_startup_checkpoint \"$worker_pid\"")
+    .map(|offset| spawn + offset)
+    .expect("S3 must await the worker's durable startup checkpoint before its first SIGKILL window");
+
+  assert!(startup_wait < recorder, "the readiness gate must run before the first crash timer/recorder starts");
+  assert!(soak.contains("^# worker up mode=stress$"), "the harness must consume the exact durable marker emitted after engine open/create");
+  assert!(soak.contains("AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS"), "the startup wait must have an operator-visible finite bound");
+  assert!(soak.contains("current_markers=${current_markers:-0}"), "a not-yet-created checkpoint must normalize to zero current markers");
+  assert!(
+    soak.contains("startup_markers_before=${startup_markers_before:-0}"),
+    "a missing checkpoint before the first spawn must normalize to zero prior markers"
+  );
+}
+
+#[test]
 fn runtime_metrics_acquire_writer_before_kv_snapshot_and_share_one_engine_path() {
   let metrics_pulse = read_script("aeordb-lib/src/engine/metrics_pulse.rs");
   let portal_routes = read_script("aeordb-lib/src/server/portal_routes.rs");

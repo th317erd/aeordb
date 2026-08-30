@@ -123,7 +123,11 @@ fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
     if line.starts_with('#') || line.is_empty() {
       continue;
     }
-    if let Some(path) = line.strip_prefix("-\t") {
+    if let Some(path) = line.strip_prefix("!\t") {
+      entries.remove(path);
+    } else if let Some(path) = line.strip_prefix("?\t") {
+      entries.remove(path);
+    } else if let Some(path) = line.strip_prefix("-\t") {
       entries.remove(path);
     } else if let Some(rest) = line.strip_prefix("+\t") {
       if let Some((path, body)) = rest.split_once('\t') {
@@ -134,6 +138,30 @@ fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
     }
   }
   entries.into_iter().collect()
+}
+
+#[test]
+fn pending_delete_checkpoint_is_not_a_required_survivor() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("pending-delete.tsv");
+  std::fs::write(&checkpoint, "/data/file-00000051.txt\tbody\n?\t/data/file-00000051.txt\n").unwrap();
+
+  assert!(
+    read_checkpoint(checkpoint.to_str().unwrap()).is_empty(),
+    "a delete intent must leave the path outside the must-survive oracle before the database mutation can commit"
+  );
+}
+
+#[test]
+fn pending_write_checkpoint_drops_a_stale_exact_body_expectation() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("pending-write.tsv");
+  std::fs::write(&checkpoint, "/stress/state/doc-021.json\told body\n!\t/stress/state/doc-021.json\n").unwrap();
+
+  assert!(
+    read_checkpoint(checkpoint.to_str().unwrap()).is_empty(),
+    "an overwrite intent must retire the prior exact-body oracle before the newer database value can commit"
+  );
 }
 
 /// Open the DB after a crash, falling back to the repair path if a normal

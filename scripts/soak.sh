@@ -20,6 +20,7 @@
 #   AEORDB_SOAK_S2_KILL_MAX_SECS (optional)
 #   AEORDB_SOAK_S3_KILL_MIN_SECS (default: 5)  only used by s3; seconds between SIGKILLs
 #   AEORDB_SOAK_S3_KILL_MAX_SECS (default: 30)
+#   AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS (default: 120) initial durable-ready wait
 #   AEORDB_SOAK_SCRATCH    (default: ~/.cache/codex/aeordb-tests/soak-scratch)
 #   CARGO_BUILD_JOBS       (default: 4)
 #
@@ -46,8 +47,10 @@ S2_KILL_MIN_SECS="${AEORDB_SOAK_S2_KILL_MIN_SECS:-}"
 S2_KILL_MAX_SECS="${AEORDB_SOAK_S2_KILL_MAX_SECS:-}"
 S3_KILL_MIN_SECS="${AEORDB_SOAK_S3_KILL_MIN_SECS:-5}"
 S3_KILL_MAX_SECS="${AEORDB_SOAK_S3_KILL_MAX_SECS:-30}"
+S3_STARTUP_TIMEOUT_SECS="${AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS:-120}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 SCRATCH_ROOT="${AEORDB_SOAK_SCRATCH:-${XDG_CACHE_HOME:-$HOME/.cache}/codex/aeordb-tests/soak-scratch}"
+SOAK_FAILURES=0
 mkdir -p "$SCRATCH_ROOT"
 
 cd "$(dirname "$0")/.."
@@ -116,6 +119,66 @@ copy_db_for_diagnostic() {
     return 0
   fi
   cp -a "$src" "$dest"
+}
+
+finish_chaos_soak() {
+  local mode="$1"
+  local iterations="$2"
+  echo
+  if [ "$SOAK_FAILURES" -gt 0 ]; then
+    echo "$mode FAILED. $SOAK_FAILURES of $iterations kill cycles reported retained diagnostic failures."
+    return 1
+  fi
+  echo "$mode complete. $iterations kill cycles executed."
+}
+
+count_report_lines() {
+  local prefix="$1"
+  awk -v prefix="$prefix" 'index($0, prefix) == 1 { count++ } END { print count + 0 }' "$verify_log"
+}
+
+verify_report_is_acceptable() {
+  [ -n "$corrupt_hash" ] && [ -n "$corrupt_header" ] && [ -n "$stale" ] \
+    && [ -n "$missing_kv" ] && [ -n "$missing_children" ] && [ -n "$dangling_records" ] \
+    && [ -n "$btree_issues" ] && [ -n "$unlisted_files" ] && [ -n "$broken_snapshots" ] \
+    && [ -n "$invalid_offsets" ] && [ -n "$invalid_voids" ] \
+    && [ "$corrupt_hash" = "0" ] && [ "$stale" = "0" ] && [ "$missing_kv" = "0" ] \
+    && [ "$missing_children" = "0" ] && [ "$dangling_records" = "0" ] && [ "$btree_issues" = "0" ] \
+    && [ "$unlisted_files" = "0" ] && [ "$broken_snapshots" = "0" ] \
+    && [ "$invalid_offsets" = "0" ] && [ "$invalid_voids" = "0" ] \
+    && [ "$verification_errors" = "0" ] && [ "$stale_dir_keys" = "0" ] || return 1
+
+  if [ "$verify_status" = "0" ]; then
+    return 0
+  fi
+  [ "$corrupt_header" -gt 0 ]
+}
+
+wait_for_s3_startup_checkpoint() {
+  local target_pid="$1"
+  local prior_markers="$2"
+  local deadline=$(( $(date +%s) + S3_STARTUP_TIMEOUT_SECS ))
+  local current_markers
+
+  while true; do
+    current_markers=$(grep -c '^# worker up mode=stress$' "$CHECKPOINT" 2>/dev/null || true)
+    current_markers=${current_markers:-0}
+    if [ "$current_markers" -gt "$prior_markers" ]; then
+      echo "[$(date +%T)] initial worker published its durable startup checkpoint"
+      return 0
+    fi
+    if ! kill -0 "$target_pid" 2>/dev/null; then
+      wait "$target_pid" 2>/dev/null
+      local status=$?
+      echo "S3 worker exited with status $status before publishing its initial durable startup checkpoint" >&2
+      return 1
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "S3 worker did not publish its initial durable startup checkpoint within ${S3_STARTUP_TIMEOUT_SECS}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 case "$MODE" in
@@ -229,7 +292,8 @@ case "$MODE" in
       #   - unlisted_files > 0     (file exists but parent doesn't list it)
       #   - broken_snapshots > 0   (snapshot root unreachable)
       verify_log="$(mktemp -p "$SCRATCH_ROOT" verify.XXXXXX)"
-      ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1
+      verify_status=0
+      ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1 || verify_status=$?
       # Parse the report. `awk` prints the numeric value in each line.
       get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
       corrupt_hash=$(get_field "Corrupt hash")
@@ -237,27 +301,31 @@ case "$MODE" in
       stale=$(get_field "Stale entries")
       missing_kv=$(get_field "Missing entries")
       missing_children=$(get_field "Missing children")
+      dangling_records=$(get_field "Dangling records")
+      btree_issues=$(get_field "B-tree issues")
       unlisted_files=$(get_field "Unlisted files")
       broken_snapshots=$(get_field "Broken snapshots")
       invalid_offsets=$(get_field "Invalid offsets")
       invalid_voids=$(get_field "Invalid voids")
-      if [ "${corrupt_hash:-0}" = "0" ] && [ "${stale:-0}" = "0" ] \
-        && [ "${missing_kv:-0}" = "0" ] && [ "${missing_children:-0}" = "0" ] \
-        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ] \
-        && [ "${invalid_offsets:-0}" = "0" ] && [ "${invalid_voids:-0}" = "0" ]; then
-        echo "[$(date +%T)] iteration $iteration: verify OK (corrupt_header=${corrupt_header:-0} — expected SIGKILL tail)"
+      verification_errors=$(count_report_lines "  Verification error:")
+      stale_dir_keys=$(count_report_lines "Stale dir_key entries (")
+      if verify_report_is_acceptable; then
+        echo "[$(date +%T)] iteration $iteration: verify OK (status=$verify_status, corrupt_header=$corrupt_header — expected SIGKILL tail)"
         rm -f "$verify_log"
       else
         echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
-        echo "  corrupt_hash=${corrupt_hash:-?} stale=${stale:-?} missing_kv=${missing_kv:-?} \
-missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} \
-invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
+        echo "  status=$verify_status corrupt_hash=${corrupt_hash:-?} corrupt_header=${corrupt_header:-?} stale=${stale:-?} \
+missing_kv=${missing_kv:-?} missing_children=${missing_children:-?} dangling=${dangling_records:-?} btree=${btree_issues:-?} \
+unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} invalid_offsets=${invalid_offsets:-?} \
+invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} stale_dir_keys=${stale_dir_keys:-?}"
         echo "  (continuing soak; collect failures at the end)"
+        SOAK_FAILURES=$((SOAK_FAILURES + 1))
       fi
     done
 
-    echo
-    echo "S2 complete. $iteration kill cycles executed."
+    if ! finish_chaos_soak "S2" "$iteration"; then
+      exit 1
+    fi
     echo "  Run: $0 summarize ${DB}.metrics.tsv"
     ;;
 
@@ -265,6 +333,10 @@ invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
     mkdir -p "$LOG_DIR"
     : > "$PMAP_LOG"
     CHECKPOINT="${AEORDB_SOAK_CHECKPOINT:-${DB}.crash.checkpoint.tsv}"
+    if ! [[ "$S3_STARTUP_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]]; then
+      echo "AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS must be a positive integer" >&2
+      exit 2
+    fi
     if [ "$S3_KILL_MAX_SECS" -lt "$S3_KILL_MIN_SECS" ]; then
       S3_KILL_MAX_SECS="$S3_KILL_MIN_SECS"
     fi
@@ -290,11 +362,23 @@ invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
       [ "$slot" -le 0 ] && break
 
       echo "[$(date +%T)] iteration $iteration: spawning stress worker for ${slot}s"
+      startup_markers_before=0
+      if [ "$iteration" -eq 1 ]; then
+        startup_markers_before=$(grep -c '^# worker up mode=stress$' "$CHECKPOINT" 2>/dev/null || true)
+        startup_markers_before=${startup_markers_before:-0}
+      fi
       "$CRASH_WORKER" \
         --database "$DB" \
         --checkpoint "$CHECKPOINT" \
         --mode stress >> "$WORKER_LOG" 2>&1 &
       worker_pid=$!
+      if [ "$iteration" -eq 1 ] && ! wait_for_s3_startup_checkpoint "$worker_pid" "$startup_markers_before"; then
+        if kill -0 "$worker_pid" 2>/dev/null; then
+          kill -TERM "$worker_pid" 2>/dev/null
+        fi
+        wait "$worker_pid" 2>/dev/null
+        exit 1
+      fi
       sleep 1
       pmap_pid=$(start_pmap_recorder "$worker_pid")
 
@@ -320,27 +404,30 @@ invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
       diag_ok=1
 
       verify_log="$diag_dir/verify.log"
-      ./target/release/aeordb verify -D "$verify_db" > "$verify_log" 2>&1
+      verify_status=0
+      ./target/release/aeordb verify -D "$verify_db" > "$verify_log" 2>&1 || verify_status=$?
       get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
       corrupt_hash=$(get_field "Corrupt hash")
       corrupt_header=$(get_field "Corrupt header")
       stale=$(get_field "Stale entries")
       missing_kv=$(get_field "Missing entries")
       missing_children=$(get_field "Missing children")
+      dangling_records=$(get_field "Dangling records")
+      btree_issues=$(get_field "B-tree issues")
       unlisted_files=$(get_field "Unlisted files")
       broken_snapshots=$(get_field "Broken snapshots")
       invalid_offsets=$(get_field "Invalid offsets")
       invalid_voids=$(get_field "Invalid voids")
-      if [ "${corrupt_hash:-0}" = "0" ] && [ "${stale:-0}" = "0" ] \
-        && [ "${missing_kv:-0}" = "0" ] && [ "${missing_children:-0}" = "0" ] \
-        && [ "${unlisted_files:-0}" = "0" ] && [ "${broken_snapshots:-0}" = "0" ] \
-        && [ "${invalid_offsets:-0}" = "0" ] && [ "${invalid_voids:-0}" = "0" ]; then
-        echo "[$(date +%T)] iteration $iteration: verify OK (corrupt_header=${corrupt_header:-0} — expected SIGKILL tail)"
+      verification_errors=$(count_report_lines "  Verification error:")
+      stale_dir_keys=$(count_report_lines "Stale dir_key entries (")
+      if verify_report_is_acceptable; then
+        echo "[$(date +%T)] iteration $iteration: verify OK (status=$verify_status, corrupt_header=$corrupt_header — expected SIGKILL tail)"
       else
         echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
-        echo "  corrupt_hash=${corrupt_hash:-?} stale=${stale:-?} missing_kv=${missing_kv:-?} \
-missing_children=${missing_children:-?} unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} \
-invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
+        echo "  status=$verify_status corrupt_hash=${corrupt_hash:-?} corrupt_header=${corrupt_header:-?} stale=${stale:-?} \
+missing_kv=${missing_kv:-?} missing_children=${missing_children:-?} dangling=${dangling_records:-?} btree=${btree_issues:-?} \
+unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} invalid_offsets=${invalid_offsets:-?} \
+invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} stale_dir_keys=${stale_dir_keys:-?}"
         diag_ok=0
       fi
 
@@ -356,11 +443,13 @@ invalid_offsets=${invalid_offsets:-?} invalid_voids=${invalid_voids:-?}"
         rm -rf "$diag_dir"
       else
         echo "[$(date +%T)] iteration $iteration: preserved diagnostic copies in $diag_dir"
+        SOAK_FAILURES=$((SOAK_FAILURES + 1))
       fi
     done
 
-    echo
-    echo "S3 complete. $iteration kill cycles executed."
+    if ! finish_chaos_soak "S3" "$iteration"; then
+      exit 1
+    fi
     echo "  Checkpoint: $CHECKPOINT"
     ;;
 

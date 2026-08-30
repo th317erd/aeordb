@@ -928,11 +928,14 @@ fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
 // --diff-checkpoint=<tsv>
 // ---------------------------------------------------------------------------
 // Differential check the soak-worker's checkpoint TSV against the DB. The
-// worker writes `+\t<path>` for every successful store and `-\t<path>` for
-// every successful delete, flushing after each line. After a SIGKILL, the
-// checkpoint is the *intent*; the DB is the *outcome*. If a path is in the
-// reconstructed "committed" set but missing from the DB, that's silent
-// data loss the engine claimed to deliver.
+// worker writes `+\t<path>` for every successful store, `!\t<path>` before an
+// overwrite may commit, `?\t<path>` before a delete may commit, and `-\t<path>`
+// after a successful delete, flushing after each group. After a SIGKILL, the
+// checkpoint is the *must-survive intent*; the DB is the *outcome*. If a path
+// remains in the reconstructed "committed" set but is missing from the DB,
+// that's silent data loss the engine claimed to deliver. Pending writes and
+// deletes conservatively retire the prior expectation because the checkpoint
+// and database cannot be committed atomically.
 //
 // Reports four counts:
 //   total_committed         — set after replaying + and - lines (intent)
@@ -956,11 +959,14 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
     }
   };
 
-  // Reconstruct the worker's view: + adds, - removes. Match `load_checkpoint`
-  // in aeordb-cli/src/bin/soak-worker.rs.
+  // Reconstruct the worker's view: + adds, ! excludes before overwrite, ?
+  // excludes before delete, and - confirms removal. Match `load_checkpoint` in
+  // aeordb-cli/src/bin/soak-worker.rs.
   let mut committed: HashSet<String> = HashSet::new();
   let mut lines = 0u64;
   let mut adds = 0u64;
+  let mut pending_writes = 0u64;
+  let mut pending_deletes = 0u64;
   let mut dels = 0u64;
   for line in BufReader::new(file).lines() {
     let line = match line {
@@ -975,6 +981,12 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
       let path = rest.split_once('\t').map(|(path, _)| path).unwrap_or(rest);
       committed.insert(path.to_string());
       adds += 1;
+    } else if let Some(rest) = line.strip_prefix("!\t") {
+      committed.remove(rest);
+      pending_writes += 1;
+    } else if let Some(rest) = line.strip_prefix("?\t") {
+      committed.remove(rest);
+      pending_deletes += 1;
     } else if let Some(rest) = line.strip_prefix("-\t") {
       committed.remove(rest);
       dels += 1;
@@ -1048,7 +1060,7 @@ fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
 
   println!("=== diff-checkpoint ===");
   println!("checkpoint:              {}", tsv_path);
-  println!("lines parsed:            {}  (+: {}, -: {})", lines, adds, dels);
+  println!("lines parsed:            {}  (+: {}, !: {}, ?: {}, -: {})", lines, adds, pending_writes, pending_deletes, dels);
   println!("committed intent (net):  {}", committed.len());
   println!("present in db:           {}", present);
   println!("MISSING from db:         {}  {}", missing.len(), if missing.is_empty() { "" } else { "← SILENT DATA LOSS" });

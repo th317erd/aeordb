@@ -6,10 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::memory_coordinator::{
+  AdmissionClass, CriticalMemoryPurpose, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation,
+};
 
 const MAX_RECORDED_SKIPPED_REGIONS: usize = 1024;
 const VERIFY_IO_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_DELETION_RECORD_BYTES: usize = 2 + u16::MAX as usize + 8 + 2 + u16::MAX as usize;
+const MAX_DIRTY_ROLLBACK_AUTHORITY_BYTES: usize = 64 * 1024 * 1024;
+const DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_MULTIPLIER: u64 = 3;
+const DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_OVERHEAD: u64 = 512;
 
 #[derive(Debug)]
 pub struct ScannedEntry {
@@ -19,12 +25,12 @@ pub struct ScannedEntry {
   pub value: Vec<u8>,
 }
 
-#[derive(Debug)]
 pub(crate) struct ScannedRebuildEntry {
   pub offset: u64,
   pub header: EntryHeader,
   pub key: Vec<u8>,
   pub value: Option<Vec<u8>>,
+  pub(crate) _retained_value_memory: Option<MemoryReservation>,
 }
 
 #[derive(Debug)]
@@ -57,6 +63,19 @@ pub struct EntryScanner {
   /// stop at the first discontinuity so stale hot-tail bytes cannot be
   /// resynchronized into false WAL records.
   recovery_tail_start: Option<u64>,
+  /// Retain bounded namespace-authority values in the recovery tail so dirty
+  /// startup can distinguish immutable dependencies from stable locators.
+  /// Ordinary rebuild and verification scans remain streaming-only.
+  retain_recovery_authority_values: bool,
+  /// Process-wide admission for the retained value and its decoded locator
+  /// form. The reservation moves with each yielded rebuild record so callers
+  /// cannot outlive its accounting.
+  recovery_authority_memory: Option<Arc<MemoryCoordinator>>,
+  /// Set only when the most recent bounded scan error proves that the file
+  /// ended inside the final syntactically valid entry. Header repair uses this
+  /// distinction to discard a torn terminal write without hiding corruption
+  /// in a complete durable entry.
+  last_error_was_terminal_truncation: bool,
   cancellation: Option<Arc<AtomicBool>>,
 }
 
@@ -95,6 +114,13 @@ impl EntryScanner {
   /// torn-write garbage at the tail and recover the real entries beyond it.
   pub fn new_dirty_recovery(file: File) -> EngineResult<Self> {
     Self::new_internal(file, true, true)
+  }
+
+  pub(crate) fn new_dirty_namespace_rollback(file: File, memory_coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
+    let mut scanner = Self::new_internal(file, true, true)?;
+    scanner.retain_recovery_authority_values = true;
+    scanner.recovery_authority_memory = Some(memory_coordinator);
+    Ok(scanner)
   }
 
   fn new_internal(mut file: File, report_errors: bool, dirty_recovery: bool) -> EngineResult<Self> {
@@ -160,6 +186,9 @@ impl EntryScanner {
       skipped_region_count: 0,
       skipped_region_bytes: 0,
       recovery_tail_start,
+      retain_recovery_authority_values: false,
+      recovery_authority_memory: None,
+      last_error_was_terminal_truncation: false,
       cancellation: None,
     })
   }
@@ -318,6 +347,18 @@ impl EntryScanner {
     self.file_length
   }
 
+  pub(crate) fn last_error_was_terminal_truncation(&self) -> bool {
+    self.last_error_was_terminal_truncation
+  }
+
+  fn entry_extends_past_boundary(&self, header: &EntryHeader, entry_offset: u64) -> bool {
+    let expected_total = EntryHeader::FIXED_HEADER_SIZE as u64
+      + header.hash_algo.hash_length() as u64
+      + u64::from(header.key_length)
+      + u64::from(header.value_length);
+    u64::from(header.total_length) == expected_total && entry_offset.saturating_add(expected_total) > self.file_length
+  }
+
   /// Scan one entry for KV rebuild. Chunk and void payloads are skipped
   /// because rebuild only needs the key/header metadata for those large
   /// records. Mutable metadata records are still read and hash-verified.
@@ -352,6 +393,7 @@ impl EntryScanner {
       }
 
       let entry_offset = self.current_offset;
+      self.last_error_was_terminal_truncation = false;
       if let Err(error) = self.file.seek(SeekFrom::Start(entry_offset)) {
         return Some(Err(error.into()));
       }
@@ -359,6 +401,7 @@ impl EntryScanner {
       let header = match EntryHeader::deserialize(&mut self.file) {
         Ok(header) => header,
         Err(EngineError::UnexpectedEof) => {
+          self.last_error_was_terminal_truncation = true;
           let length = self.file_length.saturating_sub(entry_offset) as usize;
           self.record_skipped_region(entry_offset, length);
           self.current_offset = self.file_length;
@@ -383,6 +426,7 @@ impl EntryScanner {
       let entry_end = match Self::validated_entry_end(&header, entry_offset, self.file_length) {
         Ok(entry_end) => entry_end,
         Err(error) => {
+          self.last_error_was_terminal_truncation = self.entry_extends_past_boundary(&header, entry_offset);
           if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
             return Some(Err(recovery_error));
           }
@@ -433,22 +477,68 @@ impl EntryScanner {
           return Some(Err(error.into()));
         }
         self.current_offset = entry_end;
-        return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: None }));
+        return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: None, _retained_value_memory: None }));
       }
 
-      let retain_value = header.entry_type == EntryType::DeletionRecord;
+      let recovery_authority_candidate = self.retain_recovery_authority_values
+        && self.is_recovery_tail_offset(entry_offset)
+        && matches!(
+          header.entry_type,
+          EntryType::FileRecord
+            | EntryType::DirectoryIndex
+            | EntryType::DeletionRecord
+            | EntryType::Snapshot
+            | EntryType::Fork
+            | EntryType::Symlink
+        );
+      let retain_value = header.entry_type == EntryType::DeletionRecord
+        || (recovery_authority_candidate
+          && match header.entry_type {
+            EntryType::FileRecord | EntryType::Symlink => true,
+            EntryType::DirectoryIndex => header.value_length as usize <= header.hash_algo.hash_length(),
+            _ => false,
+          });
       if retain_value && header.value_length as usize > MAX_DELETION_RECORD_BYTES {
-        self.stop_after_recovery_tail_error(entry_offset, entry_end);
-        return Some(Err(EngineError::CorruptEntry {
-          offset: entry_offset,
-          reason: format!("deletion record value length {} exceeds format maximum {}", header.value_length, MAX_DELETION_RECORD_BYTES),
-        }));
+        if header.entry_type == EntryType::DeletionRecord {
+          self.stop_after_recovery_tail_error(entry_offset, entry_end);
+          return Some(Err(EngineError::CorruptEntry {
+            offset: entry_offset,
+            reason: format!("deletion record value length {} exceeds format maximum {}", header.value_length, MAX_DELETION_RECORD_BYTES),
+          }));
+        }
+        if header.value_length as usize > MAX_DIRTY_ROLLBACK_AUTHORITY_BYTES {
+          return Some(Err(EngineError::ResourceExhausted(format!(
+            "dirty-recovery authority value length {} exceeds the bounded {}-byte rollback classifier",
+            header.value_length, MAX_DIRTY_ROLLBACK_AUTHORITY_BYTES
+          ))));
+        }
       }
+      let retained_value_memory = if recovery_authority_candidate && retain_value {
+        let charge = u64::from(header.value_length)
+          .checked_mul(DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_MULTIPLIER)
+          .and_then(|bytes| bytes.checked_add(DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_OVERHEAD))
+          .ok_or_else(|| EngineError::ResourceExhausted("dirty-recovery authority memory estimate overflow".to_string()));
+        let charge = match charge {
+          Ok(charge) => charge,
+          Err(error) => return Some(Err(error)),
+        };
+        let Some(coordinator) = self.recovery_authority_memory.as_deref() else {
+          return Some(Err(EngineError::ResourceExhausted(
+            "dirty-recovery authority retention has no process memory coordinator".to_string(),
+          )));
+        };
+        match coordinator.reserve(MemoryOwner::Repair, charge, AdmissionClass::Critical(CriticalMemoryPurpose::BoundedRecovery)) {
+          Ok(reservation) => Some(reservation),
+          Err(error) => return Some(Err(dirty_recovery_authority_memory_error(error))),
+        }
+      } else {
+        None
+      };
       let mut retained = if retain_value {
         let mut value = Vec::new();
         if let Err(error) = value.try_reserve_exact(header.value_length as usize) {
           self.current_offset = entry_end;
-          return Some(Err(EngineError::ResourceExhausted(format!("verification deletion-record allocation failed: {error}"))));
+          return Some(Err(EngineError::ResourceExhausted(format!("bounded retained-value allocation failed: {error}"))));
         }
         Some(value)
       } else {
@@ -489,8 +579,26 @@ impl EntryScanner {
       }
 
       self.current_offset = entry_end;
-      return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: retained }));
+      return Some(Ok(ScannedRebuildEntry {
+        offset: entry_offset,
+        header,
+        key,
+        value: retained,
+        _retained_value_memory: retained_value_memory,
+      }));
     }
+  }
+}
+
+fn dirty_recovery_authority_memory_error(error: MemoryCoordinatorError) -> EngineError {
+  match error {
+    MemoryCoordinatorError::PolicyUnavailable
+    | MemoryCoordinatorError::HardLimitExceeded { .. }
+    | MemoryCoordinatorError::SoftPressureDeferred { .. }
+    | MemoryCoordinatorError::EmergencyReserveExceeded { .. } => {
+      EngineError::ResourceExhausted(format!("dirty-recovery authority memory admission failed: {error}"))
+    }
+    _ => EngineError::IoError(std::io::Error::other(format!("dirty-recovery authority memory admission failed: {error}"))),
   }
 }
 
@@ -612,6 +720,10 @@ mod entry_scanner_internal_spec;
 mod tests {
   use super::*;
   use crate::engine::append_writer::AppendWriter;
+  use crate::engine::directory_ops::{DirectoryOps, file_path_hash};
+  use crate::engine::file_record::FileRecord;
+  use crate::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
+  use crate::engine::{RequestContext, StorageEngine};
 
   #[test]
   fn bounded_verification_scan_honors_preexisting_cancellation() {
@@ -624,6 +736,81 @@ mod tests {
     let mut scanner = EntryScanner::new_reporting_to(File::open(path).unwrap(), writer.current_offset(), Some(cancellation)).unwrap();
 
     assert!(matches!(scanner.next_verify_entry(), Some(Err(EngineError::ShuttingDown))));
+  }
+
+  #[test]
+  fn dirty_recovery_authority_buffer_refuses_unowned_memory_and_releases_the_coordinator() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("dirty-recovery-memory.aeordb");
+    let engine = StorageEngine::create(path.to_str().unwrap()).unwrap();
+    DirectoryOps::new(&engine).ensure_root_directory(&RequestContext::system()).unwrap();
+    engine.shutdown().unwrap();
+    drop(engine);
+
+    let mut writer = AppendWriter::open(&path).unwrap();
+    let selected_frontier = writer.file_header().hot_tail_offset;
+    writer.set_offset(selected_frontier);
+    let record = FileRecord {
+      path: "/uncommitted-memory-proof.txt".to_string(),
+      content_type: Some("text/plain".to_string()),
+      total_size: 0,
+      created_at: 1,
+      updated_at: 1,
+      metadata: Vec::new(),
+      content_hash: Vec::new(),
+      chunk_hashes: Vec::new(),
+    };
+    let value = record.serialize_for_version(writer.file_header().hash_algo.hash_length(), 0).unwrap();
+    let key = file_path_hash(&record.path, &writer.file_header().hash_algo).unwrap();
+    writer
+      .append_entry_with_compression_and_version(EntryType::FileRecord, &key, &value, 0, crate::engine::CompressionAlgorithm::None, 0)
+      .unwrap();
+    writer.sync().unwrap();
+    drop(writer);
+
+    let coordinator = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(8 * 1024 * 1024, 16 * 1024 * 1024, 1, 1).unwrap()));
+    let writer = AppendWriter::open(&path).unwrap();
+    let mut scanner = writer.scan_entries_dirty_namespace_rollback(Arc::clone(&coordinator)).unwrap();
+    let mut saw_refusal = false;
+    while let Some(result) = scanner.next_rebuild_entry() {
+      match result {
+        Err(RebuildScanError::Fatal(EngineError::ResourceExhausted(message))) => {
+          assert!(message.contains("dirty-recovery authority memory admission failed"));
+          saw_refusal = true;
+          break;
+        }
+        Err(error) => panic!("unexpected dirty-recovery scan error: {error:?}"),
+        Ok(_) => {}
+      }
+    }
+    assert!(saw_refusal, "dirty recovery retained an authority value without memory admission");
+    drop(scanner);
+
+    let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+    assert_eq!(owner.active_reservations, 0);
+    assert_eq!(owner.reserved_bytes, 0);
+    assert_eq!(owner.rejections, 1);
+
+    let coordinator = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(8 * 1024 * 1024, 16 * 1024 * 1024, 1, 4 * 1024 * 1024).unwrap()));
+    let writer = AppendWriter::open(&path).unwrap();
+    let mut scanner = writer.scan_entries_dirty_namespace_rollback(Arc::clone(&coordinator)).unwrap();
+    let retained = loop {
+      let scanned = scanner.next_rebuild_entry().expect("scanner reached the uncommitted authority").expect("authority scan succeeds");
+      if scanned.offset == selected_frontier {
+        break scanned;
+      }
+    };
+    assert_eq!(retained.value.as_deref(), Some(value.as_slice()));
+    let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+    assert_eq!(owner.active_reservations, 1);
+    assert_eq!(
+      owner.reserved_bytes,
+      value.len() as u64 * DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_MULTIPLIER + DIRTY_ROLLBACK_AUTHORITY_ALLOCATION_OVERHEAD
+    );
+    drop(retained);
+    let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::Repair).unwrap().clone();
+    assert_eq!(owner.active_reservations, 0);
+    assert_eq!(owner.reserved_bytes, 0);
   }
 
   #[test]

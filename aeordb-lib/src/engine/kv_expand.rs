@@ -379,6 +379,7 @@ fn relocate_hot_tail_payload(
       adjusted_voids.push(VoidRecord { offset: void.offset, size: void.size });
     }
   }
+  crate::engine::hot_tail::sort_void_records_by_offset(&mut adjusted_voids);
   payload.voids = adjusted_voids;
   Ok(payload)
 }
@@ -400,3 +401,7 @@ fn zero_region(file: &mut std::fs::File, offset: u64, length: u64) -> EngineResu
   }
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/kv_expand_internal_spec.rs"]
+mod kv_expand_internal_spec;

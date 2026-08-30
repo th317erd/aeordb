@@ -59,18 +59,55 @@ impl VoidManager {
   /// (for metrics + fragmentation analysis) but won't be returned by
   /// `find_void` because no entry would fit.
   ///
-  /// **Deduplicates on the offset key.** Registering the same offset twice
-  /// is a no-op as long as the size matches. Re-registering an offset with a
-  /// different size updates the entry — used when voids merge or split.
+  /// **Normalizes the reusable-space union.** Overlapping and adjacent ranges
+  /// are coalesced before they reach either index, so recovery and a later GC
+  /// pass cannot publish the same bytes more than once. Unions larger than the
+  /// on-disk `u32` length field are retained as adjacent non-overlapping rows.
   pub fn register_void(&mut self, offset: u64, size: u32) {
     if size < MINIMUM_VOID_SIZE {
       return;
     }
-    if let Some(&existing_size) = self.by_offset.get(&offset) {
-      if existing_size == size {
-        return; // exact duplicate
-      }
-      // Different size at same offset — remove the old size-index entry.
+
+    let Some(mut union_end) = offset.checked_add(size as u64) else {
+      // Keep impossible legacy evidence visible to validation and metrics;
+      // the allocator already refuses to consume an overflowing extent.
+      self.insert_exact(offset, size);
+      return;
+    };
+    let mut union_start = offset;
+
+    loop {
+      let predecessor = self.by_offset.range(..=union_start).next_back().and_then(|(&existing_offset, &existing_size)| {
+        let existing_end = existing_offset.checked_add(existing_size as u64)?;
+        (existing_end >= union_start).then_some((existing_offset, existing_size, existing_end))
+      });
+      let overlap = match predecessor {
+        Some(predecessor) => Some(predecessor),
+        None => self.by_offset.range(union_start..=union_end).next().and_then(|(&existing_offset, &existing_size)| {
+          let existing_end = existing_offset.checked_add(existing_size as u64)?;
+          (existing_offset <= union_end).then_some((existing_offset, existing_size, existing_end))
+        }),
+      };
+      let Some((existing_offset, _existing_size, existing_end)) = overlap else {
+        break;
+      };
+      self.remove_void(existing_offset);
+      union_start = union_start.min(existing_offset);
+      union_end = union_end.max(existing_end);
+    }
+
+    let mut cursor = union_start;
+    let mut remaining = union_end.saturating_sub(union_start);
+    while remaining > 0 {
+      let chunk = remaining.min(u32::MAX as u64) as u32;
+      self.insert_exact(cursor, chunk);
+      cursor = cursor.saturating_add(chunk as u64);
+      remaining -= chunk as u64;
+    }
+  }
+
+  fn insert_exact(&mut self, offset: u64, size: u32) {
+    if let Some(existing_size) = self.by_offset.insert(offset, size) {
       if let Some(set) = self.by_size.get_mut(&existing_size) {
         set.remove(&offset);
         if set.is_empty() {
@@ -78,7 +115,6 @@ impl VoidManager {
         }
       }
     }
-    self.by_offset.insert(offset, size);
     self.by_size.entry(size).or_default().insert(offset);
   }
 

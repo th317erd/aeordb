@@ -1426,6 +1426,14 @@
       - [x] Publish migration/operator/bot documentation and precise supersession/incorporation markers for stale plans.
       - [x] Eliminate the repository-wide strict-Clippy backlog without suppressions or weakened lint policy.
       - [ ] Run and publish the final broad, native, crash/soak, resource, and real-world repository qualification.
+        - [x] Reproduce and repair dirty-startup replay of stable locators and deletion records beyond the selected header frontier.
+        - [x] Repair KV-expansion void-snapshot ordering exposed by the fresh short-S3 crash campaign.
+        - [x] Rerun focused/adjacent/release-crash and fresh short-S3 gates after the recovery repair.
+        - [x] Fail closed on complete malformed rollback-authority metadata and shrink the reviewed error-squelch inventory without adding suppression debt.
+        - [x] Make aggressive S3 wait for the first durable worker-start checkpoint so its crash window cannot interrupt an unacknowledged database creation.
+        - [x] Disable unjournaled direct Chunk reuse after repeated crashes proved a torn remainder can outlive the selected Void snapshot.
+        - [x] Reconcile legacy direct-reuse regressions with the no-reuse contract while preserving chronology and KV-expansion relocation proof.
+        - [ ] Commit and push the coherent qualification-found recovery fixes and evidence.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
@@ -1448,8 +1456,8 @@
 - [x] Mask clean-startup KV page entries covered by durable hot-tail void records.
 - [x] Isolate the S3 checkpoint/visibility failure for `/stress/batch-merge/doc-035.json`: copied evidence has checkpoint state for the file, but the final path-key WAL entry is not recoverable from the DB image.
 - [x] Add focused regression coverage for dirty rebuild chronology when newer entries are written into reused lower offsets.
-- [x] Restrict reusable void consumption to chunk payload entries so mutable path/index records append instead of landing in reclaimed low offsets.
-- [x] Add focused regression coverage that mutable/index entries do not consume reusable voids while chunks still can.
+- [x] Initially restrict reusable void consumption to chunk payload entries; superseded by the P9 repeated-crash proof that disables all unjournaled v3 consumption.
+- [x] Preserve focused mutable/index no-reuse coverage and extend it to direct chunks until receipt-backed v4 allocation authority exists.
 - [x] Add S2 second-level kill windows and optional scratch DB/directory arguments to `scripts/soak.sh`.
 - [x] Run focused crash/stress soak validation on throwaway `/tmp/codex` databases.
 - [x] Run final focused cargo checks with timeouts after the crash-atomicity/visibility fixes.

@@ -333,6 +333,9 @@ fn recover_terminal_v3_hot_tail_offset(file: &std::fs::File, file_size: u64, has
     match result {
       Ok(_) => {}
       Err(entry_error @ EngineError::CorruptEntry { offset, .. }) => {
+        if scanner.last_error_was_terminal_truncation() && scanner.current_offset() == file_size {
+          return Ok(offset);
+        }
         let mut hot_tail_reader = file.try_clone()?;
         match crate::engine::hot_tail::visit_hot_tail_voids(&mut hot_tail_reader, offset, hash_length, None, |_index, _void| Ok(())) {
           Ok(_) => {

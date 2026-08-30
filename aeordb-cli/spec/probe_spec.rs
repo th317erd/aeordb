@@ -127,6 +127,38 @@ fn probe_command_supports_explicit_growth_stats_flag() {
 }
 
 #[test]
+fn checkpoint_probe_excludes_a_pending_delete_from_required_survivors() {
+  let temp = tempfile::tempdir().expect("tempdir");
+  let db_path = temp.path().join("probe-pending-delete.aeordb");
+  let checkpoint = temp.path().join("pending-delete.tsv");
+  let db_path_str = db_path.to_str().unwrap();
+
+  {
+    let engine = create_engine_for_storage(db_path_str);
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&RequestContext::system(), "/docs/a.txt", b"body", Some("text/plain")).expect("store file");
+    ops.store_file_buffered(&RequestContext::system(), "/docs/b.txt", b"body", Some("text/plain")).expect("store file");
+    engine.shutdown().expect("shutdown engine");
+  }
+  std::fs::write(&checkpoint, "+\t/docs/a.txt\n?\t/docs/a.txt\n+\t/docs/b.txt\n!\t/docs/b.txt\n").unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
+    .args(["probe", "-D", db_path_str, "--diff-checkpoint", checkpoint.to_str().unwrap()])
+    .output()
+    .expect("run checkpoint probe");
+  assert!(
+    output.status.success(),
+    "probe failed: status={:?}\nstdout={}\nstderr={}",
+    output.status.code(),
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr),
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(stdout.contains("committed intent (net):  0"), "stdout was:\n{stdout}");
+  assert!(stdout.contains("MISSING from db:         0"), "stdout was:\n{stdout}");
+}
+
+#[test]
 fn probe_command_supports_explicit_wal_tail_bytes_without_valid_database() {
   let temp = tempfile::tempdir().expect("tempdir");
   let db_path = temp.path().join("not-a-real-db.aeordb");

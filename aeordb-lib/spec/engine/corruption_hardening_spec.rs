@@ -14,12 +14,15 @@ use aeordb::engine::kv_stages::stage_params;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK};
 use aeordb::engine::lost_found;
 use aeordb::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
-use aeordb::engine::storage_engine::StorageEngine;
+use aeordb::engine::storage_engine::{StorageEngine, TransactionGuard};
+use aeordb::engine::task_queue::TaskQueue;
 use aeordb::engine::verify;
-use aeordb::engine::{EntryType, RequestContext, ENTRY_MAGIC, file_path_hash};
+use aeordb::engine::version_manager::VersionManager;
+use aeordb::engine::{BufferedFile, EntryType, RequestContext, ENTRY_MAGIC, file_path_hash};
 use aeordb::engine::file_record::FileRecord;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 /// Create a fresh test database and return the engine + temp dir.
 fn create_test_db() -> (StorageEngine, tempfile::TempDir) {
@@ -59,6 +62,22 @@ fn file_size(path: &str) -> u64 {
 fn active_header(db_path: &str) -> aeordb::engine::file_header::FileHeader {
   let mut file = OpenOptions::new().read(true).open(db_path).unwrap();
   read_active_header(&mut file).unwrap().0
+}
+
+fn capture_header_region(db_path: &std::path::Path) -> Vec<u8> {
+  let mut bytes = vec![0u8; HEADER_REGION_SIZE];
+  let mut file = OpenOptions::new().read(true).open(db_path).unwrap();
+  file.read_exact(&mut bytes).unwrap();
+  bytes
+}
+
+fn crash_copy_with_header(db_path: &std::path::Path, crash_path: &std::path::Path, selected_header_region: &[u8]) {
+  assert_eq!(selected_header_region.len(), HEADER_REGION_SIZE);
+  std::fs::copy(db_path, crash_path).unwrap();
+  let mut file = OpenOptions::new().read(true).write(true).open(crash_path).unwrap();
+  file.seek(SeekFrom::Start(0)).unwrap();
+  file.write_all(selected_header_region).unwrap();
+  file.sync_all().unwrap();
 }
 
 fn first_non_empty_kv_page_offset(db_path: &str) -> u64 {
@@ -812,32 +831,39 @@ fn durable_missing_hot_tail_marker_recovers_partially_rewritten_kv_on_reopen() {
 }
 
 #[test]
-fn rebuild_kv_preserves_newer_entry_written_into_reused_lower_offset() {
-  let (engine, _temp) = create_test_db();
+fn rebuild_kv_preserves_newer_entry_at_lower_physical_offset() {
+  let (engine, temp) = create_test_db();
   let hash_length = engine.hash_algo().hash_length();
 
   let filler_key = vec![0xE1; hash_length];
   let target_key = vec![0xA7; hash_length];
 
   let low_offset = engine.store_entry(EntryType::Chunk, &filler_key, &[0x11; 96]).unwrap();
-  let low_length = engine.read_entry_header_at(low_offset).unwrap().total_length;
   let old_offset = engine.store_entry(EntryType::Chunk, &target_key, b"old-visible-value").unwrap();
-  assert!(old_offset > low_offset, "setup should place the old target value after the reusable low slot");
+  assert!(old_offset > low_offset, "setup should place the old target value after the lower physical slot");
+  let db_path = temp.path().join("test.aeordb");
+  engine.shutdown().unwrap();
+  drop(engine);
 
-  engine.write_void_at(low_offset, low_length).unwrap();
-  let reused_offset = engine.store_entry(EntryType::Chunk, &target_key, b"new-visible-value").unwrap();
-  assert_eq!(reused_offset, low_offset, "setup should write the newer target value into the lower reused void");
+  // Model a future receipt-authorized relocation without exercising the
+  // currently forbidden v3 allocator path. Matching the replaced entry's
+  // length preserves physical framing while AppendWriter supplies a newer
+  // chronology timestamp at the lower offset.
+  let new_value = vec![0x22; 96];
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  writer.write_entry_at(low_offset, EntryType::Chunk, &target_key, &new_value).unwrap();
+  drop(writer);
 
-  let before_rebuild = engine.get_entry(&target_key).unwrap().unwrap();
-  assert_eq!(before_rebuild.2, b"new-visible-value");
+  let engine = StorageEngine::open(db_path.to_str().unwrap()).unwrap();
 
   engine.rebuild_kv().unwrap();
 
   let after_rebuild = engine.get_entry(&target_key).unwrap().unwrap();
   assert_eq!(
-    after_rebuild.2, b"new-visible-value",
-    "dirty KV rebuild must use entry chronology, not WAL offset order, because GC can reuse lower offsets for newer entries"
+    after_rebuild.2, new_value,
+    "KV rebuild must use entry chronology, not physical offset order, so future receipt-authorized relocation cannot resurrect an older value"
   );
+  assert!(engine.get_entry(&filler_key).unwrap().is_none(), "rebuild must discard the locator whose physical entry was replaced");
 }
 
 #[test]
@@ -1010,7 +1036,7 @@ fn mutable_index_entries_do_not_consume_reusable_voids() {
 }
 
 #[test]
-fn chunk_entries_can_consume_reusable_voids() {
+fn chunk_entries_do_not_consume_unjournaled_reusable_voids() {
   let (engine, _temp) = create_test_db();
 
   let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x44, 256);
@@ -1018,11 +1044,54 @@ fn chunk_entries_can_consume_reusable_voids() {
 
   let (new_offset, _new_size) = store_raw_chunk_entry(&engine, 0x55, 64);
 
-  assert_eq!(new_offset, void_offset, "Chunk entries are content-addressed payloads and may reuse reclaimed void space");
+  assert_ne!(
+    new_offset, void_offset,
+    "v3 has no selected catalog/claim transaction that can make an in-place Chunk plus remainder Void crash-atomic"
+  );
 }
 
 #[test]
-fn reusable_void_split_materializes_a_parseable_remainder() {
+fn namespace_transaction_chunks_do_not_consume_reusable_voids() {
+  let (engine, _temp) = create_test_db();
+  let old_key = vec![0x45; engine.hash_algo().hash_length()];
+  let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x45, 256);
+  engine.remove_kv_entry(&old_key).unwrap();
+  engine.write_void_at(void_offset, void_size).unwrap();
+
+  let transaction = TransactionGuard::new(&engine).unwrap();
+  let (new_offset, _new_size) = store_raw_chunk_entry(&engine, 0x46, 64);
+
+  assert_ne!(
+    new_offset, void_offset,
+    "a transaction that can append later WAL records must not tear reusable space before replacing the selected hot-tail authority"
+  );
+  transaction.commit().unwrap();
+}
+
+#[test]
+fn direct_chunk_append_is_recoverable_without_clean_shutdown() {
+  let (engine, temp) = create_test_db();
+  let old_key = vec![0x47; engine.hash_algo().hash_length()];
+  let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x47, 256);
+  engine.remove_kv_entry(&old_key).unwrap();
+  engine.write_void_at(void_offset, void_size).unwrap();
+
+  let new_key = vec![0x48; engine.hash_algo().hash_length()];
+  let new_value = vec![0xD4; 64];
+  let new_offset = engine.store_entry(EntryType::Chunk, &new_key, &new_value).unwrap();
+  assert_ne!(new_offset, void_offset, "a directly stored Chunk must append until receipt-backed reusable-space authority exists");
+
+  let database = temp.path().join("test.aeordb");
+  let crash_copy = temp.path().join("direct-reuse-crash-copy.aeordb");
+  std::fs::copy(&database, &crash_copy).unwrap();
+
+  let recovered = StorageEngine::open(crash_copy.to_str().unwrap()).expect("the returned reusable write must already be crash-recoverable");
+  assert_eq!(recovered.get_entry(&new_key).unwrap().unwrap().2, new_value);
+  assert!(recovered.get_entry(&old_key).unwrap().is_none(), "the reclaimed key must not resurrect from durable KV pages");
+}
+
+#[test]
+fn reusable_void_with_encodable_remainder_is_preserved_and_write_appends() {
   let (engine, temp) = create_test_db();
   let old_key = vec![0x61; engine.hash_algo().hash_length()];
   let (void_offset, void_size) = store_raw_chunk_entry(&engine, 0x61, 512);
@@ -1033,13 +1102,12 @@ fn reusable_void_split_materializes_a_parseable_remainder() {
   let new_value = vec![0xA6; 128];
   let needed = aeordb::engine::entry_header::EntryHeader::compute_total_length(engine.hash_algo(), new_key.len(), new_value.len()).unwrap();
   let new_offset = engine.store_entry(EntryType::Chunk, &new_key, &new_value).unwrap();
-  assert_eq!(new_offset, void_offset);
   let remainder_size = void_size - needed;
   assert!(remainder_size >= aeordb::engine::void_manager::MINIMUM_USEFUL_VOID_SIZE);
-
-  let remainder = engine.read_entry_header_at(void_offset + needed as u64).unwrap();
-  assert_eq!(remainder.entry_type, EntryType::Void);
-  assert_eq!(remainder.total_length, remainder_size);
+  assert_ne!(new_offset, void_offset, "v3 must not split reusable space without receipt-backed allocation authority");
+  let preserved = engine.read_entry_header_at(void_offset).unwrap();
+  assert_eq!(preserved.entry_type, EntryType::Void);
+  assert_eq!(preserved.total_length, void_size);
 
   let db_path = temp.path().join("test.aeordb");
   let db_str = db_path.to_str().unwrap().to_string();
@@ -1565,7 +1633,7 @@ fn targeted_btree_repair_preserves_symlinks_and_implied_child_directories() {
 }
 
 #[test]
-fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
+fn kv_expansion_relocates_and_preserves_reusable_voids_from_growth_zone() {
   let (db_str, _temp) = raw_test_db();
   let header = active_header(&db_str);
   let old_wal_start = header.kv_block_offset + header.kv_block_length;
@@ -1576,6 +1644,8 @@ fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
   engine.write_void_at(void_offset, void_size).unwrap();
 
   let (_filler_offset, _filler_size) = store_raw_directory_entry(&engine, 0x22, 600 * 1024);
+  let (retained_void_offset, retained_void_size) = store_raw_directory_entry(&engine, 0x2A, 0);
+  engine.write_void_at(retained_void_offset, retained_void_size).unwrap();
   let (sentinel_offset, sentinel_size) = store_raw_directory_entry(&engine, 0x33, 2048);
   let expected_relocated_void_offset = sentinel_offset + sentinel_size as u64;
 
@@ -1593,21 +1663,37 @@ fn kv_expansion_relocates_reusable_voids_from_growth_zone() {
     hot_tail::read_hot_tail_checked(&mut db_file, expanded_header.hot_tail_offset, expanded_header.hash_algo.hash_length())
       .expect("expanded DB should advertise a valid hot tail");
   assert!(expanded_hot_tail.writes.is_empty(), "expanded KV pages should not leave stale pre-expansion writes in the hot tail");
+  assert_eq!(
+    expanded_hot_tail.voids,
+    vec![
+      VoidRecord { offset: retained_void_offset, size: retained_void_size },
+      VoidRecord { offset: expected_relocated_void_offset, size: void_size },
+    ],
+    "relocating a low growth-zone void past a retained high void must republish the snapshot in offset order"
+  );
 
   let (replacement_offset, _replacement_size) = store_raw_chunk_entry(&engine, 0x44, 64);
 
   assert_ne!(replacement_offset, void_offset, "post-expansion writes must not reuse the old reserved void offset");
-  assert_eq!(
+  assert_ne!(
     replacement_offset, expected_relocated_void_offset,
-    "post-expansion writes should reuse the relocated copy of the growth-zone void"
+    "v3 must preserve the relocated extent until receipt-backed allocation authority can consume it"
   );
-  assert!(replacement_offset >= new_wal_start, "relocated void should be in the post-expansion WAL region");
+  assert!(replacement_offset >= new_wal_start, "post-expansion append should remain in the WAL region");
+  let relocated = engine.read_entry_header_at(expected_relocated_void_offset).unwrap();
+  assert_eq!(relocated.entry_type, EntryType::Void);
+  assert_eq!(relocated.total_length, void_size);
 
   let report = verify::verify(&engine, &db_str);
   assert!(
     report.invalid_kv_offsets.is_empty(),
     "KV expansion should not leave live KV pointers inside the reserved block: {:?}",
     report.invalid_kv_offsets
+  );
+  assert!(
+    report.invalid_hot_tail_voids.is_empty(),
+    "KV expansion must leave a monotonically ordered, non-overlapping reusable-space snapshot: {:?}",
+    report.invalid_hot_tail_voids
   );
 }
 
@@ -1980,6 +2066,182 @@ fn dirty_recovery_accepts_only_a_contiguous_verified_tail_after_the_durable_fron
   );
   let report = verify::verify_checked(&reopened, &db_str).unwrap();
   assert!(!report.has_issues(), "dirty recovery must truncate stale tail residue at the last contiguous verified entry: {report:?}");
+}
+
+#[test]
+fn dirty_recovery_rolls_back_uncommitted_namespace_locators_to_the_selected_head() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let crash_path = temp.path().join("uncommitted-locators.aeordb");
+
+  ops.store_file_buffered(&ctx, "/stable.txt", b"old authority", Some("text/plain")).unwrap();
+  let selected_head = engine.head_hash().unwrap();
+  let selected_header = capture_header_region(&db_path);
+  let stable_key = file_path_hash("/stable.txt", &engine.hash_algo()).unwrap();
+  let selected_stable_locator = engine.get_entry_verified(&stable_key).unwrap().unwrap();
+
+  ops
+    .store_files_buffered_batch(
+      &ctx,
+      vec![
+        BufferedFile {
+          path: "/stable.txt".to_string(),
+          data: b"uncommitted replacement".to_vec(),
+          content_type: Some("text/plain".to_string()),
+        },
+        BufferedFile {
+          path: "/new/deep.txt".to_string(),
+          data: b"uncommitted creation".to_vec(),
+          content_type: Some("text/plain".to_string()),
+        },
+      ],
+    )
+    .unwrap();
+  crash_copy_with_header(&db_path, &crash_path, &selected_header);
+
+  let recovered = StorageEngine::open(crash_path.to_str().unwrap()).unwrap();
+  let recovered_ops = DirectoryOps::new(&recovered);
+  assert_eq!(recovered.head_hash().unwrap(), selected_head, "dirty recovery must retain the selected namespace root");
+  assert_eq!(recovered_ops.read_file_buffered("/stable.txt").unwrap(), b"old authority");
+  assert!(
+    matches!(recovered_ops.read_file_buffered("/new/deep.txt"), Err(aeordb::engine::EngineError::NotFound(_))),
+    "a file created beyond the selected commit frontier must not become visible"
+  );
+
+  let recovered_stable_locator = recovered.get_entry_verified(&stable_key).unwrap().unwrap();
+  assert_eq!(recovered_stable_locator.0.entry_type, EntryType::FileRecord);
+  assert_eq!(recovered_stable_locator.2, selected_stable_locator.2, "the stable path locator must match the selected HEAD");
+  let new_file_key = file_path_hash("/new/deep.txt", &recovered.hash_algo()).unwrap();
+  let new_directory_key = directory_path_hash("/new", &recovered.hash_algo()).unwrap();
+  assert!(recovered.get_entry(&new_file_key).unwrap().is_none(), "uncommitted file locator survived dirty recovery");
+  assert!(recovered.get_entry(&new_directory_key).unwrap().is_none(), "uncommitted directory locator survived dirty recovery");
+
+  let report = verify::verify_checked(&recovered, crash_path.to_str().unwrap()).unwrap();
+  assert!(!report.has_issues(), "selected-HEAD rollback must leave a clean database: {report:?}");
+}
+
+#[test]
+fn dirty_recovery_rolls_back_an_uncommitted_directory_deletion() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let crash_path = temp.path().join("uncommitted-directory-delete.aeordb");
+
+  ops.create_directory(&ctx, "/doomed").unwrap();
+  let selected_head = engine.head_hash().unwrap();
+  let selected_header = capture_header_region(&db_path);
+  let directory_key = directory_path_hash("/doomed", &engine.hash_algo()).unwrap();
+  let selected_directory_locator = engine.get_entry_verified(&directory_key).unwrap().unwrap();
+
+  ops.delete_directory(&ctx, "/doomed").unwrap();
+  crash_copy_with_header(&db_path, &crash_path, &selected_header);
+
+  let recovered = StorageEngine::open(crash_path.to_str().unwrap()).unwrap();
+  let recovered_ops = DirectoryOps::new(&recovered);
+  assert_eq!(recovered.head_hash().unwrap(), selected_head, "dirty recovery must retain the selected pre-delete namespace root");
+  assert!(recovered_ops.list_directory("/doomed").unwrap().is_empty(), "the selected empty directory must remain readable");
+  let recovered_directory_locator = recovered.get_entry_verified(&directory_key).unwrap().unwrap();
+  assert_eq!(recovered_directory_locator.0.entry_type, EntryType::DirectoryIndex);
+  assert_eq!(
+    recovered_directory_locator.2, selected_directory_locator.2,
+    "the directory locator retired by an uncommitted deletion must be restored"
+  );
+
+  let report = verify::verify_checked(&recovered, crash_path.to_str().unwrap()).unwrap();
+  assert!(!report.has_issues(), "uncommitted deletion rollback must leave a clean database: {report:?}");
+}
+
+#[test]
+fn dirty_recovery_rolls_back_uncommitted_snapshot_fork_and_task_locators() {
+  for authority in ["snapshot", "fork", "task"] {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join(format!("{authority}.aeordb"));
+    let crash_path = temp.path().join(format!("{authority}-crash.aeordb"));
+    let engine = Arc::new(StorageEngine::create(db_path.to_str().unwrap()).unwrap());
+    DirectoryOps::new(&engine).ensure_root_directory(&RequestContext::system()).unwrap();
+    let selected_header = capture_header_region(&db_path);
+
+    let task_id = match authority {
+      "snapshot" => {
+        VersionManager::new(&engine)
+          .create_snapshot(&RequestContext::system(), "uncommitted-snapshot", std::collections::HashMap::new())
+          .unwrap();
+        None
+      }
+      "fork" => {
+        VersionManager::new(&engine).create_fork(&RequestContext::system(), "uncommitted-fork", None).unwrap();
+        None
+      }
+      "task" => Some(TaskQueue::new(Arc::clone(&engine)).enqueue("uncommitted-task", serde_json::json!({"proof": true})).unwrap().id),
+      _ => unreachable!(),
+    };
+    crash_copy_with_header(&db_path, &crash_path, &selected_header);
+
+    let recovered = Arc::new(StorageEngine::open(crash_path.to_str().unwrap()).unwrap());
+    let versions = VersionManager::new(&recovered);
+    match authority {
+      "snapshot" => assert!(versions.list_snapshots().unwrap().is_empty(), "uncommitted snapshot locator survived recovery"),
+      "fork" => assert!(versions.list_forks().unwrap().is_empty(), "uncommitted fork locator survived recovery"),
+      "task" => {
+        let queue = TaskQueue::new(Arc::clone(&recovered));
+        let task_id = task_id.as_deref().unwrap();
+        assert!(queue.get_task(task_id).unwrap().is_none(), "uncommitted task locator survived recovery");
+        assert!(queue.list_tasks().unwrap().is_empty(), "uncommitted task registry survived recovery");
+      }
+      _ => unreachable!(),
+    }
+    let report = verify::verify_checked(&recovered, crash_path.to_str().unwrap()).unwrap();
+    assert!(!report.has_issues(), "{authority} rollback must leave a clean database: {report:?}");
+  }
+}
+
+#[test]
+fn dirty_recovery_discards_a_tail_torn_while_materializing_a_rollback_void() {
+  let (engine, temp) = create_test_db();
+  let ctx = RequestContext::system();
+  let ops = DirectoryOps::new(&engine);
+  let db_path = temp.path().join("test.aeordb");
+  let crash_path = temp.path().join("torn-rollback-void.aeordb");
+
+  ops.store_file_buffered(&ctx, "/stable.txt", b"selected authority", Some("text/plain")).unwrap();
+  let selected_head = engine.head_hash().unwrap();
+  let selected_header = capture_header_region(&db_path);
+  let stable_key = file_path_hash("/stable.txt", &engine.hash_algo()).unwrap();
+  ops
+    .store_files_buffered_batch(
+      &ctx,
+      vec![
+        BufferedFile {
+          path: "/stable.txt".to_string(),
+          data: b"uncommitted replacement".to_vec(),
+          content_type: Some("text/plain".to_string()),
+        },
+        BufferedFile { path: "/tail.txt".to_string(), data: b"uncommitted tail".to_vec(), content_type: None },
+      ],
+    )
+    .unwrap();
+  let uncommitted_locator_offset = engine.get_kv_entry(&stable_key).unwrap().unwrap().offset;
+  crash_copy_with_header(&db_path, &crash_path, &selected_header);
+
+  // A recovery Void uses the same generic entry header. Changing only the
+  // entry-type byte models power loss after the new header began overwriting
+  // the old locator but before its key-length/value/hash fields completed.
+  let mut file = OpenOptions::new().write(true).open(&crash_path).unwrap();
+  file.seek(SeekFrom::Start(uncommitted_locator_offset + 5)).unwrap();
+  file.write_all(&[EntryType::Void.to_u8()]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+
+  let recovered = StorageEngine::open(crash_path.to_str().unwrap()).unwrap();
+  let recovered_ops = DirectoryOps::new(&recovered);
+  assert_eq!(recovered.head_hash().unwrap(), selected_head);
+  assert_eq!(recovered_ops.read_file_buffered("/stable.txt").unwrap(), b"selected authority");
+  assert!(matches!(recovered_ops.read_file_buffered("/tail.txt"), Err(aeordb::engine::EngineError::NotFound(_))));
+  let report = verify::verify_checked(&recovered, crash_path.to_str().unwrap()).unwrap();
+  assert!(!report.has_issues(), "a torn rollback Void may leak/drop tail bytes but must not accept mixed namespace authority: {report:?}");
 }
 
 #[cfg(unix)]

@@ -158,11 +158,21 @@ fn main() {
       // Occasional delete of an older entry to mix the workload.
       if counter > 0 && counter.is_multiple_of(7) {
         let target = format!("/data/file-{:08}.txt", counter - 5);
-        if ops.delete_file(&ctx, &target).is_ok() {
-          if let Err(error) = checkpoint_deleted(&mut checkpoint_file, &target) {
-            eprintln!("{}", error);
-            process::exit(4);
-          }
+        // The checkpoint and database are separate durability domains. Mark
+        // this path as an uncertain/pending delete before the database can
+        // commit it, so SIGKILL between DB acknowledgement and the confirmed
+        // `-` line cannot turn a successful delete into apparent data loss.
+        if let Err(error) = checkpoint_delete_intent(&mut checkpoint_file, &target) {
+          eprintln!("{}", error);
+          process::exit(4);
+        }
+        if let Err(error) = ops.delete_file(&ctx, &target) {
+          eprintln!("delete_file failed: {}", error);
+          process::exit(5);
+        }
+        if let Err(error) = checkpoint_deleted(&mut checkpoint_file, &target) {
+          eprintln!("{}", error);
+          process::exit(4);
         }
       }
     }
@@ -202,6 +212,14 @@ fn checkpoint_deleted(checkpoint_file: &mut File, path: &str) -> Result<(), Stri
   Ok(())
 }
 
+fn checkpoint_delete_intent(checkpoint_file: &mut File, path: &str) -> Result<(), String> {
+  writeln!(checkpoint_file, "?\t{}", path).map_err(|error| format!("checkpoint delete-intent write failed: {}", error))?;
+  checkpoint_file.flush().map_err(|error| format!("checkpoint delete-intent flush failed: {}", error))?;
+  aeordb::engine::native_durability::sync_file_data_native(checkpoint_file)
+    .map_err(|error| format!("checkpoint delete-intent durability barrier failed: {error}"))?;
+  Ok(())
+}
+
 fn run_stress_iteration(
   engine: &StorageEngine,
   ops: &DirectoryOps<'_>,
@@ -231,6 +249,7 @@ fn run_stress_iteration(
     }
     1..=4 => {
       let path = format!("/stress/state/doc-{:03}.json", counter % 64);
+      checkpoint_pending_writes(checkpoint_file, std::iter::once(path.as_str()))?;
       ops
         .merge_json_file(ctx, &path, stress_patch(counter, counter % 64), MergeDepth::Unbounded)
         .map_err(|error| format!("merge_json_file {}: {}", path, error))?;
@@ -244,6 +263,7 @@ fn run_stress_iteration(
         patches.push(JsonMergeFilePatch { path: path.clone(), patch: stress_patch(counter, item), depth: MergeDepth::Unbounded });
         paths.push(path);
       }
+      checkpoint_pending_writes(checkpoint_file, paths.iter().map(String::as_str))?;
       ops.merge_json_files_batch(ctx, patches).map_err(|error| format!("merge_json_files_batch: {}", error))?;
       for path in paths {
         checkpoint_current_json(ops, checkpoint_file, &path)?;
@@ -258,6 +278,7 @@ fn run_stress_iteration(
         "hash": fastish_hash(counter),
       })
       .to_string();
+      checkpoint_pending_writes(checkpoint_file, std::iter::once(path.as_str()))?;
       ops
         .store_file_buffered(ctx, &path, body.as_bytes(), Some("application/json"))
         .map_err(|error| format!("overwrite {}: {}", path, error))?;
@@ -307,6 +328,16 @@ fn checkpoint_current_json(ops: &DirectoryOps<'_>, checkpoint_file: &mut File, p
   let body = ops.read_file_buffered(path).map_err(|error| format!("read merged {}: {}", path, error))?;
   let body = String::from_utf8(body).map_err(|error| format!("merged file {} was not UTF-8: {}", path, error))?;
   checkpoint_committed(checkpoint_file, path, &body)
+}
+
+fn checkpoint_pending_writes<'a>(checkpoint_file: &mut File, paths: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+  for path in paths {
+    writeln!(checkpoint_file, "!\t{}", path).map_err(|error| format!("checkpoint write-intent write failed for {}: {}", path, error))?;
+  }
+  checkpoint_file.flush().map_err(|error| format!("checkpoint write-intent flush failed: {}", error))?;
+  aeordb::engine::native_durability::sync_file_data_native(checkpoint_file)
+    .map_err(|error| format!("checkpoint write-intent durability barrier failed: {error}"))?;
+  Ok(())
 }
 
 fn fastish_hash(value: u64) -> u64 {

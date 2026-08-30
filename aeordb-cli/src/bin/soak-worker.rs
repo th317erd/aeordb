@@ -458,6 +458,13 @@ fn run(config: Config) -> Result<(), String> {
         let path = pick_random(&committed, &mut rng_state);
         let ctx = RequestContext::system();
         let ops = DirectoryOps::new(&engine);
+        // Exclude the path from the external must-survive oracle before the
+        // database delete can commit. A crash after this `?` record may leave
+        // an extra file, but can never fabricate a missing acknowledged file.
+        if let Err(error) = append_checkpoint(&mut checkpoint_file, '?', &path) {
+          workload_result = Err(error);
+          break 'workload;
+        }
         match ops.delete_file(&ctx, &path) {
           Ok(_) => {
             if let Err(error) = append_checkpoint(&mut checkpoint_file, '-', &path) {
@@ -578,7 +585,13 @@ fn combine_workload_cleanup_results(workload_result: Result<(), String>, cleanup
   Ok(())
 }
 
-fn append_checkpoint(writer: &mut impl Write, operation: char, path: &str) -> Result<(), String> {
+fn append_checkpoint(writer: &mut File, operation: char, path: &str) -> Result<(), String> {
+  append_checkpoint_line(writer, operation, path)?;
+  aeordb::engine::native_durability::sync_file_data_native(writer)
+    .map_err(|error| format!("checkpoint durability barrier failed for {operation} {path}: {error}"))
+}
+
+fn append_checkpoint_line(writer: &mut impl Write, operation: char, path: &str) -> Result<(), String> {
   writeln!(writer, "{operation}\t{path}").map_err(|error| format!("checkpoint write failed for {operation} {path}: {error}"))?;
   writer.flush().map_err(|error| format!("checkpoint flush failed for {operation} {path}: {error}"))
 }
@@ -673,10 +686,14 @@ fn load_checkpoint(path: &Path) -> Result<HashSet<String>, String> {
     let line = line_result.map_err(|error| format!("read checkpoint {} line {}: {error}", path.display(), index + 1))?;
     if let Some(rest) = line.strip_prefix("+\t") {
       set.insert(rest.to_string());
+    } else if let Some(rest) = line.strip_prefix("!\t") {
+      set.remove(rest);
+    } else if let Some(rest) = line.strip_prefix("?\t") {
+      set.remove(rest);
     } else if let Some(rest) = line.strip_prefix("-\t") {
       set.remove(rest);
     } else {
-      return Err(format!("malformed checkpoint {} line {}: expected + or - operation", path.display(), index + 1));
+      return Err(format!("malformed checkpoint {} line {}: expected +, !, ?, or - operation", path.display(), index + 1));
     }
   }
   Ok(set)

@@ -61,15 +61,15 @@ impl io::Write for FailingWriter {
 #[test]
 fn checkpoint_append_requires_both_write_and_flush() {
   let mut writer = FailingWriter { fail_write: false, fail_flush: false, bytes: Vec::new() };
-  append_checkpoint(&mut writer, '+', "/docs/a.txt").unwrap();
+  append_checkpoint_line(&mut writer, '+', "/docs/a.txt").unwrap();
   assert_eq!(writer.bytes, b"+\t/docs/a.txt\n");
 
   let mut write_failure = FailingWriter { fail_write: true, fail_flush: false, bytes: Vec::new() };
-  let error = append_checkpoint(&mut write_failure, '+', "/docs/a.txt").unwrap_err();
+  let error = append_checkpoint_line(&mut write_failure, '+', "/docs/a.txt").unwrap_err();
   assert!(error.contains("checkpoint write failed") && error.contains("/docs/a.txt"));
 
   let mut flush_failure = FailingWriter { fail_write: false, fail_flush: true, bytes: Vec::new() };
-  let error = append_checkpoint(&mut flush_failure, '-', "/docs/a.txt").unwrap_err();
+  let error = append_checkpoint_line(&mut flush_failure, '-', "/docs/a.txt").unwrap_err();
   assert!(error.contains("checkpoint flush failed") && error.contains("/docs/a.txt"));
 }
 
@@ -88,6 +88,15 @@ fn checkpoint_load_distinguishes_missing_from_unreadable_or_malformed_state() {
   std::fs::write(&malformed, "+\t/docs/a.txt\nnot-an-operation\n").unwrap();
   let error = load_checkpoint(&malformed).unwrap_err();
   assert!(error.contains("malformed checkpoint") && error.contains("line 2"), "{error}");
+}
+
+#[test]
+fn checkpoint_load_excludes_a_pending_delete_from_restart_work() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("pending-delete.tsv");
+  std::fs::write(&checkpoint, "+\t/docs/a.txt\n?\t/docs/a.txt\n+\t/docs/b.txt\n!\t/docs/b.txt\n").unwrap();
+
+  assert!(load_checkpoint(&checkpoint).unwrap().is_empty());
 }
 
 #[test]
