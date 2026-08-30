@@ -82,7 +82,9 @@ fn checkpoint_load_distinguishes_missing_from_unreadable_or_malformed_state() {
   let unreadable = temporary.path().join("checkpoint-directory");
   std::fs::create_dir(&unreadable).unwrap();
   let error = load_checkpoint(&unreadable).unwrap_err();
-  assert!(error.contains("read checkpoint"), "{error}");
+  // Windows rejects the directory at open; Unix opens it and fails on read.
+  assert!(error.starts_with("open checkpoint ") || error.starts_with("read checkpoint "), "{error}");
+  assert!(error.contains(unreadable.to_string_lossy().as_ref()), "{error}");
 
   let malformed = temporary.path().join("malformed.tsv");
   std::fs::write(&malformed, "+\t/docs/a.txt\nnot-an-operation\n").unwrap();
