@@ -5801,7 +5801,11 @@ impl StorageEngine {
     let _operation = self.read_operation_guard("read_entry_header_at")?;
     // Use a READ lock — read_entry_at_shared uses a cloned file handle.
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
-    let (wal_start, wal_end) = Self::writer_wal_bounds(&writer);
+    Self::read_entry_header_at_from_stable_writer(&writer, offset)
+  }
+
+  pub(crate) fn read_entry_header_at_from_stable_writer(writer: &AppendWriter, offset: u64) -> EngineResult<EntryHeader> {
+    let (wal_start, wal_end) = Self::writer_wal_bounds(writer);
     if offset < wal_start || offset >= wal_end {
       return Err(EngineError::CorruptEntry {
         offset,
@@ -5948,6 +5952,23 @@ impl StorageEngine {
     let _operation = self.read_operation_guard("iter_kv_entries")?;
     let snapshot = self.kv_snapshot.load();
     snapshot.iter_all()
+  }
+
+  /// Visit one immutable KV generation while retaining the WAL layout that
+  /// gives every captured offset its meaning. The writer lock must precede
+  /// the snapshot lease: online expansion holds the writer while draining old
+  /// generations, so reversing this order can deadlock.
+  pub(crate) fn visit_kv_entries_with_stable_wal<F>(&self, mut visitor: F) -> EngineResult<bool>
+  where
+    F: FnMut(&KVEntry, &AppendWriter) -> EngineResult<bool>,
+  {
+    let _operation = self.read_operation_guard("visit_kv_entries_with_stable_wal")?;
+    let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
+    let snapshot = self.kv_snapshot.load();
+    snapshot.visit_all(|entry| {
+      Self::validate_kv_entry_offset(&writer, entry, &entry.hash, "visit_kv_entries_with_stable_wal")?;
+      visitor(entry, &writer)
+    })
   }
 
   pub(crate) fn visit_kv_entries_for_repair<F>(&self, visitor: F) -> EngineResult<bool>
@@ -7071,6 +7092,10 @@ mod hot_tail_timer_poison_internal_spec;
 #[cfg(test)]
 #[path = "../../spec/engine/durability_state_poison_internal_spec.rs"]
 mod durability_state_poison_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/kv_layout_read_stability_internal_spec.rs"]
+mod kv_layout_read_stability_internal_spec;
 
 #[cfg(test)]
 mod tests {

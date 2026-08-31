@@ -4046,7 +4046,7 @@
     {
       "id": "esq-v1-0574570573dca9161d61-00",
       "file": "aeordb-lib/src/engine/gc.rs",
-      "line": 1407,
+      "line": 1403,
       "column": 20,
       "enclosing_item": "reserve_gc_workspace",
       "kind": "error_conversion",
@@ -7496,7 +7496,7 @@
     {
       "id": "esq-v1-3f19eed582d420132975-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6230,
+      "line": 6251,
       "column": 11,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "logged_error_continues",
@@ -7506,7 +7506,7 @@
     {
       "id": "esq-v1-07f15be9c45dd606364e-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6354,
+      "line": 6375,
       "column": 34,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "error_conversion",
@@ -7516,7 +7516,7 @@
     {
       "id": "esq-v1-dcc1cf6dbecfd924b40f-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 7057,
+      "line": 7078,
       "column": 5,
       "enclosing_item": "impl StorageEngine::drop",
       "kind": "logged_error_continues",
@@ -7526,7 +7526,7 @@
     {
       "id": "esq-v1-a5d82e88e5f0f57c2ff1-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 8358,
+      "line": 8383,
       "column": 7,
       "enclosing_item": "impl DurabilityRepairAuthorityGuard < '_ >::drop",
       "kind": "broad_err_pattern",
@@ -7536,7 +7536,7 @@
     {
       "id": "esq-v1-2de4ce252f7b55e676bf-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 8517,
+      "line": 8542,
       "column": 5,
       "enclosing_item": "impl TransactionGuard < 'a >::drop",
       "kind": "logged_error_continues",

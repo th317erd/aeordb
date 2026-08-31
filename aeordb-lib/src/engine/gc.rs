@@ -828,14 +828,11 @@ fn mark_task_entries(engine: &StorageEngine, live: &mut HashSet<Vec<u8>>, cancel
 /// Sweep phase: iterate all KV entries, overwrite non-live entries in-place.
 /// Uses nosync writes for batch performance — one sync at the end.
 ///
-/// **Concurrency note**: GC should not be run concurrently with writes.
-/// The HTTP endpoint runs GC in `spawn_blocking`, which does NOT prevent
-/// concurrent writes from other requests. A concurrent write during the
-/// sweep phase could create an entry that the mark phase missed, causing
-/// it to be incorrectly swept. To mitigate this, each entry is re-verified
-/// against the current KV state before being overwritten — if a concurrent
-/// write has made an entry live since the mark phase, it is skipped.
-/// For full safety, callers should ensure exclusive access during GC.
+/// **Concurrency note**: the first pass retains one immutable KV generation
+/// together with the writer layout that gives its offsets meaning. This blocks
+/// online KV expansion from relocating the WAL between selecting an entry and
+/// reading its header. Destructive runs additionally re-verify every candidate
+/// against current KV state and spare hashes recorded by concurrent writers.
 ///
 /// **Crash safety (M8)**: If the process crashes mid-sweep, the `.aeordb`
 /// file may contain partially overwritten entries (some garbage entries
@@ -859,26 +856,26 @@ fn gc_sweep_internal(
 ) -> EngineResult<(usize, u64)> {
   check_gc_cancellation(engine, cancellation)?;
   let timing = std::env::var_os("AEORDB_GC_TIMING").is_some();
-  let all_entries = engine.iter_kv_entries()?;
 
   // First pass: identify garbage entries and compute sizes.
   let mut garbage_candidates: Vec<(Vec<u8>, u64, u32)> = Vec::new(); // (hash, offset, entry_size)
   let mut garbage_count: usize = 0;
   let mut reclaimed_bytes: u64 = 0;
-
-  for (index, entry) in all_entries.iter().enumerate() {
+  let mut index = 0usize;
+  engine.visit_kv_entries_with_stable_wal(|entry, writer| {
     check_gc_quantum(engine, cancellation, index)?;
+    index = index.saturating_add(1);
     if live.contains(&entry.hash) {
-      continue;
+      return Ok(true);
     }
     // Spare entries that landed during mark/sweep — they're in the recheck
     // set the engine maintains while GC is active. Without this, concurrent
     // writes would be eligible for sweep just because they're not in `live`.
     if !dry_run && engine.gc_recheck_contains(&entry.hash)? {
-      continue;
+      return Ok(true);
     }
 
-    let header = engine.read_entry_header_at(entry.offset)?;
+    let header = StorageEngine::read_entry_header_at_from_stable_writer(writer, entry.offset)?;
     let entry_size = header.total_length;
 
     garbage_count += 1;
@@ -887,9 +884,8 @@ fn gc_sweep_internal(
     if !dry_run {
       garbage_candidates.push((entry.hash.clone(), entry.offset, entry_size));
     }
-  }
-
-  drop(all_entries);
+    Ok(true)
+  })?;
 
   if dry_run || garbage_candidates.is_empty() {
     return Ok((garbage_count, reclaimed_bytes));

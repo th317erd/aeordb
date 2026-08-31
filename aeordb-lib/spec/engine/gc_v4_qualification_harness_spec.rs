@@ -160,3 +160,33 @@ fn runtime_metrics_acquire_writer_before_kv_snapshot_and_share_one_engine_path()
     "KV observability must acquire and release the writer read lock before taking a snapshot lease; expansion holds the writer while draining leases"
   );
 }
+
+#[test]
+fn gc_sweep_keeps_kv_offsets_bound_to_one_stable_wal_layout() {
+  let gc = read_script("aeordb-lib/src/engine/gc.rs");
+  let storage_engine = read_script("aeordb-lib/src/engine/storage_engine.rs");
+
+  let sweep_start = gc.find("fn gc_sweep_internal(").expect("GC sweep owner is present");
+  let sweep_end = gc[sweep_start..]
+    .find("\n/// Run a complete garbage collection cycle")
+    .map(|offset| sweep_start + offset)
+    .expect("GC sweep owner boundary changed");
+  let sweep = &gc[sweep_start..sweep_end];
+  assert!(
+    sweep.contains("visit_kv_entries_with_stable_wal"),
+    "GC sweep must not retain KV offsets after releasing the WAL layout that makes those offsets meaningful"
+  );
+  assert!(!sweep.contains("engine.iter_kv_entries()?"), "GC sweep must not copy offsets out of an unpinned WAL layout");
+
+  let visit_start =
+    storage_engine.find("fn visit_kv_entries_with_stable_wal").expect("StorageEngine must own the stable KV/WAL visit lock order");
+  let visit_end =
+    storage_engine[visit_start..].find("\n  ///").map(|offset| visit_start + offset).expect("stable KV/WAL visit boundary changed");
+  let visit = &storage_engine[visit_start..visit_end];
+  let writer_lock = visit.find("self.writer.read()").expect("stable visit must retain the WAL layout");
+  let snapshot_load = visit.find("self.kv_snapshot.load()").expect("stable visit must select one immutable KV view");
+  assert!(
+    writer_lock < snapshot_load,
+    "stable visit must lock the WAL before leasing KV pages so expansion cannot deadlock while draining"
+  );
+}

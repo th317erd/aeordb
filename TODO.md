@@ -1446,6 +1446,7 @@
           - [x] Replace the Windows-incompatible anonymous-file race fixture with a named temporary database and rerun its exact native regression.
           - [x] Make configuration-authority synchronization tolerate loaded qualification hosts while retaining the bounded 10-second test deadline.
           - [x] Make initialization-panic supervision tolerate loaded qualification hosts while retaining the bounded 10-second listener-join deadline.
+          - [x] Prevent dry-run GC from retaining KV offsets across online KV-layout expansion; prove one stable snapshot/WAL visit blocks relocation until header inspection completes.
           - [ ] Rerun native macOS/Windows, exact-source Linux release, and the exact 8 GiB/no-swap resource gate before resuming long crash/soak qualification.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
