@@ -11,6 +11,8 @@ use crate::engine::v4::configuration_controls::{ConfigurationControlCapability, 
 
 use super::{ConfigurationAuthority, ConfigurationConvergenceResult};
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[cfg(unix)]
 fn native_absolute_paths() -> (PathBuf, PathBuf, PathBuf) {
   ("/test.aeordb".into(), "/gc".into(), "/spill".into())
@@ -66,7 +68,7 @@ fn pending_snapshot_precedes_owner_activation_and_serializes_replacements() {
         |_bytes, _schema, _prospective| Ok(status()),
         move |_prospective, changed| {
           entered_tx.send(()).unwrap();
-          release_rx.recv_timeout(Duration::from_secs(2)).expect("test must release owner convergence");
+          release_rx.recv_timeout(TEST_TIMEOUT).expect("test must release owner convergence");
           let mut result = ConfigurationConvergenceResult::default();
           result.activate(changed.iter().cloned());
           result
@@ -75,7 +77,7 @@ fn pending_snapshot_precedes_owner_activation_and_serializes_replacements() {
       .unwrap()
   });
 
-  entered_rx.recv_timeout(Duration::from_secs(2)).expect("owner convergence must start");
+  entered_rx.recv_timeout(TEST_TIMEOUT).expect("owner convergence must start");
   let pending = authority.snapshot();
   assert_eq!(pending.generation, 2);
   assert_eq!(pending.resolved_unsigned("index.flush_after_seconds"), Some(30));

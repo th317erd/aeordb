@@ -1443,6 +1443,9 @@
           - [x] Close the page-provider preparation race, every wake/error/poison path, and adjacent generation/cache regressions on the exact desktop source.
           - [x] Replace the 30-second snapshot-contention stall with fail-fast deferred expansion, prove the committed write remains acknowledged and the queued expansion succeeds after the retained reader drops.
           - [x] Rerun focused, affected, broad/static, contract, and debt gates on the exact desktop source.
+          - [x] Replace the Windows-incompatible anonymous-file race fixture with a named temporary database and rerun its exact native regression.
+          - [x] Make configuration-authority synchronization tolerate loaded qualification hosts while retaining the bounded 10-second test deadline.
+          - [x] Make initialization-panic supervision tolerate loaded qualification hosts while retaining the bounded 10-second listener-join deadline.
           - [ ] Rerun native macOS/Windows, exact-source Linux release, and the exact 8 GiB/no-swap resource gate before resuming long crash/soak qualification.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 

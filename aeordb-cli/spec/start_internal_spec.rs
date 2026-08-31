@@ -6,6 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::supervise_server_and_initialization;
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[test]
 fn shutdown_drains_background_tasks_before_closing_storage_write_authority() {
   let source = include_str!("../src/commands/start.rs");
@@ -37,7 +39,7 @@ async fn initialization_task_panic_cancels_and_joins_the_listener() {
   });
 
   let (initialization_result, server_result) =
-    tokio::time::timeout(Duration::from_secs(1), supervise_server_and_initialization(initialization_task, server_task, &cancellation))
+    tokio::time::timeout(TEST_TIMEOUT, supervise_server_and_initialization(initialization_task, server_task, &cancellation))
       .await
       .expect("supervision must not hang");
 

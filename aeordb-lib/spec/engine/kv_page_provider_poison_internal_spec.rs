@@ -38,8 +38,9 @@ fn page(hash_byte: u8) -> Vec<u8> {
   )
 }
 
-fn provider_with_page(page: &[u8]) -> (File, KvPageProvider, MemoryCoordinator) {
-  let mut file = tempfile::tempfile().unwrap();
+fn provider_with_page(page: &[u8]) -> (tempfile::TempDir, File, KvPageProvider, MemoryCoordinator) {
+  let directory = tempfile::tempdir().unwrap();
+  let mut file = File::options().read(true).write(true).create_new(true).open(directory.path().join("page-provider-race.aeordb")).unwrap();
   file.write_all(page).unwrap();
   file.sync_all().unwrap();
   let coordinator = MemoryCoordinator::new(MemoryPolicy::new(64 * 1024, 128 * 1024, 16 * 1024, 16 * 1024).unwrap());
@@ -47,14 +48,14 @@ fn provider_with_page(page: &[u8]) -> (File, KvPageProvider, MemoryCoordinator) 
   let provider =
     KvPageProvider::new(file.try_clone().unwrap(), 0, HashAlgorithm::Blake3_256, 1, page_size(32) as u64, Some(coordinator.clone()))
       .unwrap();
-  (file, provider, coordinator)
+  (directory, file, provider, coordinator)
 }
 
 #[test]
 fn reader_cannot_publish_pre_update_bytes_into_the_committed_generation_cache() {
   let original = page(1);
   let replacement = page(2);
-  let (mut file, provider, coordinator) = provider_with_page(&original);
+  let (_directory, mut file, provider, coordinator) = provider_with_page(&original);
   let reader_snapshot = provider.snapshot().unwrap();
   {
     let mut state = provider.inner.state.lock().unwrap();
