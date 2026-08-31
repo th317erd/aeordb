@@ -1433,7 +1433,17 @@
         - [x] Make aggressive S3 wait for the first durable worker-start checkpoint so its crash window cannot interrupt an unacknowledged database creation.
         - [x] Disable unjournaled direct Chunk reuse after repeated crashes proved a torn remainder can outlive the selected Void snapshot.
         - [x] Reconcile legacy direct-reuse regressions with the no-reuse contract while preserving chronology and KV-expansion relocation proof.
-        - [ ] Commit and push the coherent qualification-found recovery fixes and evidence.
+        - [x] Commit and push the coherent qualification-found recovery fixes and evidence (`d93b4b22`).
+        - [x] Correct the native Windows soak-worker checkpoint error oracle and fail-closed qualification exit accounting exposed by the exact-source CLI matrix.
+        - [x] Land and rerun the final exact-source ordinary/native gates on the corrected test-only revision before starting the 12-hour campaigns.
+        - [ ] Reproduce and correct the final 8 GiB/no-swap resource failure: one GC mark observed a missing reachable index path and concurrent requests stalled during KV expansion; preserve the failed run and add focused regression proof before retrying.
+          - [x] Preserve the original resource database, server/load logs, and a byte-identical diagnostic copy; verify the copy read-only and identify one healthy WAL-backed FileRecord identity missing from KV authority.
+          - [x] Strengthen the sequential expansion regression to read every stored file and require zero verifier-reported missing/stale KV rows; record that the ordinary single-threaded path remains green.
+          - [x] Reproduce the concurrent page-publication defect with a deterministic failing-first interleaving in which an old disk read can enter the committed-generation cache after replacement publication.
+          - [x] Close the page-provider preparation race, every wake/error/poison path, and adjacent generation/cache regressions on the exact desktop source.
+          - [x] Replace the 30-second snapshot-contention stall with fail-fast deferred expansion, prove the committed write remains acknowledged and the queued expansion succeeds after the retained reader drops.
+          - [x] Rerun focused, affected, broad/static, contract, and debt gates on the exact desktop source.
+          - [ ] Rerun native macOS/Windows, exact-source Linux release, and the exact 8 GiB/no-swap resource gate before resuming long crash/soak qualification.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.

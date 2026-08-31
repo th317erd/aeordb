@@ -32,6 +32,7 @@ const HOT_BUFFER_THRESHOLD: usize = 512;
 const BOOTSTRAP_GENERATION_SOFT_BYTES: u64 = 4 * 1024 * 1024;
 const BOOTSTRAP_GENERATION_HARD_BYTES: u64 = 8 * 1024 * 1024;
 const BOOTSTRAP_GENERATION_EMERGENCY_BYTES: u64 = 1024 * 1024;
+pub(crate) const KV_SNAPSHOT_DRAIN_BUSY_REASON: &str = "timed out waiting for KV snapshots before exclusive page writes";
 
 /// A disk-resident KV store using NVT-indexed bucket pages inside the main
 /// database file. No sidecar files — the KV block lives at the head of the
@@ -721,7 +722,7 @@ impl DiskKVStore {
     }
 
     self.publish_full_snapshot()?;
-    Err(EngineError::InvalidInput("timed out waiting for KV snapshots before exclusive page writes".to_string()))
+    Err(EngineError::ResourceExhausted(KV_SNAPSHOT_DRAIN_BUSY_REASON.to_string()))
   }
 
   /// Remove the provider-backed snapshot from publication and wait for every
@@ -1937,6 +1938,7 @@ mod internal_tests {
 
     let error = store.quiesce_bounded_page_snapshots_for_exclusive_write(std::time::Duration::ZERO).unwrap_err();
 
+    assert!(matches!(error, EngineError::ResourceExhausted(_)));
     assert!(error.to_string().contains("timed out waiting for KV snapshots"));
     assert!(store.snapshot_handle().load().bounded_pages().is_some(), "a pre-overwrite timeout must restore a readable provider view");
     assert!(store.kv_page_provider_stats().unwrap().is_some());

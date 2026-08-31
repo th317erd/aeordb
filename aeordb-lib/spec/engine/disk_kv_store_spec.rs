@@ -1219,12 +1219,18 @@ fn test_kv_stage_grows_via_storage_engine() {
   let provider = engine.kv_page_provider_stats().unwrap().expect("expansion must install a provider for the new layout");
   assert_eq!(provider.active_snapshots, 1, "only the currently published generation should remain after expansion");
 
-  // Stored files must still be readable after the expansion.
-  for i in (0..count).step_by(100) {
+  // Every stored file and every WAL-backed KV row must survive the expansion.
+  // Sampling paths hid a production failure where one immutable FileRecord
+  // identity disappeared from the KV index while its WAL entry remained.
+  for i in 0..count {
     let path = format!("/many/file_{:05}.txt", i);
     let content = ops.read_file_buffered(&path).unwrap();
     assert_eq!(content, format!("v{}", i).as_bytes());
   }
+
+  let report = aeordb::engine::verify::verify_checked(&engine, db_str).unwrap();
+  assert_eq!(report.missing_kv_entries, 0, "KV expansion lost WAL-backed rows: {:?}", report.missing_kv_details);
+  assert_eq!(report.stale_kv_entries, 0, "KV expansion retained stale rows: {:?}", report.stale_kv_details);
 }
 
 #[test]

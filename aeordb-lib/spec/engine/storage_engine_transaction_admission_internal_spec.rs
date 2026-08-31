@@ -1,6 +1,7 @@
 use super::{EngineError, StorageEngine, TransactionGuard};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
+use std::time::{Duration, Instant};
 
 #[test]
 fn pre_admitted_top_level_transaction_excludes_late_legacy_joiners() {
@@ -45,4 +46,31 @@ fn exact_receipt_survives_post_commit_kv_expansion_preflight_failure() {
   assert!(engine.durability_snapshot().unwrap().hard_frontier >= admitted_sequence);
   assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, Some(1));
   assert!(engine.durability_failure().is_none());
+}
+
+#[test]
+fn snapshot_contention_defers_expansion_without_stalling_the_committed_write() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database = temporary.path().join("snapshot-contention-expansion.aeordb");
+  let engine = StorageEngine::create(database.to_str().unwrap()).unwrap();
+  let key = [0x41; 32];
+  engine.store_entry(super::EntryType::Chunk, &key, b"committed before expansion contention").unwrap();
+  let retained_reader = engine.kv_snapshot.load_full();
+  engine.kv_writer.lock().unwrap().needs_expansion = Some(1);
+
+  let started = Instant::now();
+  engine
+    .run_ready_kv_expansion()
+    .expect("snapshot contention should defer a pre-mutation expansion instead of failing the committed write");
+
+  assert!(started.elapsed() < Duration::from_millis(100), "snapshot contention stalled the committed writer");
+  assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, Some(1));
+  assert_eq!(engine.writer.read().unwrap().file_header().kv_block_stage, 0);
+  assert!(engine.get_entry(&key).unwrap().is_some());
+
+  drop(retained_reader);
+  engine.run_ready_kv_expansion().unwrap();
+  assert_eq!(engine.kv_writer.lock().unwrap().needs_expansion, None);
+  assert_eq!(engine.writer.read().unwrap().file_header().kv_block_stage, 1);
+  assert!(engine.get_entry(&key).unwrap().is_some());
 }

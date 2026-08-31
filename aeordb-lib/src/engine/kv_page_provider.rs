@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, SyncSender};
+
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
 use crate::engine::kv_pages::{bucket_page_offset, live_type_counts_in_page, page_size};
@@ -81,6 +84,21 @@ struct KvPageProviderInner {
   coordinator: Option<MemoryCoordinator>,
   state: Mutex<PageCacheState>,
   loaded: Condvar,
+  #[cfg(test)]
+  page_read_test_hook: Mutex<Option<PageReadTestHook>>,
+}
+
+#[cfg(test)]
+struct PageReadTestHook {
+  events: SyncSender<PageReadTestEvent>,
+  resume: Receiver<()>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageReadTestEvent {
+  BlockedByUpdatePreparation,
+  BeforeCachePublish,
 }
 
 #[derive(Clone)]
@@ -170,6 +188,8 @@ impl KvPageProvider {
         coordinator,
         state: Mutex::new(PageCacheState::default()),
         loaded: Condvar::new(),
+        #[cfg(test)]
+        page_read_test_hook: Mutex::new(None),
       }),
     })
   }
@@ -220,6 +240,19 @@ impl KvPageProvider {
   }
 
   fn read_page_at(&self, generation: u64, bucket: usize) -> EngineResult<Arc<[u8]>> {
+    self.read_page_at_with_preparation_access(generation, bucket, false)
+  }
+
+  fn read_page_at_for_update(&self, generation: u64, bucket: usize) -> EngineResult<Arc<[u8]>> {
+    self.read_page_at_with_preparation_access(generation, bucket, true)
+  }
+
+  fn read_page_at_with_preparation_access(
+    &self,
+    generation: u64,
+    bucket: usize,
+    may_start_disk_read_during_update_preparation: bool,
+  ) -> EngineResult<Arc<[u8]>> {
     let offset = match self.page_offset(bucket) {
       Ok(offset) => offset,
       Err(error) => {
@@ -258,6 +291,10 @@ impl KvPageProvider {
         return Ok(data);
       }
 
+      if let Some(reason) = &state.poisoned_reason {
+        return Err(EngineError::DurabilityFailure(format!("KV page publication is poisoned: {reason}")));
+      }
+
       state.access_clock = state.access_clock.saturating_add(1);
       let access_clock = state.access_clock;
       if let Some(page) = state.pages.get_mut(&bucket) {
@@ -265,6 +302,15 @@ impl KvPageProvider {
         let data = Arc::clone(&page.data);
         state.hits = state.hits.saturating_add(1);
         return Ok(data);
+      }
+      if state.preparing_update && state.pending.is_none() && !may_start_disk_read_during_update_preparation {
+        #[cfg(test)]
+        self.report_update_preparation_blocked_for_test();
+        state = self.inner.loaded.wait(state).map_err(|error| {
+          EngineError::IoError(std::io::Error::other(format!("KV page update preparation wait lock poisoned: {error}")))
+        })?;
+        drop(state);
+        continue;
       }
       if state.loading.contains(&bucket) {
         state = self
@@ -303,6 +349,8 @@ impl KvPageProvider {
     };
     let page_bytes = data.len() as u64;
     drop(state);
+    #[cfg(test)]
+    self.run_before_cache_publish_test_hook();
     let reservation = if self.inner.max_resident_bytes >= page_bytes {
       self
         .inner
@@ -331,6 +379,24 @@ impl KvPageProvider {
     state.loading.remove(&bucket);
     self.inner.loaded.notify_all();
     Ok(data)
+  }
+
+  #[cfg(test)]
+  fn run_before_cache_publish_test_hook(&self) {
+    let hook = self.inner.page_read_test_hook.lock().unwrap().take();
+    let Some(hook) = hook else {
+      return;
+    };
+    hook.events.send(PageReadTestEvent::BeforeCachePublish).unwrap();
+    hook.resume.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+  }
+
+  #[cfg(test)]
+  fn report_update_preparation_blocked_for_test(&self) {
+    let hook = self.inner.page_read_test_hook.lock().unwrap();
+    if let Some(hook) = hook.as_ref() {
+      let _ = hook.events.try_send(PageReadTestEvent::BlockedByUpdatePreparation);
+    }
   }
 
   pub fn begin_update(&self, buckets: &[usize]) -> EngineResult<KvPageUpdate> {
@@ -374,7 +440,7 @@ impl KvPageProvider {
         .ok_or_else(|| EngineError::DurabilityFailure("KV page updates require an active memory coordinator".to_string()))?;
       let mut pages = HashMap::with_capacity(buckets.len());
       for &bucket in buckets {
-        let data = self.read_page_at(old_generation, bucket)?;
+        let data = self.read_page_at_for_update(old_generation, bucket)?;
         {
           let mut state = self.lock()?;
           remove_cached_page(&mut state, bucket);
@@ -395,6 +461,7 @@ impl KvPageProvider {
       Err(error) => {
         let mut state = self.lock()?;
         state.preparing_update = false;
+        self.inner.loaded.notify_all();
         return Err(error);
       }
     };
@@ -402,12 +469,14 @@ impl KvPageProvider {
     let mut state = self.lock()?;
     if state.committed_generation != old_generation || state.pending.is_some() || state.poisoned_reason.is_some() {
       state.preparing_update = false;
+      self.inner.loaded.notify_all();
       return Err(EngineError::DurabilityFailure("KV page generation changed while preparing an update".to_string()));
     }
     for &bucket in buckets {
       remove_cached_page(&mut state, bucket);
     }
     state.pending = Some(PendingUpdate { generation, pages, overwrite_started: false });
+    self.inner.loaded.notify_all();
     Ok(KvPageUpdate { provider: self.clone(), generation, overwrite_started: false, completed: false })
   }
 
@@ -535,12 +604,15 @@ impl KvPageUpdate {
       if previous.is_some() {
         let reason = format!("duplicate historical KV page generation {} for bucket {bucket}", old.old_generation);
         state.poisoned_reason = Some(reason.clone());
+        state.preparing_update = false;
+        self.provider.inner.loaded.notify_all();
         return Err(EngineError::DurabilityFailure(reason));
       }
       state.bucket_generations.insert(bucket, self.generation);
     }
     state.committed_generation = self.generation;
     state.preparing_update = false;
+    self.provider.inner.loaded.notify_all();
     drop(replacement_pages);
     prune_historical_pages(&mut state);
     self.completed = true;
@@ -564,6 +636,7 @@ impl KvPageUpdate {
     }
     state.pending.take();
     state.preparing_update = false;
+    self.provider.inner.loaded.notify_all();
     Ok(())
   }
 }
@@ -586,10 +659,16 @@ impl Drop for KvPageUpdate {
         poisoned.into_inner()
       }
     };
-    if state.pending.as_ref().is_some_and(|pending| pending.generation == self.generation) {
-      state.poisoned_reason = Some(format!("KV page update generation {} was abandoned after overwrite started", self.generation));
-      state.preparing_update = false;
+    let reason = if state.pending.as_ref().is_some_and(|pending| pending.generation == self.generation) {
+      format!("KV page update generation {} was abandoned after overwrite started", self.generation)
+    } else {
+      format!("KV page update generation {} lost its pending state after overwrite started", self.generation)
+    };
+    if state.poisoned_reason.is_none() {
+      state.poisoned_reason = Some(reason);
     }
+    state.preparing_update = false;
+    self.provider.inner.loaded.notify_all();
   }
 }
 

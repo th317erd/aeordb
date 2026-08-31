@@ -16,7 +16,7 @@ use crate::engine::append_writer::{read_span_at, AppendWriter};
 use crate::engine::cache::{Cache, CleanCache};
 use crate::engine::cache_loaders::{ApiKeyLoader, GroupLoader, IndexConfigLoader, PermissionsLoader};
 use crate::engine::compression::CompressionAlgorithm;
-use crate::engine::disk_kv_store::DiskKVStore;
+use crate::engine::disk_kv_store::{DiskKVStore, KV_SNAPSHOT_DRAIN_BUSY_REASON};
 use crate::engine::durability_coordinator::{
   DurabilityCommitReceipt, DurabilityCoordinator, DurabilityCoordinatorError, DurabilityFailureDisposition, DurabilityGroupPolicy,
   DurabilityHardTurn, DurabilityOperation, DurabilityTicket, DurabilityWaiterState, NativeFileBarrierKind, OsErrorClass, RetryClass,
@@ -1028,6 +1028,10 @@ fn classify_index_runtime_flush(
     }
     Err(error) => (Err(error), true),
   }
+}
+
+fn kv_expansion_snapshot_drain_timeout() -> Duration {
+  Duration::ZERO
 }
 
 impl StorageEngine {
@@ -4453,6 +4457,7 @@ impl StorageEngine {
     match self.expand_kv_block_online(target_stage) {
       Ok(()) => Ok(()),
       Err(error) => {
+        let snapshot_contention = matches!(&error, EngineError::ResourceExhausted(reason) if reason == KV_SNAPSHOT_DRAIN_BUSY_REASON);
         // Failures after the first layout marker latch the engine read-only and
         // startup recovery owns the unfinished transition. A read-only
         // preflight refusal leaves the current layout authoritative, so retain
@@ -4468,7 +4473,12 @@ impl StorageEngine {
             kv.needs_expansion = Some(kv.needs_expansion.map_or(target_stage, |pending| pending.max(target_stage)));
           }
         }
-        Err(error)
+        if snapshot_contention {
+          tracing::info!(target_stage, "Deferred KV expansion because a retained read snapshot still owns the current generation");
+          Ok(())
+        } else {
+          Err(error)
+        }
       }
     }
   }
@@ -5687,7 +5697,7 @@ impl StorageEngine {
     // Boundary validation is read-only. Keep the current provider published
     // until every preflight check has succeeded, then drain old snapshot
     // generations immediately before the first durable layout mutation.
-    kv.suspend_bounded_pages_for_layout_rewrite(std::time::Duration::from_secs(30))?;
+    kv.suspend_bounded_pages_for_layout_rewrite(kv_expansion_snapshot_drain_timeout())?;
 
     let expansion_result = (|| -> EngineResult<()> {
       // Step 1: Mark resize in progress. From this call onward any failure is
