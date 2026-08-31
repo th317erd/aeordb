@@ -1447,6 +1447,13 @@
           - [x] Make configuration-authority synchronization tolerate loaded qualification hosts while retaining the bounded 10-second test deadline.
           - [x] Make initialization-panic supervision tolerate loaded qualification hosts while retaining the bounded 10-second listener-join deadline.
           - [x] Prevent dry-run GC from retaining KV offsets across online KV-layout expansion; prove one stable snapshot/WAL visit blocks relocation until header inspection completes.
+          - [x] Correct the exact rerun's terminated file response when online expansion relocates a coalesced stream's preplanned chunk offsets.
+            - [x] Preserve the failed 120-second load report, complete server journal, startup response, and 1.42 GB database with immutable hashes.
+            - [x] Reproduce the exact stale-offset interleaving deterministically before changing the streaming implementation.
+            - [x] Replan still-live chunk offsets under a bounded retry contract without retaining a maintenance guard across a slow HTTP client.
+            - [x] Prove both expansion-before-first-frame and expansion-between-frames behavior, including streaming-memory release.
+            - [x] Rerun affected, broad, and static gates on the correction tree.
+            - [ ] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
           - [ ] Rerun native macOS/Windows, exact-source Linux release, and the exact 8 GiB/no-swap resource gate before resuming long crash/soak qualification.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 

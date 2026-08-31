@@ -36,7 +36,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::file_record::FileRecord;
 use crate::engine::directory_ops::StreamingReadReservation;
-use crate::engine::ChunkReadLocation;
+use crate::engine::{ChunkReadLocation, ChunkSpanReadOutcome};
 use crate::engine::index_config::PathIndexConfig;
 use crate::engine::permission_resolver::CrudlifyOp;
 use crate::engine::query_engine::{
@@ -728,6 +728,7 @@ fn range_not_satisfiable_response(total_size: u64) -> Response {
 const RANGE_READ_SPAN_MAX_GAP_BYTES: u64 = 256 * 1024;
 const DEFAULT_READ_PREFETCH_BYTES: u64 = 2_621_440;
 const DEFAULT_READ_COALESCE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_STREAM_LAYOUT_REPLANS: usize = crate::engine::kv_stages::KV_STAGE_SIZES.len();
 
 #[derive(Clone, Copy)]
 struct ReadStreamLimits {
@@ -1030,7 +1031,29 @@ impl CoalescedEngineByteRangeStream {
     end.saturating_sub(start)
   }
 
-  fn load_next_span(&mut self) -> EngineResult<ReservedReadChunk> {
+  fn refresh_remaining_layout(&mut self) -> EngineResult<()> {
+    for chunk in &mut self.chunks[self.next_index..] {
+      let metadata = self
+        .engine
+        .get_chunk_stream_metadata(&chunk.hash, false)?
+        .ok_or_else(|| EngineError::NotFound(format!("Chunk not found: {}", hex::encode(&chunk.hash))))?;
+      let raw_value_length = metadata.raw_value_length.ok_or_else(|| EngineError::CorruptEntry {
+        offset: metadata.offset,
+        reason: "A coalesced stream chunk became compressed while refreshing its KV layout".to_string(),
+      })?;
+      if raw_value_length != chunk.file_len() {
+        return Err(EngineError::CorruptEntry {
+          offset: metadata.offset,
+          reason: format!("Chunk length changed while refreshing its KV layout: planned {}, found {}", chunk.file_len(), raw_value_length),
+        });
+      }
+      chunk.wal_offset = metadata.offset;
+      chunk.wal_total_length = metadata.total_length;
+    }
+    Ok(())
+  }
+
+  fn try_load_next_span(&mut self) -> EngineResult<Option<ReservedReadChunk>> {
     if self.next_index >= self.chunks.len() {
       return Err(EngineError::InvalidInput("Range stream is exhausted".to_string()));
     }
@@ -1095,7 +1118,10 @@ impl CoalescedEngineByteRangeStream {
       .ok_or_else(|| EngineError::ResourceExhausted("coalesced streaming span estimate overflow".to_string()))?;
     let mut reservation = reserve_streaming_read(&self.engine, scratch_bytes, "coalesced read span admission failed")?;
     let locations: Vec<ChunkReadLocation> = span_chunks.iter().map(PlannedRangeChunk::location).collect();
-    let values = self.engine.read_chunk_span_verified(&locations)?;
+    let values = match self.engine.try_read_chunk_span_verified(&locations)? {
+      ChunkSpanReadOutcome::Ready(values) => values,
+      ChunkSpanReadOutcome::LayoutChanged { .. } => return Ok(None),
+    };
     if values.len() != span_chunks.len() {
       return Err(EngineError::InvalidInput(format!(
         "Chunk span returned {} values for {} planned chunks",
@@ -1149,7 +1175,22 @@ impl CoalescedEngineByteRangeStream {
     }
     self.next_index = end_index;
 
-    Ok(ReservedReadChunk::from_admitted(output, reservation))
+    Ok(Some(ReservedReadChunk::from_admitted(output, reservation)))
+  }
+
+  fn load_next_span(&mut self) -> EngineResult<ReservedReadChunk> {
+    for layout_change in 0..=MAX_STREAM_LAYOUT_REPLANS {
+      if let Some(chunk) = self.try_load_next_span()? {
+        return Ok(chunk);
+      }
+      if layout_change == MAX_STREAM_LAYOUT_REPLANS {
+        break;
+      }
+      self.refresh_remaining_layout()?;
+    }
+    Err(EngineError::ResourceExhausted(format!(
+      "KV layout changed more than {MAX_STREAM_LAYOUT_REPLANS} times while serving one response frame"
+    )))
   }
 }
 

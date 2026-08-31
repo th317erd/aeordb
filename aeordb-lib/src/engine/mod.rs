@@ -180,6 +180,7 @@ pub use void_manager::{VoidManager, MINIMUM_VOID_SIZE, MINIMUM_USEFUL_VOID_SIZE}
 pub use storage_engine::{
   ChunkEntryMetadata, ChunkReadLocation, EngineStartupProgress, EngineStartupProgressCallback, StorageEngine, WriteBatch,
 };
+pub(crate) use storage_engine::ChunkSpanReadOutcome;
 pub use namespace_mutation::{
   LocatorPhysicalIncarnation, LocatorReplacement, LocatorReplacementCoordinator, NamespaceMutationAcknowledgement, NamespaceMutationBatch,
   NamespaceMutationCoordinator, NamespaceMutationFanout, NamespaceMutationKind, NamespaceMutationSourceIdentity, publish_namespace_root,

@@ -70,6 +70,11 @@ pub struct ChunkReadLocation {
   pub total_length: u32,
 }
 
+pub(crate) enum ChunkSpanReadOutcome {
+  Ready(Vec<Vec<u8>>),
+  LayoutChanged { planned_offset: u64, planned_length: u32, current_offset: u64, current_length: u32 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KvObservabilityMetrics {
   pub block_size_bytes: u64,
@@ -4953,9 +4958,28 @@ impl StorageEngine {
   /// revalidates that each chunk is still the live KV entry at the expected
   /// offset, then performs one offset-based read over the covering span.
   pub fn read_chunk_span_verified(&self, locations: &[ChunkReadLocation]) -> EngineResult<Vec<Vec<u8>>> {
+    match self.try_read_chunk_span_verified(locations)? {
+      ChunkSpanReadOutcome::Ready(chunks) => Ok(chunks),
+      ChunkSpanReadOutcome::LayoutChanged { planned_offset, planned_length, current_offset, current_length } => {
+        Err(EngineError::CorruptEntry {
+          offset: planned_offset,
+          reason: format!(
+            "Chunk KV entry moved while planning span: expected offset {} length {}, found offset {} length {}",
+            planned_offset, planned_length, current_offset, current_length,
+          ),
+        })
+      }
+    }
+  }
+
+  /// Attempt one coalesced chunk read against the caller's planned WAL
+  /// locations. `LayoutChanged` is a non-corruption result: online KV
+  /// expansion moved at least one still-live chunk after the caller built its
+  /// read plan.
+  pub(crate) fn try_read_chunk_span_verified(&self, locations: &[ChunkReadLocation]) -> EngineResult<ChunkSpanReadOutcome> {
     let _operation = self.read_operation_guard("read_chunk_span_verified")?;
     if locations.is_empty() {
-      return Ok(Vec::new());
+      return Ok(ChunkSpanReadOutcome::Ready(Vec::new()));
     }
 
     let snapshot = self.kv_snapshot.load();
@@ -4973,12 +4997,11 @@ impl StorageEngine {
           return Err(EngineError::InvalidInput(format!("Hash {} is not a chunk entry", hex::encode(&location.hash))));
         }
         if kv_entry.offset != location.offset || kv_entry.total_length != location.total_length {
-          return Err(EngineError::CorruptEntry {
-            offset: location.offset,
-            reason: format!(
-              "Chunk KV entry moved while planning span: expected offset {} length {}, found offset {} length {}",
-              location.offset, location.total_length, kv_entry.offset, kv_entry.total_length,
-            ),
+          return Ok(ChunkSpanReadOutcome::LayoutChanged {
+            planned_offset: location.offset,
+            planned_length: location.total_length,
+            current_offset: kv_entry.offset,
+            current_length: kv_entry.total_length,
           });
         }
         Self::validate_kv_entry_offset(&writer, &kv_entry, &location.hash, "read_chunk_span_verified")?;
@@ -5019,7 +5042,7 @@ impl StorageEngine {
       chunks.push(self.decode_verified_chunk_entry_from_buffer(&location.hash, location.offset, &span[relative_start..relative_end])?);
     }
 
-    Ok(chunks)
+    Ok(ChunkSpanReadOutcome::Ready(chunks))
   }
 
   /// Read a chunk including deleted entries and return its decompressed bytes.

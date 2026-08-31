@@ -229,6 +229,21 @@ fn test_storage_engine_read_chunk_span_verified_reads_multiple_chunks() {
     combined.extend_from_slice(&chunk);
   }
   assert_eq!(combined, data[..DEFAULT_CHUNK_SIZE * 3].to_vec());
+
+  let current_stage = engine.writer_read_lock().unwrap().file_header().kv_block_stage as usize;
+  engine.expand_kv_block_online(current_stage + 1).unwrap();
+  let current = engine.get_chunk_metadata(&locations[0].hash).unwrap().unwrap();
+  assert_ne!(current.offset, locations[0].offset, "the compatibility assertion requires a relocated planned chunk");
+  let error = engine.read_chunk_span_verified(&locations).expect_err("the public verified-span API must retain its fail-closed contract");
+  assert!(matches!(
+    error,
+    EngineError::CorruptEntry { offset, reason }
+      if offset == locations[0].offset
+        && reason == format!(
+          "Chunk KV entry moved while planning span: expected offset {} length {}, found offset {} length {}",
+          locations[0].offset, locations[0].total_length, current.offset, current.total_length,
+        )
+  ));
 }
 
 #[test]
