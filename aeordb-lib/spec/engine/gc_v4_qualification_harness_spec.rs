@@ -136,6 +136,24 @@ fn aggressive_soak_waits_for_the_initial_durable_startup_checkpoint() {
 }
 
 #[test]
+fn legacy_soak_monitors_each_worker_for_its_complete_scheduled_window() {
+  let soak = read_script("scripts/soak.sh");
+  let helper = read_script("scripts/lib/soak-cycle.sh");
+
+  assert!(soak.contains("source \"$REPO_ROOT/scripts/lib/soak-cycle.sh\""), "the runner must load the shared worker-window monitor");
+  assert_eq!(
+    soak.matches("wait_for_worker_window \"$worker_pid\"").count(),
+    2,
+    "both long-run modes must detect a worker that exits before its scheduled window"
+  );
+  assert!(!soak.contains("worker already exited"), "an early worker exit must never be converted into a successful cycle");
+
+  for required in ["wait_for_worker_window()", "wait \"$target_pid\"", "exited before its scheduled window completed", "return 1"] {
+    assert!(helper.contains(required), "the worker-window helper is missing required behavior {required:?}");
+  }
+}
+
+#[test]
 fn runtime_metrics_acquire_writer_before_kv_snapshot_and_share_one_engine_path() {
   let metrics_pulse = read_script("aeordb-lib/src/engine/metrics_pulse.rs");
   let portal_routes = read_script("aeordb-lib/src/server/portal_routes.rs");

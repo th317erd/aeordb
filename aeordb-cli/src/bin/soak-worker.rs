@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 use aeordb::engine::{gc, DirectoryOps, RequestContext, StorageEngine, VersionManager};
 
 const METRICS_HEADER: &str = "iso_time\telapsed_secs\twrites\treads\tdeletes\trss_kb\tvm_data_kb\tvm_size_kb\tvm_hwm_kb\tfd_count\tdb_size_bytes\twal_bytes\tvoid_bytes\tentry_count\tcache_perms\tcache_index\tcache_dir\tlast_action";
+const CHECKPOINT_PAYLOAD_MAX_BYTES: usize = u16::MAX as usize + 2;
+// The bounded payload above plus optional CRLF.
+const CHECKPOINT_RECORD_MAX_BYTES: usize = CHECKPOINT_PAYLOAD_MAX_BYTES + 2;
 
 struct Config {
   database: String,
@@ -676,14 +679,61 @@ fn build_corpus(root: &str) -> Result<Vec<PathBuf>, String> {
 // ---------------------------------------------------------------------------
 
 fn load_checkpoint(path: &Path) -> Result<HashSet<String>, String> {
-  let file = match File::open(path) {
-    Ok(f) => f,
+  let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+    Ok(file) => file,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
     Err(error) => return Err(format!("open checkpoint {}: {error}", path.display())),
   };
+  let file_length = file.metadata().map_err(|error| format!("inspect checkpoint {}: {error}", path.display()))?.len();
+  let mut reader = BufReader::new(&mut file);
   let mut set = HashSet::new();
-  for (index, line_result) in BufReader::new(file).lines().enumerate() {
-    let line = line_result.map_err(|error| format!("read checkpoint {} line {}: {error}", path.display(), index + 1))?;
+  let mut line_bytes = Vec::with_capacity(CHECKPOINT_RECORD_MAX_BYTES.min(8 * 1_024));
+  let mut valid_byte_frontier = 0u64;
+  let mut line_number = 0usize;
+  let mut incomplete_tail = false;
+
+  loop {
+    line_bytes.clear();
+    let bytes_read = Read::by_ref(&mut reader)
+      .take((CHECKPOINT_RECORD_MAX_BYTES + 1) as u64)
+      .read_until(b'\n', &mut line_bytes)
+      .map_err(|error| format!("read checkpoint {} line {}: {error}", path.display(), line_number + 1))?;
+    if bytes_read == 0 {
+      break;
+    }
+    line_number += 1;
+
+    let bytes_read =
+      u64::try_from(bytes_read).map_err(|error| format!("checkpoint {} line {line_number} length overflow: {error}", path.display()))?;
+    let observed_byte_frontier = valid_byte_frontier
+      .checked_add(bytes_read)
+      .ok_or_else(|| format!("checkpoint {} byte frontier overflow at line {line_number}", path.display()))?;
+    if !line_bytes.ends_with(b"\n") {
+      if observed_byte_frontier < file_length {
+        return Err(format!(
+          "checkpoint {} line {line_number} exceeds the {CHECKPOINT_RECORD_MAX_BYTES}-byte record limit",
+          path.display()
+        ));
+      }
+      incomplete_tail = true;
+      break;
+    }
+    if line_bytes.len() > CHECKPOINT_RECORD_MAX_BYTES {
+      return Err(format!("checkpoint {} line {line_number} exceeds the {CHECKPOINT_RECORD_MAX_BYTES}-byte record limit", path.display()));
+    }
+
+    line_bytes.pop();
+    if line_bytes.ends_with(b"\r") {
+      line_bytes.pop();
+    }
+    if line_bytes.len() > CHECKPOINT_PAYLOAD_MAX_BYTES {
+      return Err(format!(
+        "checkpoint {} line {line_number} exceeds the {CHECKPOINT_PAYLOAD_MAX_BYTES}-byte payload limit",
+        path.display()
+      ));
+    }
+    let line = std::str::from_utf8(&line_bytes)
+      .map_err(|error| format!("read checkpoint {} line {line_number}: invalid UTF-8: {error}", path.display()))?;
     if let Some(rest) = line.strip_prefix("+\t") {
       set.insert(rest.to_string());
     } else if let Some(rest) = line.strip_prefix("!\t") {
@@ -693,8 +743,18 @@ fn load_checkpoint(path: &Path) -> Result<HashSet<String>, String> {
     } else if let Some(rest) = line.strip_prefix("-\t") {
       set.remove(rest);
     } else {
-      return Err(format!("malformed checkpoint {} line {}: expected +, !, ?, or - operation", path.display(), index + 1));
+      return Err(format!("malformed checkpoint {} line {line_number}: expected +, !, ?, or - operation", path.display()));
     }
+    valid_byte_frontier = observed_byte_frontier;
+  }
+  drop(reader);
+
+  if incomplete_tail {
+    file
+      .set_len(valid_byte_frontier)
+      .map_err(|error| format!("truncate incomplete checkpoint tail {} at byte {valid_byte_frontier}: {error}", path.display()))?;
+    aeordb::engine::native_durability::sync_file_data_native(&file)
+      .map_err(|error| format!("checkpoint tail truncation durability barrier failed for {}: {error}", path.display()))?;
   }
   Ok(set)
 }

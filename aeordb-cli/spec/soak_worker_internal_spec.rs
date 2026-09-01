@@ -102,6 +102,92 @@ fn checkpoint_load_excludes_a_pending_delete_from_restart_work() {
 }
 
 #[test]
+fn checkpoint_load_accepts_completed_crlf_records() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("crlf.tsv");
+  std::fs::write(&checkpoint, "+\t/docs/a.txt\r\n?\t/docs/a.txt\r\n+\t/docs/b.txt\r\n").unwrap();
+
+  assert_eq!(load_checkpoint(&checkpoint).unwrap(), HashSet::from(["/docs/b.txt".to_string()]));
+}
+
+#[test]
+fn checkpoint_load_truncates_a_one_byte_final_fragment() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("one-byte-tail.tsv");
+  let complete_prefix = b"+\t/docs/a.txt\n";
+  let mut checkpoint_bytes = complete_prefix.to_vec();
+  checkpoint_bytes.push(b'+');
+  std::fs::write(&checkpoint, checkpoint_bytes).unwrap();
+
+  assert_eq!(load_checkpoint(&checkpoint).unwrap(), HashSet::from(["/docs/a.txt".to_string()]));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), complete_prefix);
+}
+
+#[test]
+fn checkpoint_load_truncates_only_a_nonterminated_final_record_before_append_resumes() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("incomplete-tail.tsv");
+  let complete_prefix = b"+\t/docs/a.txt\n+\t/docs/b.txt\n?\t/docs/a.txt\n";
+  let mut checkpoint_bytes = complete_prefix.to_vec();
+  checkpoint_bytes.extend_from_slice(b"+\t/docs/incomplete.txt");
+  std::fs::write(&checkpoint, checkpoint_bytes).unwrap();
+
+  let committed = load_checkpoint(&checkpoint).unwrap();
+  assert_eq!(committed, HashSet::from(["/docs/b.txt".to_string()]));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), complete_prefix);
+
+  let mut writer = OpenOptions::new().append(true).open(&checkpoint).unwrap();
+  append_checkpoint(&mut writer, '+', "/docs/c.txt").unwrap();
+  drop(writer);
+
+  let committed = load_checkpoint(&checkpoint).unwrap();
+  assert_eq!(committed, HashSet::from(["/docs/b.txt".to_string(), "/docs/c.txt".to_string()]));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), b"+\t/docs/a.txt\n+\t/docs/b.txt\n?\t/docs/a.txt\n+\t/docs/c.txt\n");
+}
+
+#[test]
+fn checkpoint_load_ignores_an_invalid_utf8_final_fragment_but_rejects_a_completed_one() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("invalid-utf8-tail.tsv");
+  let complete_prefix = b"+\t/docs/a.txt\n";
+  let mut incomplete = complete_prefix.to_vec();
+  incomplete.extend_from_slice(b"+\t/docs/");
+  incomplete.push(0xff);
+  std::fs::write(&checkpoint, incomplete).unwrap();
+
+  let committed = load_checkpoint(&checkpoint).unwrap();
+  assert_eq!(committed, HashSet::from(["/docs/a.txt".to_string()]));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), complete_prefix);
+
+  let mut completed = complete_prefix.to_vec();
+  completed.extend_from_slice(b"+\t/docs/");
+  completed.push(0xff);
+  completed.push(b'\n');
+  std::fs::write(&checkpoint, &completed).unwrap();
+
+  let error = load_checkpoint(&checkpoint).unwrap_err();
+  assert!(error.contains("checkpoint") && error.contains("line 2") && error.contains("UTF-8"), "{error}");
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), completed);
+}
+
+#[test]
+fn checkpoint_load_enforces_the_file_record_path_boundary() {
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("path-boundary.tsv");
+  let maximum_path = format!("/{}", "a".repeat(u16::MAX as usize - 1));
+  std::fs::write(&checkpoint, format!("+\t{maximum_path}\r\n")).unwrap();
+  assert_eq!(load_checkpoint(&checkpoint).unwrap(), HashSet::from([maximum_path]));
+
+  let excessive_path = format!("/{}", "b".repeat(u16::MAX as usize));
+  let completed = format!("+\t{excessive_path}\n").into_bytes();
+  std::fs::write(&checkpoint, &completed).unwrap();
+
+  let error = load_checkpoint(&checkpoint).unwrap_err();
+  assert!(error.contains("checkpoint") && error.contains("line 1") && error.contains("payload limit"), "{error}");
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), completed);
+}
+
+#[test]
 fn database_size_failure_is_not_reported_as_zero() {
   let temporary = tempfile::tempdir().unwrap();
   let missing = temporary.path().join("missing.aeordb");

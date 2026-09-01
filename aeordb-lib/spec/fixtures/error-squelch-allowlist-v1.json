@@ -346,7 +346,7 @@
     {
       "id": "esq-v1-30b4c94eb30af43a169b-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 64,
+      "line": 67,
       "column": 15,
       "enclosing_item": "parse_f64_argument",
       "kind": "error_conversion",
@@ -356,7 +356,7 @@
     {
       "id": "esq-v1-4ff489e02e191fad8d99-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 73,
+      "line": 76,
       "column": 3,
       "enclosing_item": "parse_u64_argument",
       "kind": "error_conversion",
@@ -366,7 +366,7 @@
     {
       "id": "esq-v1-c9a9c8990cf8e3893d8a-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 159,
+      "line": 162,
       "column": 20,
       "enclosing_item": "parse_args",
       "kind": "default_on_error",
@@ -376,7 +376,7 @@
     {
       "id": "esq-v1-3c16dfa0edb6f0bbc258-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 160,
+      "line": 163,
       "column": 22,
       "enclosing_item": "parse_args",
       "kind": "default_on_error",
@@ -386,7 +386,7 @@
     {
       "id": "esq-v1-244db270a7c974a97d06-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 164,
+      "line": 167,
       "column": 18,
       "enclosing_item": "parse_args",
       "kind": "error_conversion",
@@ -396,7 +396,7 @@
     {
       "id": "esq-v1-0ecbca3c41eaad032599-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 275,
+      "line": 278,
       "column": 26,
       "enclosing_item": "run",
       "kind": "default_on_error",
@@ -406,7 +406,7 @@
     {
       "id": "esq-v1-477e75ae8c83acb1c60d-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 353,
+      "line": 356,
       "column": 28,
       "enclosing_item": "run",
       "kind": "default_on_error",
@@ -416,7 +416,7 @@
     {
       "id": "esq-v1-8435e9a0bc567fc0e5f5-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 532,
+      "line": 535,
       "column": 24,
       "enclosing_item": "run",
       "kind": "error_conversion",
@@ -426,7 +426,7 @@
     {
       "id": "esq-v1-d62302bab56b08d9bbfe-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 533,
+      "line": 536,
       "column": 21,
       "enclosing_item": "run",
       "kind": "error_conversion",
@@ -436,7 +436,7 @@
     {
       "id": "esq-v1-ecda7de6cc9ec6f42984-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 614,
+      "line": 617,
       "column": 13,
       "enclosing_item": "do_write",
       "kind": "default_on_error",
@@ -446,7 +446,7 @@
     {
       "id": "esq-v1-5f80d870b572284bcc55-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 739,
+      "line": 799,
       "column": 3,
       "enclosing_item": "count_fds",
       "kind": "result_to_option",
@@ -456,7 +456,7 @@
     {
       "id": "esq-v1-3a38e84c2448f769595a-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 747,
+      "line": 807,
       "column": 20,
       "enclosing_item": "set_last_action",
       "kind": "error_conversion",
@@ -466,7 +466,7 @@
     {
       "id": "esq-v1-b6aa13918257b5c7ae56-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 753,
+      "line": 813,
       "column": 3,
       "enclosing_item": "read_last_action",
       "kind": "error_conversion",
@@ -476,7 +476,7 @@
     {
       "id": "esq-v1-8f7bf5569aa66efa4739-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 785,
+      "line": 845,
       "column": 18,
       "enclosing_item": "summarize",
       "kind": "default_on_error",
@@ -486,7 +486,7 @@
     {
       "id": "esq-v1-e62c534c5f98b7e28d55-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 786,
+      "line": 846,
       "column": 23,
       "enclosing_item": "summarize",
       "kind": "default_on_error",
@@ -496,7 +496,7 @@
     {
       "id": "esq-v1-57ad4a75d3636468e8c4-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 824,
+      "line": 884,
       "column": 76,
       "enclosing_item": "summarize",
       "kind": "default_on_error",
@@ -506,7 +506,7 @@
     {
       "id": "esq-v1-57ad4a75d3636468e8c4-01",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 825,
+      "line": 885,
       "column": 76,
       "enclosing_item": "summarize",
       "kind": "default_on_error",
@@ -516,7 +516,7 @@
     {
       "id": "esq-v1-0ffb19992b2690328e08-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 885,
+      "line": 945,
       "column": 5,
       "enclosing_item": "parse_row",
       "kind": "error_conversion",
@@ -526,7 +526,7 @@
     {
       "id": "esq-v1-a56c56f9f07b4db3bfb4-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 891,
+      "line": 951,
       "column": 12,
       "enclosing_item": "parse_row",
       "kind": "error_conversion",
@@ -536,7 +536,7 @@
     {
       "id": "esq-v1-ea3edb2c3187394c5042-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 894,
+      "line": 954,
       "column": 10,
       "enclosing_item": "parse_row",
       "kind": "error_conversion",
@@ -546,7 +546,7 @@
     {
       "id": "esq-v1-46422ddd89fcc56856b5-00",
       "file": "aeordb-cli/src/bin/soak-worker.rs",
-      "line": 932,
+      "line": 992,
       "column": 3,
       "enclosing_item": "pick_random",
       "kind": "default_on_error",

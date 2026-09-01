@@ -53,7 +53,11 @@ SCRATCH_ROOT="${AEORDB_SOAK_SCRATCH:-${XDG_CACHE_HOME:-$HOME/.cache}/codex/aeord
 SOAK_FAILURES=0
 mkdir -p "$SCRATCH_ROOT"
 
-cd "$(dirname "$0")/.."
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The helper path is resolved from the runtime repository root.
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/soak-cycle.sh"
+cd "$REPO_ROOT" || exit 1
 
 if [ "$MODE" != "summarize" ]; then
   case "$MODE" in
@@ -204,6 +208,8 @@ case "$MODE" in
     echo "  tail with:   tail -f $WORKER_LOG"
     sleep 2  # let the worker start before snapshotting its address space
     pmap_pid=$(start_pmap_recorder "$worker_pid")
+    # Capture the current worker IDs before leaving this case arm.
+    # shellcheck disable=SC2064
     trap "kill $worker_pid $pmap_pid 2>/dev/null" EXIT INT TERM
     wait "$worker_pid"
     kill "$pmap_pid" 2>/dev/null
@@ -258,21 +264,23 @@ case "$MODE" in
         --source-dir "$SOURCE" \
         --duration-hours "$HOURS" >> "$WORKER_LOG" 2>&1 &
       worker_pid=$!
-      sleep 2  # let the worker initialize before snapshotting
       pmap_pid=$(start_pmap_recorder "$worker_pid")
 
-      # Sleep, then SIGKILL.
-      remaining_slot=$(( slot - 2 ))
-      [ "$remaining_slot" -gt 0 ] && sleep "$remaining_slot"
-      if kill -0 "$worker_pid" 2>/dev/null; then
+      worker_window_ok=1
+      if ! wait_for_worker_window "$worker_pid" "$slot" "S2 worker iteration $iteration"; then
+        worker_window_ok=0
+      fi
+      if [ "$worker_window_ok" = "1" ] && kill -0 "$worker_pid" 2>/dev/null; then
         echo "[$(date +%T)] iteration $iteration: SIGKILL pid=$worker_pid"
         kill -KILL "$worker_pid" 2>/dev/null
         wait "$worker_pid" 2>/dev/null
-      else
-        echo "[$(date +%T)] iteration $iteration: worker already exited"
       fi
       kill "$pmap_pid" 2>/dev/null
       wait "$pmap_pid" 2>/dev/null
+      cycle_failed=0
+      if [ "$worker_window_ok" != "1" ]; then
+        cycle_failed=1
+      fi
 
       # Quick verify: try to open the database and read N random committed
       # paths. The repair-aware open path inside aeordb handles the dirty
@@ -319,7 +327,14 @@ missing_kv=${missing_kv:-?} missing_children=${missing_children:-?} dangling=${d
 unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} invalid_offsets=${invalid_offsets:-?} \
 invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} stale_dir_keys=${stale_dir_keys:-?}"
         echo "  (continuing soak; collect failures at the end)"
+        cycle_failed=1
+      fi
+      if [ "$cycle_failed" != "0" ]; then
         SOAK_FAILURES=$((SOAK_FAILURES + 1))
+      fi
+      if [ "$worker_window_ok" != "1" ]; then
+        echo "[$(date +%T)] iteration $iteration: stopping after preserving the early-exit diagnostics"
+        break
       fi
     done
 
@@ -379,17 +394,16 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
         wait "$worker_pid" 2>/dev/null
         exit 1
       fi
-      sleep 1
       pmap_pid=$(start_pmap_recorder "$worker_pid")
 
-      remaining_slot=$(( slot - 1 ))
-      [ "$remaining_slot" -gt 0 ] && sleep "$remaining_slot"
-      if kill -0 "$worker_pid" 2>/dev/null; then
+      worker_window_ok=1
+      if ! wait_for_worker_window "$worker_pid" "$slot" "S3 worker iteration $iteration"; then
+        worker_window_ok=0
+      fi
+      if [ "$worker_window_ok" = "1" ] && kill -0 "$worker_pid" 2>/dev/null; then
         echo "[$(date +%T)] iteration $iteration: SIGKILL pid=$worker_pid"
         kill -KILL "$worker_pid" 2>/dev/null
         wait "$worker_pid" 2>/dev/null
-      else
-        echo "[$(date +%T)] iteration $iteration: worker already exited"
       fi
       kill "$pmap_pid" 2>/dev/null
       wait "$pmap_pid" 2>/dev/null
@@ -401,7 +415,7 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
       copy_db_for_diagnostic "$DB" "$verify_db"
       copy_db_for_diagnostic "$DB" "$probe_db"
       cp -a "$CHECKPOINT" "$checkpoint_copy"
-      diag_ok=1
+      diag_ok=$worker_window_ok
 
       verify_log="$diag_dir/verify.log"
       verify_status=0
@@ -444,6 +458,10 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
       else
         echo "[$(date +%T)] iteration $iteration: preserved diagnostic copies in $diag_dir"
         SOAK_FAILURES=$((SOAK_FAILURES + 1))
+      fi
+      if [ "$worker_window_ok" != "1" ]; then
+        echo "[$(date +%T)] iteration $iteration: stopping after preserving the early-exit diagnostics"
+        break
       fi
     done
 
