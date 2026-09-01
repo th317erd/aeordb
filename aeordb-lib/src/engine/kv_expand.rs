@@ -182,7 +182,9 @@ pub fn expand_kv_block(db_path: &str, target_stage: usize, hash_length: usize) -
       .map_err(|_| EngineError::InvalidInput(format!("KV relocation delta {raw_delta} cannot be represented as u64")))?;
 
     let relocated_payload = match crate::engine::hot_tail::read_hot_tail_checked(&mut file, old_hot_tail, hash_length) {
-      Ok(old_payload) => relocate_hot_tail_payload(old_payload, old_kv_end, relocation_end, offset_delta, new_kv_end, new_hot_tail)?,
+      Ok(old_payload) => {
+        relocate_hot_tail_payload(old_payload, old_kv_end, relocation_end, old_hot_tail, offset_delta, new_kv_end, new_hot_tail)?
+      }
       Err(error) if crate::engine::hot_tail::is_rebuildable_hot_tail_error(&error) => {
         // A previous pre-relocation attempt may have overwritten the selected
         // old hot tail while copying WAL bytes. Bytes at the future hot-tail
@@ -344,6 +346,7 @@ fn relocate_hot_tail_payload(
   mut payload: HotTailPayload,
   old_kv_end: u64,
   relocation_end: u64,
+  old_wal_end: u64,
   offset_delta: i64,
   new_wal_start: u64,
   new_wal_end: u64,
@@ -361,22 +364,43 @@ fn relocate_hot_tail_payload(
   }
 
   let mut adjusted_voids = Vec::with_capacity(payload.voids.len());
-  for mut void in payload.voids {
+  for void in payload.voids {
     let old_end = void
       .offset
       .checked_add(u64::from(void.size))
       .ok_or_else(|| EngineError::CorruptEntry { offset: void.offset, reason: "hot-tail void end overflows u64".to_string() })?;
-    if void.offset >= old_kv_end && old_end <= relocation_end {
-      void.offset = shifted_offset(void.offset, offset_delta)?;
-    } else if void.offset < new_wal_start {
+    if void.offset < old_kv_end || old_end > old_wal_end {
       continue;
     }
-    let new_end = void
-      .offset
-      .checked_add(u64::from(void.size))
-      .ok_or_else(|| EngineError::CorruptEntry { offset: void.offset, reason: "relocated hot-tail void end overflows u64".to_string() })?;
-    if void.offset >= new_wal_start && new_end <= new_wal_end {
-      adjusted_voids.push(VoidRecord { offset: void.offset, size: void.size });
+
+    // Adjacent garbage entries may have been coalesced across the last entry
+    // boundary selected for relocation. Recovery must move that extent's
+    // prefix and retain its suffix instead of discarding the complete record.
+    let relocated_fragment_end = old_end.min(relocation_end);
+    if void.offset < relocated_fragment_end {
+      let relocated_offset = shifted_offset(void.offset, offset_delta)?;
+      let fragment_size = u32::try_from(relocated_fragment_end - void.offset).map_err(|error| EngineError::CorruptEntry {
+        offset: void.offset,
+        reason: format!("relocated hot-tail void fragment exceeds u32: {error}"),
+      })?;
+      let relocated_end = relocated_offset.checked_add(u64::from(fragment_size)).ok_or_else(|| EngineError::CorruptEntry {
+        offset: relocated_offset,
+        reason: "relocated hot-tail void end overflows u64".to_string(),
+      })?;
+      if relocated_offset >= new_wal_start && relocated_end <= new_wal_end {
+        adjusted_voids.push(VoidRecord { offset: relocated_offset, size: fragment_size });
+      }
+    }
+
+    let retained_offset = void.offset.max(new_wal_start);
+    if retained_offset < old_end {
+      let fragment_size = u32::try_from(old_end - retained_offset).map_err(|error| EngineError::CorruptEntry {
+        offset: retained_offset,
+        reason: format!("retained hot-tail void fragment exceeds u32: {error}"),
+      })?;
+      if old_end <= new_wal_end {
+        adjusted_voids.push(VoidRecord { offset: retained_offset, size: fragment_size });
+      }
     }
   }
   crate::engine::hot_tail::sort_void_records_by_offset(&mut adjusted_voids);

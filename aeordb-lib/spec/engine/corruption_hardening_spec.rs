@@ -6,6 +6,7 @@
 use aeordb::engine::btree::{BTreeNode, BTREE_CONVERSION_THRESHOLD};
 use aeordb::engine::append_writer::AppendWriter;
 use aeordb::engine::directory_ops::{DirectoryOps, directory_path_hash};
+use aeordb::engine::entry_header::EntryHeader;
 use aeordb::engine::file_header::{HEADER_REGION_SIZE, read_active_header};
 use aeordb::engine::gc;
 use aeordb::engine::hot_tail::{self, HotTailPayload, VoidRecord};
@@ -1695,6 +1696,71 @@ fn kv_expansion_relocates_and_preserves_reusable_voids_from_growth_zone() {
     "KV expansion must leave a monotonically ordered, non-overlapping reusable-space snapshot: {:?}",
     report.invalid_hot_tail_voids
   );
+}
+
+#[test]
+fn kv_expansion_splits_a_coalesced_void_across_the_relocation_boundary() {
+  let (db_str, _temp) = raw_test_db();
+  let initial_header = active_header(&db_str);
+  let hash_length = initial_header.hash_algo.hash_length();
+  let old_wal_start = initial_header.kv_block_offset + initial_header.kv_block_length;
+  let target_block_length = stage_params(1, page_size(hash_length)).0;
+  let target_wal_start = initial_header.kv_block_offset + target_block_length;
+  let entry_overhead = EntryHeader::FIXED_HEADER_SIZE + 2 * hash_length;
+  let crossing_total_length = 512usize;
+  let suffix_total_length = 256usize;
+  let filler_total_length = usize::try_from(target_wal_start - old_wal_start).unwrap() - crossing_total_length / 2;
+  assert!(filler_total_length > entry_overhead, "test layout must admit a leading filler entry");
+
+  let engine = StorageEngine::open(&db_str).unwrap();
+  let (filler_offset, filler_length) = store_raw_directory_entry(&engine, 0x51, filler_total_length - entry_overhead);
+  let (crossing_offset, crossing_length) = store_raw_directory_entry(&engine, 0x52, crossing_total_length - entry_overhead);
+  let (suffix_offset, suffix_length) = store_raw_directory_entry(&engine, 0x53, suffix_total_length - entry_overhead);
+  assert_eq!(filler_offset, old_wal_start);
+  assert_eq!(filler_length as usize, filler_total_length);
+  assert!(crossing_offset < target_wal_start && crossing_offset + crossing_length as u64 > target_wal_start);
+  assert_eq!(suffix_offset, crossing_offset + crossing_length as u64);
+  assert_eq!(suffix_length as usize, suffix_total_length);
+
+  let live = gc::gc_mark(&engine).unwrap();
+  let (garbage_entries, _reclaimed_bytes) = gc::gc_sweep(&engine, &live, false).unwrap();
+  assert!(garbage_entries >= 3, "test entries must be tombstoned by GC");
+  for key_byte in [0x51, 0x52, 0x53] {
+    assert!(engine.is_entry_deleted(&vec![key_byte; hash_length]).unwrap());
+  }
+
+  let before_expansion = active_header(&db_str);
+  let mut db_file = OpenOptions::new().read(true).open(&db_str).unwrap();
+  let before_payload =
+    hot_tail::read_hot_tail_checked(&mut db_file, before_expansion.hot_tail_offset, before_expansion.hash_algo.hash_length()).unwrap();
+  assert_eq!(
+    before_payload.voids,
+    vec![VoidRecord {
+      offset: filler_offset,
+      size: u32::try_from(filler_total_length + crossing_total_length + suffix_total_length).unwrap(),
+    }],
+    "adjacent tombstoned entries must form one reusable extent before expansion",
+  );
+  let void_bytes_before = before_payload.voids.iter().map(|void| void.size as u64).sum::<u64>();
+
+  engine.expand_kv_block_online(1).unwrap();
+
+  let expanded_header = active_header(&db_str);
+  let mut db_file = OpenOptions::new().read(true).open(&db_str).unwrap();
+  let expanded_payload =
+    hot_tail::read_hot_tail_checked(&mut db_file, expanded_header.hot_tail_offset, expanded_header.hash_algo.hash_length()).unwrap();
+  let void_bytes_after = expanded_payload.voids.iter().map(|void| void.size as u64).sum::<u64>();
+  assert_eq!(void_bytes_after, void_bytes_before, "expansion must preserve both halves of a boundary-crossing reusable extent");
+  assert_eq!(expanded_payload.voids.len(), 2, "the relocated prefix and retained suffix must remain separately addressable");
+  assert!(
+    expanded_payload.voids.iter().any(|void| void.offset == suffix_offset && void.size == suffix_length),
+    "the suffix beyond the relocation boundary must remain at its original offset",
+  );
+
+  let report = verify::verify_checked(&engine, &db_str).unwrap();
+  assert_eq!(report.missing_kv_entries, 0, "expansion lost tombstone coverage: {:?}", report.missing_kv_details);
+  assert_eq!(report.stale_kv_entries, 0, "expansion retained stale KV rows: {:?}", report.stale_kv_details);
+  assert!(!report.has_issues(), "split reusable-space publication did not verify cleanly: {report:?}");
 }
 
 #[test]

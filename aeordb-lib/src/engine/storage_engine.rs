@@ -3254,6 +3254,7 @@ impl StorageEngine {
     voids: impl IntoIterator<Item = VoidRecord>,
     old_kv_end: u64,
     relocated_end: u64,
+    old_wal_end: u64,
     offset_delta: i64,
     new_wal_start: u64,
     new_wal_end: u64,
@@ -3261,28 +3262,51 @@ impl StorageEngine {
     let mut adjusted = Vec::new();
     let mut dropped = 0usize;
 
-    for mut void in voids {
+    for void in voids {
       let Some(end) = void.offset.checked_add(void.size as u64) else {
         dropped += 1;
         continue;
       };
-
-      if void.offset >= old_kv_end && end <= relocated_end {
-        let shifted = (void.offset as i128) + (offset_delta as i128);
-        if shifted < 0 || shifted > u64::MAX as i128 {
-          dropped += 1;
-          continue;
-        }
-        void.offset = shifted as u64;
-      } else if void.offset < new_wal_start {
+      if void.offset < old_kv_end || end > old_wal_end {
         dropped += 1;
         continue;
       }
 
-      if Self::valid_reusable_range(void.offset, void.size, new_wal_start, new_wal_end) {
-        adjusted.push(void);
-      } else {
-        dropped += 1;
+      // VoidManager coalesces adjacent garbage entries. The resulting extent
+      // can cross the exact entry boundary where relocation stops: its prefix
+      // moves to the append frontier while its suffix remains at the new WAL
+      // start. Preserve both physical ranges instead of dropping the complete
+      // reusable-space record and leaving durable KV tombstones uncovered.
+      let relocated_fragment_end = end.min(relocated_end);
+      if void.offset < relocated_fragment_end {
+        let shifted = (void.offset as i128) + (offset_delta as i128);
+        let fragment_size = relocated_fragment_end - void.offset;
+        if shifted < 0 || shifted > u64::MAX as i128 || fragment_size > u64::from(u32::MAX) {
+          dropped += 1;
+          continue;
+        }
+        let shifted = shifted as u64;
+        let fragment_size = fragment_size as u32;
+        if Self::valid_reusable_range(shifted, fragment_size, new_wal_start, new_wal_end) {
+          adjusted.push(VoidRecord { offset: shifted, size: fragment_size });
+        } else {
+          dropped += 1;
+        }
+      }
+
+      let retained_fragment_start = void.offset.max(new_wal_start);
+      if retained_fragment_start < end {
+        let fragment_size = end - retained_fragment_start;
+        if fragment_size > u64::from(u32::MAX) {
+          dropped += 1;
+          continue;
+        }
+        let fragment_size = fragment_size as u32;
+        if Self::valid_reusable_range(retained_fragment_start, fragment_size, new_wal_start, new_wal_end) {
+          adjusted.push(VoidRecord { offset: retained_fragment_start, size: fragment_size });
+        } else {
+          dropped += 1;
+        }
       }
     }
 
@@ -3291,6 +3315,7 @@ impl StorageEngine {
         dropped,
         old_kv_end,
         relocated_end,
+        old_wal_end,
         new_wal_start,
         new_wal_end,
         "Dropped invalid void records while adjusting for KV expansion"
@@ -5697,7 +5722,7 @@ impl StorageEngine {
       .map(|(offset, size)| VoidRecord { offset, size })
       .collect::<Vec<_>>();
     let adjusted_voids =
-      Self::adjust_voids_for_expansion(current_voids, old_kv_end, actual_copy_end, offset_delta, new_kv_end, new_hot_tail);
+      Self::adjust_voids_for_expansion(current_voids, old_kv_end, actual_copy_end, hot_tail_offset, offset_delta, new_kv_end, new_hot_tail);
     let mut relocation_hot_payload = kv.emergency_hot_tail_payload();
     for entry in &mut relocation_hot_payload.writes {
       if entry.offset >= old_kv_end && entry.offset < actual_copy_end {
