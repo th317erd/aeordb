@@ -26,8 +26,7 @@ use super::migration_capture_replay::{
 };
 use super::migration_control::{MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MigrationPhaseV1, MigrationProgressStateV1};
 use super::migration_destination::{
-  InitializedMigrationDestinationV1, MigrationDestinationInitializationRequestV1, initialize_migration_destination_v1,
-  observe_migration_destination_path_v1,
+  MigrationDestinationInitializationRequestV1, initialize_migration_destination_v1, observe_migration_destination_path_v1,
 };
 use super::migration_final_authority_reconciliation::{
   MigrationFinalAuthorityReconciliationRequestV1, MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1,
@@ -102,6 +101,20 @@ pub struct OfflineMigrationRunRequestV1<'a> {
   pub clock: OfflineMigrationRunClockV1,
   pub cancellation: &'a CancellationToken,
   pub resume: bool,
+  pub milestone_observer: Option<&'a mut dyn OfflineMigrationRunMilestoneObserverV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineMigrationRunMilestoneV1 {
+  ManifestDurable,
+  DestinationInitialized,
+  MigrationControlsAcquired,
+  SourceGcSuspended,
+}
+
+pub trait OfflineMigrationRunMilestoneObserverV1 {
+  /// Return true to pause immediately after this durable milestone.
+  fn should_pause_after(&mut self, milestone: OfflineMigrationRunMilestoneV1) -> bool;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,8 +188,9 @@ impl RunClockV1 {
 }
 
 pub fn execute_offline_migration_v1(
-  request: OfflineMigrationRunRequestV1<'_>,
+  mut request: OfflineMigrationRunRequestV1<'_>,
 ) -> Result<OfflineMigrationRunReceiptV1, OfflineMigrationRunErrorV1> {
+  let mut milestone_observer = request.milestone_observer.take();
   validate_identity(request.identity)?;
   let mut clock = RunClockV1::new(request.clock)?;
   let manifest = if request.resume {
@@ -213,9 +227,31 @@ pub fn execute_offline_migration_v1(
   );
   let result = (|| {
     if let Some(manifest) = manifest.as_ref() {
-      let destination = Arc::new(V4FirstAuthorityPublisher::open(request.destination).map_err(OfflineMigrationRunErrorV1::owned)?);
-      validate_reopened_destination(&permit, &destination)?;
-      execute_completed_resume(&request, &permit, manifest, &source, &destination, &mut clock)
+      if request.destination.exists() {
+        let destination = Arc::new(V4FirstAuthorityPublisher::open(request.destination).map_err(OfflineMigrationRunErrorV1::owned)?);
+        validate_reopened_destination(&permit, &destination)?;
+        if MigrationStateOwnerV1::observe_completed_destination_verification_if_present(&destination, &permit)
+          .map_err(OfflineMigrationRunErrorV1::owned)?
+          .is_some()
+        {
+          execute_completed_resume(&request, &permit, manifest, &source, &destination, &mut clock)
+        } else {
+          execute_admitted_run(&request, &permit, &source, &destination, &mut clock, &mut milestone_observer)
+        }
+      } else {
+        let destination_observation = observe_migration_destination_path_v1(request.destination)
+          .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+        let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
+          permit: &permit,
+          destination: &destination_observation,
+          created_at_ms: manifest.created_at_ms(),
+          writer_fence_epoch: 1,
+          cancellation: request.cancellation,
+        })
+        .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+        pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::DestinationInitialized)?;
+        execute_admitted_run(&request, &permit, &source, &destination.shared_publisher(), &mut clock, &mut milestone_observer)
+      }
     } else {
       create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
         workspace: request.workspace,
@@ -228,6 +264,7 @@ pub fn execute_offline_migration_v1(
         cancellation: request.cancellation,
       })
       .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+      pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::ManifestDurable)?;
       let destination_observation = observe_migration_destination_path_v1(request.destination)
         .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
       let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
@@ -238,13 +275,27 @@ pub fn execute_offline_migration_v1(
         cancellation: request.cancellation,
       })
       .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-      execute_admitted_run(&request, &permit, &source, &destination, &mut clock)
+      pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::DestinationInitialized)?;
+      execute_admitted_run(&request, &permit, &source, &destination.shared_publisher(), &mut clock, &mut milestone_observer)
     }
   })();
   let shutdown = source.shutdown().map_err(OfflineMigrationRunErrorV1::owned);
   let result = result?;
   shutdown?;
   Ok(result)
+}
+
+fn pause_after(
+  observer: &mut Option<&mut dyn OfflineMigrationRunMilestoneObserverV1>,
+  milestone: OfflineMigrationRunMilestoneV1,
+) -> Result<(), OfflineMigrationRunErrorV1> {
+  if observer.as_deref_mut().is_some_and(|observer| observer.should_pause_after(milestone)) {
+    return Err(OfflineMigrationRunErrorV1::new(
+      "offline_migration_milestone_pause",
+      format!("offline migration paused after durable milestone {milestone:?}"),
+    ));
+  }
+  Ok(())
 }
 
 fn validate_reopened_destination(
@@ -389,8 +440,9 @@ fn execute_admitted_run(
   request: &OfflineMigrationRunRequestV1<'_>,
   permit: &MigrationPreflightPermitV1,
   source: &Arc<StorageEngine>,
-  destination: &InitializedMigrationDestinationV1,
+  destination: &Arc<V4FirstAuthorityPublisher>,
   clock: &mut RunClockV1,
+  milestone_observer: &mut Option<&mut dyn OfflineMigrationRunMilestoneObserverV1>,
 ) -> Result<OfflineMigrationRunReceiptV1, OfflineMigrationRunErrorV1> {
   let memory = migration_memory(request.bounds)?;
   let mut retirement = RetirementJournalOwnerV1::new_chain(
@@ -405,7 +457,7 @@ fn execute_admitted_run(
   .map_err(OfflineMigrationRunErrorV1::owned)?;
   let (updated, publication, monotonic) = clock.next()?;
   let (owner, _) = MigrationStateOwnerV1::acquire(
-    destination.shared_publisher(),
+    destination.clone(),
     permit.clone(),
     MigrationAcquisitionRequestV1 {
       holder_boot_id: request.identity.holder_boot_id,
@@ -418,6 +470,7 @@ fn execute_admitted_run(
     &mut retirement,
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::MigrationControlsAcquired)?;
   let (updated, publication, monotonic) = clock.next()?;
   let (_source_gc, _) = MigrationSourceGcSuspensionOwnerV1::suspend(
     source,
@@ -426,6 +479,7 @@ fn execute_admitted_run(
     &mut retirement,
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::SourceGcSuspended)?;
 
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 0, 0, 0, 0, 0)?;
@@ -433,10 +487,11 @@ fn execute_admitted_run(
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
 
   let source_basis = source.frozen_source_authority_snapshot().map_err(OfflineMigrationRunErrorV1::owned)?;
-  let authority = authority_template(permit, &destination.first_authority().namespace_root.root_hash, request.clock)?;
+  let base_predecessor = destination.load_selected_semantic_authority().map_err(OfflineMigrationRunErrorV1::owned)?.root_hash;
+  let authority = authority_template(permit, &base_predecessor, request.clock)?;
   let inventory = collect_inventory(request, permit, source)?;
   let mut seeds = inventory.into_base_clone_stream();
-  let mut root_workspace = create_root_workspace(request, permit, destination, &memory, publication_time(clock)?)?;
+  let mut root_workspace = create_root_workspace(request, permit, &memory, publication_time(clock)?)?;
   let mut root_sink = LegacyRootMapProducerSinkV1::new(&mut root_workspace, &authority, source_basis.hard_publication_frontier)
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   let clone = execute_migration_base_clone_v1(MigrationBaseCloneExecutionRequestV1 {
@@ -444,7 +499,7 @@ fn execute_admitted_run(
     source: source.as_ref(),
     seeds: &mut seeds,
     seed_results: &mut root_sink,
-    destination: destination.publisher(),
+    destination,
     memory: &memory,
     cancellation: request.cancellation,
     publication_timestamp_ms: publication_time(clock)?,
@@ -456,11 +511,11 @@ fn execute_admitted_run(
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   drop(root_sink);
 
-  let base_tree = load_destination_tree(destination.publisher(), &clone.destination_head_tree)
+  let base_tree = load_destination_tree(destination, &clone.destination_head_tree)
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
     permit,
-    destination: destination.publisher(),
+    destination,
     authority: &authority,
     source_sequence: source_basis.hard_publication_frontier,
     source_root: &source_basis.namespace_root,
@@ -472,7 +527,7 @@ fn execute_admitted_run(
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
 
-  let destination_sequence = destination.publisher().observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header.slot_sequence;
+  let destination_sequence = destination.observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header.slot_sequence;
   transition(
     &owner,
     &mut retirement,
@@ -569,7 +624,7 @@ fn execute_admitted_run(
   let namespace = execute_final_namespace_reconciliation_v1(MigrationFinalNamespaceReconciliationRequestV1 {
     permit,
     freeze: &freeze,
-    destination: destination.publisher(),
+    destination,
     last_reconciled_source_root: permit.source_capture_head(),
     current_destination_tree_root: &clone.destination_head_tree,
     authority: &authority,
@@ -602,7 +657,7 @@ fn execute_admitted_run(
     inventory: &mut final_stream,
     prior_mappings: &mut prior,
     root_sink: &mut final_sink,
-    destination: destination.publisher(),
+    destination,
     authority: &authority,
     memory: &memory,
     cancellation: request.cancellation,
@@ -632,7 +687,7 @@ fn execute_admitted_run(
       &mut retirement,
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  LegacyRootMapOwnerV1::new(destination.publisher())
+  LegacyRootMapOwnerV1::new(destination)
     .publish(
       LegacyRootMapPublicationRequestV1 {
         workspace: root_workspace,
@@ -644,7 +699,7 @@ fn execute_admitted_run(
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
 
-  let root_map = open_root_map(destination.publisher(), permit, request.cancellation, &memory)?;
+  let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
   let (updated, publication, monotonic) = clock.next()?;
   owner
     .begin_destination_verification(
@@ -661,7 +716,7 @@ fn execute_admitted_run(
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   drop(root_map);
-  let root_map = open_root_map(destination.publisher(), permit, request.cancellation, &memory)?;
+  let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
   let (updated, publication, monotonic) = clock.next()?;
   owner
     .start_destination_full_verification(
@@ -680,11 +735,11 @@ fn execute_admitted_run(
   drop(root_map);
 
   let mut verification_stream = verification_inventory.into_final_authority_stream();
-  let root_map = open_root_map(destination.publisher(), permit, request.cancellation, &memory)?;
+  let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
   let verification = verify_destination(
     permit,
     source,
-    destination.publisher(),
+    destination,
     &root_map,
     &mut verification_stream,
     &final_authority.mapping_closure,
@@ -716,7 +771,7 @@ fn execute_admitted_run(
       "source checksum changed between preflight and verified shadow completion",
     ));
   }
-  let final_header = destination.publisher().observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header;
+  let final_header = destination.observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header;
   Ok(OfflineMigrationRunReceiptV1 {
     phase: MigrationPhaseV1::DestinationVerify,
     state: MigrationProgressStateV1::Complete,
@@ -809,7 +864,6 @@ fn collect_inventory(
 fn create_root_workspace(
   request: &OfflineMigrationRunRequestV1<'_>,
   permit: &MigrationPreflightPermitV1,
-  destination: &InitializedMigrationDestinationV1,
   memory: &MemoryCoordinator,
   publication_timestamp_ms: u64,
 ) -> Result<LegacyRootMapStagingWorkspaceV1, OfflineMigrationRunErrorV1> {
@@ -835,7 +889,7 @@ fn create_root_workspace(
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   LegacyRootMapStagingWorkspaceV1::create(
-    destination.path(),
+    request.destination,
     identity,
     publication_timestamp_ms,
     options,

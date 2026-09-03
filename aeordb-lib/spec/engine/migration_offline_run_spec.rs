@@ -9,7 +9,8 @@ use aeordb::engine::config_resolver::CommandLineConfigOverrides;
 use aeordb::engine::v4::database_header::{ReadOnlyDatabaseHeader, read_database_header_read_only};
 use aeordb::engine::v4::migration_control::{MigrationPhaseV1, MigrationProgressStateV1};
 use aeordb::engine::v4::migration_offline_run::{
-  OfflineMigrationRunClockV1, OfflineMigrationRunIdentityV1, OfflineMigrationRunRequestV1, execute_offline_migration_v1,
+  OfflineMigrationRunClockV1, OfflineMigrationRunIdentityV1, OfflineMigrationRunMilestoneObserverV1, OfflineMigrationRunMilestoneV1,
+  OfflineMigrationRunRequestV1, execute_offline_migration_v1,
 };
 use aeordb::engine::v4::migration_run_manifest::{MIGRATION_RUN_MANIFEST_FILE_NAME, MigrationRunBoundsV1};
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, VersionManager};
@@ -109,6 +110,23 @@ impl Fixture {
       clock: OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_000_000, monotonic_time_ms: 10_000 },
       cancellation,
       resume: false,
+      milestone_observer: None,
+    }
+  }
+}
+
+struct PauseAtMilestone {
+  target: OfflineMigrationRunMilestoneV1,
+  paused: bool,
+}
+
+impl OfflineMigrationRunMilestoneObserverV1 for PauseAtMilestone {
+  fn should_pause_after(&mut self, milestone: OfflineMigrationRunMilestoneV1) -> bool {
+    if !self.paused && milestone == self.target {
+      self.paused = true;
+      true
+    } else {
+      false
     }
   }
 }
@@ -166,6 +184,52 @@ fn completed_offline_run_resumes_through_a_new_live_proof_without_changing_eithe
   assert_eq!(file_blake3(&fixture.source), source_before_resume);
   assert_eq!(file_blake3(&fixture.destination), destination_before_resume);
   assert_eq!(fs::metadata(&fixture.destination).unwrap().len(), destination_size);
+}
+
+#[test]
+fn early_durable_milestones_resume_to_verified_without_changing_the_v3_source() {
+  for milestone in [
+    OfflineMigrationRunMilestoneV1::ManifestDurable,
+    OfflineMigrationRunMilestoneV1::DestinationInitialized,
+    OfflineMigrationRunMilestoneV1::MigrationControlsAcquired,
+    OfflineMigrationRunMilestoneV1::SourceGcSuspended,
+  ] {
+    let fixture = Fixture::new();
+    let source_before = file_blake3(&fixture.source);
+    let source_size = fs::metadata(&fixture.source).unwrap().len();
+    let first_cancellation = CancellationToken::new();
+    let mut observer = PauseAtMilestone { target: milestone, paused: false };
+    let mut first_request = fixture.request(&first_cancellation);
+    first_request.milestone_observer = Some(&mut observer);
+
+    let error = execute_offline_migration_v1(first_request).unwrap_err();
+    assert_eq!(error.code(), "offline_migration_milestone_pause", "milestone {milestone:?}");
+    assert!(observer.paused);
+    assert!(fixture.workspace.join(MIGRATION_RUN_MANIFEST_FILE_NAME).is_file());
+    assert_eq!(fixture.destination.exists(), milestone != OfflineMigrationRunMilestoneV1::ManifestDurable);
+    assert_eq!(file_blake3(&fixture.source), source_before);
+    assert_eq!(fs::metadata(&fixture.source).unwrap().len(), source_size);
+
+    let resumed_cancellation = CancellationToken::new();
+    let mut resumed_request = fixture.request(&resumed_cancellation);
+    resumed_request.resume = true;
+    resumed_request.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_010_000, monotonic_time_ms: 20_000 };
+    let receipt = execute_offline_migration_v1(resumed_request).unwrap_or_else(|error| panic!("milestone {milestone:?}: {error:?}"));
+    assert_eq!(receipt.phase, MigrationPhaseV1::DestinationVerify);
+    assert_eq!(receipt.state, MigrationProgressStateV1::Complete);
+    assert!(receipt.destination_full_verified);
+    assert_eq!(file_blake3(&fixture.source), source_before);
+    assert_eq!(fs::metadata(&fixture.source).unwrap().len(), source_size);
+
+    let destination_before_retry = file_blake3(&fixture.destination);
+    let retry_cancellation = CancellationToken::new();
+    let mut retry_request = fixture.request(&retry_cancellation);
+    retry_request.resume = true;
+    retry_request.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_020_000, monotonic_time_ms: 30_000 };
+    assert_eq!(execute_offline_migration_v1(retry_request).unwrap(), receipt);
+    assert_eq!(file_blake3(&fixture.destination), destination_before_retry);
+    assert_eq!(file_blake3(&fixture.source), source_before);
+  }
 }
 
 #[test]

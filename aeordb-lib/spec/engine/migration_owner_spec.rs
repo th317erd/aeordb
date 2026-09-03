@@ -548,6 +548,11 @@ fn completed_observation_requires_bound_held_lease_and_exact_verified_progress()
   let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
   let (_owner, _) =
     MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  assert_eq!(
+    MigrationStateOwnerV1::observe_completed_destination_verification_if_present(&publisher, &permit).unwrap(),
+    None,
+    "valid Pending progress is resumable, not completed",
+  );
   let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
     | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
     | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
@@ -564,6 +569,10 @@ fn completed_observation_requires_bound_held_lease_and_exact_verified_progress()
   });
 
   let observed = MigrationStateOwnerV1::observe_completed_destination_verification(&publisher, &permit).unwrap();
+  assert_eq!(
+    MigrationStateOwnerV1::observe_completed_destination_verification_if_present(&publisher, &permit).unwrap(),
+    Some(observed.clone()),
+  );
   assert_eq!(observed.fencing_token, 1);
   assert_eq!(observed.phase, MigrationPhaseV1::DestinationVerify);
   assert_eq!(observed.state, MigrationProgressStateV1::Complete);
