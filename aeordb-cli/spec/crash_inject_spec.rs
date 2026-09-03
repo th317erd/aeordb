@@ -113,6 +113,21 @@ fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
   false
 }
 
+fn wait_for_checkpoint_path_record_count(checkpoint_path: &str, path: &str, minimum_records: usize, timeout: Duration) -> bool {
+  let record_prefix = format!("{path}\t");
+  let start = std::time::Instant::now();
+  while start.elapsed() < timeout {
+    if let Ok(contents) = std::fs::read_to_string(checkpoint_path) {
+      let records = contents.lines().filter(|line| line.starts_with(&record_prefix)).count();
+      if records >= minimum_records {
+        return true;
+      }
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  false
+}
+
 /// Read the checkpoint file. Returns the list of `(path, expected_body)`
 /// pairs the worker reported as committed. Comments (`#`-prefixed lines)
 /// are skipped.
@@ -161,6 +176,47 @@ fn pending_write_checkpoint_drops_a_stale_exact_body_expectation() {
   assert!(
     read_checkpoint(checkpoint.to_str().unwrap()).is_empty(),
     "an overwrite intent must retire the prior exact-body oracle before the newer database value can commit"
+  );
+}
+
+#[test]
+fn gc_reused_path_records_pending_intent_before_replacement_commit() {
+  let temp = tempfile::tempdir().unwrap();
+  let database = temp.path().join("gc-reused-path.aeordb");
+  let checkpoint = temp.path().join("checkpoint.tsv");
+  let path = "/gc/file-0000.json";
+  let old_body = r#"{"counter":"old"}"#;
+
+  {
+    let engine = StorageEngine::create(database.to_str().unwrap()).unwrap();
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&aeordb::engine::RequestContext::system(), path, old_body.as_bytes(), Some("application/json")).unwrap();
+    engine.shutdown().unwrap();
+  }
+  std::fs::write(&checkpoint, format!("{path}\t{old_body}\n")).unwrap();
+
+  let mut worker = Command::new(env!("CARGO_BIN_EXE_crash-soak-worker"))
+    .args(["--database", database.to_str().unwrap(), "--checkpoint", checkpoint.to_str().unwrap(), "--mode", "gc"])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+
+  let replacement_committed = wait_for_checkpoint_path_record_count(checkpoint.to_str().unwrap(), path, 2, Duration::from_secs(10));
+  sigkill(&mut worker);
+  assert!(replacement_committed, "worker did not commit the replacement within the test deadline");
+
+  let contents = std::fs::read_to_string(&checkpoint).unwrap();
+  let lines: Vec<&str> = contents.lines().collect();
+  let record_prefix = format!("{path}\t");
+  let replacement_index =
+    lines.iter().enumerate().filter(|(_, line)| line.starts_with(&record_prefix)).nth(1).map(|(index, _)| index).unwrap();
+  let pending_intent = format!("!\t{path}");
+
+  assert_eq!(
+    lines.get(replacement_index.checked_sub(1).unwrap()).copied(),
+    Some(pending_intent.as_str()),
+    "a reused path must retire the previous exact-body expectation before the replacement can commit"
   );
 }
 

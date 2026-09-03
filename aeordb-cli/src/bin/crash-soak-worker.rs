@@ -137,6 +137,16 @@ fn main() {
       (path, body, "text/plain")
     };
 
+    if mode == "gc" {
+      // GC mode intentionally reuses a bounded path set. Retire the prior
+      // exact-body expectation before a replacement can commit because the
+      // database and checkpoint are separate durability domains.
+      if let Err(error) = checkpoint_pending_writes(&mut checkpoint_file, std::iter::once(path.as_str())) {
+        eprintln!("{error}");
+        process::exit(4);
+      }
+    }
+
     let result = ops.store_file_buffered(&ctx, &path, body.as_bytes(), Some(content_type));
     match result {
       Ok(_) => {
