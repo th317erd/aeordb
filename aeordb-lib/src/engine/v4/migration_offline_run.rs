@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::first_authority::V4FirstAuthorityPublisher;
 use super::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
+use super::hash::digest_parts;
 use super::migration_base_clone_execution::{MigrationBaseCloneExecutionRequestV1, execute_migration_base_clone_v1};
 use super::migration_capture_replay::{
   MigrationCaptureReplayAuthorityTemplateV1, MigrationSuccessorProjectionRequestV1, load_destination_tree, publish_migration_successor_v1,
@@ -45,9 +46,13 @@ use super::migration_preflight::MigrationPreflightPermitV1;
 use super::migration_root_map::LegacyRootMapRowV1;
 use super::migration_root_map_owner::{
   LegacyRootMapOwnerV1, LegacyRootMapProducerSinkV1, LegacyRootMapPublicationRequestV1, LegacyRootMapStagedPriorLookupV1,
-  LegacyRootMapStagingWorkspaceV1, LegacyRootMapWorkspaceIdentityV1, LegacyRootMapWorkspaceOptionsV1, VerifiedLegacyRootMapReaderV1,
+  LegacyRootMapStagingWorkspaceV1, LegacyRootMapWorkspaceIdentityV1, LegacyRootMapWorkspaceOptionsV1,
+  LegacyRootMapWorkspaceReopenOptionsV1, VerifiedLegacyRootMapReaderV1,
 };
-use super::migration_run_manifest::{MigrationRunBoundsV1, MigrationRunManifestCreateRequestV1, create_migration_run_manifest_v1};
+use super::migration_run_manifest::{
+  MigrationRunBoundsV1, MigrationRunManifestCreateRequestV1, MigrationRunManifestV1, create_migration_run_manifest_v1,
+  open_migration_run_manifest_v1,
+};
 use super::migration_source_gc::{MigrationSourceGcSuspensionOwnerV1, MigrationSourceGcSuspensionRequestV1};
 use super::migration_v3_authority_inventory::{
   V3MigrationAuthorityInventoryLimitsV1, V3MigrationAuthorityInventoryRequestV1, collect_v3_migration_authority_inventory_v1,
@@ -172,14 +177,16 @@ impl RunClockV1 {
 pub fn execute_offline_migration_v1(
   request: OfflineMigrationRunRequestV1<'_>,
 ) -> Result<OfflineMigrationRunReceiptV1, OfflineMigrationRunErrorV1> {
-  if request.resume {
-    return Err(OfflineMigrationRunErrorV1::new(
-      "offline_migration_resume_not_ready",
-      "cross-process resume is not yet admitted by this orchestration version",
-    ));
-  }
   validate_identity(request.identity)?;
   let mut clock = RunClockV1::new(request.clock)?;
+  let manifest = if request.resume {
+    Some(
+      open_migration_run_manifest_v1(request.workspace, request.cancellation)
+        .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?,
+    )
+  } else {
+    None
+  };
   let preflight = collect_offline_migration_preflight_v1(OfflineMigrationPreflightRequestV1 {
     source: request.source,
     destination: request.destination,
@@ -194,43 +201,188 @@ pub fn execute_offline_migration_v1(
     bounds: request.bounds,
     acquisition_timeout: request.acquisition_timeout,
     cancellation: request.cancellation,
-    resume_manifest: None,
+    resume_manifest: manifest.as_ref(),
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   let permit = preflight.permit().clone();
-  create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
-    workspace: request.workspace,
-    source: request.source,
-    destination: request.destination,
-    permit: &permit,
-    holder_boot_id: request.identity.holder_boot_id,
-    created_at_ms: request.clock.wall_time_ms,
-    bounds: request.bounds,
-    cancellation: request.cancellation,
-  })
-  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-
-  let destination_observation = observe_migration_destination_path_v1(request.destination)
-    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
-    permit: &permit,
-    destination: &destination_observation,
-    created_at_ms: request.clock.wall_time_ms,
-    writer_fence_epoch: 1,
-    cancellation: request.cancellation,
-  })
-  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   let source_path =
     request.source.to_str().ok_or_else(|| OfflineMigrationRunErrorV1::new("offline_migration_source_path", "source path is not UTF-8"))?;
   let source = Arc::new(
     StorageEngine::open_for_offline_migration_inspection(source_path, request.configuration_overrides.clone())
       .map_err(OfflineMigrationRunErrorV1::owned)?,
   );
-  let result = execute_admitted_run(&request, &permit, &source, &destination, &mut clock);
+  let result = (|| {
+    if let Some(manifest) = manifest.as_ref() {
+      let destination = Arc::new(V4FirstAuthorityPublisher::open(request.destination).map_err(OfflineMigrationRunErrorV1::owned)?);
+      validate_reopened_destination(&permit, &destination)?;
+      execute_completed_resume(&request, &permit, manifest, &source, &destination, &mut clock)
+    } else {
+      create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
+        workspace: request.workspace,
+        source: request.source,
+        destination: request.destination,
+        permit: &permit,
+        holder_boot_id: request.identity.holder_boot_id,
+        created_at_ms: request.clock.wall_time_ms,
+        bounds: request.bounds,
+        cancellation: request.cancellation,
+      })
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+      let destination_observation = observe_migration_destination_path_v1(request.destination)
+        .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+      let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
+        permit: &permit,
+        destination: &destination_observation,
+        created_at_ms: request.clock.wall_time_ms,
+        writer_fence_epoch: 1,
+        cancellation: request.cancellation,
+      })
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+      execute_admitted_run(&request, &permit, &source, &destination, &mut clock)
+    }
+  })();
   let shutdown = source.shutdown().map_err(OfflineMigrationRunErrorV1::owned);
   let result = result?;
   shutdown?;
   Ok(result)
+}
+
+fn validate_reopened_destination(
+  permit: &MigrationPreflightPermitV1,
+  destination: &V4FirstAuthorityPublisher,
+) -> Result<(), OfflineMigrationRunErrorV1> {
+  let observation = destination.observe().map_err(OfflineMigrationRunErrorV1::owned)?;
+  let header = &observation.selected.header;
+  if observation.selected.redundancy_degraded
+    || header.database_id != permit.database_id()
+    || header.physical_instance_id != permit.destination_physical_instance_id()
+    || header.hash_algorithm != permit.hash_algorithm()
+    || header.writer_fence_epoch != 1
+    || header.required_reader_capabilities != permit.required_reader_capabilities().into_bytes()
+    || header.required_writer_capabilities != permit.required_writer_capabilities().into_bytes()
+    || header.system_family_registry_fingerprint != permit.system_family_registry_fingerprint()
+    || header.head_hash.iter().all(|byte| *byte == 0)
+  {
+    return Err(OfflineMigrationRunErrorV1::new(
+      "offline_migration_resume_destination",
+      "reopened destination differs from the immutable migration identity, capability, fence, or registry binding",
+    ));
+  }
+  Ok(())
+}
+
+fn execute_completed_resume(
+  request: &OfflineMigrationRunRequestV1<'_>,
+  permit: &MigrationPreflightPermitV1,
+  _manifest: &MigrationRunManifestV1,
+  source: &Arc<StorageEngine>,
+  destination: &Arc<V4FirstAuthorityPublisher>,
+  clock: &mut RunClockV1,
+) -> Result<OfflineMigrationRunReceiptV1, OfflineMigrationRunErrorV1> {
+  let progress =
+    MigrationStateOwnerV1::observe_completed_destination_verification(destination, permit).map_err(OfflineMigrationRunErrorV1::owned)?;
+  let memory = migration_memory(request.bounds)?;
+  let mut prior_workspace = reopen_root_workspace(request, permit, &memory)?;
+  let mut prior = LegacyRootMapStagedPriorLookupV1::snapshot(
+    &mut prior_workspace,
+    &memory,
+    request.bounds.prior_lookup_maximum_memory_bytes,
+    request.bounds.maximum_authority_records,
+  )
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  drop(prior_workspace);
+  let root_workspace = reopen_root_workspace(request, permit, &memory)?;
+  let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
+  let selected = destination.load_selected_semantic_authority().map_err(OfflineMigrationRunErrorV1::owned)?;
+  let authority = authority_template(permit, &initial_destination_root(permit), request.clock)?;
+  let final_inventory = collect_inventory(request, permit, source)?;
+  let verification_inventory = collect_inventory(request, permit, source)?;
+  let mut final_stream = final_inventory.into_final_authority_stream();
+  let freeze = acquire_migration_source_write_freeze_v1(MigrationSourceWriteFreezeRequestV1 {
+    permit,
+    source,
+    cancellation: request.cancellation,
+    acquisition_timeout: request.acquisition_timeout,
+  })
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let namespace = execute_final_namespace_reconciliation_v1(MigrationFinalNamespaceReconciliationRequestV1 {
+    permit,
+    freeze: &freeze,
+    destination,
+    last_reconciled_source_root: permit.source_capture_head(),
+    current_destination_tree_root: &selected.namespace_tree_root,
+    authority: &authority,
+    memory: &memory,
+    cancellation: request.cancellation,
+    publication_timestamp_ms: publication_time(clock)?,
+    maximum_diff_memory_bytes: request.bounds.maximum_memory_bytes,
+    maximum_diff_work_items: request.bounds.maximum_work_items,
+    maximum_subtree_memory_bytes: request.bounds.maximum_memory_bytes,
+    maximum_subtree_work_items: request.bounds.maximum_work_items,
+    maximum_total_subtree_work_items: request.bounds.maximum_work_items,
+    maximum_decoded_chunk_bytes: to_usize(request.bounds.maximum_decoded_chunk_bytes, "decoded chunk bound")?,
+    maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
+  })
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let selected_sink = SelectedRootMapValidationSinkV1::new(&root_map, &root_workspace, request.cancellation);
+  let mut final_sink =
+    VerificationMappingCaptureSinkV1::new(selected_sink, request.bounds.maximum_authority_records, request.bounds.maximum_memory_bytes);
+  let final_authority = execute_final_authority_reconciliation_v1(MigrationFinalAuthorityReconciliationRequestV1 {
+    permit,
+    namespace: &namespace,
+    inventory: &mut final_stream,
+    prior_mappings: &mut prior,
+    root_sink: &mut final_sink,
+    destination,
+    authority: &authority,
+    memory: &memory,
+    cancellation: request.cancellation,
+    publication_timestamp_ms: publication_time(clock)?,
+    maximum_memory_bytes: request.bounds.maximum_memory_bytes,
+    maximum_work_items: request.bounds.maximum_work_items,
+    maximum_subtree_memory_bytes: request.bounds.maximum_memory_bytes,
+    maximum_subtree_work_items: request.bounds.maximum_work_items,
+    maximum_total_subtree_work_items: request.bounds.maximum_work_items,
+    maximum_decoded_chunk_bytes: to_usize(request.bounds.maximum_decoded_chunk_bytes, "decoded chunk bound")?,
+    maximum_destination_entity_bytes: to_usize(request.bounds.maximum_decoded_chunk_bytes, "destination entity bound")?,
+    maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
+  })
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let detached_mappings = final_sink.into_mappings()?;
+  let mut verification_stream = verification_inventory.into_final_authority_stream();
+  let verification = verify_destination(
+    permit,
+    source,
+    destination,
+    &root_map,
+    &mut verification_stream,
+    &final_authority.mapping_closure,
+    &detached_mappings,
+    request.bounds,
+    request.cancellation,
+    &memory,
+  )?;
+  freeze.validate_unchanged().map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let checksum = file_blake3(request.source, request.cancellation)?;
+  if checksum != permit.source_complete_file_checksum() {
+    return Err(OfflineMigrationRunErrorV1::new(
+      "offline_migration_source_changed",
+      "source checksum changed between manifest preflight and resumed verification",
+    ));
+  }
+  let final_header = destination.observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header;
+  Ok(OfflineMigrationRunReceiptV1 {
+    phase: progress.phase,
+    state: progress.state,
+    destination_full_verified: true,
+    source_complete_file_checksum: checksum,
+    destination_header_sequence: final_header.slot_sequence,
+    copied_entity_count: progress.entity_count,
+    copied_content_bytes: progress.copied_bytes,
+    verified_root_count: verification.roots,
+    verified_entity_count: verification.entities,
+    verified_content_bytes: verification.content_bytes,
+  })
 }
 
 fn execute_admitted_run(
@@ -275,13 +427,13 @@ fn execute_admitted_run(
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
 
-  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, 0, 0, 0)?;
-  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 0, 0, 0, 0)?;
-  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Pending, 0, 0, 0, 0)?;
-  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 0, 0, 0, 0)?;
+  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
+  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 0, 0, 0, 0, 0)?;
+  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Pending, 0, 0, 0, 0, 0)?;
+  transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
 
   let source_basis = source.frozen_source_authority_snapshot().map_err(OfflineMigrationRunErrorV1::owned)?;
-  let authority = authority_template(permit, destination, request.clock)?;
+  let authority = authority_template(permit, &destination.first_authority().namespace_root.root_hash, request.clock)?;
   let inventory = collect_inventory(request, permit, source)?;
   let mut seeds = inventory.into_base_clone_stream();
   let mut root_workspace = create_root_workspace(request, permit, destination, &memory, publication_time(clock)?)?;
@@ -331,6 +483,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
   transition(
@@ -343,6 +496,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
   transition(
@@ -355,6 +509,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
   transition(
@@ -367,6 +522,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
   transition(
@@ -379,6 +535,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
   transition(
@@ -391,6 +548,7 @@ fn execute_admitted_run(
     destination_sequence,
     source_basis.hard_publication_frontier,
     clone.processed_seeds,
+    clone.published_entities,
     clone.copied_chunk_bytes,
   )?;
 
@@ -583,6 +741,7 @@ fn transition(
   destination_header_sequence: u64,
   copied_through_write_sequence: u64,
   namespace_count: u64,
+  entity_count: u64,
   copied_bytes: u64,
 ) -> Result<(), OfflineMigrationRunErrorV1> {
   let (updated, publication, monotonic) = clock.next()?;
@@ -608,7 +767,7 @@ fn transition(
           0
         },
         namespace_count,
-        entity_count: namespace_count,
+        entity_count,
         copied_bytes,
         updated_at_ms: updated,
         legacy_root_map_control_payload_hash: vec![0; permit.hash_algorithm().hash_length()],
@@ -686,9 +845,44 @@ fn create_root_workspace(
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))
 }
 
+fn reopen_root_workspace(
+  request: &OfflineMigrationRunRequestV1<'_>,
+  permit: &MigrationPreflightPermitV1,
+  memory: &MemoryCoordinator,
+) -> Result<LegacyRootMapStagingWorkspaceV1, OfflineMigrationRunErrorV1> {
+  let identity = LegacyRootMapWorkspaceIdentityV1::new(
+    permit.database_id(),
+    permit.migration_id(),
+    permit.database_id(),
+    permit.source_physical_instance_id(),
+    permit.destination_physical_instance_id(),
+    1,
+    permit.hash_algorithm(),
+  )
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let options = LegacyRootMapWorkspaceReopenOptionsV1::new(
+    request.bounds.root_map_maximum_stored_bytes,
+    request.bounds.root_map_maximum_staged_rows,
+    request.bounds.root_map_minimum_free_bytes,
+    request.bounds.root_map_maximum_sort_memory_bytes,
+    request.bounds.root_map_maximum_open_runs as usize,
+    request.bounds.root_map_maximum_page_rows as usize,
+    to_usize(request.bounds.root_map_maximum_publication_batch_bytes, "root-map publication bound")?,
+  )
+  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let path =
+    request.workspace.join(hex::encode(permit.database_id())).join(hex::encode(permit.migration_id())).join("root-map-0000000000000001");
+  LegacyRootMapStagingWorkspaceV1::reopen(&path, identity, options, request.cancellation.clone(), memory)
+    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))
+}
+
+fn initial_destination_root(permit: &MigrationPreflightPermitV1) -> Vec<u8> {
+  digest_parts(permit.hash_algorithm(), &[b"dirc:"])
+}
+
 fn authority_template(
   permit: &MigrationPreflightPermitV1,
-  destination: &InitializedMigrationDestinationV1,
+  base_predecessor_head: &[u8],
   clock: OfflineMigrationRunClockV1,
 ) -> Result<MigrationCaptureReplayAuthorityTemplateV1, OfflineMigrationRunErrorV1> {
   let required_capabilities = permit.required_reader_capabilities().into_bytes();
@@ -701,7 +895,7 @@ fn authority_template(
   )
   .map_err(OfflineMigrationRunErrorV1::owned)?;
   Ok(MigrationCaptureReplayAuthorityTemplateV1 {
-    base_predecessor_head: destination.first_authority().namespace_root.root_hash.clone(),
+    base_predecessor_head: base_predecessor_head.to_vec(),
     semantic_state,
     required_capabilities,
     typed_closure_context: b"offline v3-to-v4 shadow migration".to_vec(),
@@ -781,8 +975,71 @@ struct DetachedVerificationMappingV1 {
   destination_entity: Option<Vec<u8>>,
 }
 
-struct VerificationMappingCaptureSinkV1<'a> {
-  delegate: LegacyRootMapProducerSinkV1<'a>,
+struct SelectedRootMapValidationSinkV1<'a, 'destination> {
+  root_map: &'a VerifiedLegacyRootMapReaderV1<'destination>,
+  workspace: &'a LegacyRootMapStagingWorkspaceV1,
+  cancellation: &'a CancellationToken,
+  observed_roots: HashSet<Vec<u8>>,
+  finished: bool,
+}
+
+impl<'a, 'destination> SelectedRootMapValidationSinkV1<'a, 'destination> {
+  fn new(
+    root_map: &'a VerifiedLegacyRootMapReaderV1<'destination>,
+    workspace: &'a LegacyRootMapStagingWorkspaceV1,
+    cancellation: &'a CancellationToken,
+  ) -> Self {
+    Self { root_map, workspace, cancellation, observed_roots: HashSet::new(), finished: false }
+  }
+}
+
+impl MigrationFinalRootMappingSinkV1 for SelectedRootMapValidationSinkV1<'_, '_> {
+  fn record_root_mapping(&mut self, mapping: &MigrationFinalRootMappingV1) -> crate::engine::EngineResult<()> {
+    if self.finished {
+      return Err(crate::engine::EngineError::InvalidInput("selected root-map validation received a mapping after closure".to_string()));
+    }
+    if mapping.kind == super::migration_base_clone_execution::MigrationBaseCloneSeedKindV1::DetachedProtectedPath {
+      if mapping.destination_namespace_root.is_some() || mapping.destination_tree_root.is_some() {
+        return Err(crate::engine::EngineError::InvalidInput(
+          "detached protected mapping unexpectedly identifies a NamespaceRoot".to_string(),
+        ));
+      }
+      return Ok(());
+    }
+    let expected_namespace = mapping
+      .destination_namespace_root
+      .as_deref()
+      .ok_or_else(|| crate::engine::EngineError::InvalidInput("resumed final mapping has no destination NamespaceRoot".to_string()))?;
+    let selected = self
+      .root_map
+      .lookup(&mapping.source_root, self.cancellation)
+      .map_err(|error| crate::engine::EngineError::InvalidInput(error.to_string()))?
+      .ok_or_else(|| crate::engine::EngineError::InvalidInput("resumed final mapping is absent from the selected root map".to_string()))?;
+    if selected.namespace_root_v1_hash != expected_namespace || selected.captured_source_write_sequence != mapping.source_write_sequence {
+      return Err(crate::engine::EngineError::InvalidInput("resumed final mapping differs from the selected root map".to_string()));
+    }
+    self.observed_roots.insert(mapping.source_root.clone());
+    Ok(())
+  }
+
+  fn finish_root_mappings(&mut self, closure: &MigrationFinalRootMappingClosureV1) -> crate::engine::EngineResult<()> {
+    if self.finished || self.observed_roots.len() != self.root_map.record_count() as usize {
+      return Err(crate::engine::EngineError::InvalidInput("selected root-map validation closure is duplicate or incomplete".to_string()));
+    }
+    self.workspace.validate_sealed_final_closure(closure).map_err(|error| crate::engine::EngineError::InvalidInput(error.to_string()))?;
+    if closure.destination_namespace_root != self.root_map.destination_head() {
+      return Err(crate::engine::EngineError::InvalidInput(
+        "reproduced final closure differs from the selected destination HEAD".to_string(),
+      ));
+    }
+    self.root_map.validate_selected_unchanged().map_err(|error| crate::engine::EngineError::InvalidInput(error.to_string()))?;
+    self.finished = true;
+    Ok(())
+  }
+}
+
+struct VerificationMappingCaptureSinkV1<D> {
+  delegate: D,
   mappings: Vec<DetachedVerificationMappingV1>,
   maximum_records: u64,
   maximum_memory_bytes: u64,
@@ -790,8 +1047,8 @@ struct VerificationMappingCaptureSinkV1<'a> {
   finished: bool,
 }
 
-impl<'a> VerificationMappingCaptureSinkV1<'a> {
-  fn new(delegate: LegacyRootMapProducerSinkV1<'a>, maximum_records: u64, maximum_memory_bytes: u64) -> Self {
+impl<D> VerificationMappingCaptureSinkV1<D> {
+  fn new(delegate: D, maximum_records: u64, maximum_memory_bytes: u64) -> Self {
     Self { delegate, mappings: Vec::new(), maximum_records, maximum_memory_bytes, used_memory_bytes: 0, finished: false }
   }
 
@@ -806,7 +1063,7 @@ impl<'a> VerificationMappingCaptureSinkV1<'a> {
   }
 }
 
-impl MigrationFinalRootMappingSinkV1 for VerificationMappingCaptureSinkV1<'_> {
+impl<D: MigrationFinalRootMappingSinkV1> MigrationFinalRootMappingSinkV1 for VerificationMappingCaptureSinkV1<D> {
   fn record_root_mapping(&mut self, mapping: &MigrationFinalRootMappingV1) -> crate::engine::EngineResult<()> {
     if mapping.kind == super::migration_base_clone_execution::MigrationBaseCloneSeedKindV1::DetachedProtectedPath {
       let family_id = mapping.system_family_id.ok_or_else(|| {

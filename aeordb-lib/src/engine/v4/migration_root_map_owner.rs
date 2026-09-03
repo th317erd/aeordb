@@ -679,6 +679,39 @@ impl LegacyRootMapStagingWorkspaceV1 {
     &self.workspace_path
   }
 
+  /// Revalidate a previously sealed staging closure against a newly produced
+  /// final-authority closure after process restart.
+  ///
+  /// The live source freeze proof is intentionally process-local.  Resume
+  /// must therefore reproduce the final closure, while the already sealed
+  /// workspace remains immutable and must match it exactly.
+  pub(crate) fn validate_sealed_final_closure(
+    &self,
+    closure: &MigrationFinalRootMappingClosureV1,
+  ) -> Result<(), LegacyRootMapOwnerErrorV1> {
+    let seal = self
+      .seal
+      .as_ref()
+      .ok_or_else(|| LegacyRootMapOwnerErrorV1::invalid("migration_root_map_unsealed", "root-map workspace has no final closure"))?;
+    if closure.database_id != self.identity.database_id
+      || closure.migration_id != self.identity.migration_id
+      || closure.source_physical_instance_id != self.identity.source_physical_instance_id
+      || closure.destination_physical_instance_id != self.identity.destination_physical_instance_id
+      || seal.mapping_count != closure.mapping_count
+      || seal.omitted_mapping_count != closure.omitted_mapping_count
+      || seal.authority_digest != closure.authority_digest
+      || seal.mapping_digest != closure.mapping_digest
+      || seal.destination_namespace_root != closure.destination_namespace_root
+      || seal.staged_row_count != self.staged_rows
+    {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_closure_changed",
+        "reproduced final-authority closure differs from the sealed root-map workspace",
+      ));
+    }
+    Ok(())
+  }
+
   pub fn stage_mapping(
     &mut self,
     row: &LegacyRootMapRowV1,

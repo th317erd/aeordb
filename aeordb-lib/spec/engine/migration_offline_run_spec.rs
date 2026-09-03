@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -144,6 +145,97 @@ fn real_offline_run_reaches_verified_shadow_without_changing_the_v3_source() {
   assert_eq!(receipt.verified_root_count, 2);
   assert!(receipt.verified_entity_count >= 7);
   assert_eq!(receipt.verified_content_bytes, 51);
+}
+
+#[test]
+fn completed_offline_run_resumes_through_a_new_live_proof_without_changing_either_file() {
+  let fixture = Fixture::new();
+  let first_cancellation = CancellationToken::new();
+  let first = execute_offline_migration_v1(fixture.request(&first_cancellation)).unwrap();
+  let source_before_resume = file_blake3(&fixture.source);
+  let destination_before_resume = file_blake3(&fixture.destination);
+  let destination_size = fs::metadata(&fixture.destination).unwrap().len();
+
+  let resumed_cancellation = CancellationToken::new();
+  let mut resumed_request = fixture.request(&resumed_cancellation);
+  resumed_request.resume = true;
+  resumed_request.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_010_000, monotonic_time_ms: 20_000 };
+  let resumed = execute_offline_migration_v1(resumed_request).unwrap();
+
+  assert_eq!(resumed, first);
+  assert_eq!(file_blake3(&fixture.source), source_before_resume);
+  assert_eq!(file_blake3(&fixture.destination), destination_before_resume);
+  assert_eq!(fs::metadata(&fixture.destination).unwrap().len(), destination_size);
+}
+
+#[test]
+fn resume_refuses_a_foreign_v4_destination_without_changing_either_file() {
+  let fixture = Fixture::new();
+  let first_cancellation = CancellationToken::new();
+  execute_offline_migration_v1(fixture.request(&first_cancellation)).unwrap();
+
+  let foreign = Fixture::new();
+  let foreign_cancellation = CancellationToken::new();
+  let mut foreign_request = foreign.request(&foreign_cancellation);
+  foreign_request.identity.destination_physical_instance_id = id(0x41);
+  execute_offline_migration_v1(foreign_request).unwrap();
+  fs::copy(&foreign.destination, &fixture.destination).unwrap();
+  let source_before_resume = file_blake3(&fixture.source);
+  let destination_before_resume = file_blake3(&fixture.destination);
+  let destination_size = fs::metadata(&fixture.destination).unwrap().len();
+
+  let resumed_cancellation = CancellationToken::new();
+  let mut resumed_request = fixture.request(&resumed_cancellation);
+  resumed_request.resume = true;
+  let error = execute_offline_migration_v1(resumed_request).unwrap_err();
+
+  assert_eq!(error.code(), "offline_migration_resume_destination");
+  assert_eq!(file_blake3(&fixture.source), source_before_resume);
+  assert_eq!(file_blake3(&fixture.destination), destination_before_resume);
+  assert_eq!(fs::metadata(&fixture.destination).unwrap().len(), destination_size);
+}
+
+#[test]
+fn resume_requires_the_exact_manifest_and_sealed_root_map_without_changing_database_files() {
+  let missing = Fixture::new();
+  let source_before = file_blake3(&missing.source);
+  let cancellation = CancellationToken::new();
+  let mut request = missing.request(&cancellation);
+  request.resume = true;
+  let error = execute_offline_migration_v1(request).unwrap_err();
+  assert_eq!(error.code(), "migration_run_manifest_directory");
+  assert_eq!(file_blake3(&missing.source), source_before);
+  assert!(!missing.destination.exists());
+
+  let mismatched = Fixture::new();
+  let first_cancellation = CancellationToken::new();
+  execute_offline_migration_v1(mismatched.request(&first_cancellation)).unwrap();
+  let source_before = file_blake3(&mismatched.source);
+  let destination_before = file_blake3(&mismatched.destination);
+  let resumed_cancellation = CancellationToken::new();
+  let mut request = mismatched.request(&resumed_cancellation);
+  request.resume = true;
+  request.source_commit = [0x22; 20];
+  let error = execute_offline_migration_v1(request).unwrap_err();
+  assert_eq!(error.code(), "migration_run_manifest_permit");
+  assert_eq!(file_blake3(&mismatched.source), source_before);
+  assert_eq!(file_blake3(&mismatched.destination), destination_before);
+
+  let damaged = Fixture::new();
+  let first_cancellation = CancellationToken::new();
+  execute_offline_migration_v1(damaged.request(&first_cancellation)).unwrap();
+  let source_before = file_blake3(&damaged.source);
+  let destination_before = file_blake3(&damaged.destination);
+  let closure =
+    damaged.workspace.join(hex::encode(id(0x10))).join(hex::encode(id(0x20))).join("root-map-0000000000000001").join("closure.armc");
+  fs::OpenOptions::new().append(true).open(closure).unwrap().write_all(b"unexpected tail").unwrap();
+  let resumed_cancellation = CancellationToken::new();
+  let mut request = damaged.request(&resumed_cancellation);
+  request.resume = true;
+  let error = execute_offline_migration_v1(request).unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_capacity");
+  assert_eq!(file_blake3(&damaged.source), source_before);
+  assert_eq!(file_blake3(&damaged.destination), destination_before);
 }
 
 #[test]

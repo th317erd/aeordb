@@ -218,6 +218,18 @@ pub struct MigrationCaptureStateObservationV1 {
   pub last_error_evidence: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MigrationCompletedStateObservationV1 {
+  pub control_sequence: u64,
+  pub fencing_token: u64,
+  pub phase: MigrationPhaseV1,
+  pub state: MigrationProgressStateV1,
+  pub destination_header_sequence: u64,
+  pub namespace_count: u64,
+  pub entity_count: u64,
+  pub copied_bytes: u64,
+}
+
 struct MigrationProgressPublicationContextV1 {
   loaded_lease: LoadedMutableSystemControlV1,
   loaded_progress: LoadedMutableSystemControlV1,
@@ -245,6 +257,54 @@ impl Debug for MigrationStateOwnerV1 {
 }
 
 impl MigrationStateOwnerV1 {
+  /// Observe an already completed shadow migration without claiming mutation
+  /// authority for its expired process-local execution context.
+  pub fn observe_completed_destination_verification(
+    publisher: &V4FirstAuthorityPublisher,
+    permit: &MigrationPreflightPermitV1,
+  ) -> Result<MigrationCompletedStateObservationV1, MigrationStateOwnerErrorV1> {
+    validate_destination_authority(publisher, permit)?;
+    let ((_, lease), (loaded_progress, progress)) = require_migration_controls(publisher, permit)?;
+    validate_lease_binding(&lease, permit)?;
+    validate_bound_progress(&progress, &lease, permit)?;
+    if loaded_progress.redundancy_degraded {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_completed_progress",
+        "completed destination-verification progress must have a valid A/B history",
+      ));
+    }
+    if lease.body.state != MigrationLeaseStateV1::Held {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_completed_lease",
+        format!("completed destination verification has a {:?} persisted lease", lease.body.state),
+      ));
+    }
+    let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
+      | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
+      | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+    if progress.body.phase != MigrationPhaseV1::DestinationVerify
+      || progress.body.state != MigrationProgressStateV1::Complete
+      || progress.body.flags != required_flags
+      || progress.body.destination_header_sequence == 0
+      || all_zero(&progress.body.legacy_root_map_control_payload_hash)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_completed_progress",
+        "migration progress is not an exact completed destination-verification state",
+      ));
+    }
+    Ok(MigrationCompletedStateObservationV1 {
+      control_sequence: progress.sequence,
+      fencing_token: progress.body.fencing_token,
+      phase: progress.body.phase,
+      state: progress.body.state,
+      destination_header_sequence: progress.body.destination_header_sequence,
+      namespace_count: progress.body.namespace_count,
+      entity_count: progress.body.entity_count,
+      copied_bytes: progress.body.copied_bytes,
+    })
+  }
+
   pub fn acquire(
     publisher: Arc<V4FirstAuthorityPublisher>,
     permit: MigrationPreflightPermitV1,

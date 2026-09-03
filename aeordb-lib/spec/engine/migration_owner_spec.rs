@@ -21,10 +21,10 @@ use aeordb::engine::v4::first_authority::{
 use aeordb::engine::v4::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::migration_control::{
-  MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE, MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED,
-  MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1, MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1,
-  MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control, encode_migration_lease_control,
-  encode_migration_progress_control,
+  MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED, MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE,
+  MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD, MigrationLeaseBodyV1,
+  MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressBodyV1, MigrationProgressStateV1, decode_migration_lease_control,
+  decode_migration_progress_control, encode_migration_lease_control, encode_migration_progress_control,
 };
 use aeordb::engine::v4::migration_capture_runtime::{
   MigrationCaptureRuntimeClockV1, MigrationCaptureRuntimeOptionsV1, MigrationCaptureRuntimeStateV1, MigrationCaptureRuntimeV1,
@@ -535,6 +535,63 @@ fn acquisition_publishes_fenced_lease_then_progress_and_reopens() {
   assert_eq!(progress.body.flags, 0);
   assert_eq!(progress.body.fencing_token, 1);
   assert_eq!(progress.body.destination_header_sequence, 0);
+}
+
+#[test]
+fn completed_observation_requires_bound_held_lease_and_exact_verified_progress() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let (_owner, _) =
+    MigrationStateOwnerV1::acquire(publisher.clone(), permit.clone(), acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
+  let required_flags = MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED
+    | MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD
+    | MIGRATION_PROGRESS_FLAG_DESTINATION_FULL_VERIFIED;
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.phase = MigrationPhaseV1::DestinationVerify;
+    progress.state = MigrationProgressStateV1::Complete;
+    progress.flags = required_flags;
+    progress.destination_header_sequence = 17;
+    progress.namespace_count = 5;
+    progress.entity_count = 19;
+    progress.copied_bytes = 23;
+    progress.legacy_root_map_control_payload_hash = digest_parts(algorithm, &[b"selected root map"]);
+    progress.updated_at_ms = ACQUIRED_AT_MS + 5_000;
+  });
+
+  let observed = MigrationStateOwnerV1::observe_completed_destination_verification(&publisher, &permit).unwrap();
+  assert_eq!(observed.fencing_token, 1);
+  assert_eq!(observed.phase, MigrationPhaseV1::DestinationVerify);
+  assert_eq!(observed.state, MigrationProgressStateV1::Complete);
+  assert_eq!(observed.destination_header_sequence, 17);
+  assert_eq!(observed.namespace_count, 5);
+  assert_eq!(observed.entity_count, 19);
+  assert_eq!(observed.copied_bytes, 23);
+
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.flags |= MIGRATION_PROGRESS_FLAG_NEEDS_FULL_RECONCILE;
+    progress.last_error_evidence = digest_parts(algorithm, &[b"reconciliation required"]);
+    progress.updated_at_ms = ACQUIRED_AT_MS + 6_000;
+  });
+  assert_eq!(
+    MigrationStateOwnerV1::observe_completed_destination_verification(&publisher, &permit).unwrap_err().code(),
+    "migration_completed_progress"
+  );
+
+  replace_progress(&publisher, algorithm, &mut retirement, |progress| {
+    progress.flags = required_flags;
+    progress.last_error_evidence.fill(0);
+    progress.updated_at_ms = ACQUIRED_AT_MS + 7_000;
+  });
+  replace_lease(&publisher, algorithm, &mut retirement, ACQUIRED_AT_MS + 8_000, |lease| lease.fencing_token += 1);
+  assert_eq!(
+    MigrationStateOwnerV1::observe_completed_destination_verification(&publisher, &permit).unwrap_err().code(),
+    "migration_progress_rebind_required"
+  );
 }
 
 #[test]
