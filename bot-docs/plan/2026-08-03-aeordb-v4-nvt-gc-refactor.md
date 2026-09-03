@@ -12,10 +12,10 @@
 > **Execution status (2026-09-03):** The header above preserves the plan's
 > ratification-time state. Current mutable execution status lives in the
 > [Child 08 progress ledger](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md).
-> The safe repository implementation is complete through P9 except for the
-> exact-candidate native macOS gate and canonical final packet. Copied-production,
-> canary, installation/deployment, operational cutover/acceptance, first v4
-> write, monitoring, and destructive GC remain separately gated and unexecuted.
+> The safe repository implementation, exact-candidate native qualification,
+> and canonical P9 evidence packet are complete. Copied-production, canary,
+> installation/deployment, operational cutover/acceptance, first v4 write,
+> monitoring, and destructive GC remain separately gated and unexecuted.
 
 The ratified decision source is a required tracked campaign artifact. Before P0
 starts, it must be committed alongside this plan and treated as append-only

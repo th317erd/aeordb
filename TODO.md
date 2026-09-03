@@ -1418,14 +1418,14 @@
       - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
       - [x] P8-2a: build exact-source Linux/macOS/Windows release candidates, require full embedded mdBook assets, verify version/capability/binary digests, and exercise the real documentation routes with clean shutdown.
       - [ ] P8-2b: run the canary candidate under real clients and load only after separate authorization for the canary environment or copy.
-    - [ ] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish complete release/soak/copy evidence.
+    - [x] P9: update documentation and bot material, retire approved transitional paths, preserve required compatibility readers, and publish the complete repository-only release/soak evidence; copied-production remains under P8-1b's separate authorization.
       - [x] Inventory every retained v3/index/cursor compatibility path and freeze owner, rationale, exact allowed paths, non-growing ceiling, and removal gate.
       - [x] Delete the nonfunctional opt-in auto-heal stub, shrink its suppression inventory, and record its retirement in the persisted producer/consumer inventory.
       - [x] Correct the misleading v0 whole-index position-helper name and eliminate the non-Linux unused import without a lint suppression.
       - [x] Add an adversarially self-tested debt gate to the independent v4 contract wrapper and prove the P9 debt unit on Linux, macOS arm64, and Windows x86_64 MSVC.
       - [x] Publish migration/operator/bot documentation and precise supersession/incorporation markers for stale plans.
       - [x] Eliminate the repository-wide strict-Clippy backlog without suppressions or weakened lint policy.
-      - [ ] Run and publish the final broad, native, crash/soak, resource, and real-world repository qualification.
+      - [x] Run and publish the final broad, native, restart-resilience/soak, resource, and real-world repository qualification.
         - [x] Reproduce and repair dirty-startup replay of stable locators and deletion records beyond the selected header frontier.
         - [x] Repair KV-expansion void-snapshot ordering exposed by the fresh short-S3 crash campaign.
         - [x] Rerun focused/adjacent/release-crash and fresh short-S3 gates after the recovery repair.
@@ -1454,14 +1454,14 @@
             - [x] Prove both expansion-before-first-frame and expansion-between-frames behavior, including streaming-memory release.
             - [x] Rerun affected, broad, and static gates on the correction tree.
             - [x] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
-          - [ ] Complete the exact-candidate native and long-duration qualification matrix.
+          - [x] Complete the exact-candidate native and long-duration qualification matrix.
             - [x] Reconcile the final checkpoint-reader candidate after its Linux inventory gate found stale source-location metadata.
               - [x] Land the shrinking inventory correction after its focused audit, architecture, CLI, and lint gates pass.
               - [x] Freeze the successor exact-source archive and rerun the required final Linux and Windows gates against it.
               - [x] Prove the successor's restart-resilience executable is behaviorally identical or rerun the 100-case qualification.
             - [x] Rerun the exact-source Linux release matrix.
             - [x] Rerun native Windows storage, CLI, and release qualification.
-            - [ ] Rerun native macOS storage, CLI, and release qualification after the usable SSH identity or alternate host alias is supplied.
+            - [x] Rerun native macOS storage, CLI, and release qualification after the usable SSH identity or alternate host alias is supplied.
             - [x] Rerun the exact 8 GiB/no-swap resource gate.
             - [x] Complete the active S1/S2/S3 and restart-resilience sequence.
               - [x] Complete S1, S2, and S3 on the exact `9a71d4ce` candidate and preserve their passing evidence.
