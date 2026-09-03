@@ -9,7 +9,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ use super::migration_destination::{migration_native_path_digest_v1, observe_migr
 use super::migration_preflight::{AuthorityInventoryCountsV1, MigrationPreflightPermitV1};
 use super::private_workspace::{
   create_private_directory_synced, create_private_regular_file, validate_existing_directory, validate_private_directory_readonly,
-  validate_private_regular_file,
+  is_canonical_lexical_absolute_utf8_path, validate_private_regular_file,
 };
 use crate::engine::emergency_spill::open_regular_file_no_follow;
 use crate::engine::native_durability::{PlatformFileIdentityDescriptorV1, platform_file_identity, sync_directory_native, sync_file_all_native};
@@ -860,9 +860,7 @@ fn canonical_existing_directory(path: &Path, role: &str) -> Result<PathBuf, Migr
 }
 
 fn canonical_lexical_path(path: &Path) -> bool {
-  path.is_absolute()
-    && path.to_str().is_some()
-    && !path.components().any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+  is_canonical_lexical_absolute_utf8_path(path)
 }
 
 fn read_bounded_manifest(path: &Path, cancellation: Option<&CancellationToken>) -> Result<Vec<u8>, MigrationRunManifestErrorV1> {

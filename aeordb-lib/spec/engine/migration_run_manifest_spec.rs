@@ -23,6 +23,24 @@ use tokio_util::sync::CancellationToken;
 const GIB: u64 = 1024 * 1024 * 1024;
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
+#[cfg(not(windows))]
+fn unresolved_parent_path(root: &Path, child: &str, file_name: &str) -> PathBuf {
+  root.join(child).join("..").join(file_name)
+}
+
+#[cfg(windows)]
+fn unresolved_parent_path(root: &Path, child: &str, file_name: &str) -> PathBuf {
+  use std::ffi::OsString;
+  use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+  let mut path: Vec<u16> = root.as_os_str().encode_wide().collect();
+  path.extend("\\".encode_utf16());
+  path.extend(child.encode_utf16());
+  path.extend("\\..\\".encode_utf16());
+  path.extend(file_name.encode_utf16());
+  OsString::from_wide(&path).into()
+}
+
 fn id(first: u8) -> [u8; 16] {
   std::array::from_fn(|offset| first.wrapping_add(offset as u8))
 }
@@ -241,12 +259,10 @@ fn create(fixture: &Fixture, run_bounds: MigrationRunBoundsV1) -> aeordb::engine
   .unwrap()
 }
 
+#[cfg(unix)]
 fn make_private(path: &Path) {
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-  }
+  use std::os::unix::fs::PermissionsExt;
+  fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn rewrite_manifest_value(fixture: &Fixture, mutate: impl FnOnce(&mut serde_json::Value), repair_checksum: bool) {
@@ -581,7 +597,7 @@ fn stale_source_destination_and_permit_bindings_fail_before_workspace_creation()
 #[test]
 fn malformed_source_and_workspace_paths_fail_without_creating_destination_state() {
   let fixture = new_fixture();
-  let noncanonical_source = fixture.source.parent().unwrap().join("destination").join("..").join("source-v3.aeordb");
+  let noncanonical_source = unresolved_parent_path(fixture.source.parent().unwrap(), "destination", "source-v3.aeordb");
   let error = create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
     workspace: &fixture.workspace,
     source: &noncanonical_source,
@@ -667,12 +683,8 @@ fn workspace_state_is_private_empty_no_follow_and_collision_safe() {
   assert!(!fixture.workspace.join(MIGRATION_RUN_MANIFEST_FILE_NAME).exists());
 
   let fixture = new_fixture();
-  fs::create_dir(&fixture.workspace).unwrap();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&fixture.workspace, fs::Permissions::from_mode(0o700)).unwrap();
-  }
+  create(&fixture, bounds());
+  fs::remove_file(fixture.workspace.join(MIGRATION_RUN_MANIFEST_FILE_NAME)).unwrap();
   fs::write(fixture.workspace.join("unexpected-entry"), b"do not adopt").unwrap();
   let error = create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
     workspace: &fixture.workspace,
@@ -689,15 +701,10 @@ fn workspace_state_is_private_empty_no_follow_and_collision_safe() {
   assert_eq!(fs::read(fixture.workspace.join("unexpected-entry")).unwrap(), b"do not adopt");
 
   let fixture = new_fixture();
-  fs::create_dir(&fixture.workspace).unwrap();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&fixture.workspace, fs::Permissions::from_mode(0o700)).unwrap();
-  }
+  create(&fixture, bounds());
   let manifest_path = fixture.workspace.join(MIGRATION_RUN_MANIFEST_FILE_NAME);
+  fs::remove_file(&manifest_path).unwrap();
   fs::write(&manifest_path, b"prior collision bytes").unwrap();
-  make_private(&manifest_path);
   let before = fs::read(&manifest_path).unwrap();
   let error = create_migration_run_manifest_v1(MigrationRunManifestCreateRequestV1 {
     workspace: &fixture.workspace,
@@ -898,8 +905,8 @@ fn reopen_rejects_missing_empty_directory_and_symlink_manifest_paths() {
     "migration_run_manifest_open"
   );
 
-  fs::write(&path, b"").unwrap();
-  make_private(&path);
+  create(&fixture, bounds());
+  fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(0).unwrap();
   assert_eq!(
     open_migration_run_manifest_v1(&fixture.workspace, &CancellationToken::new()).unwrap_err().code(),
     "migration_run_manifest_size"

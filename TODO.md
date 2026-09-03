@@ -1420,6 +1420,7 @@
             - [x] Bridge durable base/replay root staging into final reconciliation through a bounded conflict-detecting prior-root lookup.
             - [ ] Supply the versioned, documented offline orchestration command that assembles real preflight evidence and drives the existing bounded migration substrate without production or service activation.
               - [x] Persist one immutable, private, checksummed run manifest before destination creation so every retry reuses the admitted identities, paths, source evidence, and execution bounds.
+              - [x] Correct the run-manifest and destination path gates for raw Windows verbatim dot segments, and keep malformed-state fixtures private under native Windows ACLs.
             - [ ] Migrate the rehearsal copy, validate complete v3/v4 namespace and content parity, exercise restart/recovery and resource bounds, and retain every truthful attempt.
             - [ ] Fix every defect through failing-first regression coverage and repeat until the large rehearsal is fully green.
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.

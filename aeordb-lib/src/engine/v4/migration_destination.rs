@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -16,6 +16,7 @@ use super::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DATABASE_HEADER_V4_
 use super::first_authority::{
   FirstAuthorityPublicationReceiptV1, FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher,
 };
+use super::private_workspace::is_canonical_lexical_absolute_utf8_path;
 use super::hash::digest_parts;
 use super::migration_preflight::MigrationPreflightPermitV1;
 use super::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
@@ -222,7 +223,7 @@ pub fn observe_migration_destination_path_v1(
   path: impl AsRef<Path>,
 ) -> Result<MigrationDestinationPathObservationV1, MigrationDestinationInitializationErrorV1> {
   let path = path.as_ref();
-  if !path.is_absolute() || path.components().any(|component| matches!(component, Component::CurDir | Component::ParentDir)) {
+  if !is_canonical_lexical_absolute_utf8_path(path) {
     return Err(MigrationDestinationInitializationErrorV1::before(
       "migration_destination_path_noncanonical",
       "destination must be an absolute path without current- or parent-directory components",

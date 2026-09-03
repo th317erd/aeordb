@@ -88,6 +88,18 @@ use tokio_util::sync::CancellationToken;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
+#[cfg(windows)]
+fn unresolved_parent_path(root: &Path, child: &str, file_name: &str) -> std::path::PathBuf {
+  use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+  let mut path: Vec<u16> = root.as_os_str().encode_wide().collect();
+  path.extend("\\".encode_utf16());
+  path.extend(child.encode_utf16());
+  path.extend("\\..\\".encode_utf16());
+  path.extend(file_name.encode_utf16());
+  OsString::from_wide(&path).into()
+}
+
 fn id(first: u8) -> [u8; 16] {
   std::array::from_fn(|offset| first.wrapping_add(offset as u8))
 }
@@ -2898,6 +2910,16 @@ fn destination_observation_refuses_existing_symlink_and_noncanonical_paths() {
   fs::create_dir(directory.path().join("child")).unwrap();
   let noncanonical = directory.path().join("child").join("..").join("new.aeordb");
   assert_eq!(observe_migration_destination_path_v1(&noncanonical).unwrap_err().code(), "migration_destination_path_noncanonical");
+
+  #[cfg(windows)]
+  {
+    let canonical_root = directory.path().canonicalize().unwrap();
+    let verbatim_noncanonical = unresolved_parent_path(&canonical_root, "child", "new.aeordb");
+    assert_eq!(
+      observe_migration_destination_path_v1(&verbatim_noncanonical).unwrap_err().code(),
+      "migration_destination_path_noncanonical"
+    );
+  }
 }
 
 #[test]

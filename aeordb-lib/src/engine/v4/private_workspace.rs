@@ -1,7 +1,7 @@
 //! Shared private-path and capacity primitives for external v4 workspaces.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 #[cfg(windows)]
 use std::mem::size_of;
@@ -35,6 +35,23 @@ pub(crate) enum PrivateWorkspaceErrorV1 {
   },
   #[error("private workspace durability failed: {0}")]
   Durability(#[source] Box<NativeDurabilityError>),
+}
+
+pub(crate) fn is_canonical_lexical_absolute_utf8_path(path: &Path) -> bool {
+  if !path.is_absolute()
+    || path.to_str().is_none()
+    || path.components().any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+  {
+    return false;
+  }
+  #[cfg(windows)]
+  {
+    let path_text = path.to_str().expect("UTF-8 path checked above");
+    if path_text.split(|character| character == '\\' || character == '/').any(|segment| segment == "." || segment == "..") {
+      return false;
+    }
+  }
+  true
 }
 
 pub(crate) fn validate_private_directory_readonly(path: &Path, role: &str) -> Result<(), PrivateWorkspaceErrorV1> {
