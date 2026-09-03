@@ -1455,10 +1455,10 @@
             - [x] Rerun affected, broad, and static gates on the correction tree.
             - [x] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
           - [ ] Complete the exact-candidate native and long-duration qualification matrix.
-            - [ ] Reconcile the final checkpoint-reader candidate after its Linux inventory gate found stale source-location metadata.
+            - [x] Reconcile the final checkpoint-reader candidate after its Linux inventory gate found stale source-location metadata.
               - [x] Land the shrinking inventory correction after its focused audit, architecture, CLI, and lint gates pass.
-              - [ ] Freeze the successor exact-source archive and rerun the required final Linux and Windows gates against it.
-              - [ ] Prove the successor's restart-resilience executable is behaviorally identical or rerun the 100-case qualification.
+              - [x] Freeze the successor exact-source archive and rerun the required final Linux and Windows gates against it.
+              - [x] Prove the successor's restart-resilience executable is behaviorally identical or rerun the 100-case qualification.
             - [x] Rerun the exact-source Linux release matrix.
             - [x] Rerun native Windows storage, CLI, and release qualification.
             - [ ] Rerun native macOS storage, CLI, and release qualification after the usable SSH identity or alternate host alias is supplied.
