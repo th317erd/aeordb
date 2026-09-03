@@ -159,6 +159,67 @@ fn checkpoint_probe_excludes_a_pending_delete_from_required_survivors() {
 }
 
 #[test]
+fn checkpoint_probe_ignores_an_incomplete_final_record() {
+  let temp = tempfile::tempdir().expect("tempdir");
+  let db_path = temp.path().join("probe-incomplete-tail.aeordb");
+  let checkpoint = temp.path().join("incomplete-tail.tsv");
+  let db_path_str = db_path.to_str().unwrap();
+
+  {
+    let engine = create_engine_for_storage(db_path_str);
+    let ops = DirectoryOps::new(&engine);
+    ops.store_file_buffered(&RequestContext::system(), "/docs/complete.txt", b"body", Some("text/plain")).expect("store file");
+    engine.shutdown().expect("shutdown engine");
+  }
+  std::fs::write(&checkpoint, "+\t/docs/complete.txt\n+\t/docs/incomplete.txt").unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
+    .args(["probe", "-D", db_path_str, "--diff-checkpoint", checkpoint.to_str().unwrap()])
+    .output()
+    .expect("run checkpoint probe");
+  assert!(
+    output.status.success(),
+    "probe failed: status={:?}\nstdout={}\nstderr={}",
+    output.status.code(),
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr),
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stdout.contains("committed intent (net):  1"), "stdout was:\n{stdout}");
+  assert!(stdout.contains("MISSING from db:         0"), "stdout was:\n{stdout}");
+  assert!(stderr.contains("ignored nonterminated final checkpoint record"), "stderr was:\n{stderr}");
+}
+
+#[test]
+fn checkpoint_probe_rejects_a_completed_malformed_record() {
+  let temp = tempfile::tempdir().expect("tempdir");
+  let db_path = temp.path().join("probe-malformed-checkpoint.aeordb");
+  let checkpoint = temp.path().join("malformed.tsv");
+  let db_path_str = db_path.to_str().unwrap();
+
+  {
+    let engine = create_engine_for_storage(db_path_str);
+    engine.shutdown().expect("shutdown engine");
+  }
+  std::fs::write(&checkpoint, "+\t/docs/complete.txt\nmalformed\n").unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
+    .args(["probe", "-D", db_path_str, "--diff-checkpoint", checkpoint.to_str().unwrap()])
+    .output()
+    .expect("run checkpoint probe");
+  assert_eq!(
+    output.status.code(),
+    Some(1),
+    "stdout={}\nstderr={}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stderr.contains("malformed checkpoint") && stderr.contains("line 2"), "stderr was:\n{stderr}");
+}
+
+#[test]
 fn probe_command_supports_explicit_wal_tail_bytes_without_valid_database() {
   let temp = tempfile::tempdir().expect("tempdir");
   let db_path = temp.path().join("not-a-real-db.aeordb");

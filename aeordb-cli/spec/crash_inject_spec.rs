@@ -34,13 +34,14 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use aeordb::engine::{DirectoryOps, StorageEngine};
+use aeordb_cli::soak_checkpoint::{SoakCheckpointRecord, visit_soak_checkpoint_records};
 
 /// Locate the crash-soak-worker binary built by cargo. Walks up from the
 /// current test exe to find target/<profile>/crash-soak-worker.
@@ -100,13 +101,15 @@ fn sigkill(child: &mut Child) {
 fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
   let start = std::time::Instant::now();
   while start.elapsed() < timeout {
-    if let Ok(file) = File::open(checkpoint_path) {
-      let reader = BufReader::new(file);
-      for line in reader.lines().map_while(Result::ok) {
-        if line.starts_with("# worker up") {
-          return true;
-        }
+    let mut worker_up = false;
+    let read_result = visit_soak_checkpoint_records(Path::new(checkpoint_path), |_line_number, record| {
+      if let SoakCheckpointRecord::Comment { text } = record {
+        worker_up |= text.starts_with("# worker up mode=");
       }
+      Ok(())
+    });
+    if read_result.is_ok() && worker_up {
+      return true;
     }
     std::thread::sleep(Duration::from_millis(20));
   }
@@ -114,14 +117,17 @@ fn wait_for_worker_up(checkpoint_path: &str, timeout: Duration) -> bool {
 }
 
 fn wait_for_checkpoint_path_record_count(checkpoint_path: &str, path: &str, minimum_records: usize, timeout: Duration) -> bool {
-  let record_prefix = format!("{path}\t");
   let start = std::time::Instant::now();
   while start.elapsed() < timeout {
-    if let Ok(contents) = std::fs::read_to_string(checkpoint_path) {
-      let records = contents.lines().filter(|line| line.starts_with(&record_prefix)).count();
-      if records >= minimum_records {
-        return true;
+    let mut records = 0usize;
+    let read_result = visit_soak_checkpoint_records(Path::new(checkpoint_path), |_line_number, record| {
+      if matches!(record, SoakCheckpointRecord::Committed { path: record_path, .. } if record_path == path) {
+        records += 1;
       }
+      Ok(())
+    });
+    if read_result.is_ok() && records >= minimum_records {
+      return true;
     }
     std::thread::sleep(Duration::from_millis(20));
   }
@@ -131,28 +137,21 @@ fn wait_for_checkpoint_path_record_count(checkpoint_path: &str, path: &str, mini
 /// Read the checkpoint file. Returns the list of `(path, expected_body)`
 /// pairs the worker reported as committed. Comments (`#`-prefixed lines)
 /// are skipped.
-fn read_checkpoint(checkpoint_path: &str) -> Vec<(String, String)> {
-  let file = File::open(checkpoint_path).expect("open checkpoint");
+fn read_checkpoint(checkpoint_path: &str) -> Result<Vec<(String, String)>, String> {
   let mut entries = BTreeMap::new();
-  for line in BufReader::new(file).lines().map_while(Result::ok) {
-    if line.starts_with('#') || line.is_empty() {
-      continue;
-    }
-    if let Some(path) = line.strip_prefix("!\t") {
-      entries.remove(path);
-    } else if let Some(path) = line.strip_prefix("?\t") {
-      entries.remove(path);
-    } else if let Some(path) = line.strip_prefix("-\t") {
-      entries.remove(path);
-    } else if let Some(rest) = line.strip_prefix("+\t") {
-      if let Some((path, body)) = rest.split_once('\t') {
-        entries.insert(path.to_string(), body.to_string());
-      }
-    } else if let Some((path, body)) = line.split_once('\t') {
+  visit_soak_checkpoint_records(Path::new(checkpoint_path), |_line_number, record| match record {
+    SoakCheckpointRecord::Comment { .. } => Ok(()),
+    SoakCheckpointRecord::Committed { path, body: Some(body) } => {
       entries.insert(path.to_string(), body.to_string());
+      Ok(())
     }
-  }
-  entries.into_iter().collect()
+    SoakCheckpointRecord::Committed { .. } => Err("committed qualification-oracle record is missing its expected body".to_string()),
+    SoakCheckpointRecord::PendingWrite { path } | SoakCheckpointRecord::PendingDelete { path } | SoakCheckpointRecord::Deleted { path } => {
+      entries.remove(path);
+      Ok(())
+    }
+  })?;
+  Ok(entries.into_iter().collect())
 }
 
 #[test]
@@ -162,7 +161,7 @@ fn pending_delete_checkpoint_is_not_a_required_survivor() {
   std::fs::write(&checkpoint, "/data/file-00000051.txt\tbody\n?\t/data/file-00000051.txt\n").unwrap();
 
   assert!(
-    read_checkpoint(checkpoint.to_str().unwrap()).is_empty(),
+    read_checkpoint(checkpoint.to_str().unwrap()).unwrap().is_empty(),
     "a delete intent must leave the path outside the must-survive oracle before the database mutation can commit"
   );
 }
@@ -174,9 +173,79 @@ fn pending_write_checkpoint_drops_a_stale_exact_body_expectation() {
   std::fs::write(&checkpoint, "/stress/state/doc-021.json\told body\n!\t/stress/state/doc-021.json\n").unwrap();
 
   assert!(
-    read_checkpoint(checkpoint.to_str().unwrap()).is_empty(),
+    read_checkpoint(checkpoint.to_str().unwrap()).unwrap().is_empty(),
     "an overwrite intent must retire the prior exact-body oracle before the newer database value can commit"
   );
+}
+
+#[test]
+fn checkpoint_reader_ignores_an_incomplete_final_body_record() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("incomplete-body.tsv");
+  std::fs::write(&checkpoint, "/docs/complete.json\t{\"counter\":1}\n/docs/incomplete.json\t").unwrap();
+
+  assert_eq!(
+    read_checkpoint(checkpoint.to_str().unwrap()).unwrap(),
+    vec![("/docs/complete.json".to_string(), "{\"counter\":1}".to_string())],
+    "a nonterminated final record was not durably committed and must stay outside the oracle"
+  );
+}
+
+#[test]
+fn checkpoint_reader_rejects_a_completed_malformed_record() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("malformed.tsv");
+  std::fs::write(&checkpoint, "/docs/complete.json\t{}\nmalformed\n").unwrap();
+
+  let error = read_checkpoint(checkpoint.to_str().unwrap()).unwrap_err();
+  assert!(error.contains("malformed checkpoint") && error.contains("line 2"), "{error}");
+}
+
+#[test]
+fn checkpoint_reader_rejects_a_completed_committed_record_without_a_body() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("missing-body.tsv");
+  std::fs::write(&checkpoint, "+\t/docs/missing-body.json\n").unwrap();
+
+  let error = read_checkpoint(checkpoint.to_str().unwrap()).unwrap_err();
+  assert!(error.contains("line 1") && error.contains("missing its expected body"), "{error}");
+}
+
+#[test]
+fn checkpoint_reader_ignores_incomplete_invalid_text_but_rejects_completed_invalid_text() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("invalid-text.tsv");
+  let complete_prefix = b"/docs/complete.json\t{}\n";
+  let mut incomplete = complete_prefix.to_vec();
+  incomplete.extend_from_slice(b"/docs/incomplete.json\t\xff");
+  std::fs::write(&checkpoint, incomplete).unwrap();
+
+  assert_eq!(read_checkpoint(checkpoint.to_str().unwrap()).unwrap(), vec![("/docs/complete.json".to_string(), "{}".to_string())]);
+
+  let mut completed = complete_prefix.to_vec();
+  completed.extend_from_slice(b"/docs/invalid.json\t\xff\n");
+  std::fs::write(&checkpoint, completed).unwrap();
+  let error = read_checkpoint(checkpoint.to_str().unwrap()).unwrap_err();
+  assert!(error.contains("checkpoint") && error.contains("line 2") && error.contains("UTF-8"), "{error}");
+}
+
+#[test]
+fn checkpoint_waiters_require_complete_marker_and_body_records() {
+  let temp = tempfile::tempdir().unwrap();
+  let checkpoint = temp.path().join("waiters.tsv");
+  let checkpoint_path = checkpoint.to_str().unwrap();
+  let path = "/docs/reused.json";
+  std::fs::write(&checkpoint, format!("# worker up mode=stress\n{path}\tbody-1\n{path}\tbody-2")).unwrap();
+
+  assert!(wait_for_worker_up(checkpoint_path, Duration::from_millis(60)));
+  assert!(!wait_for_checkpoint_path_record_count(checkpoint_path, path, 2, Duration::from_millis(60)));
+
+  let mut checkpoint_file = OpenOptions::new().append(true).open(&checkpoint).unwrap();
+  writeln!(checkpoint_file).unwrap();
+  assert!(wait_for_checkpoint_path_record_count(checkpoint_path, path, 2, Duration::from_millis(60)));
+
+  std::fs::write(&checkpoint, "# worker up mode=stress").unwrap();
+  assert!(!wait_for_worker_up(checkpoint_path, Duration::from_millis(60)));
 }
 
 #[test]
@@ -206,16 +275,24 @@ fn gc_reused_path_records_pending_intent_before_replacement_commit() {
   sigkill(&mut worker);
   assert!(replacement_committed, "worker did not commit the replacement within the test deadline");
 
-  let contents = std::fs::read_to_string(&checkpoint).unwrap();
-  let lines: Vec<&str> = contents.lines().collect();
-  let record_prefix = format!("{path}\t");
-  let replacement_index =
-    lines.iter().enumerate().filter(|(_, line)| line.starts_with(&record_prefix)).nth(1).map(|(index, _)| index).unwrap();
-  let pending_intent = format!("!\t{path}");
+  let mut committed_records = 0usize;
+  let mut previous_record_was_pending_intent = false;
+  let mut replacement_preceded_by_pending_intent = false;
+  visit_soak_checkpoint_records(&checkpoint, |_line_number, record| {
+    if matches!(record, SoakCheckpointRecord::Committed { path: record_path, .. } if record_path == path) {
+      committed_records += 1;
+      if committed_records == 2 {
+        replacement_preceded_by_pending_intent = previous_record_was_pending_intent;
+      }
+    }
+    previous_record_was_pending_intent =
+      matches!(record, SoakCheckpointRecord::PendingWrite { path: pending_path } if pending_path == path);
+    Ok(())
+  })
+  .unwrap();
 
-  assert_eq!(
-    lines.get(replacement_index.checked_sub(1).unwrap()).copied(),
-    Some(pending_intent.as_str()),
+  assert!(
+    committed_records >= 2 && replacement_preceded_by_pending_intent,
     "a reused path must retire the previous exact-body expectation before the replacement can commit"
   );
 }
@@ -247,7 +324,7 @@ fn run_sigkill_iteration(iteration: usize, mode: &str, kill_after: Duration) {
   std::thread::sleep(kill_after);
   sigkill(&mut worker);
 
-  let committed = read_checkpoint(&checkpoint);
+  let committed = read_checkpoint(&checkpoint).unwrap_or_else(|error| panic!("iteration {iteration}: {error}"));
   assert!(!committed.is_empty(), "iteration {}: worker was killed before committing anything; raise kill_after", iteration,);
 
   // Reopen and verify every committed entry is intact.

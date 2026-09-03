@@ -71,6 +71,10 @@ name = "probe_spec"
 path = "spec/probe_spec.rs"
 
 [[test]]
+name = "soak_checkpoint_spec"
+path = "spec/soak_checkpoint_spec.rs"
+
+[[test]]
 name = "deployment_spec"
 path = "spec/deployment_spec.rs"
 

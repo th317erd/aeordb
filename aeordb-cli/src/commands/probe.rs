@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::{DirectoryOps, EngineFileStream, EngineResult, EntryType, StorageEngine};
+use crate::soak_checkpoint::{SoakCheckpointRecord, visit_soak_checkpoint_records};
 
 pub struct ProbeConfig<'a> {
   pub database: &'a str,
@@ -948,53 +949,47 @@ fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
 // ---------------------------------------------------------------------------
 fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
   use std::collections::HashSet;
-  use std::io::{BufRead, BufReader};
-  use std::fs::File;
-
-  let file = match File::open(tsv_path) {
-    Ok(f) => f,
-    Err(e) => {
-      eprintln!("open checkpoint {}: {}", tsv_path, e);
-      std::process::exit(1);
-    }
-  };
 
   // Reconstruct the worker's view: + adds, ! excludes before overwrite, ?
   // excludes before delete, and - confirms removal. Match `load_checkpoint` in
   // aeordb-cli/src/bin/soak-worker.rs.
   let mut committed: HashSet<String> = HashSet::new();
-  let mut lines = 0u64;
   let mut adds = 0u64;
   let mut pending_writes = 0u64;
   let mut pending_deletes = 0u64;
   let mut dels = 0u64;
-  for line in BufReader::new(file).lines() {
-    let line = match line {
-      Ok(line) => line,
-      Err(error) => {
-        eprintln!("read checkpoint {}: {error}", tsv_path);
-        std::process::exit(1);
+  let read_summary = visit_soak_checkpoint_records(std::path::Path::new(tsv_path), |_line_number, record| {
+    match record {
+      SoakCheckpointRecord::Comment { .. } => {}
+      SoakCheckpointRecord::Committed { path, .. } => {
+        committed.insert(path.to_string());
+        adds += 1;
       }
-    };
-    lines += 1;
-    if let Some(rest) = line.strip_prefix("+\t") {
-      let path = rest.split_once('\t').map(|(path, _)| path).unwrap_or(rest);
-      committed.insert(path.to_string());
-      adds += 1;
-    } else if let Some(rest) = line.strip_prefix("!\t") {
-      committed.remove(rest);
-      pending_writes += 1;
-    } else if let Some(rest) = line.strip_prefix("?\t") {
-      committed.remove(rest);
-      pending_deletes += 1;
-    } else if let Some(rest) = line.strip_prefix("-\t") {
-      committed.remove(rest);
-      dels += 1;
-    } else if let Some((path, _body)) = line.split_once('\t') {
-      // crash-soak-worker records committed content as path<TAB>body.
-      committed.insert(path.to_string());
-      adds += 1;
+      SoakCheckpointRecord::PendingWrite { path } => {
+        committed.remove(path);
+        pending_writes += 1;
+      }
+      SoakCheckpointRecord::PendingDelete { path } => {
+        committed.remove(path);
+        pending_deletes += 1;
+      }
+      SoakCheckpointRecord::Deleted { path } => {
+        committed.remove(path);
+        dels += 1;
+      }
     }
+    Ok(())
+  });
+  let read_summary = match read_summary {
+    Ok(summary) => summary,
+    Err(error) => {
+      eprintln!("{error}");
+      std::process::exit(1);
+    }
+  };
+  let lines = read_summary.complete_lines;
+  if read_summary.ignored_incomplete_tail {
+    eprintln!("ignored nonterminated final checkpoint record in {tsv_path}");
   }
 
   let algo = engine.hash_algo();

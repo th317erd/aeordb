@@ -1436,7 +1436,7 @@
         - [x] Commit and push the coherent qualification-found recovery fixes and evidence (`d93b4b22`).
         - [x] Correct the native Windows soak-worker checkpoint error oracle and fail-closed qualification exit accounting exposed by the exact-source CLI matrix.
         - [x] Land and rerun the final exact-source ordinary/native gates on the corrected test-only revision before starting the 12-hour campaigns.
-        - [ ] Reproduce and correct the final 8 GiB/no-swap resource failure: one GC mark observed a missing reachable index path and concurrent requests stalled during KV expansion; preserve the failed run and add focused regression proof before retrying.
+        - [x] Reproduce and correct the final 8 GiB/no-swap resource failure: one GC mark observed a missing reachable index path and concurrent requests stalled during KV expansion; preserve the failed run and add focused regression proof before retrying.
           - [x] Preserve the original resource database, server/load logs, and a byte-identical diagnostic copy; verify the copy read-only and identify one healthy WAL-backed FileRecord identity missing from KV authority.
           - [x] Strengthen the sequential expansion regression to read every stored file and require zero verifier-reported missing/stale KV rows; record that the ordinary single-threaded path remains green.
           - [x] Reproduce the concurrent page-publication defect with a deterministic failing-first interleaving in which an old disk read can enter the committed-generation cache after replacement publication.
@@ -1453,8 +1453,16 @@
             - [x] Replan still-live chunk offsets under a bounded retry contract without retaining a maintenance guard across a slow HTTP client.
             - [x] Prove both expansion-before-first-frame and expansion-between-frames behavior, including streaming-memory release.
             - [x] Rerun affected, broad, and static gates on the correction tree.
-            - [ ] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
-          - [ ] Rerun native macOS/Windows, exact-source Linux release, and the exact 8 GiB/no-swap resource gate before resuming long crash/soak qualification.
+            - [x] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
+          - [ ] Complete the exact-candidate native and long-duration qualification matrix.
+            - [x] Rerun the exact-source Linux release matrix.
+            - [x] Rerun native Windows storage, CLI, and release qualification.
+            - [ ] Rerun native macOS storage, CLI, and release qualification after the usable SSH identity or alternate host alias is supplied.
+            - [x] Rerun the exact 8 GiB/no-swap resource gate.
+            - [ ] Complete the active S1/S2/S3 and restart-resilience sequence.
+              - [x] Complete S1, S2, and S3 on the exact `9a71d4ce` candidate and preserve their passing evidence.
+              - [x] Correct the incomplete-tail checkpoint-reader gap exposed by restart-resilience attempt 2 and prove every checkpoint reader.
+              - [ ] Rerun all 100 restart-resilience cases from a fresh exact candidate.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
