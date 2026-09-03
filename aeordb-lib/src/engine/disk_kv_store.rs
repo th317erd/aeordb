@@ -85,6 +85,10 @@ pub struct DiskKVStore {
   pub needs_expansion: Option<usize>,
   /// Transaction nesting depth. When > 0, flush() skips clearing the hot tail.
   pub transaction_depth: u32,
+  /// Normal stores preserve buffered state during drop. The crate-private
+  /// offline migration inspection path disables that implicit write so merely
+  /// observing a source can never repair or otherwise change it.
+  flush_on_drop: bool,
   /// A namespace mutation with a pre-admitted hard ticket owns transaction
   /// depth exclusively; legacy guards must retry after it completes.
   pub(crate) pre_admitted_transaction_active: bool,
@@ -385,6 +389,7 @@ impl DiskKVStore {
       needs_rebuild: false,
       needs_expansion: None,
       transaction_depth: 0,
+      flush_on_drop: true,
       pre_admitted_transaction_active: false,
       atomic_visibility_state: None,
       next_atomic_visibility_id: 1,
@@ -595,6 +600,7 @@ impl DiskKVStore {
       needs_rebuild: detected_page_corruption,
       needs_expansion: None,
       transaction_depth: 0,
+      flush_on_drop: true,
       pre_admitted_transaction_active: false,
       atomic_visibility_state: None,
       next_atomic_visibility_id: 1,
@@ -1789,6 +1795,10 @@ impl DiskKVStore {
   pub fn hot_buffer_len(&self) -> usize {
     self.hot_buffer.len()
   }
+
+  pub(crate) fn disable_flush_on_drop_for_read_only_inspection(&mut self) {
+    self.flush_on_drop = false;
+  }
 }
 
 impl Drop for DiskKVStore {
@@ -1799,6 +1809,9 @@ impl Drop for DiskKVStore {
       self.entry_count = state.baseline_entry_count;
       self.hot_tail_offset = state.baseline_hot_tail_offset;
       tracing::error!(atomic_visibility_id = state.id, "DiskKVStore discarded an uncommitted atomic visibility batch during drop");
+      return;
+    }
+    if !self.flush_on_drop {
       return;
     }
     if !self.write_buffer.is_empty() {

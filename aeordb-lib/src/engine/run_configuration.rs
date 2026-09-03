@@ -70,7 +70,8 @@ impl StorageEngine {
     Ok(MaintenanceRunConfiguration { generation: snapshot.generation, max_concurrent_tasks })
   }
 
-  #[allow(dead_code)] // Called when the P3c migration state owner is activated.
+  /// Capture the effective migration configuration once for an admitted
+  /// offline run; later phases must not fall back to live configuration.
   pub(crate) fn capture_migration_run_configuration(&self) -> EngineResult<MigrationRunConfiguration> {
     let snapshot = self.configuration_snapshot();
     Ok(MigrationRunConfiguration {

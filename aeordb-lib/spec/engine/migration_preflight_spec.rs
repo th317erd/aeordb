@@ -569,6 +569,16 @@ fn disposable_v3_database_closes_real_read_only_preflight_producers() {
 }
 
 #[test]
+fn repeated_native_probes_on_one_filesystem_produce_stable_migration_evidence() {
+  let temporary = tempfile::tempdir().unwrap();
+
+  let first = NativeCutoverCapabilitiesV1::from_probe_report(&probe_native_durability(temporary.path()).unwrap());
+  let second = NativeCutoverCapabilitiesV1::from_probe_report(&probe_native_durability(temporary.path()).unwrap());
+
+  assert_eq!(first, second, "retries must reproduce the native evidence anchored by the immutable run manifest");
+}
+
+#[test]
 fn preflight_contract_stays_disconnected_from_mutation_and_service_authority() {
   let source = std::fs::read_to_string(format!("{}/src/engine/v4/migration_preflight.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
   for forbidden in [

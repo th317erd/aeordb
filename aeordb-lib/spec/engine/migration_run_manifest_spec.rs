@@ -94,17 +94,17 @@ fn capacity(role: CapacityRoleV1, identity: PlatformFileIdentityDescriptorV1) ->
   }
 }
 
-fn permit_with_migration_id(
+fn request_with_migration_id(
   source: &Path,
   destination: &MigrationDestinationPathObservationV1,
   migration_id: [u8; 16],
-) -> MigrationPreflightPermitV1 {
+) -> MigrationPreflightRequestV1 {
   let source_identity = platform_file_identity(source).unwrap();
   let source_size = fs::metadata(source).unwrap().len();
   let source_checksum = digest(0x70);
   let registry = embedded_system_family_registry(ALGORITHM).unwrap();
   let baseline = CapabilitySetV1::v4_baseline();
-  let request = MigrationPreflightRequestV1 {
+  MigrationPreflightRequestV1 {
     identity: MigrationIdentityEvidenceV1 {
       database_id: id(0x10),
       migration_id,
@@ -195,8 +195,15 @@ fn permit_with_migration_id(
       required_writer_capabilities: baseline,
       system_family_registry_fingerprint: registry.operational_fingerprint.clone(),
     },
-  };
-  admit_migration_preflight_v1(&request).unwrap().1
+  }
+}
+
+fn permit_with_migration_id(
+  source: &Path,
+  destination: &MigrationDestinationPathObservationV1,
+  migration_id: [u8; 16],
+) -> MigrationPreflightPermitV1 {
+  admit_migration_preflight_v1(&request_with_migration_id(source, destination, migration_id)).unwrap().1
 }
 
 fn permit(source: &Path, destination: &MigrationDestinationPathObservationV1) -> MigrationPreflightPermitV1 {
@@ -419,6 +426,28 @@ fn durable_manifest_reopens_exact_admitted_run_without_touching_source_or_destin
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(fs::metadata(reopened.path()).unwrap().permissions().mode() & 0o077, 0);
   }
+}
+
+#[test]
+fn retry_accepts_fresh_resource_observations_but_keeps_binary_identity_immutable() {
+  let fixture = new_fixture();
+  let created = create(&fixture, bounds());
+  let observation = observe_migration_destination_path_v1(&fixture.destination).unwrap();
+  let mut refreshed = request_with_migration_id(&fixture.source, &observation, fixture.permit.migration_id());
+  for capacity in &mut refreshed.capacity {
+    capacity.available_bytes -= GIB;
+  }
+  refreshed.memory.host_available_bytes -= GIB;
+  refreshed.memory.evidence_digest = digest(0xf1);
+  let refreshed = admit_migration_preflight_v1(&refreshed).unwrap().1;
+
+  assert_ne!(refreshed.evidence_fingerprint(), fixture.permit.evidence_fingerprint());
+  created.validate_permit(&refreshed).unwrap();
+
+  let mut changed_binary = request_with_migration_id(&fixture.source, &observation, fixture.permit.migration_id());
+  changed_binary.binary.executable_sha256 = digest(0x32);
+  let changed_binary = admit_migration_preflight_v1(&changed_binary).unwrap().1;
+  assert_eq!(created.validate_permit(&changed_binary).unwrap_err().code(), "migration_run_manifest_permit");
 }
 
 #[test]

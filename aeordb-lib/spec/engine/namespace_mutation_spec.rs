@@ -1165,16 +1165,55 @@ fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orches
     .iter()
     .flat_map(|(path, source)| source.match_indices("capture_migration_run_configuration(").map(move |_| path))
     .collect::<Vec<_>>();
-  assert_eq!(capture_callers.len(), 1, "migration configuration capture acquired a premature runtime caller: {capture_callers:?}");
-  assert_eq!(capture_callers[0].file_name().and_then(|value| value.to_str()), Some("run_configuration.rs"));
+  assert_eq!(capture_callers.len(), 2, "migration configuration capture escaped its reviewed offline owner: {capture_callers:?}");
+  assert!(capture_callers.iter().all(|path| matches!(
+    path.file_name().and_then(|value| value.to_str()),
+    Some("run_configuration.rs" | "migration_offline_preflight.rs")
+  )));
+
+  let inspection_open_callers = sources
+    .iter()
+    .flat_map(|(path, source)| source.match_indices("open_for_offline_migration_inspection(").map(move |_| path))
+    .collect::<Vec<_>>();
+  assert_eq!(inspection_open_callers.len(), 2, "read-only source open escaped its storage/collector boundary: {inspection_open_callers:?}");
+  assert!(inspection_open_callers
+    .iter()
+    .all(|path| matches!(path.file_name().and_then(|value| value.to_str()), Some("storage_engine.rs" | "migration_offline_preflight.rs"))));
+  let storage_engine = sources
+    .iter()
+    .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("storage_engine.rs"))
+    .map(|(_, source)| source)
+    .unwrap();
+  assert!(storage_engine.contains("pub(crate) fn open_for_offline_migration_inspection("));
+  assert!(!storage_engine.contains("pub fn open_for_offline_migration_inspection("));
+  assert!(storage_engine.contains("AppendWriter::open_read_only("));
+  let append_writer = sources
+    .iter()
+    .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("append_writer.rs"))
+    .map(|(_, source)| source)
+    .unwrap();
+  assert!(append_writer.contains("pub(crate) fn open_read_only("));
+  assert!(!append_writer.contains("pub fn open_read_only("));
+
+  let drop_flush_suppression_callers = sources
+    .iter()
+    .flat_map(|(path, source)| source.match_indices("disable_flush_on_drop_for_read_only_inspection(").map(move |_| path))
+    .collect::<Vec<_>>();
+  assert_eq!(
+    drop_flush_suppression_callers.len(),
+    2,
+    "read-only KV drop behavior escaped its disk/store boundary: {drop_flush_suppression_callers:?}"
+  );
+  assert!(drop_flush_suppression_callers
+    .iter()
+    .all(|path| matches!(path.file_name().and_then(|value| value.to_str()), Some("disk_kv_store.rs" | "storage_engine.rs"))));
 
   let run_configuration = sources
     .iter()
     .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("run_configuration.rs"))
     .map(|(_, source)| source)
     .unwrap();
-  assert!(run_configuration.contains("Called when the P3c migration state owner is activated"));
-  assert!(run_configuration.contains("#[allow(dead_code)]"));
+  assert!(run_configuration.contains("Capture the effective migration configuration once"));
 
   let migration_control_sources = sources
     .iter()
@@ -1232,6 +1271,7 @@ fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orches
   assert!(v4_module.contains("pub mod migration_control;"), "ratified P3c migration codec is not exported");
   assert!(v4_module.contains("pub mod migration_owner;"), "ratified P3c migration state owner is not exported");
   assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
+  assert!(v4_module.contains("pub mod migration_offline_preflight;"), "reviewed offline preflight collector is not exported");
   assert!(v4_module.contains("pub mod migration_capture;"), "ratified P3c capture checkpoint format is not exported");
   assert!(v4_module.contains("pub mod migration_capture_workspace;"), "ratified P3c capture workspace is not exported");
   assert!(v4_module.contains("pub mod migration_capture_runtime;"), "ratified P3c capture runtime is not exported");

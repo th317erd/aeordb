@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -829,6 +829,10 @@ fn recovered_void_records_from_sorted_ranges(wal_start: u64, wal_end: u64, range
 /// appends new entries.
 pub struct StorageEngine {
   database_path: PathBuf,
+  /// Set only by the crate-private offline migration collector. This mode may
+  /// read a clean v3 source but must neither recover it nor flush observations
+  /// back into it.
+  read_only_inspection: bool,
   startup_emergency_spill_locations: Vec<crate::engine::emergency_spill::EmergencySpillLocation>,
   configuration_authority: OnceLock<Arc<crate::engine::configuration_authority::ConfigurationAuthority>>,
   memory_coordinator: OnceLock<Arc<MemoryCoordinator>>,
@@ -2288,6 +2292,9 @@ impl StorageEngine {
   }
 
   pub(crate) fn ensure_writable(&self) -> EngineResult<()> {
+    if self.read_only_inspection {
+      return Err(EngineError::DurabilityFailure("offline migration inspection handles are permanently read-only".to_string()));
+    }
     if self.durability_state_poisoned.load(Ordering::Acquire) {
       return Err(EngineError::DurabilityFailure(Self::durability_state_poison_reason().to_string()));
     }
@@ -3484,6 +3491,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      read_only_inspection: false,
       startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
@@ -3559,6 +3567,7 @@ impl StorageEngine {
     progress_callback: Option<EngineStartupProgressCallback>,
     inherited_memory: Option<Arc<MemoryCoordinator>>,
     command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+    allow_mutating_recovery: bool,
   ) -> EngineResult<Self> {
     let bootstrap = crate::engine::config_resolver::preopen_engine_bootstrap(Path::new(path), &command_line)?;
     if let Some(reason) = bootstrap.emergency_spill_resolution_error.as_deref() {
@@ -3579,7 +3588,8 @@ impl StorageEngine {
     let lock_path = format!("{}.lock", path);
     let lock_file = Self::acquire_file_lock(&lock_path)?;
 
-    let mut writer = AppendWriter::open(Path::new(path))?;
+    let mut writer =
+      if allow_mutating_recovery { AppendWriter::open(Path::new(path))? } else { AppendWriter::open_read_only(Path::new(path))? };
     let hash_algo = writer.file_header().hash_algo;
     let hash_length = hash_algo.hash_length();
     let mut file_header = writer.file_header().clone();
@@ -3595,6 +3605,11 @@ impl StorageEngine {
       && ((file_header.kv_block_offset == 0 && file_header.kv_block_length == 0)
         || (file_header.kv_block_offset > header_end && file_header.kv_block_length > 0));
     if needs_initial_kv {
+      if !allow_mutating_recovery {
+        return Err(EngineError::DurabilityFailure(
+          "offline migration inspection refuses a source that requires legacy KV layout migration".to_string(),
+        ));
+      }
       tracing::info!(
         kv_block_offset = file_header.kv_block_offset,
         kv_block_length = file_header.kv_block_length,
@@ -3625,6 +3640,11 @@ impl StorageEngine {
     let resize_target = file_header.resize_target_stage as usize;
     let current_stage = file_header.kv_block_stage as usize;
     if file_header.resize_in_progress || resize_target > current_stage {
+      if !allow_mutating_recovery {
+        return Err(EngineError::DurabilityFailure(
+          "offline migration inspection refuses a source that requires interrupted KV expansion recovery".to_string(),
+        ));
+      }
       tracing::info!(current_stage, resize_target, "Pending KV block expansion detected — expanding before opening");
       // Drop the writer to release the file handle during expansion
       drop(writer);
@@ -3707,8 +3727,8 @@ impl StorageEngine {
     // Open only the validated standard layout. Legacy layouts have already
     // passed through the crash-recoverable bootstrap above, so there is no
     // second startup rebuild path that can bypass bounded external sorting.
-    let kv_file = OpenOptions::new().read(true).write(true).open(path)?;
-    let kv_store = DiskKVStore::open_with_layout_and_coordinator(
+    let kv_file = if allow_mutating_recovery { OpenOptions::new().read(true).write(true).open(path)? } else { File::open(path)? };
+    let mut kv_store = DiskKVStore::open_with_layout_and_coordinator(
       kv_file,
       hash_algo,
       kv_block_offset,
@@ -3720,9 +3740,23 @@ impl StorageEngine {
       file_header.kv_block_version,
       Arc::clone(&durability_coordinator),
     )?;
+    if !allow_mutating_recovery {
+      kv_store.disable_flush_on_drop_for_read_only_inspection();
+    }
     // If any bucket page failed CRC on open, the KV index is unreliable for
     // the affected buckets and the WAL becomes the source of truth below.
     let detected_kv_corruption = kv_store.needs_rebuild;
+    if !allow_mutating_recovery && (needs_dirty_startup || detected_kv_corruption) {
+      let reason = match (needs_dirty_startup, detected_kv_corruption) {
+        (true, true) => "dirty hot-tail state and corrupt KV pages",
+        (true, false) => "dirty hot-tail state",
+        (false, true) => "corrupt KV pages",
+        (false, false) => unreachable!("guarded by recovery-required condition"),
+      };
+      return Err(EngineError::DurabilityFailure(format!(
+        "offline migration inspection refuses a source that requires mutating recovery: {reason}"
+      )));
+    }
 
     // Hot tail entries are already loaded into the DiskKVStore write buffer
     // by DiskKVStore::open() — no separate replay step needed.
@@ -3731,6 +3765,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      read_only_inspection: !allow_mutating_recovery,
       startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
       memory_coordinator: OnceLock::new(),
@@ -3819,7 +3854,9 @@ impl StorageEngine {
 
     // Seed the DiskKVStore's pending_voids snapshot from the loaded
     // VoidManager state so the next hot tail flush carries it forward.
-    engine.sync_voids_to_kv_writer()?;
+    if allow_mutating_recovery {
+      engine.sync_voids_to_kv_writer()?;
+    }
     engine.refresh_persistent_durability_recovery()?;
     engine.initialize_configuration_authority(command_line)?;
     engine.finalize_memory_coordinator(inherited_memory_supplied)?;
@@ -4177,7 +4214,7 @@ impl StorageEngine {
   /// Performs any required in-file recovery and refuses to open patch databases
   /// (`backup_type > 1`).
   pub fn open(path: &str) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, None, None, None, Default::default())?;
+    let engine = Self::open_internal(path, None, None, None, Default::default(), true)?;
     Self::reject_patch_database(engine, path)
   }
 
@@ -4194,7 +4231,7 @@ impl StorageEngine {
     hot_dir: Option<&Path>,
     progress_callback: Option<EngineStartupProgressCallback>,
   ) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, hot_dir, progress_callback, None, Default::default())?;
+    let engine = Self::open_internal(path, hot_dir, progress_callback, None, Default::default(), true)?;
 
     Self::reject_patch_database(engine, path)
   }
@@ -4205,7 +4242,7 @@ impl StorageEngine {
     progress_callback: Option<EngineStartupProgressCallback>,
     command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
   ) -> EngineResult<Self> {
-    let engine = Self::open_internal(path, hot_dir, progress_callback, None, command_line)?;
+    let engine = Self::open_internal(path, hot_dir, progress_callback, None, command_line, true)?;
 
     Self::reject_patch_database(engine, path)
   }
@@ -4234,13 +4271,21 @@ impl StorageEngine {
     Ok(engine)
   }
 
+  pub(crate) fn open_for_offline_migration_inspection(
+    path: &str,
+    command_line: crate::engine::config_resolver::CommandLineConfigOverrides,
+  ) -> EngineResult<Self> {
+    let engine = Self::open_internal(path, None, None, None, command_line, false)?;
+    Self::reject_patch_database(engine, path)
+  }
+
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, None, Default::default())
+    Self::open_internal(path, None, None, None, Default::default(), true)
   }
 
   pub(crate) fn open_for_import_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, Some(coordinator), Default::default())
+    Self::open_internal(path, None, None, Some(coordinator), Default::default(), true)
   }
 
   /// Store an entry: append to file, register in KV store.
@@ -7005,6 +7050,12 @@ impl StorageEngine {
         "Storage engine shutdown blocked by durability work"
       );
       return Err(EngineError::ShuttingDown);
+    }
+
+    if self.read_only_inspection {
+      tracing::info!("Read-only migration inspection shutdown complete without flushing source state");
+      self.shutdown_complete.store(true, Ordering::Release);
+      return Ok(());
     }
 
     if self.shutdown_flush_started.swap(true, Ordering::AcqRel) {

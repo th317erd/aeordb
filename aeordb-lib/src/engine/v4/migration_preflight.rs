@@ -291,19 +291,20 @@ impl NativeCutoverCapabilitiesV1 {
       hasher.update(&[mechanism.map_or(0, mechanism_tag)]);
     }
     hasher.update(&[u8::from(report.read_back_verified)]);
+    // Probe files are deliberately disposable, so their file/birth IDs change
+    // on every run. Persist only the stable filesystem identity class and the
+    // identity relationships the probe proved. This keeps a retry on the same
+    // filesystem reproducible without weakening the rename/replace evidence.
     for identity in
       [report.identity_before_rename, report.identity_after_rename, report.destination_identity_before_replace, report.replaced_identity]
     {
-      match identity {
-        Some(identity) => {
-          hasher.update(&[1]);
-          hasher.update(&identity.to_bytes());
-        }
-        None => {
-          hasher.update(&[0]);
-        }
-      }
+      hash_probe_identity_class(&mut hasher, identity);
     }
+    hasher.update(&[
+      u8::from(same_probe_file(report.identity_before_rename, report.identity_after_rename)),
+      u8::from(same_probe_file(report.identity_before_rename, report.replaced_identity)),
+      u8::from(distinct_probe_file(report.destination_identity_before_replace, report.replaced_identity)),
+    ]);
     Self {
       data_barrier: is_supported(&report.capabilities.data_barrier),
       file_barrier: is_supported(&report.capabilities.file_barrier),
@@ -329,6 +330,29 @@ impl NativeCutoverCapabilitiesV1 {
       && self.stable_file_identity
       && self.read_back_verified
   }
+}
+
+fn hash_probe_identity_class(hasher: &mut blake3::Hasher, identity: Option<PlatformFileIdentityDescriptorV1>) {
+  match identity {
+    Some(identity) => {
+      hasher.update(&[1]);
+      hasher.update(&identity.platform.to_le_bytes());
+      hasher.update(&identity.schema.to_le_bytes());
+      hasher.update(&identity.flags.to_le_bytes());
+      hasher.update(&identity.volume_identity);
+    }
+    None => {
+      hasher.update(&[0]);
+    }
+  }
+}
+
+fn same_probe_file(left: Option<PlatformFileIdentityDescriptorV1>, right: Option<PlatformFileIdentityDescriptorV1>) -> bool {
+  left.zip(right).is_some_and(|(left, right)| left.represents_same_physical_file_as(right))
+}
+
+fn distinct_probe_file(left: Option<PlatformFileIdentityDescriptorV1>, right: Option<PlatformFileIdentityDescriptorV1>) -> bool {
+  left.zip(right).is_some_and(|(left, right)| !left.represents_same_physical_file_as(right))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,6 +558,13 @@ pub struct MigrationPreflightPermitV1 {
   capability_profile: BinaryCapabilityProfileV1,
   required_reader_capabilities: CapabilitySetV1,
   required_writer_capabilities: CapabilitySetV1,
+  binary_source_commit: [u8; 20],
+  binary_executable_sha256: [u8; 32],
+  source_native_qualification_digest: [u8; 32],
+  destination_native_qualification_digest: [u8; 32],
+  capture_max_bytes: u64,
+  capture_free_reserve_bytes: u64,
+  checkpoint_after_seconds: u64,
   evidence_fingerprint: [u8; 32],
 }
 
@@ -624,6 +655,34 @@ impl MigrationPreflightPermitV1 {
 
   pub const fn required_writer_capabilities(&self) -> CapabilitySetV1 {
     self.required_writer_capabilities
+  }
+
+  pub const fn binary_source_commit(&self) -> [u8; 20] {
+    self.binary_source_commit
+  }
+
+  pub const fn binary_executable_sha256(&self) -> [u8; 32] {
+    self.binary_executable_sha256
+  }
+
+  pub const fn source_native_qualification_digest(&self) -> [u8; 32] {
+    self.source_native_qualification_digest
+  }
+
+  pub const fn destination_native_qualification_digest(&self) -> [u8; 32] {
+    self.destination_native_qualification_digest
+  }
+
+  pub const fn capture_max_bytes(&self) -> u64 {
+    self.capture_max_bytes
+  }
+
+  pub const fn capture_free_reserve_bytes(&self) -> u64 {
+    self.capture_free_reserve_bytes
+  }
+
+  pub const fn checkpoint_after_seconds(&self) -> u64 {
+    self.checkpoint_after_seconds
   }
 
   pub const fn evidence_fingerprint(&self) -> [u8; 32] {
@@ -717,6 +776,13 @@ pub fn admit_migration_preflight_v1(
     capability_profile: request.binary.capability_profile,
     required_reader_capabilities: request.binary.required_reader_capabilities,
     required_writer_capabilities: request.binary.required_writer_capabilities,
+    binary_source_commit: request.binary.source_commit,
+    binary_executable_sha256: request.binary.executable_sha256,
+    source_native_qualification_digest: request.native.source.qualification_digest,
+    destination_native_qualification_digest: request.native.destination.qualification_digest,
+    capture_max_bytes: request.configuration.capture_max_bytes,
+    capture_free_reserve_bytes: request.configuration.capture_free_reserve_bytes,
+    checkpoint_after_seconds: request.configuration.checkpoint_after_seconds,
     evidence_fingerprint: report.evidence_fingerprint,
   };
   Ok((report, permit))

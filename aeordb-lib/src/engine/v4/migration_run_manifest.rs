@@ -183,6 +183,13 @@ pub struct MigrationRunManifestV1 {
   capability_profile: BinaryCapabilityProfileV1,
   required_reader_capabilities: CapabilitySetV1,
   required_writer_capabilities: CapabilitySetV1,
+  binary_source_commit: [u8; 20],
+  binary_executable_sha256: [u8; 32],
+  source_native_qualification_digest: [u8; 32],
+  destination_native_qualification_digest: [u8; 32],
+  capture_max_bytes: u64,
+  capture_free_reserve_bytes: u64,
+  checkpoint_after_seconds: u64,
   preflight_evidence_fingerprint: [u8; 32],
   bounds: MigrationRunBoundsV1,
 }
@@ -288,6 +295,34 @@ impl MigrationRunManifestV1 {
     self.required_writer_capabilities
   }
 
+  pub const fn binary_source_commit(&self) -> [u8; 20] {
+    self.binary_source_commit
+  }
+
+  pub const fn binary_executable_sha256(&self) -> [u8; 32] {
+    self.binary_executable_sha256
+  }
+
+  pub const fn source_native_qualification_digest(&self) -> [u8; 32] {
+    self.source_native_qualification_digest
+  }
+
+  pub const fn destination_native_qualification_digest(&self) -> [u8; 32] {
+    self.destination_native_qualification_digest
+  }
+
+  pub const fn capture_max_bytes(&self) -> u64 {
+    self.capture_max_bytes
+  }
+
+  pub const fn capture_free_reserve_bytes(&self) -> u64 {
+    self.capture_free_reserve_bytes
+  }
+
+  pub const fn checkpoint_after_seconds(&self) -> u64 {
+    self.checkpoint_after_seconds
+  }
+
   pub const fn preflight_evidence_fingerprint(&self) -> [u8; 32] {
     self.preflight_evidence_fingerprint
   }
@@ -319,7 +354,13 @@ impl MigrationRunManifestV1 {
       || self.capability_profile != permit.capability_profile()
       || self.required_reader_capabilities != permit.required_reader_capabilities()
       || self.required_writer_capabilities != permit.required_writer_capabilities()
-      || self.preflight_evidence_fingerprint != permit.evidence_fingerprint()
+      || self.binary_source_commit != permit.binary_source_commit()
+      || self.binary_executable_sha256 != permit.binary_executable_sha256()
+      || self.source_native_qualification_digest != permit.source_native_qualification_digest()
+      || self.destination_native_qualification_digest != permit.destination_native_qualification_digest()
+      || self.capture_max_bytes != permit.capture_max_bytes()
+      || self.capture_free_reserve_bytes != permit.capture_free_reserve_bytes()
+      || self.checkpoint_after_seconds != permit.checkpoint_after_seconds()
     {
       return Err(MigrationRunManifestErrorV1::invalid(
         "migration_run_manifest_permit",
@@ -394,6 +435,13 @@ struct PersistedManifestBodyV1 {
   supported_writer_capabilities: String,
   required_reader_capabilities: String,
   required_writer_capabilities: String,
+  binary_source_commit: String,
+  binary_executable_sha256: String,
+  source_native_qualification_digest: String,
+  destination_native_qualification_digest: String,
+  capture_max_bytes: u64,
+  capture_free_reserve_bytes: u64,
+  checkpoint_after_seconds: u64,
   preflight_evidence_fingerprint: String,
   bounds: MigrationRunBoundsV1,
 }
@@ -554,6 +602,13 @@ fn body_from_request(
     supported_writer_capabilities: hex::encode(permit.capability_profile().supported_writer_capabilities.into_bytes()),
     required_reader_capabilities: hex::encode(permit.required_reader_capabilities().into_bytes()),
     required_writer_capabilities: hex::encode(permit.required_writer_capabilities().into_bytes()),
+    binary_source_commit: hex::encode(permit.binary_source_commit()),
+    binary_executable_sha256: hex::encode(permit.binary_executable_sha256()),
+    source_native_qualification_digest: hex::encode(permit.source_native_qualification_digest()),
+    destination_native_qualification_digest: hex::encode(permit.destination_native_qualification_digest()),
+    capture_max_bytes: permit.capture_max_bytes(),
+    capture_free_reserve_bytes: permit.capture_free_reserve_bytes(),
+    checkpoint_after_seconds: permit.checkpoint_after_seconds(),
     preflight_evidence_fingerprint: hex::encode(permit.evidence_fingerprint()),
     bounds: request.bounds,
   })
@@ -633,6 +688,16 @@ fn decode_manifest(bytes: &[u8], path: PathBuf) -> Result<MigrationRunManifestV1
     capability_profile: BinaryCapabilityProfileV1::new(supported_readers, supported_writers),
     required_reader_capabilities: capability_set(&body.required_reader_capabilities, "required reader capabilities")?,
     required_writer_capabilities: capability_set(&body.required_writer_capabilities, "required writer capabilities")?,
+    binary_source_commit: decode_array(&body.binary_source_commit, "binary source commit")?,
+    binary_executable_sha256: decode_array(&body.binary_executable_sha256, "binary executable SHA-256")?,
+    source_native_qualification_digest: decode_array(&body.source_native_qualification_digest, "source native qualification digest")?,
+    destination_native_qualification_digest: decode_array(
+      &body.destination_native_qualification_digest,
+      "destination native qualification digest",
+    )?,
+    capture_max_bytes: body.capture_max_bytes,
+    capture_free_reserve_bytes: body.capture_free_reserve_bytes,
+    checkpoint_after_seconds: body.checkpoint_after_seconds,
     preflight_evidence_fingerprint: decode_array(&body.preflight_evidence_fingerprint, "preflight evidence fingerprint")?,
     bounds: body.bounds,
   };
@@ -666,6 +731,13 @@ fn validate_manifest(manifest: &MigrationRunManifestV1) -> Result<(), MigrationR
     || manifest.source_authority_digest.iter().all(|byte| *byte == 0)
     || manifest.effective_configuration_fingerprint.iter().all(|byte| *byte == 0)
     || manifest.system_family_registry_fingerprint.iter().all(|byte| *byte == 0)
+    || manifest.binary_source_commit.iter().all(|byte| *byte == 0)
+    || manifest.binary_executable_sha256.iter().all(|byte| *byte == 0)
+    || manifest.source_native_qualification_digest.iter().all(|byte| *byte == 0)
+    || manifest.destination_native_qualification_digest.iter().all(|byte| *byte == 0)
+    || manifest.capture_max_bytes == 0
+    || manifest.capture_free_reserve_bytes == 0
+    || manifest.checkpoint_after_seconds == 0
     || manifest.preflight_evidence_fingerprint.iter().all(|byte| *byte == 0)
     || manifest.required_reader_capabilities.is_empty()
     || manifest.required_writer_capabilities.is_empty()

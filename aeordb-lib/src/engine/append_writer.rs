@@ -90,6 +90,23 @@ impl AppendWriter {
     })
   }
 
+  pub(crate) fn open_read_only(path: &Path) -> EngineResult<Self> {
+    let mut file = File::open(path)?;
+    let (file_header, active_slot) = read_active_header(&mut file)?;
+    let reader = File::open(path)?;
+    let current_offset = file.seek(SeekFrom::End(0))?;
+
+    Ok(AppendWriter {
+      file,
+      reader,
+      file_path: path.to_path_buf(),
+      file_header,
+      current_offset,
+      active_slot,
+      durability_coordinator: Arc::new(DurabilityCoordinator::new()),
+    })
+  }
+
   pub fn file_path(&self) -> &Path {
     &self.file_path
   }
