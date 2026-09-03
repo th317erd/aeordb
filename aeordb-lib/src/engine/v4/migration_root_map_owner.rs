@@ -26,7 +26,8 @@ use super::header_publication::DatabaseHeaderObservationV4;
 use super::migration_base_clone_execution::{MigrationBaseCloneSeedKindV1, MigrationBaseCloneSeedResultSinkV1, MigrationBaseCloneSeedV1};
 use super::migration_capture_replay::{MigrationCaptureReplayAuthorityTemplateV1, MigrationCaptureReplayRootSinkV1};
 use super::migration_final_authority_reconciliation::{
-  MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1, MigrationFinalRootMappingV1,
+  MigrationFinalAuthoritySeedV1, MigrationFinalPriorRootMappingLookupV1, MigrationFinalRootMappingClosureV1,
+  MigrationFinalRootMappingSinkV1, MigrationFinalRootMappingV1,
 };
 use super::migration_root_map::{
   LegacyRootMapChainVerifierV1, LegacyRootMapControlBodyV1, LegacyRootMapPageBodyV1, LegacyRootMapRowV1, LegacyRootSemanticAvailabilityV1,
@@ -75,6 +76,8 @@ const SELECTED_READER_RETAINED_MEMORY_BYTES: u64 = 512 * 1024;
 // body, FileRecord entity, and decode bookkeeping at the same time.
 const SELECTED_READER_PAGE_MEMORY_BYTES: u64 = 2 * PAGE_BODY_MAX_BYTES as u64 + 128 * 1024;
 const SELECTED_READER_OPEN_MEMORY_BYTES: u64 = SELECTED_READER_RETAINED_MEMORY_BYTES + SELECTED_READER_PAGE_MEMORY_BYTES;
+const MAXIMUM_PRIOR_LOOKUP_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+const PRIOR_LOOKUP_ROW_MEMORY_OVERHEAD: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StagedLegacyRootMappingV1 {
@@ -383,6 +386,136 @@ pub struct LegacyRootMapStagingWorkspaceV1 {
   seal: Option<LegacyRootMapSealV1>,
   cancellation: CancellationToken,
   _state_memory: MemoryReservation,
+}
+
+struct StagedPriorDestinationV1 {
+  legacy_root: Vec<u8>,
+  namespace_root: Vec<u8>,
+  semantic_availability: LegacyRootSemanticAvailabilityV1,
+  destination_tree: Vec<u8>,
+}
+
+/// Bounded immutable snapshot of base-clone and replay mappings staged before
+/// final authority reconciliation.
+///
+/// The snapshot validates the complete durable stage prefix once, detects
+/// conflicting duplicate roots, and then serves allocation-small binary
+/// searches without borrowing the mutable staging workspace needed by the
+/// final mapping sink.
+pub struct LegacyRootMapStagedPriorLookupV1 {
+  rows: Vec<StagedPriorDestinationV1>,
+  cancellation: CancellationToken,
+  remaining_lookups: u64,
+  _memory: MemoryReservation,
+}
+
+impl fmt::Debug for LegacyRootMapStagedPriorLookupV1 {
+  fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("LegacyRootMapStagedPriorLookupV1")
+      .field("row_count", &self.rows.len())
+      .field("remaining_lookups", &self.remaining_lookups)
+      .finish_non_exhaustive()
+  }
+}
+
+impl LegacyRootMapStagedPriorLookupV1 {
+  pub fn snapshot(
+    workspace: &mut LegacyRootMapStagingWorkspaceV1,
+    memory: &MemoryCoordinator,
+    maximum_memory_bytes: u64,
+    maximum_lookups: u64,
+  ) -> Result<Self, LegacyRootMapOwnerErrorV1> {
+    check_cancelled(&workspace.cancellation)?;
+    if maximum_memory_bytes == 0
+      || maximum_memory_bytes > MAXIMUM_PRIOR_LOOKUP_MEMORY_BYTES
+      || maximum_lookups == 0
+      || maximum_lookups > MAXIMUM_WORKSPACE_ENTRIES
+    {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_prior_lookup_bounds",
+        "staged prior-root lookup memory and work bounds are invalid",
+      ));
+    }
+    let required_memory = prior_lookup_memory_charge(workspace.staged_rows, workspace.identity.algorithm)?;
+    if required_memory > maximum_memory_bytes {
+      return Err(LegacyRootMapOwnerErrorV1::Capacity(format!(
+        "staged prior-root lookup requires {required_memory} bytes, exceeding its {maximum_memory_bytes}-byte bound"
+      )));
+    }
+    let retained_memory = memory
+      .reserve(MemoryOwner::Migration, required_memory, AdmissionClass::Maintenance)
+      .map_err(|source| LegacyRootMapOwnerErrorV1::Memory(Box::new(source)))?;
+    sync_file_all_native(&workspace.stage_file).map_err(|source| LegacyRootMapOwnerErrorV1::Durability(Box::new(source)))?;
+    let expected_bytes = expected_stage_byte_count(workspace.staged_rows, workspace.identity.algorithm)?;
+    validate_stage_snapshot(
+      &mut workspace.stage_file,
+      workspace.identity.algorithm,
+      workspace.staged_rows,
+      expected_bytes,
+      None,
+      false,
+      &workspace.cancellation,
+    )?;
+
+    let mut stage =
+      workspace.stage_file.try_clone().map_err(|source| LegacyRootMapOwnerErrorV1::Io { operation: "prior-root stage clone", source })?;
+    stage.seek(SeekFrom::Start(0)).map_err(|source| LegacyRootMapOwnerErrorV1::Io { operation: "prior-root stage rewind", source })?;
+    let row_capacity = usize::try_from(workspace.staged_rows)
+      .map_err(|error| LegacyRootMapOwnerErrorV1::Capacity(format!("prior-root row count exceeds usize: {error}")))?;
+    let mut rows = Vec::new();
+    rows
+      .try_reserve_exact(row_capacity)
+      .map_err(|error| LegacyRootMapOwnerErrorV1::Allocation(format!("prior-root lookup allocation failed: {error}")))?;
+    for _ in 0..workspace.staged_rows {
+      check_cancelled(&workspace.cancellation)?;
+      let mapping = read_next_stage_mapping(&mut stage, workspace.identity.algorithm)?.ok_or_else(|| {
+        LegacyRootMapOwnerErrorV1::invalid("migration_root_map_prior_lookup_stage", "validated root-map stage ended before its row count")
+      })?;
+      let namespace = decode_namespace_root(&mapping.namespace_root.value, workspace.identity.algorithm)?;
+      rows.push(StagedPriorDestinationV1 {
+        legacy_root: mapping.row.legacy_root_hash,
+        namespace_root: mapping.row.namespace_root_v1_hash,
+        semantic_availability: mapping.row.semantic_availability,
+        destination_tree: namespace.namespace_tree_root,
+      });
+    }
+    if read_next_stage_mapping(&mut stage, workspace.identity.algorithm)?.is_some() {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_prior_lookup_stage",
+        "validated root-map stage contains rows beyond its selected prefix",
+      ));
+    }
+    rows.sort_by(|left, right| left.legacy_root.cmp(&right.legacy_root));
+    for pair in rows.windows(2) {
+      if pair[0].legacy_root == pair[1].legacy_root
+        && (pair[0].namespace_root != pair[1].namespace_root || pair[0].semantic_availability != pair[1].semantic_availability)
+      {
+        return Err(LegacyRootMapOwnerErrorV1::invalid(
+          "migration_root_map_conflicting_mapping",
+          "one legacy root maps to different destination or semantic state",
+        ));
+      }
+    }
+    Ok(Self { rows, cancellation: workspace.cancellation.clone(), remaining_lookups: maximum_lookups, _memory: retained_memory })
+  }
+}
+
+impl MigrationFinalPriorRootMappingLookupV1 for LegacyRootMapStagedPriorLookupV1 {
+  fn lookup_destination_entity(&mut self, seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
+    check_cancelled(&self.cancellation).map_err(owner_engine_error)?;
+    if self.remaining_lookups == 0 {
+      return Err(EngineError::ResourceExhausted("staged prior-root lookup exhausted its configured work bound".to_string()));
+    }
+    self.remaining_lookups -= 1;
+    Ok(
+      self
+        .rows
+        .binary_search_by(|row| row.legacy_root.as_slice().cmp(&seed.seed.hash))
+        .ok()
+        .map(|index| self.rows[index].destination_tree.clone()),
+    )
+  }
 }
 
 impl fmt::Debug for LegacyRootMapStagingWorkspaceV1 {
@@ -907,6 +1040,29 @@ fn row_memory_charge(algorithm: HashAlgorithm) -> Result<usize, LegacyRootMapOwn
     .checked_add(size_of::<LegacyRootMapRowV1>())
     .and_then(|value| value.checked_add(ROW_MEMORY_OVERHEAD))
     .ok_or_else(|| LegacyRootMapOwnerErrorV1::Capacity("root-map row memory charge overflowed".to_string()))
+}
+
+fn prior_lookup_memory_charge(rows: u64, algorithm: HashAlgorithm) -> Result<u64, LegacyRootMapOwnerErrorV1> {
+  let retained_row = size_of::<StagedPriorDestinationV1>()
+    .checked_add(
+      algorithm
+        .hash_length()
+        .checked_mul(3)
+        .ok_or_else(|| LegacyRootMapOwnerErrorV1::Capacity("prior-root hash memory charge overflowed".to_string()))?,
+    )
+    .and_then(|value| value.checked_add(PRIOR_LOOKUP_ROW_MEMORY_OVERHEAD))
+    .ok_or_else(|| LegacyRootMapOwnerErrorV1::Capacity("prior-root row memory charge overflowed".to_string()))?;
+  let retained_row = u64::try_from(retained_row)
+    .map_err(|error| LegacyRootMapOwnerErrorV1::Capacity(format!("prior-root row memory charge exceeds u64: {error}")))?;
+  let retained_rows = rows
+    .checked_mul(retained_row)
+    .ok_or_else(|| LegacyRootMapOwnerErrorV1::Capacity("prior-root retained memory charge overflowed".to_string()))?;
+  let frame = u64::try_from(stage_frame_length(algorithm)?)
+    .map_err(|error| LegacyRootMapOwnerErrorV1::Capacity(format!("prior-root frame memory charge exceeds u64: {error}")))?;
+  STATE_MEMORY_BYTES
+    .checked_add(retained_rows)
+    .and_then(|value| value.checked_add(frame))
+    .ok_or_else(|| LegacyRootMapOwnerErrorV1::Capacity("prior-root total memory charge overflowed".to_string()))
 }
 
 fn create_workspace_path(

@@ -22,7 +22,8 @@ use aeordb::engine::v4::migration_base_clone_execution::{
 };
 use aeordb::engine::v4::migration_capture_replay::{MigrationCaptureReplayAuthorityTemplateV1, MigrationCaptureReplayRootSinkV1};
 use aeordb::engine::v4::migration_final_authority_reconciliation::{
-  MigrationFinalAuthoritySeedCountsV1, MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1, MigrationFinalRootMappingV1,
+  MigrationFinalAuthoritySeedCountsV1, MigrationFinalAuthoritySeedV1, MigrationFinalPriorRootMappingLookupV1,
+  MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1, MigrationFinalRootMappingV1,
 };
 use aeordb::engine::v4::migration_preflight::AuthorityInventoryCountsV1;
 use aeordb::engine::v4::migration_root_map::{
@@ -30,8 +31,9 @@ use aeordb::engine::v4::migration_root_map::{
   encode_legacy_root_map_control, encode_legacy_root_map_page, legacy_root_map_page_identity_hash,
 };
 use aeordb::engine::v4::migration_root_map_owner::{
-  LegacyRootMapOwnerV1, LegacyRootMapProducerSinkV1, LegacyRootMapPublicationRequestV1, LegacyRootMapStagingWorkspaceV1,
-  LegacyRootMapWorkspaceIdentityV1, LegacyRootMapWorkspaceOptionsV1, LegacyRootMapWorkspaceReopenOptionsV1, VerifiedLegacyRootMapReaderV1,
+  LegacyRootMapOwnerV1, LegacyRootMapProducerSinkV1, LegacyRootMapPublicationRequestV1, LegacyRootMapStagedPriorLookupV1,
+  LegacyRootMapStagingWorkspaceV1, LegacyRootMapWorkspaceIdentityV1, LegacyRootMapWorkspaceOptionsV1,
+  LegacyRootMapWorkspaceReopenOptionsV1, VerifiedLegacyRootMapReaderV1,
 };
 use aeordb::engine::v4::namespace::{
   EncodedNamespaceRootV1, NamespaceRootWriteV1, SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1,
@@ -723,6 +725,66 @@ fn one_root_map_sink_adapts_base_replay_and_final_streams_and_omits_detached_pat
   }
   assert!(reader.lookup(&vec![0x98; algorithm.hash_length()], &cancellation).unwrap().is_none());
   assert!(reader.lookup(&vec![0x99; algorithm.hash_length()], &cancellation).unwrap().is_none());
+}
+
+#[test]
+fn staged_prior_lookup_is_bounded_canonical_and_detects_conflicts() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (directory, database_path, publisher) = create_publisher_for(algorithm);
+  let cancellation = CancellationToken::new();
+  let memory = memory();
+  let scratch = directory.path().join("scratch-prior-lookup");
+  std::fs::create_dir(&scratch).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700)).unwrap();
+  }
+  let mut workspace = LegacyRootMapStagingWorkspaceV1::create(
+    &database_path,
+    identity(algorithm),
+    1_700_000_000_300,
+    options(&scratch),
+    cancellation.clone(),
+    &memory,
+  )
+  .unwrap();
+  let authority =
+    authority_for(algorithm, SemanticAvailabilityV1::ContentOnly { reason: SemanticUnavailableReasonV1::LegacyGlobalStateNotCaptured });
+  let destination_tree = publish_tree(&publisher, algorithm, 0x31);
+  let (row, namespace) = staged_mapping(algorithm, &authority, 0x21, &destination_tree, 7);
+  workspace.stage_mapping(&row, &namespace).unwrap();
+  workspace.stage_mapping(&row, &namespace).unwrap();
+
+  assert!(LegacyRootMapStagedPriorLookupV1::snapshot(&mut workspace, &memory, 1, 2).is_err());
+  let mut lookup = LegacyRootMapStagedPriorLookupV1::snapshot(&mut workspace, &memory, 1 << 20, 2).unwrap();
+  let seed = MigrationFinalAuthoritySeedV1 {
+    authority_identity: b"snapshot-a".to_vec(),
+    source_write_sequence: 7,
+    system_family_id: None,
+    logical_bytes: 0,
+    seed: MigrationBaseCloneSeedV1 {
+      kind: MigrationBaseCloneSeedKindV1::Snapshot,
+      path: "/".to_string(),
+      entry_type: EntryType::DirectoryIndex,
+      hash: row.legacy_root_hash.clone(),
+    },
+  };
+  assert_eq!(lookup.lookup_destination_entity(&seed).unwrap(), Some(destination_tree.clone()));
+  let mut missing = seed.clone();
+  missing.seed.hash = vec![0x22; algorithm.hash_length()];
+  assert_eq!(lookup.lookup_destination_entity(&missing).unwrap(), None);
+  assert!(lookup.lookup_destination_entity(&seed).is_err(), "the lookup work bound must be terminal");
+  drop(lookup);
+
+  let conflicting_tree = publish_tree(&publisher, algorithm, 0x32);
+  let (conflicting, conflicting_namespace) = staged_mapping(algorithm, &authority, 0x21, &conflicting_tree, 8);
+  workspace.stage_mapping(&conflicting, &conflicting_namespace).unwrap();
+  let error = LegacyRootMapStagedPriorLookupV1::snapshot(&mut workspace, &memory, 1 << 20, 3).unwrap_err();
+  assert_eq!(error.code(), "migration_root_map_conflicting_mapping");
+
+  cancellation.cancel();
+  assert!(LegacyRootMapStagedPriorLookupV1::snapshot(&mut workspace, &memory, 1 << 20, 3).is_err());
 }
 
 #[test]

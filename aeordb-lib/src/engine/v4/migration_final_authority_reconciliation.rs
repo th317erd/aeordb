@@ -974,6 +974,19 @@ fn update_authority_counts_digest(hasher: &mut blake3::Hasher, counts: Authority
   }
 }
 
+pub(super) fn migration_final_authority_inventory_digest_v1(
+  rows: &[MigrationFinalAuthoritySeedV1],
+  counts: AuthorityInventoryCountsV1,
+) -> Result<[u8; 32], MigrationFinalAuthorityReconciliationErrorV1> {
+  let mut hasher = blake3::Hasher::new();
+  hasher.update(INVENTORY_DIGEST_DOMAIN);
+  for row in rows {
+    update_inventory_digest(&mut hasher, row)?;
+  }
+  update_authority_counts_digest(&mut hasher, counts);
+  Ok(*hasher.finalize().as_bytes())
+}
+
 fn update_len_bytes(
   hasher: &mut blake3::Hasher,
   bytes: &[u8],

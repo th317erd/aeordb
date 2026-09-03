@@ -20,7 +20,7 @@ use aeordb::engine::v4::migration_preflight::{
   evaluate_migration_preflight_v1,
 };
 use aeordb::engine::v4::system_family::embedded_system_family_registry;
-use aeordb::engine::verify::verify_checked;
+use aeordb::engine::verify::{VerifyReport, verify_checked};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
@@ -400,6 +400,67 @@ fn selected_header_verifier_and_transition_inspector_map_without_restating_their
   assert!(recovery.inspection_complete);
   assert!(!recovery.durability_latched);
   assert!(!recovery.repair_active);
+}
+
+#[test]
+fn canonical_head_clone_admits_only_recoverable_path_key_divergence() {
+  let mut request = valid_request();
+  let mut locator_only = aeordb::engine::verify::VerifyReport::new("source.aeordb");
+  locator_only.file_size = request.source.file_size;
+  locator_only.stale_dir_path_keys.push("/Pictures/Abstract".to_string());
+  request.verification = StrictVerificationEvidenceV1::from_complete_report(
+    &locator_only,
+    request.source.selected_header_sequence,
+    request.source.complete_file_checksum,
+  );
+
+  assert_eq!(request.verification.state, StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence);
+  assert_eq!(request.verification.issue_count, 1);
+  assert!(admit_migration_preflight_v1(&request).is_ok());
+
+  locator_only.corrupt_hash = 1;
+  request.verification = StrictVerificationEvidenceV1::from_complete_report(
+    &locator_only,
+    request.source.selected_header_sequence,
+    request.source.complete_file_checksum,
+  );
+  assert_eq!(request.verification.state, StrictVerificationStateV1::CompleteWithIssues);
+  assert_refused(|candidate| candidate.verification = request.verification, MigrationPreflightFindingCodeV1::StrictVerificationIssues);
+
+  assert_refused(
+    |candidate| {
+      candidate.verification.state = StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence;
+      candidate.verification.issue_count = 0;
+    },
+    MigrationPreflightFindingCodeV1::StrictVerificationIssues,
+  );
+
+  let blocking_issue_mutations: [(&str, fn(&mut VerifyReport)); 12] = [
+    ("corrupt_hash", |report| report.corrupt_hash = 1),
+    ("corrupt_header", |report| report.corrupt_header = 1),
+    ("missing_children", |report| report.missing_children.push("/missing".to_string())),
+    ("unlisted_files", |report| report.unlisted_files.push("/unlisted".to_string())),
+    ("dangling_file_records", |report| report.dangling_file_records.push("/dangling".to_string())),
+    ("btree_directory_issues", |report| report.btree_directory_issues.push("/btree".to_string())),
+    ("stale_kv_entries", |report| report.stale_kv_entries = 1),
+    ("missing_kv_entries", |report| report.missing_kv_entries = 1),
+    ("invalid_kv_offsets", |report| report.invalid_kv_offsets.push("invalid offset".to_string())),
+    ("invalid_hot_tail_voids", |report| report.invalid_hot_tail_voids.push("invalid void".to_string())),
+    ("verification_errors", |report| report.verification_errors.push("scan failed".to_string())),
+    ("broken_snapshots", |report| report.broken_snapshots.push("broken-snapshot".to_string())),
+  ];
+  for (name, introduce_issue) in blocking_issue_mutations {
+    let mut mixed = aeordb::engine::verify::VerifyReport::new("source.aeordb");
+    mixed.file_size = request.source.file_size;
+    mixed.stale_dir_path_keys.push("/Pictures/Abstract".to_string());
+    introduce_issue(&mut mixed);
+    let evidence = StrictVerificationEvidenceV1::from_complete_report(
+      &mixed,
+      request.source.selected_header_sequence,
+      request.source.complete_file_checksum,
+    );
+    assert_eq!(evidence.state, StrictVerificationStateV1::CompleteWithIssues, "{name} must remain blocking");
+  }
 }
 
 #[test]

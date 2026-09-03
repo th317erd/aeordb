@@ -79,6 +79,11 @@ impl MigrationSourceEvidenceV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrictVerificationStateV1 {
   CompleteClean,
+  /// Verification completed with only stale `dir:{path}` locator keys. The
+  /// canonical HEAD walk used by the base clone follows parent `ChildEntry`
+  /// hashes instead of these auxiliary locator keys, so this narrowly scoped
+  /// divergence is safe to admit while remaining visible in the evidence.
+  CompleteWithRecoverablePathKeyDivergence,
   CompleteWithIssues,
   Incomplete,
 }
@@ -99,8 +104,15 @@ impl StrictVerificationEvidenceV1 {
   /// represented as `Incomplete` by the owning preflight collector.
   pub fn from_complete_report(report: &VerifyReport, source_header_sequence: u64, source_complete_file_checksum: [u8; 32]) -> Self {
     let issue_count = verification_issue_count(report);
+    let state = if !report.has_issues() {
+      StrictVerificationStateV1::CompleteClean
+    } else if !report.stale_dir_path_keys.is_empty() && !has_blocking_verification_issues(report) {
+      StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence
+    } else {
+      StrictVerificationStateV1::CompleteWithIssues
+    };
     Self {
-      state: if report.has_issues() { StrictVerificationStateV1::CompleteWithIssues } else { StrictVerificationStateV1::CompleteClean },
+      state,
       source_file_size: report.file_size,
       source_header_sequence,
       source_complete_file_checksum,
@@ -758,6 +770,10 @@ fn validate_verification(request: &MigrationPreflightRequestV1, report: &mut Mig
   match verification.state {
     StrictVerificationStateV1::CompleteClean if verification.issue_count == 0 => {}
     StrictVerificationStateV1::CompleteClean => report.push(MigrationPreflightFindingCodeV1::StrictVerificationIssues),
+    StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence if verification.issue_count > 0 => {}
+    StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence => {
+      report.push(MigrationPreflightFindingCodeV1::StrictVerificationIssues);
+    }
     StrictVerificationStateV1::CompleteWithIssues => report.push(MigrationPreflightFindingCodeV1::StrictVerificationIssues),
     StrictVerificationStateV1::Incomplete => report.push(MigrationPreflightFindingCodeV1::StrictVerificationIncomplete),
   }
@@ -1081,6 +1097,21 @@ fn verification_issue_count(report: &VerifyReport) -> u64 {
   .fold(scalar, |total, count| total.saturating_add(usize_to_u64(count)))
 }
 
+fn has_blocking_verification_issues(report: &VerifyReport) -> bool {
+  report.corrupt_hash > 0
+    || report.corrupt_header > 0
+    || !report.missing_children.is_empty()
+    || !report.unlisted_files.is_empty()
+    || !report.dangling_file_records.is_empty()
+    || !report.btree_directory_issues.is_empty()
+    || report.stale_kv_entries > 0
+    || report.missing_kv_entries > 0
+    || !report.invalid_kv_offsets.is_empty()
+    || !report.invalid_hot_tail_voids.is_empty()
+    || !report.verification_errors.is_empty()
+    || !report.broken_snapshots.is_empty()
+}
+
 fn verification_evidence_digest(report: &VerifyReport) -> [u8; 32] {
   let mut hasher = blake3::Hasher::new();
   hasher.update(b"aeordb.strict-verification-report.v1\0");
@@ -1219,6 +1250,7 @@ fn verification_state_tag(state: StrictVerificationStateV1) -> u8 {
     StrictVerificationStateV1::CompleteClean => 1,
     StrictVerificationStateV1::CompleteWithIssues => 2,
     StrictVerificationStateV1::Incomplete => 3,
+    StrictVerificationStateV1::CompleteWithRecoverablePathKeyDivergence => 4,
   }
 }
 

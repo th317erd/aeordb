@@ -734,6 +734,111 @@ pub fn stream_strict_migration_merkle_diff_v1(
   Ok(receipt)
 }
 
+pub(super) fn count_strict_migration_tree_symlinks_v1(
+  source: &dyn MigrationBaseCloneEntrySourceV1,
+  root: &[u8],
+  memory: &MemoryCoordinator,
+  cancellation: &CancellationToken,
+  maximum_memory_bytes: u64,
+  maximum_work_items: u64,
+  maximum_directory_depth: usize,
+) -> Result<u64, MigrationFinalReconciliationErrorV1> {
+  let algorithm = source.hash_algorithm();
+  if root.len() != algorithm.hash_length()
+    || is_zero_hash(root)
+    || maximum_memory_bytes == 0
+    || maximum_memory_bytes > MAXIMUM_DIFF_MEMORY_BYTES
+    || maximum_work_items == 0
+    || maximum_work_items > MAXIMUM_DIFF_WORK_ITEMS
+    || maximum_directory_depth == 0
+    || maximum_directory_depth > MAXIMUM_DIFF_DIRECTORY_DEPTH
+  {
+    return Err(MigrationFinalReconciliationErrorV1::invalid(
+      "migration_v3_inventory_namespace_bounds",
+      "v3 inventory namespace root or resource bounds are invalid",
+    ));
+  }
+  check_diff_cancelled(cancellation)?;
+  let mut budget = DiffMemoryBudgetV1::new(memory, maximum_memory_bytes)?;
+  let mut work = DiffWorkBudgetV1::new(maximum_work_items);
+  let mut receipt = MigrationMerkleDiffReceiptV1 {
+    basis_root: Vec::new(),
+    target_root: root.to_vec(),
+    changed_path_count: 0,
+    metadata_only_count: 0,
+    visited_directory_count: 0,
+    visited_entity_count: 0,
+    visited_btree_node_count: 0,
+    compared_child_count: 0,
+    maximum_memory_used_bytes: 0,
+    maximum_frontier_items: 0,
+  };
+  let initial_charge = diff_directory_frontier_charge(root.len())?;
+  budget.reserve(initial_charge)?;
+  let mut directories = vec![(root.to_vec(), 0usize, initial_charge)];
+  let mut symlinks = 0u64;
+  while let Some((directory_hash, depth, frontier_charge)) = directories.pop() {
+    budget.release(frontier_charge)?;
+    check_diff_cancelled(cancellation)?;
+    if depth >= maximum_directory_depth {
+      return Err(MigrationFinalReconciliationErrorV1::invalid(
+        "migration_v3_inventory_namespace_depth",
+        "v3 inventory namespace exceeds its configured directory-depth bound",
+      ));
+    }
+    let mut cursor = DirectoryEntryCursorV1::open(source, &directory_hash, algorithm, &mut budget, &mut work, &mut receipt)?;
+    while let Some(child) = cursor.next(source, algorithm, cancellation, &mut budget, &mut work, &mut receipt)? {
+      work.consume("v3 inventory namespace child")?;
+      match EntryType::from_u8(child.entry.entry_type).map_err(MigrationFinalReconciliationErrorV1::DiffSource)? {
+        EntryType::Symlink => {
+          symlinks = symlinks.checked_add(1).ok_or_else(|| {
+            MigrationFinalReconciliationErrorV1::invalid("migration_v3_inventory_symlink_overflow", "v3 inventory symlink count overflowed")
+          })?;
+        }
+        EntryType::DirectoryIndex => {
+          let child_depth = depth.checked_add(1).ok_or_else(|| {
+            MigrationFinalReconciliationErrorV1::invalid(
+              "migration_v3_inventory_namespace_depth",
+              "v3 inventory directory depth overflowed",
+            )
+          })?;
+          if child_depth >= maximum_directory_depth {
+            return Err(MigrationFinalReconciliationErrorV1::invalid(
+              "migration_v3_inventory_namespace_depth",
+              "v3 inventory namespace exceeds its configured directory-depth bound",
+            ));
+          }
+          let charge = diff_directory_frontier_charge(child.entry.hash.len())?;
+          budget.reserve(charge)?;
+          directories.try_reserve(1).map_err(|error| {
+            MigrationFinalReconciliationErrorV1::invalid(
+              "migration_v3_inventory_namespace_allocation",
+              format!("v3 inventory directory frontier allocation failed: {error}"),
+            )
+          })?;
+          directories.push((child.entry.hash.clone(), child_depth, charge));
+        }
+        _ => {}
+      }
+      budget.release(child.memory_charge)?;
+    }
+  }
+  Ok(symlinks)
+}
+
+fn diff_directory_frontier_charge(hash_bytes: usize) -> Result<u64, MigrationFinalReconciliationErrorV1> {
+  let bytes = size_of::<(Vec<u8>, usize, u64)>()
+    .checked_add(hash_bytes)
+    .and_then(|value| value.checked_add(OWNED_ALLOCATION_OVERHEAD as usize))
+    .ok_or_else(|| {
+      MigrationFinalReconciliationErrorV1::invalid(
+        "migration_v3_inventory_namespace_memory_overflow",
+        "v3 inventory directory frontier memory charge overflowed",
+      )
+    })?;
+  diff_usize_to_u64(bytes, "v3 inventory directory frontier charge")
+}
+
 struct DiffMemoryBudgetV1 {
   _reservation: MemoryReservation,
   maximum: u64,

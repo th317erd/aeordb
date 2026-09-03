@@ -1237,6 +1237,10 @@ name = "migration_preflight_spec"
 path = "spec/engine/migration_preflight_spec.rs"
 
 [[test]]
+name = "migration_v3_authority_inventory_spec"
+path = "spec/engine/migration_v3_authority_inventory_spec.rs"
+
+[[test]]
 name = "migration_clone_spec"
 path = "spec/engine/migration_clone_spec.rs"
 

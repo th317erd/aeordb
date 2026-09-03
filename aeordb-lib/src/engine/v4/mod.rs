@@ -120,6 +120,7 @@ pub mod migration_preflight;
 pub mod migration_root_map;
 pub mod migration_root_map_owner;
 pub mod migration_source_gc;
+pub mod migration_v3_authority_inventory;
 pub mod namespace;
 mod native_path;
 pub mod parser_plan;
