@@ -1,7 +1,7 @@
 # Child 05 Progress: Index
 
 - **Status:** complete; shadow-only activation boundary preserved
-- **Current landing unit:** P5-8 complete; Child 06 handoff pending
+- **Current landing unit:** Closed; the Child 06 handoff and downstream repository implementation are complete, and final campaign-wide P9 qualification/evidence are owned by Child 08.
 - **Entry commit:** `16350fa`
 - **Last green commit:** `16350fa`
 - **Owner:** Codex, completed shadow-generation integration and Child 05 qualification

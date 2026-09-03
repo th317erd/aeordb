@@ -1,7 +1,7 @@
 # Child 06 Progress: Query
 
 - **Status:** complete; P6 and P7 are closed, including the successor-superset Windows x86_64 MSVC qualification for every historically blocked Child 06 native gate
-- **Current landing unit:** Child 06 native qualification is closed at exact pushed source commit `03b72f8`; query behavior is unchanged while P8 remains behind its explicit operational authorization boundary
+- **Current landing unit:** Closed at exact pushed Child 06 source commit `03b72f8`; downstream safe P8 repository qualification has since landed, final P9 native/evidence closure is owned by Child 08, and operational P8 boundaries remain separately gated.
 - **Entry commit:** `20e1aa9` (`Persist soft mutation journals safely`)
 - **Last green source commit:** `03b72f8` (`repair native health qualification`)
 - **Owner:** current Codex thread; serialized ownership of namespace fanout, v4 coverage runtime, and shared test manifest

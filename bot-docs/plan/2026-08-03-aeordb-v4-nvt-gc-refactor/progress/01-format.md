@@ -1,7 +1,7 @@
 # Child 01 Progress: Format
 
-- **Status:** P0b, P0c, P1a, P1b, and P1c complete
-- **Current landing unit:** P1c closed; handoff to the P3a format-owned writer slice
+- **Status:** P0b, P0c, P1a, P1b, and P1c are complete; their dependent P3a and downstream repository implementation have since landed.
+- **Current landing unit:** Closed; final campaign-wide P9 qualification and evidence are owned by Child 08.
 - **Entry commit:** resumed from pushed P2f boundary `f12031f`
 - **Last green commit:** pushed P1c implementation and portable native-contract boundary `e1f1e29`
 - **Owner:** Codex, persistent-format/reference owner
@@ -14,7 +14,7 @@
 - **Broad gate:** P0a stabilized workspace gate passed at entry; P0b-1 is reference/fixture-only and passed its standalone tool tests and static analysis
 - **Drift/risks:** repository-wide Clippy is red at entry and tracked by Child 08; independent fixture review remains distinct from later production codec authorship
 - **Evidence:** Child 08 P0a evidence commit `5009cd2d975577a207556c605c4e90fdd1ef18cb`, GC stabilization `9b96586959bd4f3011e088f22bb5f1df01cfacae`, and ledger commit `9eb503b1d8dbee62e2d90493ecf7010075bc2792`. P0b-1 first failed because the independent reference manifest was absent, then passed with 10 annotated `DatabaseHeaderV4` fixtures covering 32- and 64-byte hashes, A/B selection, degraded redundancy, equal-sequence ambiguity, CRC rejection, unknown capability, reserved/padding rejection, and physical-ID adoption. `cargo test` passed 4 tests; standalone strict Clippy passed; fresh generation and verification passed; and `timeout 2m ./scripts/plan/check-v4-contracts.sh` passed with 93 routes and 36 docs.
-- **Next action:** begin P3a with deterministic writer-to-fixture red tests for the common v4 header and primitive codecs
+- **Next action:** No remaining Child 01 implementation action; support Child 08's exact-candidate native and final evidence closure without changing frozen format contracts.
 
 ## P0c Machine Contract Registry
 
