@@ -272,7 +272,7 @@ pub fn observe_migration_destination_path_v1(
     )
   })?;
   Ok(MigrationDestinationPathObservationV1 {
-    path_digest: native_path_digest(&canonical_path),
+    path_digest: migration_native_path_digest_v1(&canonical_path),
     path: canonical_path,
     parent: canonical_parent,
     parent_identity,
@@ -654,7 +654,7 @@ fn prepare_before_create(
   Ok(PreparedMigrationDestinationV1 { header, header_slot, first_authority })
 }
 
-fn native_path_digest(path: &Path) -> [u8; 32] {
+pub(super) fn migration_native_path_digest_v1(path: &Path) -> [u8; 32] {
   let mut hasher = blake3::Hasher::new();
   hasher.update(PATH_DIGEST_DOMAIN);
   #[cfg(unix)]
