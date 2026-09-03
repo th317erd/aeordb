@@ -2171,10 +2171,16 @@ impl StorageEngine {
     }
     let writer = self.writer.read().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?;
     let header = writer.file_header();
+    // The coordinator is intentionally process-local and restarts its ticket
+    // space at zero.  Migration roots, however, require a nonzero boundary
+    // which survives a clean reopen.  The selected A/B header sequence is the
+    // durable publication floor; live hard-authority tickets can only advance
+    // the boundary within this process.
+    let hard_publication_frontier = durability.hard_frontier.max(header.sequence);
     Ok(FrozenSourceAuthoritySnapshot {
       header_sequence: header.sequence,
       namespace_root: header.head_hash.clone(),
-      hard_publication_frontier: durability.hard_frontier,
+      hard_publication_frontier,
       hash_algorithm: header.hash_algo,
     })
   }

@@ -493,10 +493,20 @@ pub fn execute_final_authority_reconciliation_v1<'request, 'freeze, 'source>(
     } else {
       (None, None)
     };
+    // V3 snapshot/fork/sync metadata does not persist the publication
+    // sequence at which a historical root was created, so the canonical
+    // inventory represents that unknown value as zero.  A final mapping is
+    // nevertheless observed under this exact frozen source boundary, and the
+    // durable root-map contract requires that nonzero observation sequence.
+    let mapping_source_write_sequence = if is_root_kind(seed.seed.kind) && seed.source_write_sequence == 0 {
+      freeze.authority().hard_publication_frontier
+    } else {
+      seed.source_write_sequence
+    };
     let mapping = MigrationFinalRootMappingV1 {
       kind: seed.seed.kind,
       authority_identity: seed.authority_identity.clone(),
-      source_write_sequence: seed.source_write_sequence,
+      source_write_sequence: mapping_source_write_sequence,
       source_path: seed.seed.path.clone(),
       source_entry_type: seed.seed.entry_type,
       source_root: seed.seed.hash.clone(),

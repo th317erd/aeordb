@@ -240,6 +240,7 @@ fn collect_open_source_evidence(
   );
   let limits = V3MigrationAuthorityInventoryLimitsV1 {
     maximum_roots: request.bounds.maximum_authority_roots,
+    maximum_authority_records: request.bounds.maximum_authority_records,
     maximum_peers: request.bounds.maximum_authority_records,
     maximum_tasks: request.bounds.maximum_authority_records,
     maximum_plugins: request.bounds.maximum_authority_records,

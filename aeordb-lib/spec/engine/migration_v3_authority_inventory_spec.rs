@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aeordb::engine::directory_ops::DirectoryOps;
+use aeordb::engine::memory_coordinator::MemoryOwner;
 use aeordb::engine::peer_connection::PeerConfig;
 use aeordb::engine::sync_engine::PeerSyncState;
 use aeordb::engine::system_store::{PeerConfigStore, store_peer_sync_state};
@@ -24,6 +25,7 @@ fn id(first: u8) -> [u8; 16] {
 fn limits() -> V3MigrationAuthorityInventoryLimitsV1 {
   V3MigrationAuthorityInventoryLimitsV1 {
     maximum_roots: 64,
+    maximum_authority_records: 4_096,
     maximum_peers: 64,
     maximum_tasks: 1_024,
     maximum_plugins: 64,
@@ -67,6 +69,12 @@ fn populated_source() -> (tempfile::TempDir, std::path::PathBuf, Arc<StorageEngi
   operations.ensure_root_directory(&context).unwrap();
   operations.store_file_buffered(&context, "/docs/a.txt", b"first", Some("text/plain")).unwrap();
   operations.store_symlink(&context, "/docs/latest", "/docs/a.txt").unwrap();
+  operations.store_file_buffered(&context, "/.aeordb-config/indexes.json", br#"{"fields":[]}"#, Some("application/json")).unwrap();
+  operations.store_file_buffered(&context, "/.aeordb-system/users/portable-user.json", b"portable user", Some("application/json")).unwrap();
+  operations
+    .store_file_buffered(&context, "/.aeordb-system/config/node-local-secret.json", b"node-local secret", Some("application/json"))
+    .unwrap();
+  operations.store_symlink(&context, "/.aeordb-system/users/portable-alias", "/.aeordb-system/users/portable-user.json").unwrap();
 
   let versions = VersionManager::new(&engine);
   versions.create_snapshot(&context, "snap-z", HashMap::new()).unwrap();
@@ -135,26 +143,55 @@ fn real_v3_inventory_is_canonical_complete_and_read_only() {
   assert_eq!(evidence.counts.tasks, 1);
   assert_eq!(evidence.counts.plugins, 0);
   assert_eq!(evidence.counts.modules, 0);
-  assert_eq!(evidence.counts.symlinks, 1);
+  assert_eq!(evidence.counts.symlinks, 2);
   assert_eq!(evidence.counts.roots, 6);
   assert_ne!(evidence.authority_digest, [0; 32]);
 
   let mut stream = inventory.into_final_authority_stream();
-  let mut kinds_and_identities = Vec::new();
+  let mut rows = Vec::new();
   while let Some(row) = stream.next_seed().unwrap() {
-    kinds_and_identities.push((row.seed.kind, row.authority_identity));
+    rows.push(row);
   }
   assert_eq!(
-    kinds_and_identities,
+    rows.iter().map(|row| (row.seed.kind, row.authority_identity.as_slice())).collect::<Vec<_>>(),
     vec![
-      (MigrationBaseCloneSeedKindV1::CurrentHead, Vec::new()),
-      (MigrationBaseCloneSeedKindV1::Snapshot, b"snap-a".to_vec()),
-      (MigrationBaseCloneSeedKindV1::Snapshot, b"snap-z".to_vec()),
-      (MigrationBaseCloneSeedKindV1::Fork, b"fork-a".to_vec()),
-      (MigrationBaseCloneSeedKindV1::Fork, b"fork-z".to_vec()),
-      (MigrationBaseCloneSeedKindV1::SyncPin, 3u64.to_be_bytes().to_vec()),
+      (MigrationBaseCloneSeedKindV1::CurrentHead, b"".as_slice()),
+      (MigrationBaseCloneSeedKindV1::Snapshot, b"snap-a".as_slice()),
+      (MigrationBaseCloneSeedKindV1::Snapshot, b"snap-z".as_slice()),
+      (MigrationBaseCloneSeedKindV1::Fork, b"fork-a".as_slice()),
+      (MigrationBaseCloneSeedKindV1::Fork, b"fork-z".as_slice()),
+      (MigrationBaseCloneSeedKindV1::SyncPin, 3u64.to_be_bytes().as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-config/indexes.json".as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/cluster/peers".as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/config/node-local-secret.json".as_slice(),),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/sync-peers/3".as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/sync-peers/9".as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/users/portable-alias".as_slice()),
+      (MigrationBaseCloneSeedKindV1::DetachedProtectedPath, b"/.aeordb-system/users/portable-user.json".as_slice()),
     ]
   );
+  let detached = &rows[6..];
+  assert_eq!(
+    detached.iter().map(|row| row.system_family_id).collect::<Vec<_>>(),
+    vec![Some(0x0001), Some(0x0021), Some(0x0016), Some(0x0022), Some(0x0022), Some(0x0010), Some(0x0010)]
+  );
+  assert_eq!(
+    detached.iter().map(|row| row.seed.path.as_str()).collect::<Vec<_>>(),
+    vec![
+      "/.aeordb-config/indexes.json",
+      "/.aeordb-system/cluster/peers",
+      "/.aeordb-system/config/node-local-secret.json",
+      "/.aeordb-system/sync-peers/3",
+      "/.aeordb-system/sync-peers/9",
+      "/.aeordb-system/users/portable-alias",
+      "/.aeordb-system/users/portable-user.json",
+    ]
+  );
+  assert!(detached.iter().all(|row| row.source_write_sequence > 0 && row.authority_identity == row.seed.path.as_bytes()));
+  assert_eq!(detached.iter().find(|row| row.seed.path == "/.aeordb-config/indexes.json").unwrap().logical_bytes, 13);
+  assert_eq!(detached.iter().find(|row| row.seed.path == "/.aeordb-system/config/node-local-secret.json").unwrap().logical_bytes, 17);
+  assert_eq!(detached.iter().find(|row| row.seed.path.ends_with("portable-alias")).unwrap().logical_bytes, 0);
+  assert_eq!(detached.iter().find(|row| row.seed.path.ends_with("portable-user.json")).unwrap().logical_bytes, 13);
   let final_closure = stream.finish().unwrap();
   assert_eq!(final_closure.authority_digest, evidence.authority_digest);
   assert_eq!(final_closure.source_authority_counts, evidence.counts);
@@ -166,10 +203,30 @@ fn real_v3_inventory_is_canonical_complete_and_read_only() {
   while base.next_seed().unwrap().is_some() {
     base_count += 1;
   }
-  assert_eq!(base_count, 6);
+  assert_eq!(base_count, 13);
   let base_closure = base.finish().unwrap();
   assert_eq!(base_closure.source_authority_digest, evidence.authority_digest);
   assert_eq!(base_closure.source_authority_counts, evidence.counts);
+  assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn reopened_v3_inventory_retains_a_nonzero_persisted_publication_sequence() {
+  let (_directory, path, source) = populated_source();
+  source.shutdown().unwrap();
+  drop(source);
+
+  let reopened = Arc::new(StorageEngine::open(path.to_str().unwrap()).unwrap());
+  assert_eq!(reopened.durability_snapshot().unwrap().hard_frontier, 0);
+  let before = fs::read(&path).unwrap();
+  let cancellation = CancellationToken::new();
+  let inventory = collect_v3_migration_authority_inventory_v1(collect(&reopened, &cancellation, limits())).unwrap();
+  let mut stream = inventory.into_final_authority_stream();
+  let head = stream.next_seed().unwrap().unwrap();
+  assert!(head.source_write_sequence > 0);
+  let source_publication_sequence = head.source_write_sequence;
+  while stream.next_seed().unwrap().is_some() {}
+  assert_eq!(stream.finish().unwrap().frozen_source_publication_sequence, source_publication_sequence);
   assert_eq!(fs::read(&path).unwrap(), before);
 }
 
@@ -215,20 +272,27 @@ fn cancellation_limits_and_malformed_sync_pins_fail_closed() {
 fn authority_streams_require_complete_single_consumption() {
   let (_directory, _path, source) = populated_source();
   let cancellation = CancellationToken::new();
+  let migration_memory = || source.memory_coordinator().snapshot().unwrap().owner(MemoryOwner::Migration).unwrap().reserved_bytes;
+  let baseline_memory = migration_memory();
 
   let inventory = collect_v3_migration_authority_inventory_v1(collect(&source, &cancellation, limits())).unwrap();
+  assert_eq!(migration_memory(), baseline_memory + limits().maximum_namespace_memory_bytes);
   let mut base = inventory.into_base_clone_stream();
   assert!(base.finish().is_err(), "base-clone closure must not be available before every seed is consumed");
+  assert_eq!(migration_memory(), baseline_memory + limits().maximum_namespace_memory_bytes);
   while base.next_seed().unwrap().is_some() {}
   base.finish().unwrap();
+  assert_eq!(migration_memory(), baseline_memory);
   assert!(base.finish().is_err(), "base-clone closure must be single-use");
   assert!(base.next_seed().is_err(), "a finished base-clone stream must stay closed");
 
   let inventory = collect_v3_migration_authority_inventory_v1(collect(&source, &cancellation, limits())).unwrap();
+  assert_eq!(migration_memory(), baseline_memory + limits().maximum_namespace_memory_bytes);
   let mut final_authority = inventory.into_final_authority_stream();
   assert!(final_authority.finish().is_err(), "final-authority closure must not be available before every seed is consumed");
   while final_authority.next_seed().unwrap().is_some() {}
   final_authority.finish().unwrap();
+  assert_eq!(migration_memory(), baseline_memory);
   assert!(final_authority.finish().is_err(), "final-authority closure must be single-use");
   assert!(final_authority.next_seed().is_err(), "a finished final-authority stream must stay closed");
 }
@@ -245,6 +309,9 @@ fn every_inventory_identity_time_and_upper_bound_is_validated() {
 
   assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_roots = 0);
   assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_roots = 1_000_001);
+  assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_authority_records = 0);
+  assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_authority_records = 1_000_001);
+  assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_authority_records = 63);
   assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_peers = 0);
   assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_peers = 1_000_001);
   assert_invalid_request(&source, &cancellation, |request| request.limits.maximum_tasks = 0);
@@ -261,6 +328,10 @@ fn every_inventory_identity_time_and_upper_bound_is_validated() {
   let mut peer_limited = limits();
   peer_limited.maximum_peers = 1;
   assert!(collect_v3_migration_authority_inventory_v1(collect(&source, &cancellation, peer_limited)).is_err());
+
+  let mut authority_limited = limits();
+  authority_limited.maximum_authority_records = 9;
+  assert!(collect_v3_migration_authority_inventory_v1(collect(&source, &cancellation, authority_limited)).is_err());
 
   TaskQueue::new(source.clone()).enqueue("second-rehearsal", serde_json::json!({"bounded": true})).unwrap();
   let mut task_limited = limits();

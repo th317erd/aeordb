@@ -116,6 +116,7 @@ pub mod migration_destination;
 pub mod migration_final_authority_reconciliation;
 pub mod migration_final_reconciliation;
 pub mod migration_offline_preflight;
+pub mod migration_offline_run;
 pub mod migration_owner;
 pub mod migration_preflight;
 pub mod migration_root_map;

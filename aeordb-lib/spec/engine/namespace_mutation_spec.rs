@@ -1145,7 +1145,7 @@ fn wave_three_backup_import_and_promotion_cannot_reintroduce_split_authority() {
 }
 
 #[test]
-fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orchestration_unactivated() {
+fn migration_architecture_allows_only_reviewed_offline_orchestration_and_capture_runtime() {
   fn visit_rust_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
     for entry in std::fs::read_dir(directory).unwrap() {
       let path = entry.unwrap().path();
@@ -1175,10 +1175,15 @@ fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orches
     .iter()
     .flat_map(|(path, source)| source.match_indices("open_for_offline_migration_inspection(").map(move |_| path))
     .collect::<Vec<_>>();
-  assert_eq!(inspection_open_callers.len(), 2, "read-only source open escaped its storage/collector boundary: {inspection_open_callers:?}");
-  assert!(inspection_open_callers
-    .iter()
-    .all(|path| matches!(path.file_name().and_then(|value| value.to_str()), Some("storage_engine.rs" | "migration_offline_preflight.rs"))));
+  assert_eq!(
+    inspection_open_callers.len(),
+    3,
+    "read-only source open escaped its reviewed migration boundary: {inspection_open_callers:?}"
+  );
+  assert!(inspection_open_callers.iter().all(|path| matches!(
+    path.file_name().and_then(|value| value.to_str()),
+    Some("storage_engine.rs" | "migration_offline_preflight.rs" | "migration_offline_run.rs")
+  )));
   let storage_engine = sources
     .iter()
     .find(|(path, _)| path.file_name().and_then(|value| value.to_str()) == Some("storage_engine.rs"))
@@ -1272,6 +1277,7 @@ fn wave_five_exit_allows_reviewed_p3c_capture_runtime_but_keeps_migration_orches
   assert!(v4_module.contains("pub mod migration_owner;"), "ratified P3c migration state owner is not exported");
   assert!(v4_module.contains("pub mod migration_preflight;"), "ratified P3c preflight contract is not exported");
   assert!(v4_module.contains("pub mod migration_offline_preflight;"), "reviewed offline preflight collector is not exported");
+  assert!(v4_module.contains("pub mod migration_offline_run;"), "reviewed offline migration orchestrator is not exported");
   assert!(v4_module.contains("pub mod migration_capture;"), "ratified P3c capture checkpoint format is not exported");
   assert!(v4_module.contains("pub mod migration_capture_workspace;"), "ratified P3c capture workspace is not exported");
   assert!(v4_module.contains("pub mod migration_capture_runtime;"), "ratified P3c capture runtime is not exported");

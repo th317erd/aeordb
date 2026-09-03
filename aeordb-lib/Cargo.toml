@@ -1241,6 +1241,10 @@ name = "migration_offline_preflight_spec"
 path = "spec/engine/migration_offline_preflight_spec.rs"
 
 [[test]]
+name = "migration_offline_run_spec"
+path = "spec/engine/migration_offline_run_spec.rs"
+
+[[test]]
 name = "migration_v3_authority_inventory_spec"
 path = "spec/engine/migration_v3_authority_inventory_spec.rs"
 

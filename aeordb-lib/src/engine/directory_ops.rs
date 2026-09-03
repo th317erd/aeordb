@@ -736,10 +736,18 @@ fn file_record_header_needs_migration(engine: &StorageEngine, key: &[u8]) -> Eng
 /// [`SystemFamilyPolicyResolver`].
 fn v0_path_uses_detached_system_storage(path: &str) -> bool {
   let normalized = crate::engine::path_utils::normalize_path(path);
-  normalized == "/.aeordb-system"
-    || normalized.starts_with("/.aeordb-system/")
-    || normalized == "/.aeordb-config"
-    || normalized.starts_with("/.aeordb-config/")
+  v0_detached_system_roots()
+    .iter()
+    .any(|root| normalized == *root || normalized.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('/')))
+}
+
+/// The only namespace roots detached from HEAD by the legacy v0 layout.
+///
+/// This is storage-format compatibility knowledge, not a replacement for
+/// current [`SystemFamilyPolicyResolver`] policy. Migration uses these roots
+/// solely to discover every legacy path that the registry must classify.
+pub(crate) const fn v0_detached_system_roots() -> &'static [&'static str] {
+  &["/.aeordb-config", "/.aeordb-system"]
 }
 
 /// Return the legacy entry-header flags required by the v0 storage layout.
@@ -3286,11 +3294,67 @@ impl<'a> DirectoryOps<'a> {
     self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, true, &mut visitor)
   }
 
-  fn visit_live_directory_children_strict_no_heal<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
+  pub(crate) fn visit_live_directory_children_strict_no_heal<F>(&self, path: &str, mut visitor: F) -> EngineResult<bool>
   where
     F: FnMut(&ChildEntry) -> EngineResult<bool>,
   {
     self.visit_live_directory_children_with_mode(path, crate::engine::btree::BTreeWalkMode::Strict, false, &mut visitor)
+  }
+
+  /// Visit a current directory through its root-selected immutable identity.
+  ///
+  /// Detached v0 directories still have auxiliary `dir:{path}` locators. A
+  /// stale interior locator must not override the parent ChildEntry selected
+  /// by the detached root, so migration traverses that immutable identity
+  /// directly while retaining strict child/body validation and no healing.
+  pub(crate) fn visit_live_directory_children_at_identity_strict_no_heal<F>(
+    &self,
+    path: &str,
+    identity: &[u8],
+    mut visitor: F,
+  ) -> EngineResult<bool>
+  where
+    F: FnMut(&ChildEntry) -> EngineResult<bool>,
+  {
+    let normalized = normalize_path(path);
+    let Some((header, key, value)) = self.engine.get_entry_verified(identity)? else {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: format!("directory '{normalized}' root-selected identity is missing") });
+    };
+    if key != identity || header.entry_type != EntryType::DirectoryIndex {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("directory '{normalized}' root-selected identity has the wrong key or entry type"),
+      });
+    }
+    if value.is_empty() {
+      return Ok(true);
+    }
+
+    let mut visit_live_child = |child: &ChildEntry| -> EngineResult<bool> {
+      if self.live_child_for_mode(&normalized, child, crate::engine::btree::BTreeWalkMode::Strict)? {
+        return visitor(child);
+      }
+      Ok(true)
+    };
+    if crate::engine::btree::is_btree_format(&value) {
+      let result = crate::engine::btree::btree_visit_from_node_with_mode(
+        &value,
+        self.engine,
+        self.engine.hash_algo().hash_length(),
+        false,
+        crate::engine::btree::BTreeWalkMode::Strict,
+        &mut visit_live_child,
+      )?;
+      if !result.integrity.is_complete() {
+        return Err(EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("directory '{normalized}' root-selected B-tree traversal was incomplete"),
+        });
+      }
+      return Ok(result.visitor_completion.is_exhausted());
+    }
+
+    Self::visit_bounded_flat_children(&value, self.engine.hash_algo().hash_length(), header.entry_version, visit_live_child)
   }
 
   fn visit_live_directory_children_with_mode<F>(
