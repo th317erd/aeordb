@@ -5,7 +5,7 @@
 - **Status:** P0 through the safe P8 native candidate gates are complete; P9 repository debt, operator/documentation closure, repository-wide strict Clippy, exact Linux/Windows, live/resource, long-duration, and final 100-case qualification are green. Native macOS awaits the usable SSH identity; copied-production, canary, install/deploy, cutover/acceptance, and destructive GC remain separately gated.
 - **Current landing unit:** P9 native macOS qualification and adversarial repository-only DoD/evidence closure.
 - **Entry commit:** `094d83f3646d24e0caeddad55ca96077c146004d` (`harden final qualification tests`).
-- **Last pushed green commit:** `10901585e82914eb1dbcb0ef6a8495e86cb3c8c5` (`record exact successor qualification`) on `development` and `origin/development`; the exact implementation candidate remains `535004f166ad4cfaf8e7ab740458f2ef4733d2bc`, and recovery authority remains the preceding `d93b4b22` landing.
+- **Prior pushed green commit at this reconciliation's entry:** `10901585e82914eb1dbcb0ef6a8495e86cb3c8c5` (`record exact successor qualification`) on `development` and `origin/development`; subsequent evidence-only reconciliation commits are recorded by repository history, the exact implementation candidate remains `535004f166ad4cfaf8e7ab740458f2ef4733d2bc`, and recovery authority remains the preceding `d93b4b22` landing.
 - **Owner:** Codex, campaign integration/evidence owner.
 - **Start gate:** Exact successor Linux and Windows native release candidates, live documentation routes, resource qualification, S1/S2/S3, and the final 100-case restart-resilience target are green and preserved.
 - **Plan:** [Child 08](../children/08-verification-operations-docs-and-debt.md).
