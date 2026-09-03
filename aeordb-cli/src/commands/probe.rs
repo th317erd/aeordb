@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::{DirectoryOps, EngineFileStream, EngineResult, EntryType, StorageEngine};
-use crate::soak_checkpoint::{SoakCheckpointRecord, visit_soak_checkpoint_records};
 
 pub struct ProbeConfig<'a> {
   pub database: &'a str,
@@ -948,6 +947,7 @@ fn print_growth_stats(engine: &aeordb::engine::StorageEngine) {
 //                              flushed, or a system/internal file.
 // ---------------------------------------------------------------------------
 fn diff_checkpoint(engine: &aeordb::engine::StorageEngine, tsv_path: &str) {
+  use crate::soak_checkpoint::{SoakCheckpointRecord, visit_soak_checkpoint_records};
   use std::collections::HashSet;
 
   // Reconstruct the worker's view: + adds, ! excludes before overwrite, ?

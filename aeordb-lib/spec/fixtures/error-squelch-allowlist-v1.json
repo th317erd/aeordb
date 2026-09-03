@@ -9,7 +9,7 @@
     "aeordb-plugins",
     "aeordb-lib/build.rs"
   ],
-  "maximum_occurrences": 1506,
+  "maximum_occurrences": 1505,
   "reviews": {
     "api-optional-default": {
       "review_status": "reviewed",
@@ -874,19 +874,9 @@
       "review": "diagnostic-partial-output"
     },
     {
-      "id": "esq-v1-c363c01a12bb2de5c820-00",
-      "file": "aeordb-cli/src/commands/probe.rs",
-      "line": 981,
-      "column": 18,
-      "enclosing_item": "diff_checkpoint",
-      "kind": "default_on_error",
-      "pattern": "rest . split_once ('\\t') . map (| (path , _) | path) . unwrap_or (rest)",
-      "review": "contractual-configuration-default"
-    },
-    {
       "id": "esq-v1-db9f1065ad373fb7ef12-00",
       "file": "aeordb-cli/src/commands/probe.rs",
-      "line": 1113,
+      "line": 1108,
       "column": 5,
       "enclosing_item": "dump_wal_tail",
       "kind": "broad_err_pattern",

@@ -1455,14 +1455,18 @@
             - [x] Rerun affected, broad, and static gates on the correction tree.
             - [x] Rerun the exact 8 GiB/no-swap real-server qualification on the landed revision.
           - [ ] Complete the exact-candidate native and long-duration qualification matrix.
+            - [ ] Reconcile the final checkpoint-reader candidate after its Linux inventory gate found stale source-location metadata.
+              - [x] Land the shrinking inventory correction after its focused audit, architecture, CLI, and lint gates pass.
+              - [ ] Freeze the successor exact-source archive and rerun the required final Linux and Windows gates against it.
+              - [ ] Prove the successor's restart-resilience executable is behaviorally identical or rerun the 100-case qualification.
             - [x] Rerun the exact-source Linux release matrix.
             - [x] Rerun native Windows storage, CLI, and release qualification.
             - [ ] Rerun native macOS storage, CLI, and release qualification after the usable SSH identity or alternate host alias is supplied.
             - [x] Rerun the exact 8 GiB/no-swap resource gate.
-            - [ ] Complete the active S1/S2/S3 and restart-resilience sequence.
+            - [x] Complete the active S1/S2/S3 and restart-resilience sequence.
               - [x] Complete S1, S2, and S3 on the exact `9a71d4ce` candidate and preserve their passing evidence.
               - [x] Correct the incomplete-tail checkpoint-reader gap exposed by restart-resilience attempt 2 and prove every checkpoint reader.
-              - [ ] Rerun all 100 restart-resilience cases from a fresh exact candidate.
+              - [x] Rerun all 100 restart-resilience cases from a fresh exact candidate.
       - [ ] Run copied-production, canary, installation/deployment, cutover/acceptance, monitoring, and destructive GC only after their exact separate authorizations.
 
 - [x] Finalize the NVT field-index refactor plan from the operator's resolved decisions.
