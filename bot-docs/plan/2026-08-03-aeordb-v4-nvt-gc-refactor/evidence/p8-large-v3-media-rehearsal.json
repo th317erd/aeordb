@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
+  "landing_unit": "P8-1a4-large-v3-media-rehearsal",
+  "captured_at": "2026-09-04T05:30:53Z",
+  "status": "pass-representative-v3-rehearsal-only",
+  "host": "wyatt-desktop",
+  "rehearsal_root": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903",
+  "source_media": {
+    "root": "/media/Data/Remote/Seafile/th317erd@gmail.com",
+    "selected_directories": [
+      "Pictures",
+      "Video"
+    ],
+    "file_count": 5406,
+    "path_manifest_sha256": "bff8bcf86a10dbb67fc49d8e3df3fc2a26162941b302a43075f735d44efeb66b",
+    "metadata_manifest_sha256": "1dac363dee1b141b1158e9d051c1139aaf604e74182365fe584a54a2ea844056",
+    "content_manifest_sha256": "c0b9f262bd18226571e56a86bf2b4dcfe7067b980631503c78a4f90479c065a4",
+    "manifest_format": "NUL-safe path, metadata, and SHA-256 streams",
+    "unchanged_across_source_seal": true
+  },
+  "v3_writer": {
+    "path": "/home/wyatt/.local/bin/aeordb",
+    "version": "0.9.5",
+    "sha256": "74dae9958c0e22e713b7d04f7ecd0d3d37c488b261186fcb24968785b1df1c8f"
+  },
+  "sealed_sources": {
+    "original": {
+      "path": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/source-v3.aeordb",
+      "bytes": 11654356123,
+      "mtime_epoch": 1788454262,
+      "sha256": "fe54e1ae6582b192434f3aff606bd0041a713128fdedaf8a249524a63a36ecfe"
+    },
+    "original_copy": {
+      "path": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/migration-copy-v3.aeordb",
+      "bytes": 11654356123,
+      "mtime_epoch": 1788454262,
+      "sha256": "fe54e1ae6582b192434f3aff606bd0041a713128fdedaf8a249524a63a36ecfe"
+    },
+    "clean_migration_copy": {
+      "path": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/migration-clean-copy-v3.aeordb",
+      "bytes": 11654356141,
+      "mtime_epoch": 1788493099,
+      "sha256_before_migration": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "sha256_after_forced_interruption": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "sha256_after_completed_resume": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "sha256_after_completed_retry": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "preparation": "The exact old writer opened and gracefully closed a third disposable copy to clean its recoverable hot tail. Both sealed originals remained unchanged."
+    }
+  },
+  "strict_v3_verification": {
+    "valid_entries": 66878,
+    "corrupt_hashes": 0,
+    "corrupt_headers": 0,
+    "chunks": 45476,
+    "file_records": 16748,
+    "directory_index_entries": 4651,
+    "canonical_directories": 1110,
+    "symlinks": 0,
+    "snapshots": 0,
+    "forks": 0,
+    "missing_children": 0,
+    "dangling_records": 0,
+    "btree_issues": 0,
+    "unlisted_files": 0,
+    "kv_entries": 66041,
+    "kv_stale_entries": 0,
+    "kv_missing_entries": 0,
+    "kv_invalid_offsets": 0,
+    "kv_invalid_voids": 0,
+    "recoverable_auxiliary_dir_keys": 15,
+    "admission_note": "Only stale auxiliary dir:{path} locator rows were present; canonical HEAD authority and every structural verifier category were intact. The migration preflight accepts exactly this recoverable auxiliary-only condition and keeps all other strict findings blocking."
+  },
+  "candidate": {
+    "source_commit": "08025b80c6c5d39359cdd7f9fab323854537c566",
+    "branch": "development",
+    "binary": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/target/release/aeordb",
+    "binary_sha256": "c24e5f54e0c50e8fe4762762eefa2191ae1ce5e40b6a331f9a96a7712ad78d04",
+    "build_log_sha256": "707fe961f8351923468cbcfa6fdad6e958c70d6b10d8c35f983544c2a46baf95",
+    "immutable_run_manifest": "/home/wyatt/.cache/codex/aeordb-tests/p8-media-rehearsal-20260903/workspace-08025b80-dirty-resume/migration-run-v1.json",
+    "immutable_run_manifest_sha256": "25091051107d9e47c056233109c4cb013e60e825b5bb245e7b31cda9f242a092"
+  },
+  "identity_and_authority": {
+    "database_id": "8efddb1b586840f0b78d094c00521dce",
+    "migration_id": "a41397bb8ef14d3d85c07ff779dfbff4",
+    "source_physical_instance_id": "b6ff2708094c4c6fa8be64d37d0814ac",
+    "destination_physical_instance_id": "54a33003f8084676b20329f4ca3bd4bb",
+    "logical_identity_preserved": true,
+    "physical_identity_distinct": true,
+    "source_header_sequence": 295,
+    "source_capture_head": "ab61e08cb785c62d6c6104a65c96171388773762d3c58d1ba7aed78763717185",
+    "source_authority_digest": "83a0cbbb43a7967fd4bc4cfab84367db94b9dea4db94b30c1b9f21b8be09fb2c",
+    "system_family_registry_fingerprint": "ac7eb8307ac8695695e809132585495fafe5e757b4c2c9eecf93f92c099a3501",
+    "authority_counts": {
+      "protected_families": 46,
+      "modules": 2,
+      "snapshots": 0,
+      "forks": 0,
+      "symlinks": 0,
+      "history_roots": 0,
+      "peers": 0,
+      "sync_states": 0,
+      "tasks": 1,
+      "plugins": 2,
+      "roots": 1
+    }
+  },
+  "forced_interruption": {
+    "result": "expected-process-interruption",
+    "exit_status": 137,
+    "elapsed_seconds": 242,
+    "durable_milestones": [
+      "migration_controls_acquired",
+      "source_gc_suspended",
+      "preflight_running",
+      "preflight_complete",
+      "copy_pending",
+      "copy_running",
+      "base_clone_staged",
+      "base_successor_published"
+    ],
+    "partial_destination_bytes": 100588345,
+    "progress_sha256": "6b6c66e75e65dfec05f073f587485ebbcda09963594d355b3f2b9e3576a20294",
+    "status_sha256": "fce8e21bde220cdbc318ee03f4e2f4ae992ff4f5562804ccdd795c4e22553d1a",
+    "source_unchanged": true
+  },
+  "completed_resume": {
+    "result": "pass",
+    "exit_status": 0,
+    "started_epoch": 1788497893,
+    "stopped_epoch": 1788498600,
+    "wall_seconds": 707.07,
+    "maximum_rss_kib": 192504,
+    "swaps": 0,
+    "receipt_protocol": "aeordb.offline-migration.receipt.v1",
+    "phase": "destination_verify",
+    "state": "complete",
+    "destination_full_verified": true,
+    "destination_header_sequence": 270,
+    "copied_entity_count": 65756,
+    "copied_content_bytes": 15354506282,
+    "verified_root_count": 1,
+    "verified_entity_count": 50151,
+    "verified_content_bytes": 15354506282,
+    "receipt_sha256": "3696e735f7b8cded2f1c82e80d3cc57a8837cc25603b46f7189ee9209f9adf0b",
+    "progress_sha256": "914d2d288309f8603e572595b851bddb0397e4f36fa392538d5d4178f12106b5",
+    "status_sha256": "6c94c11f88330fd858995507b0d052524074416f341781f8145dad018eface65",
+    "resource_log_sha256": "e85e858e9205107399b480cb17dd96db63101ff01cc657a7cfd3d54ea28a0dae"
+  },
+  "parity": {
+    "result": "pass",
+    "authority": "A fresh v3 authority inventory matched the immutable manifest and final reconciliation closure, including the complete selected root set and SystemFamily registry fingerprint.",
+    "namespace": "Every required source child was present exactly once, every omitted family was absent, and every destination child was explained. Directory type, name, timestamps, virtual time, node identity, and leaf metadata matched.",
+    "file_records": "Every reachable FileRecord matched path, content type, total size, timestamps, metadata, content hash, and chunk count.",
+    "chunks": "Every source chunk was bounded-decompressed, compared byte-for-byte with its v4 destination chunk, and included in an independently recomputed complete-file content hash and size check.",
+    "content": "All 15,354,506,282 reachable logical content bytes were verified; the verified total exactly equals the copied total.",
+    "extra_or_missing_authority_refused": true,
+    "full_verification_bound_to_durable_progress": true
+  },
+  "completed_state_retry": {
+    "result": "pass-byte-identical",
+    "exit_status": 0,
+    "started_epoch": 1788498812,
+    "stopped_epoch": 1788499438,
+    "wall_seconds": 625.77,
+    "maximum_rss_kib": 70284,
+    "swaps": 0,
+    "receipt_identical_to_completed_resume": true,
+    "receipt_sha256": "3696e735f7b8cded2f1c82e80d3cc57a8837cc25603b46f7189ee9209f9adf0b",
+    "stderr_empty": true,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status_sha256": "50b28f25fc019fad86251a8c8358456006ff50d693465161ba09169b3babbff2",
+    "resource_log_sha256": "2126ba65fb304aa06564d5b1208a84ba157c31dc408ad1f8651e32d0cc02b081",
+    "source_sha256_before_and_after": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+    "destination_sha256_before_and_after": "dc01bf031f042f436f2c7bf835d1c4292de50d6cc79c4785539a4ff5a05829cd",
+    "destination_bytes": 11447013668,
+    "destination_mtime_epoch": 1788498600,
+    "destination_mtime_note": "The final 1,362-byte terminal publication occurred at the completed resume stop epoch. The later completed-state retry left size, mtime, and SHA-256 unchanged."
+  },
+  "defects_found_and_closed": [
+    {
+      "class": "valid legacy flat-directory physical ordering",
+      "failing_evidence_sha256": "b5b2540d02172fc8c46814b02b243d6624155e80b25254516e70c9a46d8c9ae7",
+      "fix_commit": "eb99f6bac52aeed0f759b12740ecae96347efd21",
+      "regression_matrix_sha256": "2498763cba471a4fa2b73caf644b2ade45b6de8c718a113b7f93af380ea6ed87"
+    },
+    {
+      "class": "restart after destination KV capacity exhaustion",
+      "failing_evidence_sha256": "97336eabe247c48f13e6b851cb4b5d2166aaf7498508b3b708700e83acd395b5",
+      "fix_commit": "08025b80c6c5d39359cdd7f9fab323854537c566",
+      "regression_matrix_sha256": "f7317d3489fc9c6cf5036b470a86605119d1d192acf2f885ee9a87205b8b6a7c",
+      "strict_clippy_sha256": "443a25c7866f1d033ec3562227115915ea310da9fb56d25bec1201845a08f27a"
+    }
+  ],
+  "disk_safety": {
+    "minimum_free_bytes_guardrail": 250000000000,
+    "free_bytes_at_final_capture": 312052600832,
+    "free_bytes_above_guardrail": 62052600832,
+    "cargo_gib_reclaimed": 41.9,
+    "cleanup": "Ran cargo clean only in two superseded rehearsal worktrees and removed one superseded failed shadow plus its failed workspace after preserving its manifest. Sealed sources, the successful shadow, active candidate, modified source trees, and all evidence were retained.",
+    "production_data_removed": false,
+    "sealed_source_removed": false
+  },
+  "raw_evidence": {
+    "root": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/evidence",
+    "media_evidence_index_sha256": "f668eec3093be2fff69f5c9089868563f31dfcff574374d7d26ecdc3221a0c3c",
+    "source_seal_log_sha256": "18166ddd71aac8b524a0ddc107733355d9b682ba14f7799a8348cf8ece3722d5",
+    "old_verify_log_sha256": "b6e389804ba90d86188f6bdbac36b71a5257f30f75b6e534684a0816d7ac741c",
+    "old_writer_recovery_status_sha256": "b696bf89adda58f8564722109f874e06d57dac52df292435490fc92b8bc366c6",
+    "clean_copy_checksum_log_sha256": "adf3948e15a708c27a21f067dba4b2ee92b60e83c03688060cdf20960d04d556"
+  },
+  "qualification_boundary": {
+    "large_representative_v3_rehearsal_proven": true,
+    "forced_interruption_and_resume_proven": true,
+    "completed_state_repeatability_proven": true,
+    "resource_bound_proven": true,
+    "production_database_touched": false,
+    "production_derived_copy_touched": false,
+    "candidate_installed": false,
+    "canary_run": false,
+    "service_activated": false,
+    "operational_cutover_run": false,
+    "operator_acceptance_recorded": false,
+    "first_v4_write_accepted": false,
+    "destructive_gc_run": false,
+    "next_gate": "P8-1b checksummed copied-production rehearsal requires separate authorization before any access to FS-Server1 production data."
+  }
+}

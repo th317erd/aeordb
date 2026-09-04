@@ -1413,16 +1413,16 @@
             - [x] Account for the transient 16-byte ACUT identity validation alongside both journal buffers and the inactive slot.
           - [x] P8-1a3: bind the typed ACUT transition semantics to migration/destination/file-identity evidence, then prove every pre-acceptance journal/sync/rename/reopen crash prefix on disposable same-filesystem files.
           - [x] Expose the required `aeordb-cli --test cutover_fault_spec` campaign target through the canonical cutover rehearsal matrix without duplicating its fault logic.
-          - [ ] P8-1a4: run the operator-authorized large real-v3 media rehearsal before requesting access to a production-derived copy.
+          - [x] P8-1a4: run the operator-authorized large real-v3 media rehearsal before requesting access to a production-derived copy.
             - [x] Establish an isolated `wyatt-desktop` workspace and begin populating a disposable v3 database with the exact old production binary and push-only AeorDB client.
             - [x] Seal the completed v3 source with file/content manifests, binary identity, strict verification, and an unchanged checksummed rehearsal copy.
             - [x] Add the bounded canonical v3 authority inventory, narrowly admit recoverable auxiliary path-key divergence, and preserve every structural preflight refusal.
             - [x] Bridge durable base/replay root staging into final reconciliation through a bounded conflict-detecting prior-root lookup.
-            - [ ] Supply the versioned, documented offline orchestration command that assembles real preflight evidence and drives the existing bounded migration substrate without production or service activation.
+            - [x] Supply the versioned, documented offline orchestration command that assembles real preflight evidence and drives the existing bounded migration substrate without production or service activation.
               - [x] Persist one immutable, private, checksummed run manifest before destination creation so every retry reuses the admitted identities, paths, source evidence, and execution bounds.
               - [x] Correct the run-manifest and destination path gates for raw Windows verbatim dot segments, and keep malformed-state fixtures private under native Windows ACLs.
-            - [ ] Migrate the rehearsal copy, validate complete v3/v4 namespace and content parity, exercise restart/recovery and resource bounds, and retain every truthful attempt.
-            - [ ] Fix every defect through failing-first regression coverage and repeat until the large rehearsal is fully green.
+            - [x] Migrate the rehearsal copy, validate complete v3/v4 namespace and content parity, exercise restart/recovery and resource bounds, and retain every truthful attempt.
+            - [x] Fix every defect through failing-first regression coverage and repeat until the large rehearsal is fully green.
         - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
       - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
