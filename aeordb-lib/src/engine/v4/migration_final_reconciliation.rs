@@ -922,18 +922,8 @@ struct BudgetedChildEntryV1 {
 
 enum DirectoryEntryCursorV1 {
   Empty,
-  Flat {
-    value: Vec<u8>,
-    offset: usize,
-    entry_version: u8,
-    entry_count: usize,
-    previous_name: Option<String>,
-    previous_name_memory_charge: u64,
-    memory_charge: u64,
-  },
-  BTree {
-    frames: Vec<DiffBtreeFrameV1>,
-  },
+  Flat { entries: Vec<ChildEntry>, index: usize, memory_charge: u64 },
+  BTree { frames: Vec<DiffBtreeFrameV1> },
 }
 
 enum DiffBtreeFrameV1 {
@@ -965,15 +955,53 @@ impl DirectoryEntryCursorV1 {
   ) -> Result<Self, MigrationFinalReconciliationErrorV1> {
     let loaded = load_diff_directory(source, root, algorithm, budget, work, receipt)?;
     if !is_btree_format(&loaded.value) {
-      return Ok(Self::Flat {
-        value: loaded.value,
-        offset: 0,
-        entry_version: loaded.header.entry_version,
-        entry_count: 0,
-        previous_name: None,
-        previous_name_memory_charge: 0,
-        memory_charge: loaded.memory_charge,
-      });
+      let loaded_bytes = diff_usize_to_u64(loaded.value.len(), "flat directory value length")?;
+      let vector_bytes = diff_usize_to_u64(size_of::<Vec<ChildEntry>>(), "flat directory vector size")?;
+      let parse_charge = loaded_bytes
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(vector_bytes))
+        .and_then(|bytes| bytes.checked_add(OWNED_ALLOCATION_OVERHEAD))
+        .ok_or_else(|| {
+          MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_memory_overflow", "flat directory parse charge overflow")
+        })?;
+      budget.reserve(parse_charge)?;
+      let mut entries = Vec::new();
+      let mut offset = 0usize;
+      while offset < loaded.value.len() {
+        if entries.len() >= BTREE_CONVERSION_THRESHOLD {
+          return Err(MigrationFinalReconciliationErrorV1::invalid(
+            "migration_final_diff_flat_count",
+            format!("flat directory exceeds the bounded {BTREE_CONVERSION_THRESHOLD}-entry compatibility limit"),
+          ));
+        }
+        let (entry, consumed) = ChildEntry::deserialize(&loaded.value[offset..], algorithm.hash_length(), loaded.header.entry_version)
+          .map_err(MigrationFinalReconciliationErrorV1::DiffSource)?;
+        if consumed == 0 {
+          return Err(MigrationFinalReconciliationErrorV1::invalid(
+            "migration_final_diff_flat_zero_progress",
+            "flat directory child consumed zero bytes",
+          ));
+        }
+        offset = offset.checked_add(consumed).ok_or_else(|| {
+          MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_flat_offset", "flat directory offset overflow")
+        })?;
+        validate_diff_child(&entry, algorithm.hash_length())?;
+        entries.try_reserve(1).map_err(|error| {
+          MigrationFinalReconciliationErrorV1::DiffSource(EngineError::ResourceExhausted(format!(
+            "flat directory child allocation failed: {error}"
+          )))
+        })?;
+        entries.push(entry);
+      }
+      entries.sort_by(|left, right| left.name.cmp(&right.name));
+      if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(MigrationFinalReconciliationErrorV1::invalid(
+          "migration_final_diff_flat_duplicate",
+          "flat directory contains duplicate child names",
+        ));
+      }
+      budget.release(loaded.memory_charge)?;
+      return Ok(Self::Flat { entries, index: 0, memory_charge: parse_charge });
     }
     let mut cursor = Self::BTree { frames: Vec::new() };
     cursor.descend_loaded_btree(source, root.to_vec(), loaded, None, None, algorithm, budget, work, receipt)?;
@@ -994,47 +1022,16 @@ impl DirectoryEntryCursorV1 {
       check_diff_cancelled(cancellation)?;
       match self {
         Self::Empty => return Ok(None),
-        Self::Flat { value, offset, entry_version, entry_count, previous_name, previous_name_memory_charge, memory_charge } => {
-          if *offset == value.len() {
-            let retained = memory_charge.checked_add(*previous_name_memory_charge).ok_or_else(|| {
-              MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_memory_overflow", "flat cursor release charge overflow")
-            })?;
-            budget.release(retained)?;
+        Self::Flat { entries, index, memory_charge } => {
+          if *index == entries.len() {
+            budget.release(*memory_charge)?;
             *self = Self::Empty;
             return Ok(None);
           }
-          if *entry_count >= BTREE_CONVERSION_THRESHOLD {
-            return Err(MigrationFinalReconciliationErrorV1::invalid(
-              "migration_final_diff_flat_count",
-              format!("flat directory exceeds the bounded {BTREE_CONVERSION_THRESHOLD}-entry compatibility limit"),
-            ));
-          }
-          let (entry, consumed) = ChildEntry::deserialize(&value[*offset..], algorithm.hash_length(), *entry_version)
-            .map_err(MigrationFinalReconciliationErrorV1::DiffSource)?;
-          if consumed == 0 {
-            return Err(MigrationFinalReconciliationErrorV1::invalid(
-              "migration_final_diff_flat_zero_progress",
-              "flat directory child consumed zero bytes",
-            ));
-          }
-          *offset = offset.checked_add(consumed).ok_or_else(|| {
-            MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_flat_offset", "flat directory offset overflow")
+          let entry = entries[*index].clone();
+          *index = index.checked_add(1).ok_or_else(|| {
+            MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_flat_count", "flat directory entry index overflow")
           })?;
-          *entry_count = entry_count.checked_add(1).ok_or_else(|| {
-            MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_flat_count", "flat directory entry count overflow")
-          })?;
-          validate_diff_child(&entry, algorithm.hash_length())?;
-          if previous_name.as_deref().is_some_and(|previous| previous >= entry.name.as_str()) {
-            return Err(MigrationFinalReconciliationErrorV1::invalid(
-              "migration_final_diff_flat_order",
-              "flat directory entries are not in strict name order",
-            ));
-          }
-          let next_previous_charge = diff_string_memory_charge(&entry.name, "flat previous name")?;
-          budget.reserve(next_previous_charge)?;
-          let prior_charge = std::mem::replace(previous_name_memory_charge, next_previous_charge);
-          *previous_name = Some(entry.name.clone());
-          budget.release(prior_charge)?;
           return budget_child(entry, budget);
         }
         Self::BTree { frames } => {
@@ -1366,13 +1363,6 @@ fn diff_child_memory_charge(entry: &ChildEntry) -> Result<u64, MigrationFinalRec
     .and_then(|bytes| bytes.checked_add(content_type_bytes))
     .and_then(|bytes| bytes.checked_add(OWNED_ALLOCATION_OVERHEAD))
     .ok_or_else(|| MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_memory_overflow", "child charge overflow"))
-}
-
-fn diff_string_memory_charge(value: &str, name: &'static str) -> Result<u64, MigrationFinalReconciliationErrorV1> {
-  diff_usize_to_u64(size_of::<String>(), "string descriptor size")?
-    .checked_add(diff_usize_to_u64(value.len(), name)?)
-    .and_then(|bytes| bytes.checked_add(OWNED_ALLOCATION_OVERHEAD))
-    .ok_or_else(|| MigrationFinalReconciliationErrorV1::invalid("migration_final_diff_memory_overflow", format!("{name} charge overflow")))
 }
 
 fn diff_change_memory_charge(change: &MigrationMerkleChangeV1) -> Result<u64, MigrationFinalReconciliationErrorV1> {

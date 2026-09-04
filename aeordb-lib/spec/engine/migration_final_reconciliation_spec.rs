@@ -848,6 +848,55 @@ fn strict_merkle_diff_streams_flat_changes_and_metadata_at_both_hash_widths() {
 }
 
 #[test]
+fn strict_merkle_diff_canonicalizes_unsorted_legacy_flat_directories_but_refuses_duplicates() {
+  let mut source = DiffSource::new(ALGORITHM);
+  let shared = digest_parts(ALGORITHM, &[b"shared"]);
+  let basis_root = diff_directory(
+    &mut source,
+    &[
+      diff_child("z-removed.txt", EntryType::FileRecord, digest(0x51).to_vec(), 1),
+      diff_child("a-shared.txt", EntryType::FileRecord, shared.clone(), 1),
+    ],
+  );
+  let target_root = diff_directory(
+    &mut source,
+    &[
+      diff_child("y-added.txt", EntryType::FileRecord, digest(0x52).to_vec(), 1),
+      diff_child("a-shared.txt", EntryType::FileRecord, shared.clone(), 1),
+    ],
+  );
+  let memory = diff_memory();
+  let cancellation = CancellationToken::new();
+  let mut sink = DiffSink::default();
+
+  let receipt =
+    stream_strict_migration_merkle_diff_v1(diff_request(&source, &basis_root, &target_root, &memory, &cancellation), &mut sink).unwrap();
+
+  assert_eq!(
+    sink.changes,
+    vec![
+      ("/y-added.txt".to_string(), MigrationMerkleChangeKindV1::Added),
+      ("/z-removed.txt".to_string(), MigrationMerkleChangeKindV1::Removed),
+    ]
+  );
+  assert_eq!(receipt.changed_path_count, 2);
+
+  let duplicate_root = diff_directory(
+    &mut source,
+    &[
+      diff_child("duplicate.txt", EntryType::FileRecord, digest(0x53).to_vec(), 1),
+      diff_child("duplicate.txt", EntryType::FileRecord, digest(0x54).to_vec(), 2),
+    ],
+  );
+  let error = stream_strict_migration_merkle_diff_v1(
+    diff_request(&source, &basis_root, &duplicate_root, &memory, &cancellation),
+    &mut DiffSink::default(),
+  )
+  .unwrap_err();
+  assert_eq!(error.code(), "migration_final_diff_flat_duplicate");
+}
+
+#[test]
 fn strict_merkle_diff_descends_changed_directories_and_btree_pages() {
   let algorithm = HashAlgorithm::Blake3_256;
   let mut source = DiffSource::new(algorithm);
