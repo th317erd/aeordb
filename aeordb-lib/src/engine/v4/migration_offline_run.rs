@@ -506,19 +506,19 @@ fn execute_admitted_run(
   }
   .map_err(OfflineMigrationRunErrorV1::owned)?;
   let (updated, publication, monotonic) = clock.next()?;
-  let (owner, _) = MigrationStateOwnerV1::acquire(
-    destination.clone(),
-    permit.clone(),
-    MigrationAcquisitionRequestV1 {
-      holder_boot_id: request.identity.holder_boot_id,
-      acquired_at_ms: updated,
-      lease_duration_ms: i64::try_from(request.bounds.lease_duration_ms)
-        .map_err(|error| OfflineMigrationRunErrorV1::new("offline_migration_lease", error.to_string()))?,
-      publication_timestamp_ms: publication,
-      monotonic_now_ms: monotonic,
-    },
-    &mut retirement,
-  )
+  let acquisition = MigrationAcquisitionRequestV1 {
+    holder_boot_id: request.identity.holder_boot_id,
+    acquired_at_ms: updated,
+    lease_duration_ms: i64::try_from(request.bounds.lease_duration_ms)
+      .map_err(|error| OfflineMigrationRunErrorV1::new("offline_migration_lease", error.to_string()))?,
+    publication_timestamp_ms: publication,
+    monotonic_now_ms: monotonic,
+  };
+  let owner = if request.resume {
+    MigrationStateOwnerV1::acquire_or_takeover_for_restart(destination.clone(), permit.clone(), acquisition, &mut retirement)
+  } else {
+    MigrationStateOwnerV1::acquire(destination.clone(), permit.clone(), acquisition, &mut retirement).map(|(owner, _)| owner)
+  }
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::MigrationControlsAcquired)?;
   let (updated, publication, monotonic) = clock.next()?;
@@ -955,6 +955,7 @@ fn execute_admitted_run(
   })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transition(
   owner: &MigrationStateOwnerV1,
   retirement: &mut RetirementJournalOwnerV1,
@@ -1452,6 +1453,7 @@ struct DestinationVerifierV1<'a> {
   content_bytes: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_destination(
   permit: &MigrationPreflightPermitV1,
   source: &StorageEngine,

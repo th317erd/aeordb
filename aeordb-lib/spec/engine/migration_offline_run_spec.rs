@@ -8,12 +8,15 @@ use std::time::Duration;
 use aeordb::engine::config_resolver::CommandLineConfigOverrides;
 use aeordb::engine::v4::database_header::{ReadOnlyDatabaseHeader, read_database_header_read_only};
 use aeordb::engine::v4::first_authority::V4FirstAuthorityPublisher;
-use aeordb::engine::v4::migration_control::{MigrationPhaseV1, MigrationProgressStateV1};
+use aeordb::engine::v4::migration_control::{
+  MigrationLeaseStateV1, MigrationPhaseV1, MigrationProgressStateV1, decode_migration_lease_control, decode_migration_progress_control,
+};
 use aeordb::engine::v4::migration_offline_run::{
   OfflineMigrationRunClockV1, OfflineMigrationRunIdentityV1, OfflineMigrationRunMilestoneObserverV1, OfflineMigrationRunMilestoneV1,
   OfflineMigrationRunRequestV1, execute_offline_migration_v1,
 };
 use aeordb::engine::v4::migration_run_manifest::{MIGRATION_RUN_MANIFEST_FILE_NAME, MigrationRunBoundsV1};
+use aeordb::engine::v4::system_control::SystemControlKindV1;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryOwner, MemoryPolicy};
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine, VersionManager};
 use tokio_util::sync::CancellationToken;
@@ -262,6 +265,61 @@ fn postclosure_durable_boundaries_resume_through_verified_completion() {
 #[test]
 fn terminal_destination_verification_publication_resumes_immutably() {
   assert_durable_milestone_resumes(OfflineMigrationRunMilestoneV1::DestinationVerificationComplete);
+}
+
+#[test]
+fn expired_lease_resumes_under_a_new_holder_without_permitting_early_takeover() {
+  let fixture = Fixture::new();
+  let source_before = file_blake3(&fixture.source);
+  let first_cancellation = CancellationToken::new();
+  let mut observer = PauseAtMilestone { target: OfflineMigrationRunMilestoneV1::CopyRunning, paused: false };
+  let mut first_request = fixture.request(&first_cancellation);
+  first_request.milestone_observer = Some(&mut observer);
+  assert_eq!(execute_offline_migration_v1(first_request).unwrap_err().code(), "offline_migration_milestone_pause");
+  assert!(observer.paused);
+  let destination_before_takeover = file_blake3(&fixture.destination);
+
+  let early_cancellation = CancellationToken::new();
+  let mut early = fixture.request(&early_cancellation);
+  early.resume = true;
+  early.identity.holder_boot_id = id(0x60);
+  early.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_010_000, monotonic_time_ms: 20_000 };
+  assert_eq!(execute_offline_migration_v1(early).unwrap_err().code(), "migration_lease_held_by_other_boot");
+  assert_eq!(file_blake3(&fixture.source), source_before);
+  assert_eq!(file_blake3(&fixture.destination), destination_before_takeover);
+
+  let takeover_cancellation = CancellationToken::new();
+  let mut takeover = fixture.request(&takeover_cancellation);
+  takeover.resume = true;
+  takeover.identity.holder_boot_id = id(0x60);
+  takeover.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_070_000, monotonic_time_ms: 80_000 };
+  let receipt = execute_offline_migration_v1(takeover).unwrap();
+  assert_eq!(receipt.phase, MigrationPhaseV1::DestinationVerify);
+  assert_eq!(receipt.state, MigrationProgressStateV1::Complete);
+  assert!(receipt.destination_full_verified);
+  assert_eq!(file_blake3(&fixture.source), source_before);
+
+  let publisher = V4FirstAuthorityPublisher::open(&fixture.destination).unwrap();
+  let lease = publisher.load_mutable_system_control(SystemControlKindV1::MigrationLease, &id(0x10), &id(0x20)).unwrap().unwrap();
+  let lease = decode_migration_lease_control(&lease.bytes, aeordb::engine::HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(lease.body.holder_boot_id, id(0x60));
+  assert_eq!(lease.body.fencing_token, 2);
+  assert_eq!(lease.body.state, MigrationLeaseStateV1::Held);
+  let progress = publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &id(0x10), &id(0x20)).unwrap().unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, aeordb::engine::HashAlgorithm::Blake3_256).unwrap();
+  assert_eq!(progress.body.fencing_token, 2);
+  assert_eq!(progress.body.phase, MigrationPhaseV1::DestinationVerify);
+  assert_eq!(progress.body.state, MigrationProgressStateV1::Complete);
+
+  let destination_after_takeover = file_blake3(&fixture.destination);
+  let retry_cancellation = CancellationToken::new();
+  let mut retry = fixture.request(&retry_cancellation);
+  retry.resume = true;
+  retry.identity.holder_boot_id = id(0x60);
+  retry.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_080_000, monotonic_time_ms: 90_000 };
+  assert_eq!(execute_offline_migration_v1(retry).unwrap(), receipt);
+  assert_eq!(file_blake3(&fixture.destination), destination_after_takeover);
+  assert_eq!(file_blake3(&fixture.source), source_before);
 }
 
 fn assert_durable_milestone_resumes(milestone: OfflineMigrationRunMilestoneV1) {

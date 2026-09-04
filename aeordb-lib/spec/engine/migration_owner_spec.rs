@@ -569,10 +569,7 @@ fn completed_observation_requires_bound_held_lease_and_exact_verified_progress()
   });
 
   let observed = MigrationStateOwnerV1::observe_completed_destination_verification(&publisher, &permit).unwrap();
-  assert_eq!(
-    MigrationStateOwnerV1::observe_completed_destination_verification_if_present(&publisher, &permit).unwrap(),
-    Some(observed.clone()),
-  );
+  assert_eq!(MigrationStateOwnerV1::observe_completed_destination_verification_if_present(&publisher, &permit).unwrap(), Some(observed),);
   assert_eq!(observed.fencing_token, 1);
   assert_eq!(observed.phase, MigrationPhaseV1::DestinationVerify);
   assert_eq!(observed.state, MigrationProgressStateV1::Complete);
@@ -654,6 +651,69 @@ fn acquisition_resumes_a_durable_lease_only_partial_and_retries_exactly() {
 
   let (_, retry) = MigrationStateOwnerV1::acquire(publisher, permit, acquisition_request(HOLDER_BOOT_ID), &mut retirement).unwrap();
   assert!(!retry.resumed_partial);
+  assert!(retry.idempotent);
+}
+
+#[test]
+fn expired_takeover_reconstructs_missing_initial_progress_and_retries_exactly() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _path, publisher) = create_publisher(algorithm);
+  let publisher = Arc::new(publisher);
+  let (_, permit) = admit_migration_preflight_v1(&preflight_request(algorithm, DESTINATION_PHYSICAL_ID)).unwrap();
+  let cancellation = CancellationToken::new();
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+  let mut retirement = retirement_owner(algorithm, &cancellation, &memory);
+  let lease = encode_migration_lease_control(
+    1,
+    &MigrationLeaseBodyV1 {
+      database_id: DATABASE_ID,
+      migration_id: MIGRATION_ID,
+      source_physical_instance_id: SOURCE_PHYSICAL_ID,
+      destination_physical_instance_id: DESTINATION_PHYSICAL_ID,
+      holder_boot_id: HOLDER_BOOT_ID,
+      fencing_token: 1,
+      acquired_at_ms: ACQUIRED_AT_MS,
+      renewed_at_ms: ACQUIRED_AT_MS,
+      expires_at_ms: ACQUIRED_AT_MS + LEASE_DURATION_MS,
+      source_header_sequence: 41,
+      state: MigrationLeaseStateV1::Held,
+    },
+    algorithm,
+  )
+  .unwrap();
+  publisher
+    .publish_mutable_system_control(
+      MutableSystemControlPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        kind: SystemControlKindV1::MigrationLease,
+        identity: &MIGRATION_ID,
+        expected: None,
+        guards: &[],
+        encoded_control: &lease,
+        publication_timestamp_ms: 1_700_000_000_300,
+        monotonic_now_ms: 10_000,
+      },
+      &mut retirement,
+    )
+    .unwrap();
+  let request = takeover_request([0x72; 16], 1, ACQUIRED_AT_MS + LEASE_DURATION_MS);
+
+  let (owner, receipt) = MigrationStateOwnerV1::takeover(publisher.clone(), permit.clone(), request, &mut retirement).unwrap();
+  assert_eq!(owner.fencing_token(), 2);
+  assert_eq!(receipt.lease_control_sequence, 2);
+  assert_eq!(receipt.progress_control_sequence, 1);
+  assert_eq!(receipt.fencing_token, 2);
+  assert!(!receipt.resumed_rebind);
+  assert!(!receipt.idempotent);
+  let progress =
+    publisher.load_mutable_system_control(SystemControlKindV1::MigrationProgress, &DATABASE_ID, &MIGRATION_ID).unwrap().unwrap();
+  let progress = decode_migration_progress_control(&progress.bytes, algorithm).unwrap();
+  assert_eq!(progress.sequence, 1);
+  assert_eq!(progress.body.fencing_token, 2);
+  assert_eq!(progress.body.phase, MigrationPhaseV1::Preflight);
+  assert_eq!(progress.body.state, MigrationProgressStateV1::Pending);
+
+  let (_, retry) = MigrationStateOwnerV1::takeover(publisher, permit, request, &mut retirement).unwrap();
   assert!(retry.idempotent);
 }
 
@@ -962,7 +1022,9 @@ fn release_and_takeover_prepare_fallible_state_before_their_first_publication() 
     .split_once("pub fn takeover(")
     .and_then(|(_, remainder)| remainder.split_once("pub(crate) fn advance_cutover_progress(").map(|(takeover, _)| takeover))
     .expect("migration takeover method boundary");
-  assert_eq!(takeover.matches("require_migration_controls(").count(), 1);
+  assert_eq!(takeover.matches("load_migration_controls(").count(), 1);
+  assert_eq!(takeover.matches("require_migration_controls(").count(), 0);
+  assert!(takeover.contains("initial_progress_body("));
   assert!(takeover.rfind("encode_migration_progress_control").unwrap() < takeover.find("publish_control(").unwrap());
 }
 

@@ -334,6 +334,69 @@ impl MigrationStateOwnerV1 {
     })
   }
 
+  pub(crate) fn acquire_or_takeover_for_restart(
+    publisher: Arc<V4FirstAuthorityPublisher>,
+    permit: MigrationPreflightPermitV1,
+    request: MigrationAcquisitionRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<Self, MigrationStateOwnerErrorV1> {
+    validate_acquisition_request(request)?;
+    validate_destination_authority(&publisher, &permit)?;
+    let (lease, progress) = load_migration_controls(&publisher, &permit)?;
+    let Some((_, lease)) = lease else {
+      return Self::acquire(publisher, permit, request, retirement_owner).map(|(owner, _)| owner);
+    };
+    validate_lease_binding(&lease, &permit)?;
+
+    let active = lease.body.state == MigrationLeaseStateV1::Held && request.acquired_at_ms < lease.body.expires_at_ms;
+    let selected_partial_takeover = active
+      && lease.body.holder_boot_id == request.holder_boot_id
+      && lease.body.fencing_token > 1
+      && progress.as_ref().is_none_or(|(_, progress)| progress.body.fencing_token < lease.body.fencing_token);
+    if selected_partial_takeover {
+      let expected_fencing_token =
+        lease.body.fencing_token.checked_sub(1).ok_or_else(|| {
+          MigrationStateOwnerErrorV1::invalid("migration_takeover_fencing", "partial takeover has no prior fencing token")
+        })?;
+      let lease_duration_ms = lease
+        .body
+        .expires_at_ms
+        .checked_sub(lease.body.acquired_at_ms)
+        .ok_or_else(|| MigrationStateOwnerErrorV1::invalid("migration_takeover_times", "partial takeover lease duration underflowed"))?;
+      return Self::takeover(
+        publisher,
+        permit,
+        MigrationTakeoverRequestV1 {
+          new_holder_boot_id: request.holder_boot_id,
+          expected_fencing_token,
+          takeover_at_ms: lease.body.acquired_at_ms,
+          lease_duration_ms,
+          publication_timestamp_ms: request.publication_timestamp_ms,
+          monotonic_now_ms: request.monotonic_now_ms,
+        },
+        retirement_owner,
+      )
+      .map(|(owner, _)| owner);
+    }
+    if active || !matches!(lease.body.state, MigrationLeaseStateV1::Held | MigrationLeaseStateV1::Expired) {
+      return Self::acquire(publisher, permit, request, retirement_owner).map(|(owner, _)| owner);
+    }
+    Self::takeover(
+      publisher,
+      permit,
+      MigrationTakeoverRequestV1 {
+        new_holder_boot_id: request.holder_boot_id,
+        expected_fencing_token: lease.body.fencing_token,
+        takeover_at_ms: request.acquired_at_ms,
+        lease_duration_ms: request.lease_duration_ms,
+        publication_timestamp_ms: request.publication_timestamp_ms,
+        monotonic_now_ms: request.monotonic_now_ms,
+      },
+      retirement_owner,
+    )
+    .map(|(owner, _)| owner)
+  }
+
   pub fn acquire(
     publisher: Arc<V4FirstAuthorityPublisher>,
     permit: MigrationPreflightPermitV1,
@@ -412,32 +475,7 @@ impl MigrationStateOwnerV1 {
         progress
       }
       None => {
-        let hash_width = permit.hash_algorithm().hash_length();
-        let body = MigrationProgressBodyV1 {
-          database_id: permit.database_id(),
-          migration_id: permit.migration_id(),
-          source_physical_instance_id: permit.source_physical_instance_id(),
-          destination_physical_instance_id: permit.destination_physical_instance_id(),
-          fencing_token: lease.body.fencing_token,
-          phase: MigrationPhaseV1::Preflight,
-          state: MigrationProgressStateV1::Pending,
-          flags: 0,
-          source_header_sequence: permit.source_header_sequence(),
-          destination_header_sequence: 0,
-          copied_through_write_sequence: 0,
-          captured_through_publication_sequence: 0,
-          reconciled_through_publication_sequence: 0,
-          namespace_count: 0,
-          entity_count: 0,
-          copied_bytes: 0,
-          updated_at_ms: lease.body.acquired_at_ms,
-          source_capture_head: permit.source_capture_head().to_vec(),
-          checkpoint_artifact: vec![0; hash_width],
-          legacy_root_map_control_payload_hash: vec![0; hash_width],
-          effective_config_fingerprint: permit.effective_configuration_fingerprint().to_vec(),
-          system_family_registry_fingerprint: permit.system_family_registry_fingerprint().to_vec(),
-          last_error_evidence: vec![0; hash_width],
-        };
+        let body = initial_progress_body(&permit, lease.body.fencing_token, lease.body.acquired_at_ms);
         let encoded = encode_migration_progress_control(1, &body, permit.hash_algorithm())?;
         let receipt = match publish_control(
           &publisher,
@@ -1472,16 +1510,20 @@ impl MigrationStateOwnerV1 {
   ) -> Result<(Self, MigrationTakeoverReceiptV1), MigrationStateOwnerErrorV1> {
     let clocks = validate_takeover_request(request)?;
     validate_destination_authority(&publisher, &permit)?;
-    let ((loaded_lease, lease), (loaded_progress, progress)) = require_migration_controls(&publisher, &permit)?;
+    let (lease, progress) = load_migration_controls(&publisher, &permit)?;
+    let (loaded_lease, lease) = lease
+      .ok_or_else(|| MigrationStateOwnerErrorV1::invalid("migration_lease_missing", "selected migration lease is required for takeover"))?;
     validate_lease_binding(&lease, &permit)?;
-    validate_progress_policy_binding(&progress, &permit)?;
+    if let Some((_, progress)) = progress.as_ref() {
+      validate_progress_policy_binding(progress, &permit)?;
+    }
     if !matches!(lease.body.state, MigrationLeaseStateV1::Held | MigrationLeaseStateV1::Expired) {
       return Err(MigrationStateOwnerErrorV1::invalid(
         "migration_takeover_lease_state",
         format!("migration takeover requires a held or explicitly expired lease, selected state is {:?}", lease.body.state),
       ));
     }
-    if progress.body.fencing_token > lease.body.fencing_token {
+    if progress.as_ref().is_some_and(|(_, progress)| progress.body.fencing_token > lease.body.fencing_token) {
       return Err(MigrationStateOwnerErrorV1::invalid(
         "migration_progress_token_ahead",
         "migration progress fencing token cannot be ahead of the selected lease",
@@ -1529,28 +1571,36 @@ impl MigrationStateOwnerV1 {
         .checked_add(1)
         .ok_or_else(|| MigrationStateOwnerErrorV1::invalid("migration_lease_sequence_exhausted", "migration lease sequence is exhausted"))?
     };
-    if selected_is_target && progress.body.fencing_token == target_fencing_token {
-      let owner = Self { publisher, permit, holder_boot_id: target_lease_body.holder_boot_id, fencing_token: target_fencing_token };
-      return Ok((
-        owner,
-        MigrationTakeoverReceiptV1 {
-          lease_control_sequence: lease.sequence,
-          progress_control_sequence: progress.sequence,
-          fencing_token: target_fencing_token,
-          resumed_rebind: false,
-          idempotent: true,
-        },
-      ));
+    if let Some((_, progress)) = progress.as_ref() {
+      if selected_is_target && progress.body.fencing_token == target_fencing_token {
+        let owner = Self { publisher, permit, holder_boot_id: target_lease_body.holder_boot_id, fencing_token: target_fencing_token };
+        return Ok((
+          owner,
+          MigrationTakeoverReceiptV1 {
+            lease_control_sequence: lease.sequence,
+            progress_control_sequence: progress.sequence,
+            fencing_token: target_fencing_token,
+            resumed_rebind: false,
+            idempotent: true,
+          },
+        ));
+      }
     }
-    let target_progress_sequence = progress.sequence.checked_add(1).ok_or_else(|| {
-      MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
-    })?;
+    let (target_progress_sequence, mut target_progress_body, progress_expectation) = match progress.as_ref() {
+      Some((loaded_progress, progress)) => (
+        progress.sequence.checked_add(1).ok_or_else(|| {
+          MigrationStateOwnerErrorV1::invalid("migration_progress_sequence_exhausted", "migration progress sequence is exhausted")
+        })?,
+        progress.body.clone(),
+        Some(control_expectation(loaded_progress)),
+      ),
+      None => (1, initial_progress_body(&permit, target_fencing_token, request.takeover_at_ms), None),
+    };
     let encoded_target_lease = if selected_is_target {
       None
     } else {
       Some(encode_migration_lease_control(target_lease_sequence, &target_lease_body, permit.hash_algorithm())?)
     };
-    let mut target_progress_body = progress.body.clone();
     target_progress_body.fencing_token = target_fencing_token;
     target_progress_body.updated_at_ms = target_progress_body.updated_at_ms.max(request.takeover_at_ms);
     let encoded_target_progress =
@@ -1558,11 +1608,15 @@ impl MigrationStateOwnerV1 {
 
     let lease_expectation = if let Some(encoded_target_lease) = encoded_target_lease.as_ref() {
       let progress_guard_identity = permit.migration_id();
-      let progress_guards = [MutableSystemControlGuardV1 {
-        kind: SystemControlKindV1::MigrationProgress,
-        identity: &progress_guard_identity,
-        expected: control_expectation(&loaded_progress),
-      }];
+      let progress_guards: Vec<_> = progress_expectation
+        .as_ref()
+        .map(|expected| MutableSystemControlGuardV1 {
+          kind: SystemControlKindV1::MigrationProgress,
+          identity: progress_guard_identity.as_slice(),
+          expected: expected.clone(),
+        })
+        .into_iter()
+        .collect();
       let receipt = match publish_control(
         &publisher,
         &permit,
@@ -1604,7 +1658,7 @@ impl MigrationStateOwnerV1 {
       &permit,
       MigrationControlPublicationV1 {
         kind: SystemControlKindV1::MigrationProgress,
-        expected: Some(control_expectation(&loaded_progress)),
+        expected: progress_expectation,
         guards: &lease_guards,
         encoded_control: &encoded_target_progress,
         publication_timestamp_ms: clocks.progress_publication_timestamp_ms,
@@ -2622,6 +2676,35 @@ fn mutable_control_was_fenced(error: &MutableSystemControlPublicationErrorV1) ->
 
 type LoadedMigrationLeaseV1 = (LoadedMutableSystemControlV1, MigrationLeaseControlV1);
 type LoadedMigrationProgressV1 = (LoadedMutableSystemControlV1, MigrationProgressControlV1);
+
+fn initial_progress_body(permit: &MigrationPreflightPermitV1, fencing_token: u64, updated_at_ms: i64) -> MigrationProgressBodyV1 {
+  let hash_width = permit.hash_algorithm().hash_length();
+  MigrationProgressBodyV1 {
+    database_id: permit.database_id(),
+    migration_id: permit.migration_id(),
+    source_physical_instance_id: permit.source_physical_instance_id(),
+    destination_physical_instance_id: permit.destination_physical_instance_id(),
+    fencing_token,
+    phase: MigrationPhaseV1::Preflight,
+    state: MigrationProgressStateV1::Pending,
+    flags: 0,
+    source_header_sequence: permit.source_header_sequence(),
+    destination_header_sequence: 0,
+    copied_through_write_sequence: 0,
+    captured_through_publication_sequence: 0,
+    reconciled_through_publication_sequence: 0,
+    namespace_count: 0,
+    entity_count: 0,
+    copied_bytes: 0,
+    updated_at_ms,
+    source_capture_head: permit.source_capture_head().to_vec(),
+    checkpoint_artifact: vec![0; hash_width],
+    legacy_root_map_control_payload_hash: vec![0; hash_width],
+    effective_config_fingerprint: permit.effective_configuration_fingerprint().to_vec(),
+    system_family_registry_fingerprint: permit.system_family_registry_fingerprint().to_vec(),
+    last_error_evidence: vec![0; hash_width],
+  }
+}
 
 fn load_migration_controls(
   publisher: &V4FirstAuthorityPublisher,

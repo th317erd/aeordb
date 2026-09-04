@@ -24,6 +24,7 @@ use aeordb::engine::verify::{VerifyReport, verify_checked};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
+type VerifyReportMutation = fn(&mut VerifyReport);
 
 fn id(first: u8) -> [u8; 16] {
   std::array::from_fn(|offset| first.wrapping_add(offset as u8))
@@ -435,7 +436,7 @@ fn canonical_head_clone_admits_only_recoverable_path_key_divergence() {
     MigrationPreflightFindingCodeV1::StrictVerificationIssues,
   );
 
-  let blocking_issue_mutations: [(&str, fn(&mut VerifyReport)); 12] = [
+  let blocking_issue_mutations: [(&str, VerifyReportMutation); 12] = [
     ("corrupt_hash", |report| report.corrupt_hash = 1),
     ("corrupt_header", |report| report.corrupt_header = 1),
     ("missing_children", |report| report.missing_children.push("/missing".to_string())),
