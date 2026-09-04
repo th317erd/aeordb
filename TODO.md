@@ -1427,6 +1427,9 @@
           - [x] Capture the offline service/file/pool/emergency-artifact baseline and prove the exact candidate plus protection mechanics before source mutation.
           - [ ] Run `verify --repair --force-fix-in-place` under retained resource/capacity monitoring; never create `<database>.repaired`.
           - [ ] Turn every repair defect into a failing-first bounded regression, fix AeorDB, rebuild the exact candidate, and retry while practical.
+            - [x] Make dirty rebuild resynchronize past historical malformed WAL regions without weakening the selected-frontier tail stop or explicit-rebuild strictness.
+            - [x] Prevent failed partial engine initialization from publishing KV, hot-tail, or A/B-header state during `Drop`.
+            - [x] Reject a selected durable WAL frontier outside physical bounds without mutation, while preserving explicit terminal-header repair.
           - [ ] Require a separate strict verification pass, then remove write permission and set the repaired v3 file immutable in that order.
           - [ ] Create only one v4 shadow on `/mnt/storage`, enforce the 5 TB free-space floor, and exercise interruption/resume/parity/repeatability.
           - [ ] Treat recovery as desirable evidence while judging success primarily by permanent AeorDB hardening and honest fail-closed classification.

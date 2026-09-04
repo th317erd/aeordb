@@ -292,7 +292,13 @@ fn repair_discards_only_a_truncated_terminal_wal_entry() {
     file.sync_all().unwrap();
   }
 
+  let before_rejected_open = std::fs::read(&path).unwrap();
   assert!(StorageEngine::open(&path).is_err(), "selected header must reject a WAL frontier beyond physical EOF");
+  assert_eq!(
+    std::fs::read(&path).unwrap(),
+    before_rejected_open,
+    "rejecting a selected WAL frontier beyond EOF must not publish partially initialized engine state"
+  );
   let report = repair_header_in_place(&path).expect("a terminal partial WAL entry is recoverable by discarding only that entry");
   assert!(report.repaired);
   assert!(report.hot_tail_past_eof.is_some());

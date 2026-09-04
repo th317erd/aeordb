@@ -2135,6 +2135,78 @@ fn dirty_recovery_accepts_only_a_contiguous_verified_tail_after_the_durable_fron
 }
 
 #[test]
+fn dirty_recovery_resynchronizes_after_historical_corruption_before_the_durable_frontier() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("historical-corruption.aeordb");
+  let db_str = db_path.to_str().unwrap();
+  let engine = StorageEngine::create(db_str).unwrap();
+  let corrupt_key = vec![0x31; engine.hash_algo().hash_length()];
+  let surviving_key = vec![0x32; engine.hash_algo().hash_length()];
+  let boundary_corrupt_key = vec![0x33; engine.hash_algo().hash_length()];
+  let stale_tail_key = vec![0x34; engine.hash_algo().hash_length()];
+  let surviving_value = b"valid entry after historical corruption";
+  let corrupt_offset = engine.store_entry(EntryType::Chunk, &corrupt_key, b"historical entry to corrupt").unwrap();
+  engine.store_entry(EntryType::Chunk, &surviving_key, surviving_value).unwrap();
+  let boundary_corrupt_offset = engine.store_entry(EntryType::Chunk, &boundary_corrupt_key, b"last selected entry to corrupt").unwrap();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let selected_tail = active_header(db_str).hot_tail_offset;
+  let mut file = OpenOptions::new().read(true).write(true).open(&db_path).unwrap();
+  file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+  file.write_all(&[0u8; 4]).unwrap();
+  file.seek(SeekFrom::Start(boundary_corrupt_offset)).unwrap();
+  file.write_all(&[0u8; 4]).unwrap();
+  file.seek(SeekFrom::Start(selected_tail)).unwrap();
+  file.write_all(&[0xFF]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  writer.set_offset(selected_tail + 1);
+  writer.append_entry(EntryType::Chunk, &stale_tail_key, b"valid-looking bytes beyond a tail discontinuity", 0).unwrap();
+  writer.sync().unwrap();
+  drop(writer);
+
+  let reopened = StorageEngine::open(db_str).expect("dirty startup must resynchronize at the next validated historical WAL entry");
+  assert!(reopened.get_entry(&corrupt_key).unwrap().is_none(), "the corrupt historical entry must not survive the rebuilt KV authority");
+  assert_eq!(reopened.get_entry(&surviving_key).unwrap().unwrap().2, surviving_value);
+  assert!(reopened.get_entry(&boundary_corrupt_key).unwrap().is_none());
+  assert!(
+    reopened.get_entry(&stale_tail_key).unwrap().is_none(),
+    "historical resynchronization must stop at the selected frontier instead of jumping into stale valid-looking tail bytes"
+  );
+}
+
+#[test]
+fn failed_dirty_startup_does_not_publish_or_modify_database_bytes_on_drop() {
+  let temp = tempfile::tempdir().unwrap();
+  let db_path = temp.path().join("failed-dirty-startup.aeordb");
+  let db_str = db_path.to_str().unwrap();
+  let engine = StorageEngine::create(db_str).unwrap();
+  engine.shutdown().unwrap();
+  drop(engine);
+
+  let selected_tail = active_header(db_str).hot_tail_offset;
+  let malformed_key = vec![0x41; active_header(db_str).hash_algo.hash_length()];
+  let mut writer = AppendWriter::open(&db_path).unwrap();
+  writer.set_offset(selected_tail);
+  writer.append_entry(EntryType::FileRecord, &malformed_key, b"not a file record", 0).unwrap();
+  writer.sync().unwrap();
+  drop(writer);
+  let before = std::fs::read(&db_path).unwrap();
+
+  let result = StorageEngine::open(db_str);
+  assert!(result.is_err(), "malformed namespace authority in the recovery tail must fail startup closed");
+  let after = std::fs::read(&db_path).unwrap();
+  assert!(
+    after == before,
+    "dropping a partially initialized engine after failed startup must not publish a hot tail, KV state, or A/B header (before={}, after={})",
+    blake3::hash(&before),
+    blake3::hash(&after)
+  );
+}
+
+#[test]
 fn dirty_recovery_rolls_back_uncommitted_namespace_locators_to_the_selected_head() {
   let (engine, temp) = create_test_db();
   let ctx = RequestContext::system();

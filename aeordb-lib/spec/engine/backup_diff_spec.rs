@@ -295,6 +295,7 @@ fn test_patch_cannot_be_opened_normally() {
   let output = db_path(&temp, "patch_no_open.aeordb");
 
   create_patch(&engine, &empty, &head, &output).unwrap();
+  let before = std::fs::read(&output).unwrap();
 
   let result = StorageEngine::open(&output);
   assert!(result.is_err(), "StorageEngine::open should reject a patch database");
@@ -303,6 +304,13 @@ fn test_patch_cannot_be_opened_normally() {
     Err(other) => panic!("expected PatchDatabase error, got: {}", other),
     Ok(_) => panic!("expected error, got Ok"),
   }
+  let after = std::fs::read(&output).unwrap();
+  assert!(
+    after == before,
+    "rejecting a patch as an ordinary database must not publish shutdown state (before={}, after={})",
+    blake3::hash(&before),
+    blake3::hash(&after)
+  );
 }
 
 // ============================================================

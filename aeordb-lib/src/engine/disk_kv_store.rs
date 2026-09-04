@@ -1796,7 +1796,7 @@ impl DiskKVStore {
     self.hot_buffer.len()
   }
 
-  pub(crate) fn disable_flush_on_drop_for_read_only_inspection(&mut self) {
+  pub(crate) fn disable_flush_on_drop(&mut self) {
     self.flush_on_drop = false;
   }
 }

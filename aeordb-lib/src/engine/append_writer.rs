@@ -695,11 +695,12 @@ impl AppendWriter {
     EntryScanner::new_reporting_to(file, self.current_offset, cancellation)
   }
 
-  /// Scan the WAL for dirty-startup recovery: ignore the stale
-  /// `header.hot_tail_offset` and walk to EOF. **MUST** be used by
-  /// `rebuild_kv` when the hot tail was detected as corrupt/missing —
-  /// otherwise entries written between the last 100ms timer flush and the
-  /// crash are silently dropped.
+  /// Scan the WAL for dirty-startup recovery: use the selected
+  /// `header.hot_tail_offset` as the historical resynchronization boundary,
+  /// then accept only a contiguous verified recovery tail through EOF.
+  /// **MUST** be used when the hot tail was detected as corrupt/missing —
+  /// otherwise entries written between the last timer flush and the crash are
+  /// silently dropped.
   pub fn scan_entries_dirty_recovery(&self) -> EngineResult<EntryScanner> {
     let file = File::open(&self.file_path)?;
     EntryScanner::new_dirty_recovery(file)

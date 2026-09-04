@@ -35,6 +35,13 @@ pub(crate) struct ScannedRebuildEntry {
 
 #[derive(Debug)]
 pub(crate) enum RebuildScanError {
+  /// A malformed entry below the selected durable WAL frontier was omitted
+  /// after the scanner resynchronized at the next validated historical entry.
+  /// Rebuild callers continue while retaining a bounded corruption count.
+  SkippedHistorical {
+    offset: u64,
+    error: EngineError,
+  },
   /// Bytes beyond the selected durable WAL frontier are not authoritative.
   /// Dirty recovery stops at the first malformed record in that tail rather
   /// than resynchronizing into stale bytes that happen to resemble entries.
@@ -110,8 +117,9 @@ impl EntryScanner {
   /// 100ms flush timer. Any WAL entry written between the last header update
   /// and the crash sits PAST `hot_tail_offset` but before EOF. Using the
   /// stale offset as the scan end silently drops those entries during
-  /// `rebuild_kv`. Scanning to EOF lets `scan_for_next_magic` skip any
-  /// torn-write garbage at the tail and recover the real entries beyond it.
+  /// `rebuild_kv`. Scanning to EOF recovers the contiguous verified entries
+  /// immediately beyond that frontier. The first discontinuity ends recovery;
+  /// resynchronization is allowed only within the historical durable WAL.
   pub fn new_dirty_recovery(file: File) -> EngineResult<Self> {
     Self::new_internal(file, true, true)
   }
@@ -168,6 +176,15 @@ impl EntryScanner {
       };
       (header_end, end)
     };
+    if dirty_recovery && standard_layout && (header.hot_tail_offset < start_offset || header.hot_tail_offset > file_length) {
+      return Err(EngineError::CorruptEntry {
+        offset: header.hot_tail_offset,
+        reason: format!(
+          "selected durable WAL frontier {} is outside the physical WAL bounds {start_offset}..{file_length}",
+          header.hot_tail_offset
+        ),
+      });
+    }
     let recovery_tail_start =
       if dirty_recovery && standard_layout && header.hot_tail_offset >= start_offset && header.hot_tail_offset <= file_length {
         Some(header.hot_tail_offset)
@@ -197,14 +214,14 @@ impl EntryScanner {
   /// The scan walks overlapping 1 MiB windows so memory stays bounded without
   /// discarding valid records after a large corrupt region.
   /// Returns Some((offset, bytes_skipped)) if found, None if not.
-  fn scan_for_next_magic(&mut self, start: u64) -> EngineResult<Option<(u64, u64)>> {
+  fn scan_for_next_magic(&mut self, start: u64, scan_end: u64) -> EngineResult<Option<(u64, u64)>> {
     use crate::engine::entry_header::ENTRY_MAGIC;
     let magic_bytes = ENTRY_MAGIC.to_le_bytes();
     let mut buffer = Vec::new();
     let mut window_start = start;
-    while window_start < self.file_length {
+    while window_start < scan_end {
       self.check_cancelled()?;
-      let window_end = window_start.saturating_add(1_048_576).min(self.file_length);
+      let window_end = window_start.saturating_add(1_048_576).min(scan_end);
       let window_size = usize::try_from(window_end.saturating_sub(window_start))
         .map_err(|_| EngineError::ResourceExhausted("entry recovery scan window exceeds platform address space".to_string()))?;
       if window_size < 4 {
@@ -232,7 +249,7 @@ impl EntryScanner {
           self.file.seek(SeekFrom::Start(candidate_offset))?;
           match EntryHeader::deserialize(&mut self.file) {
             Ok(header) => {
-              if Self::validated_entry_end(&header, candidate_offset, self.file_length).is_ok() {
+              if Self::validated_entry_end(&header, candidate_offset, scan_end).is_ok() {
                 return Ok(Some((candidate_offset, candidate_offset.saturating_sub(start).saturating_add(1))));
               }
             }
@@ -242,7 +259,7 @@ impl EntryScanner {
         }
       }
 
-      if window_end == self.file_length {
+      if window_end == scan_end {
         return Ok(None);
       }
       window_start = window_end.saturating_sub(3);
@@ -286,16 +303,17 @@ impl EntryScanner {
       self.current_offset = self.file_length;
       return Ok(());
     }
-    match self.scan_for_next_magic(entry_offset.saturating_add(1))? {
+    let scan_end = self.scan_boundary_for_offset(entry_offset);
+    match self.scan_for_next_magic(entry_offset.saturating_add(1), scan_end)? {
       Some((next_offset, skipped_bytes)) => {
-        tracing::warn!(entry_offset, next_offset, skipped_bytes, "Recovered at the next validated entry header");
+        tracing::debug!(entry_offset, next_offset, skipped_bytes, "Recovered at the next validated entry header");
         self.record_skipped_region(entry_offset, skipped_bytes as usize);
         self.current_offset = next_offset;
       }
       None => {
-        let skipped = self.file_length.saturating_sub(entry_offset);
+        let skipped = scan_end.saturating_sub(entry_offset);
         self.record_skipped_region(entry_offset, skipped as usize);
-        self.current_offset = self.file_length;
+        self.current_offset = scan_end;
       }
     }
     Ok(())
@@ -303,6 +321,10 @@ impl EntryScanner {
 
   fn is_recovery_tail_offset(&self, offset: u64) -> bool {
     self.recovery_tail_start.is_some_and(|tail_start| offset >= tail_start)
+  }
+
+  fn scan_boundary_for_offset(&self, offset: u64) -> u64 {
+    self.recovery_tail_start.filter(|tail_start| offset < *tail_start).unwrap_or(self.file_length)
   }
 
   fn stop_after_recovery_tail_error(&mut self, entry_offset: u64, fallback_next: u64) {
@@ -367,8 +389,12 @@ impl EntryScanner {
     let verify_recovery_tail = self.is_recovery_tail_offset(entry_offset);
     self.next_bounded_entry(verify_recovery_tail).map(|result| {
       result.map_err(|error| {
-        if verify_recovery_tail && matches!(error, EngineError::CorruptEntry { .. }) {
-          RebuildScanError::DiscardedRecoveryTail { offset: entry_offset, error }
+        if matches!(error, EngineError::CorruptEntry { .. }) {
+          if verify_recovery_tail {
+            RebuildScanError::DiscardedRecoveryTail { offset: entry_offset, error }
+          } else {
+            RebuildScanError::SkippedHistorical { offset: entry_offset, error }
+          }
         } else {
           RebuildScanError::Fatal(error)
         }
@@ -393,7 +419,21 @@ impl EntryScanner {
       }
 
       let entry_offset = self.current_offset;
+      let scan_boundary = self.scan_boundary_for_offset(entry_offset);
       self.last_error_was_terminal_truncation = false;
+      if scan_boundary.saturating_sub(entry_offset) < EntryHeader::FIXED_HEADER_SIZE as u64 {
+        self.last_error_was_terminal_truncation = scan_boundary == self.file_length;
+        let length = scan_boundary.saturating_sub(entry_offset) as usize;
+        self.record_skipped_region(entry_offset, length);
+        self.current_offset = scan_boundary;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry {
+            offset: entry_offset,
+            reason: "truncated entry header at WAL authority boundary".to_string(),
+          }));
+        }
+        continue;
+      }
       if let Err(error) = self.file.seek(SeekFrom::Start(entry_offset)) {
         return Some(Err(error.into()));
       }
@@ -412,7 +452,7 @@ impl EntryScanner {
         }
         Err(EngineError::IoError(error)) => return Some(Err(EngineError::IoError(error))),
         Err(error) => {
-          tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
+          tracing::debug!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
           if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
             return Some(Err(recovery_error));
           }
@@ -423,7 +463,7 @@ impl EntryScanner {
         }
       };
 
-      let entry_end = match Self::validated_entry_end(&header, entry_offset, self.file_length) {
+      let entry_end = match Self::validated_entry_end(&header, entry_offset, scan_boundary) {
         Ok(entry_end) => entry_end,
         Err(error) => {
           self.last_error_was_terminal_truncation = self.entry_extends_past_boundary(&header, entry_offset);
@@ -463,7 +503,7 @@ impl EntryScanner {
         if error.kind() != std::io::ErrorKind::UnexpectedEof {
           return Some(Err(error.into()));
         }
-        tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
+        tracing::debug!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
         self.stop_after_recovery_tail_error(entry_offset, entry_end);
         if self.report_errors {
           return Some(Err(EngineError::CorruptEntry { offset: entry_offset, reason: format!("IO error reading key: {}", error) }));
@@ -615,6 +655,20 @@ impl Iterator for EntryScanner {
       }
 
       let entry_offset = self.current_offset;
+      let scan_boundary = self.scan_boundary_for_offset(entry_offset);
+
+      if scan_boundary.saturating_sub(entry_offset) < EntryHeader::FIXED_HEADER_SIZE as u64 {
+        let length = scan_boundary.saturating_sub(entry_offset) as usize;
+        self.record_skipped_region(entry_offset, length);
+        self.current_offset = scan_boundary;
+        if self.report_errors {
+          return Some(Err(EngineError::CorruptEntry {
+            offset: entry_offset,
+            reason: "truncated entry header at WAL authority boundary".to_string(),
+          }));
+        }
+        continue;
+      }
 
       // Try to seek to current offset
       if let Err(error) = self.file.seek(SeekFrom::Start(entry_offset)) {
@@ -637,7 +691,7 @@ impl Iterator for EntryScanner {
         Err(error) => {
           // Corrupt entry header — can't use total_length to skip.
           // Scan forward looking for the next valid entry magic bytes.
-          tracing::warn!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
+          tracing::debug!("Corrupt entry header at offset {}: {}. Scanning for next valid entry...", entry_offset, error);
           if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
             return Some(Err(recovery_error));
           }
@@ -648,7 +702,7 @@ impl Iterator for EntryScanner {
         }
       };
 
-      let entry_end = match Self::validated_entry_end(&header, entry_offset, self.file_length) {
+      let entry_end = match Self::validated_entry_end(&header, entry_offset, scan_boundary) {
         Ok(entry_end) => entry_end,
         Err(error) => {
           if let Err(recovery_error) = self.recover_after_malformed_header(entry_offset) {
@@ -667,7 +721,7 @@ impl Iterator for EntryScanner {
         Err(error) => return Some(Err(error)),
       };
       if let Err(error) = self.file.read_exact(&mut key) {
-        tracing::warn!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
+        tracing::debug!("IO error reading key at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
         self.current_offset = entry_end;
 
@@ -683,7 +737,7 @@ impl Iterator for EntryScanner {
         Err(error) => return Some(Err(error)),
       };
       if let Err(error) = self.file.read_exact(&mut value) {
-        tracing::warn!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
+        tracing::debug!("IO error reading value at offset {}: {}. Skipping entry.", entry_offset, error);
         self.record_skipped_region(entry_offset, header.total_length as usize);
         self.current_offset = entry_end;
 
@@ -695,7 +749,7 @@ impl Iterator for EntryScanner {
 
       // Verify hash integrity
       if !header.verify(&key, &value) {
-        tracing::warn!("Hash verification failed for entry at offset {}. Skipping.", entry_offset);
+        tracing::debug!("Hash verification failed for entry at offset {}. Skipping.", entry_offset);
         self.current_offset = entry_end;
 
         if self.report_errors {

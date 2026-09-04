@@ -1200,16 +1200,14 @@ fn migration_architecture_allows_only_reviewed_offline_orchestration_and_capture
   assert!(append_writer.contains("pub(crate) fn open_read_only("));
   assert!(!append_writer.contains("pub fn open_read_only("));
 
-  let drop_flush_suppression_callers = sources
-    .iter()
-    .flat_map(|(path, source)| source.match_indices("disable_flush_on_drop_for_read_only_inspection(").map(move |_| path))
-    .collect::<Vec<_>>();
+  let drop_flush_suppression_sites =
+    sources.iter().flat_map(|(path, source)| source.match_indices("disable_flush_on_drop(").map(move |_| path)).collect::<Vec<_>>();
   assert_eq!(
-    drop_flush_suppression_callers.len(),
-    2,
-    "read-only KV drop behavior escaped its disk/store boundary: {drop_flush_suppression_callers:?}"
+    drop_flush_suppression_sites.len(),
+    3,
+    "non-publishing KV drop behavior escaped its disk/store boundary: {drop_flush_suppression_sites:?}"
   );
-  assert!(drop_flush_suppression_callers
+  assert!(drop_flush_suppression_sites
     .iter()
     .all(|path| matches!(path.file_name().and_then(|value| value.to_str()), Some("disk_kv_store.rs" | "storage_engine.rs"))));
 

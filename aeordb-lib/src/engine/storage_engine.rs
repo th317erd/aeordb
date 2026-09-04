@@ -255,7 +255,11 @@ fn estimate_remaining_seconds(elapsed: std::time::Duration, current: u64, total:
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KvRebuildScanBoundary {
-  /// Recover uncheckpointed WAL bytes after a missing/corrupt hot tail.
+  /// Recover uncheckpointed WAL bytes after a missing/corrupt hot tail and
+  /// tolerate resynchronizable corruption below the selected frontier.
+  DirtyRecovery,
+  /// Include uncheckpointed WAL bytes for an explicit repair, while keeping
+  /// corruption below the selected frontier fatal.
   PhysicalEof,
   /// Trust the selected, validated WAL frontier and ignore later bytes.
   SelectedWal,
@@ -829,6 +833,9 @@ fn recovered_void_records_from_sorted_ranges(wal_start: u64, wal_end: u64, range
 /// appends new entries.
 pub struct StorageEngine {
   database_path: PathBuf,
+  /// Armed only after the complete create/open contract succeeds. A failed
+  /// constructor owns no authority to publish state from `Drop`.
+  implicit_shutdown_armed: bool,
   /// Set only by the crate-private offline migration collector. This mode may
   /// read a clean v3 source but must neither recover it nor flush observations
   /// back into it.
@@ -1096,6 +1103,9 @@ impl StorageEngine {
                   .checked_add(1)
                   .ok_or_else(|| EngineError::ResourceExhausted("dirty namespace rollback entry count overflow".to_string()))?;
               }
+            }
+            Err(RebuildScanError::SkippedHistorical { offset, error }) => {
+              tracing::debug!(offset, error = %error, "Dirty namespace rollback skipped historical WAL corruption");
             }
             Err(RebuildScanError::DiscardedRecoveryTail { offset, error }) => {
               tracing::warn!(offset, error = %error, "Dirty namespace rollback stopped at non-authoritative tail residue");
@@ -3495,8 +3505,9 @@ impl StorageEngine {
 
     let void_manager = VoidManager::new(hash_algo);
 
-    let engine = StorageEngine {
+    let mut engine = StorageEngine {
       database_path: PathBuf::from(path),
+      implicit_shutdown_armed: false,
       read_only_inspection: false,
       startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
@@ -3555,6 +3566,7 @@ impl StorageEngine {
     engine.activate_bounded_clean_caches()?;
     engine.activate_bounded_kv_pages()?;
     engine.initialize_durability_runtime()?;
+    engine.implicit_shutdown_armed = true;
     Ok(engine)
   }
 
@@ -3747,7 +3759,7 @@ impl StorageEngine {
       Arc::clone(&durability_coordinator),
     )?;
     if !allow_mutating_recovery {
-      kv_store.disable_flush_on_drop_for_read_only_inspection();
+      kv_store.disable_flush_on_drop();
     }
     // If any bucket page failed CRC on open, the KV index is unreliable for
     // the affected buckets and the WAL becomes the source of truth below.
@@ -3771,6 +3783,7 @@ impl StorageEngine {
 
     let engine = StorageEngine {
       database_path: PathBuf::from(path),
+      implicit_shutdown_armed: false,
       read_only_inspection: !allow_mutating_recovery,
       startup_emergency_spill_locations: bootstrap.emergency_spill_locations,
       configuration_authority: OnceLock::new(),
@@ -3832,7 +3845,7 @@ impl StorageEngine {
       if needs_dirty_startup {
         tracing::warn!("Dirty startup: rebuilding KV index from full WAL scan...");
       }
-      let scan_boundary = if needs_dirty_startup { KvRebuildScanBoundary::PhysicalEof } else { KvRebuildScanBoundary::SelectedWal };
+      let scan_boundary = if needs_dirty_startup { KvRebuildScanBoundary::DirtyRecovery } else { KvRebuildScanBoundary::SelectedWal };
       engine.rebuild_kv_with_progress_boundary(progress_callback.clone(), scan_boundary)?;
       // Re-initialize counters from the freshly rebuilt KV
       let refreshed = Arc::new(EngineCounters::initialize_from_kv(&engine)?);
@@ -4253,7 +4266,7 @@ impl StorageEngine {
     Self::reject_patch_database(engine, path)
   }
 
-  fn reject_patch_database(engine: Self, path: &str) -> EngineResult<Self> {
+  fn reject_patch_database(mut engine: Self, path: &str) -> EngineResult<Self> {
     // Guard: refuse to open patch databases as normal databases
     let header = engine
       .writer
@@ -4274,6 +4287,7 @@ impl StorageEngine {
       )));
     }
 
+    engine.implicit_shutdown_armed = true;
     Ok(engine)
   }
 
@@ -4287,11 +4301,16 @@ impl StorageEngine {
 
   /// Open a database file for import purposes, allowing patch databases.
   pub fn open_for_import(path: &str) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, None, Default::default(), true)
+    Self::open_internal(path, None, None, None, Default::default(), true).map(Self::arm_implicit_shutdown)
   }
 
   pub(crate) fn open_for_import_with_memory_coordinator(path: &str, coordinator: Arc<MemoryCoordinator>) -> EngineResult<Self> {
-    Self::open_internal(path, None, None, Some(coordinator), Default::default(), true)
+    Self::open_internal(path, None, None, Some(coordinator), Default::default(), true).map(Self::arm_implicit_shutdown)
+  }
+
+  fn arm_implicit_shutdown(mut engine: Self) -> Self {
+    engine.implicit_shutdown_armed = true;
+    engine
   }
 
   /// Store an entry: append to file, register in KV store.
@@ -6278,7 +6297,9 @@ impl StorageEngine {
         "rebuild_kv: scanning authoritative WAL"
       );
       let mut scanner = match scan_boundary {
-        KvRebuildScanBoundary::PhysicalEof => writer.scan_entries_dirty_namespace_rollback(self.memory_coordinator())?,
+        KvRebuildScanBoundary::DirtyRecovery | KvRebuildScanBoundary::PhysicalEof => {
+          writer.scan_entries_dirty_namespace_rollback(self.memory_coordinator())?
+        }
         KvRebuildScanBoundary::SelectedWal => writer.scan_entries_reporting_current_wal(Some(Arc::clone(&self.shutdown_started)))?,
       };
       let scan_start_offset = scanner.current_offset();
@@ -6317,7 +6338,7 @@ impl StorageEngine {
             if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
               skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
             }
-            if scan_boundary == KvRebuildScanBoundary::PhysicalEof
+            if matches!(scan_boundary, KvRebuildScanBoundary::DirtyRecovery | KvRebuildScanBoundary::PhysicalEof)
               && scanned.offset >= selected_frontier
               && Self::dirty_recovery_entry_is_rollback_authority(&scanned)?
             {
@@ -6346,6 +6367,13 @@ impl StorageEngine {
               scanned.header.total_length,
               order,
             )?;
+          }
+          Err(RebuildScanError::SkippedHistorical { offset, error }) => {
+            if scan_boundary != KvRebuildScanBoundary::DirtyRecovery {
+              return Err(error);
+            }
+            tracing::debug!(offset, error = %error, "Dirty-startup KV rebuild skipped historical WAL corruption");
+            corrupt_entry_count = corrupt_entry_count.saturating_add(1);
           }
           Err(RebuildScanError::DiscardedRecoveryTail { offset, error }) => {
             tracing::warn!(
@@ -6441,7 +6469,7 @@ impl StorageEngine {
     // from the stale on-disk `header.hot_tail_offset`, which is updated
     // only every 100 ms by the hot tail flush timer. Any entry written
     // between the last flush and the crash sits PAST that offset and was
-    // just discovered by `scan_entries_dirty_recovery`. If we set
+    // just discovered by the dirty-recovery scanner. If we set
     // hot_tail_offset = writer.current_offset(), header lies about where
     // valid data ends and the next append clobbers the dirty-recovered
     // entries — leaving the KV pointing at offsets whose data has been
@@ -7180,6 +7208,12 @@ impl StorageEngine {
 
 impl Drop for StorageEngine {
   fn drop(&mut self) {
+    if !self.implicit_shutdown_armed {
+      let kv = self.kv_writer.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+      kv.disable_flush_on_drop();
+      tracing::debug!("Discarding a partially initialized storage engine without publishing state");
+      return;
+    }
     if let Err(error) = self.shutdown() {
       tracing::error!("Storage engine drop shutdown failed: {}", error);
     }
