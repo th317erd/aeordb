@@ -1424,7 +1424,7 @@
             - [x] Migrate the rehearsal copy, validate complete v3/v4 namespace and content parity, exercise restart/recovery and resource bounds, and retain every truthful attempt.
             - [x] Fix every defect through failing-first regression coverage and repeat until the large rehearsal is fully green.
         - [ ] P8-1b: run the explicitly authorized in-place repair and same-pool production-scale development migration without a full repair copy.
-          - [ ] Capture the offline service/file/pool/emergency-artifact baseline and prove the exact candidate plus protection mechanics before source mutation.
+          - [x] Capture the offline service/file/pool/emergency-artifact baseline and prove the exact candidate plus protection mechanics before source mutation.
           - [ ] Run `verify --repair --force-fix-in-place` under retained resource/capacity monitoring; never create `<database>.repaired`.
           - [ ] Turn every repair defect into a failing-first bounded regression, fix AeorDB, rebuild the exact candidate, and retry while practical.
           - [ ] Require a separate strict verification pass, then remove write permission and set the repaired v3 file immutable in that order.
