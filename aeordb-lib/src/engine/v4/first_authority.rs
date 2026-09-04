@@ -2980,7 +2980,6 @@ impl V4FirstAuthorityPublisher {
       || admission.authority_after != header.head_hash
       || admission.selected_header_slot_sequence > header.slot_sequence
       || admission.publication_sequence == 0
-      || admission.publication_sequence > header.write_sequence_high_water
     {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "selected_semantic_authority_admission",
@@ -2995,7 +2994,7 @@ impl V4FirstAuthorityPublisher {
       namespace_tree_root: root.namespace_tree_root,
       semantic_state,
       system_family_registry_fingerprint: header.system_family_registry_fingerprint.clone(),
-      selected_header_slot_sequence: header.slot_sequence,
+      selected_header_slot_sequence: admission.selected_header_slot_sequence,
       write_sequence_high_water: header.write_sequence_high_water,
       root_publication_sequence: admission.publication_sequence,
     })
@@ -3401,13 +3400,10 @@ impl V4FirstAuthorityPublisher {
       header.write_sequence_high_water,
     )
     .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
-    if authority.admission.selected_header_slot_sequence > header.slot_sequence
-      || authority.admission.publication_sequence == 0
-      || authority.admission.publication_sequence > header.write_sequence_high_water
-    {
+    if authority.admission.selected_header_slot_sequence > header.slot_sequence || authority.admission.publication_sequence == 0 {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "captured_authority_admission_sequence",
-        "root admission witness exceeds the captured header authority",
+        "root admission witness has no durable publication or exceeds the captured header history",
       ));
     }
     ensure_captured_authority_not_cancelled(cancellation)?;
@@ -9859,6 +9855,17 @@ impl V4FirstAuthorityPublisher {
         "selected HEAD has no immutable first-admission proof",
       )
     })?;
+    let admission = decode_root_admission_commit(&admission_control, header.hash_algorithm)?;
+    if admission.authority_kind != RootAuthorityKindV1::Head
+      || admission.authority_after != namespace_root.root_hash
+      || admission.selected_header_slot_sequence > header.slot_sequence
+      || admission.publication_sequence == 0
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_witness_mismatch",
+        "selected successor admission differs from the selected root or header history",
+      ));
+    }
     let prepare_control = load_system_file_slot(
       &self.file,
       &kv,
@@ -9875,14 +9882,59 @@ impl V4FirstAuthorityPublisher {
       )
     })?;
     let prepare = decode_root_publication_prepare(&prepare_control, header.hash_algorithm)?;
-    let (expected_prepare_control, _) = encode_successor_witnesses(
+    if prepare.intended_header_slot_sequence > header.slot_sequence || prepare.intended_publication_sequence == 0 {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_witness_mismatch",
+        "selected successor prepare exceeds the selected header history or has no durable publication",
+      ));
+    }
+    let admission_prepare_control = if admission.transaction_id == request.transaction_id {
+      prepare_control.clone()
+    } else {
+      load_system_file_slot(
+        &self.file,
+        &kv,
+        header,
+        SystemControlKindV1::RootPublicationPrepare,
+        &admission.transaction_id,
+        SystemControlSlotV1::Immutable,
+      )?
+      .map(|loaded| loaded.body)
+      .ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "successor_authority_witness_mismatch",
+          "selected successor admission references a missing original prepare",
+        )
+      })?
+    };
+    let admission_prepare = decode_root_publication_prepare(&admission_prepare_control, header.hash_algorithm)?;
+    if admission.prepare_payload_hash != digest_parts(header.hash_algorithm, &[&admission_prepare_control])
+      || admission_prepare.database_id != admission.database_id
+      || admission_prepare.transaction_id != admission.transaction_id
+      || admission_prepare.created_at_ms != admission.publication_started_at_ms
+      || admission_prepare.target_namespace_root != admission.namespace_root
+      || admission_prepare.target_semantic_state != request.semantic_state.object_id
+      || admission_prepare.authority_kind != admission.authority_kind
+      || digest_parts(header.hash_algorithm, &[&admission_prepare.authority_identity]) != admission.authority_identity_digest
+      || admission_prepare.expected_authority_after != admission.authority_after
+      || admission_prepare.intended_header_slot_sequence != admission.selected_header_slot_sequence
+      || admission_prepare.intended_publication_sequence != admission.publication_sequence
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "successor_authority_witness_mismatch",
+        "selected successor admission and its original prepare do not form one complete historical witness",
+      ));
+    }
+    let (expected_prepare_control, expected_admission_control) = encode_successor_witnesses(
       request,
       &namespace_root,
       header.hash_algorithm,
-      header.slot_sequence,
+      prepare.intended_header_slot_sequence,
       prepare.intended_publication_sequence,
     )?;
-    if prepare_control != expected_prepare_control {
+    if prepare_control != expected_prepare_control
+      || (admission.transaction_id == request.transaction_id && admission_control != expected_admission_control)
+    {
       return Err(FirstAuthorityPublicationErrorV1::invalid(
         "successor_authority_retry_collision",
         "selected successor prepare differs from the exact retry request",

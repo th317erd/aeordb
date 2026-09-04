@@ -374,31 +374,30 @@ pub fn execute_final_namespace_reconciliation_v1<'request, 'source>(
   request.freeze.validate_unchanged()?;
   let destination_tree = sink.current_tree;
   let destination_namespace_root = namespace_root_for_tree(request.permit.hash_algorithm(), &destination_tree, request.authority)?;
-  let (destination_successor_count, idempotent, destination_header_sequence) =
-    if destination_tree.root_hash == request.current_destination_tree_root {
-      let observation = request.destination.observe().map_err(MigrationCaptureReplayErrorV1::Publication)?;
-      if observation.selected.header.head_hash != destination_namespace_root {
-        return Err(MigrationFinalReconciliationErrorV1::invalid(
-          "migration_final_destination_divergence",
-          "destination HEAD differs from an unchanged final reconciliation tree",
-        ));
-      }
-      (0, true, observation.selected.header.slot_sequence)
-    } else {
-      let publication = publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
-        permit: request.permit,
-        destination: request.destination,
-        authority: request.authority,
-        source_sequence: request.freeze.authority().hard_publication_frontier,
-        source_root: &request.freeze.authority().namespace_root,
-        expected_head_hash: &predecessor_namespace_root,
-        tree: destination_tree.clone(),
-        semantic_timestamp_ms: request.publication_timestamp_ms,
-        transaction_domain: FINAL_RECONCILIATION_TRANSACTION_DOMAIN,
-        closure_domain: FINAL_RECONCILIATION_CLOSURE_DOMAIN,
-      })?;
-      (u64::from(!publication.idempotent), publication.idempotent, publication.observation.selected.header.slot_sequence)
-    };
+  let (destination_successor_count, idempotent) = if destination_tree.root_hash == request.current_destination_tree_root {
+    let observation = request.destination.observe().map_err(MigrationCaptureReplayErrorV1::Publication)?;
+    if observation.selected.header.head_hash != destination_namespace_root {
+      return Err(MigrationFinalReconciliationErrorV1::invalid(
+        "migration_final_destination_divergence",
+        "destination HEAD differs from an unchanged final reconciliation tree",
+      ));
+    }
+    (0, true)
+  } else {
+    let publication = publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
+      permit: request.permit,
+      destination: request.destination,
+      authority: request.authority,
+      source_sequence: request.freeze.authority().hard_publication_frontier,
+      source_root: &request.freeze.authority().namespace_root,
+      expected_head_hash: &predecessor_namespace_root,
+      tree: destination_tree.clone(),
+      semantic_timestamp_ms: request.publication_timestamp_ms,
+      transaction_domain: FINAL_RECONCILIATION_TRANSACTION_DOMAIN,
+      closure_domain: FINAL_RECONCILIATION_CLOSURE_DOMAIN,
+    })?;
+    (u64::from(!publication.idempotent), publication.idempotent)
+  };
   request.freeze.validate_unchanged()?;
   let final_observation = request.destination.observe().map_err(MigrationCaptureReplayErrorV1::Publication)?;
   if final_observation.selected.header.head_hash != destination_namespace_root {
@@ -407,6 +406,14 @@ pub fn execute_final_namespace_reconciliation_v1<'request, 'source>(
       "selected destination HEAD differs from the reconciled namespace root",
     ));
   }
+  let selected_authority = request.destination.load_selected_semantic_authority().map_err(MigrationCaptureReplayErrorV1::Publication)?;
+  if selected_authority.root_hash != destination_namespace_root || selected_authority.namespace_tree_root != destination_tree.root_hash {
+    return Err(MigrationFinalReconciliationErrorV1::invalid(
+      "migration_final_destination_semantic_authority",
+      "selected semantic authority differs from the reconciled namespace and tree roots",
+    ));
+  }
+  let destination_header_sequence = selected_authority.selected_header_slot_sequence;
   Ok(MigrationFinalNamespaceReconciliationReceiptV1 {
     frozen_source_root: request.freeze.authority().namespace_root.clone(),
     frozen_source_publication_sequence: request.freeze.authority().hard_publication_frontier,

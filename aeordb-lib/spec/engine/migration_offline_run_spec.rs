@@ -205,6 +205,65 @@ fn first_retirement_bearing_transition_resumes_without_forking_the_journal() {
   assert_durable_milestone_resumes(OfflineMigrationRunMilestoneV1::PreflightRunning);
 }
 
+#[test]
+fn every_preclone_progress_transition_resumes_without_forking_the_journal() {
+  for milestone in [
+    OfflineMigrationRunMilestoneV1::PreflightComplete,
+    OfflineMigrationRunMilestoneV1::CopyPending,
+    OfflineMigrationRunMilestoneV1::CopyRunning,
+  ] {
+    assert_durable_milestone_resumes(milestone);
+  }
+}
+
+#[test]
+fn base_clone_staging_resumes_through_the_existing_root_map_workspace() {
+  assert_durable_milestone_resumes(OfflineMigrationRunMilestoneV1::BaseCloneStaged);
+}
+
+#[test]
+fn published_base_successor_resumes_without_advancing_head_twice() {
+  assert_durable_milestone_resumes(OfflineMigrationRunMilestoneV1::BaseSuccessorPublished);
+}
+
+#[test]
+fn every_prefreeze_progress_transition_resumes_without_forking_the_journal() {
+  for milestone in [
+    OfflineMigrationRunMilestoneV1::CopyComplete,
+    OfflineMigrationRunMilestoneV1::ReconcilePending,
+    OfflineMigrationRunMilestoneV1::ReconcileRunning,
+    OfflineMigrationRunMilestoneV1::ReconcileComplete,
+    OfflineMigrationRunMilestoneV1::FinalFreezePending,
+    OfflineMigrationRunMilestoneV1::FinalFreezeRunning,
+  ] {
+    assert_durable_milestone_resumes(milestone);
+  }
+}
+
+#[test]
+fn final_reconciliation_boundaries_resume_through_exact_durable_closure() {
+  for milestone in [OfflineMigrationRunMilestoneV1::FinalNamespaceReconciled, OfflineMigrationRunMilestoneV1::FinalAuthorityStaged] {
+    assert_durable_milestone_resumes(milestone);
+  }
+}
+
+#[test]
+fn postclosure_durable_boundaries_resume_through_verified_completion() {
+  for milestone in [
+    OfflineMigrationRunMilestoneV1::FinalFreezeComplete,
+    OfflineMigrationRunMilestoneV1::RootMapPublished,
+    OfflineMigrationRunMilestoneV1::DestinationVerificationPending,
+    OfflineMigrationRunMilestoneV1::DestinationVerificationRunning,
+  ] {
+    assert_durable_milestone_resumes(milestone);
+  }
+}
+
+#[test]
+fn terminal_destination_verification_publication_resumes_immutably() {
+  assert_durable_milestone_resumes(OfflineMigrationRunMilestoneV1::DestinationVerificationComplete);
+}
+
 fn assert_durable_milestone_resumes(milestone: OfflineMigrationRunMilestoneV1) {
   let fixture = Fixture::new();
   let source_before = file_blake3(&fixture.source);
@@ -221,6 +280,11 @@ fn assert_durable_milestone_resumes(milestone: OfflineMigrationRunMilestoneV1) {
   assert_eq!(fixture.destination.exists(), milestone != OfflineMigrationRunMilestoneV1::ManifestDurable);
   assert_eq!(file_blake3(&fixture.source), source_before);
   assert_eq!(fs::metadata(&fixture.source).unwrap().len(), source_size);
+  if milestone == OfflineMigrationRunMilestoneV1::BaseSuccessorPublished {
+    let publisher = V4FirstAuthorityPublisher::open(&fixture.destination).unwrap();
+    let header = publisher.observe().unwrap().selected.header;
+    assert_eq!(publisher.load_selected_semantic_authority().unwrap().root_hash, header.head_hash);
+  }
 
   let resumed_cancellation = CancellationToken::new();
   let mut resumed_request = fixture.request(&resumed_cancellation);
@@ -230,10 +294,33 @@ fn assert_durable_milestone_resumes(milestone: OfflineMigrationRunMilestoneV1) {
   assert_eq!(receipt.phase, MigrationPhaseV1::DestinationVerify);
   assert_eq!(receipt.state, MigrationProgressStateV1::Complete);
   assert!(receipt.destination_full_verified);
+  assert!(receipt.copied_entity_count > 0, "milestone {milestone:?}");
+  assert!(receipt.copied_content_bytes > 0, "milestone {milestone:?}");
   assert_eq!(file_blake3(&fixture.source), source_before);
   assert_eq!(fs::metadata(&fixture.source).unwrap().len(), source_size);
 
-  if milestone == OfflineMigrationRunMilestoneV1::PreflightRunning {
+  if matches!(
+    milestone,
+    OfflineMigrationRunMilestoneV1::PreflightRunning
+      | OfflineMigrationRunMilestoneV1::PreflightComplete
+      | OfflineMigrationRunMilestoneV1::CopyPending
+      | OfflineMigrationRunMilestoneV1::CopyRunning
+      | OfflineMigrationRunMilestoneV1::BaseCloneStaged
+      | OfflineMigrationRunMilestoneV1::BaseSuccessorPublished
+      | OfflineMigrationRunMilestoneV1::CopyComplete
+      | OfflineMigrationRunMilestoneV1::ReconcilePending
+      | OfflineMigrationRunMilestoneV1::ReconcileRunning
+      | OfflineMigrationRunMilestoneV1::ReconcileComplete
+      | OfflineMigrationRunMilestoneV1::FinalFreezePending
+      | OfflineMigrationRunMilestoneV1::FinalFreezeRunning
+      | OfflineMigrationRunMilestoneV1::FinalNamespaceReconciled
+      | OfflineMigrationRunMilestoneV1::FinalAuthorityStaged
+      | OfflineMigrationRunMilestoneV1::FinalFreezeComplete
+      | OfflineMigrationRunMilestoneV1::RootMapPublished
+      | OfflineMigrationRunMilestoneV1::DestinationVerificationPending
+      | OfflineMigrationRunMilestoneV1::DestinationVerificationRunning
+      | OfflineMigrationRunMilestoneV1::DestinationVerificationComplete
+  ) {
     let publisher = V4FirstAuthorityPublisher::open(&fixture.destination).unwrap();
     let memory = MemoryCoordinator::new(MemoryPolicy::new(256 * MIB, 384 * MIB, 1, 32 * MIB).unwrap());
     let journal = publisher

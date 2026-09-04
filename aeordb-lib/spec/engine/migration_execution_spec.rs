@@ -820,6 +820,42 @@ fn successor_authority_refuses_precloned_identity_collisions_and_nonexact_retrie
 }
 
 #[test]
+fn exact_successor_retry_survives_a_later_non_head_header_publication() {
+  let algorithm = HashAlgorithm::Blake3_256;
+  let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);
+  let before = publisher.observe().unwrap();
+  let request = successor_request(algorithm, &before.selected.header, 0x7a, before.selected.header.updated_at_ms + 1, "retry-history.txt");
+  let successor = publisher.publish_successor_authority(&request).unwrap();
+  let chunk = b"header history after successor";
+  let chunk_key = digest_parts(algorithm, &[b"chunk:", chunk]);
+
+  let later = publisher
+    .publish_immutable_entity_batch(ImmutableEntityBatchPublicationRequestV1 {
+      database_id: &before.selected.header.database_id,
+      entities: &[ImmutableEntityWriteV1 {
+        entity_version: 0,
+        entry_type: EntryTypeV4::Chunk,
+        flags: 0,
+        key: &chunk_key,
+        stored_value: chunk,
+      }],
+      publication_timestamp_ms: successor.observation.selected.header.updated_at_ms + 1,
+    })
+    .unwrap();
+  assert!(later.observation.selected.header.slot_sequence > successor.observation.selected.header.slot_sequence);
+  assert_eq!(later.observation.selected.header.head_hash, successor.namespace_root.root_hash);
+  let selected_authority = publisher.load_selected_semantic_authority().unwrap();
+  assert_eq!(selected_authority.selected_header_slot_sequence, successor.observation.selected.header.slot_sequence);
+  assert_eq!(selected_authority.root_hash, successor.namespace_root.root_hash);
+
+  let retry = publisher.publish_successor_authority(&request).unwrap();
+  assert!(retry.idempotent);
+  assert_eq!(retry.namespace_root, successor.namespace_root);
+  assert_eq!(retry.publication_sequence, successor.publication_sequence);
+  assert_eq!(retry.observation, later.observation);
+}
+
+#[test]
 fn concurrent_successor_publications_from_one_predecessor_have_exactly_one_winner() {
   let algorithm = HashAlgorithm::Blake3_256;
   let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);

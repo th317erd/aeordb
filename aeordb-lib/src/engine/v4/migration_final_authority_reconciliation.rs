@@ -193,12 +193,12 @@ impl MigrationFinalAuthorityReconciliationProofV1<'_, '_> {
     let observation = destination.observe()?;
     if observation.selected.header.database_id != self.closure.database_id
       || observation.selected.header.physical_instance_id != self.closure.destination_physical_instance_id
-      || observation.selected.header.slot_sequence != self.closure.destination_header_sequence
+      || observation.selected.header.slot_sequence < self.closure.destination_header_sequence
       || observation.selected.header.head_hash != self.closure.destination_namespace_root
     {
       return Err(MigrationFinalAuthorityReconciliationErrorV1::invalid(
         "migration_final_authority_destination_changed",
-        "destination header or HEAD changed after final authority closure",
+        "destination header history precedes the closure or its HEAD changed after final authority reconciliation",
       ));
     }
     Ok(())
@@ -536,7 +536,7 @@ pub fn execute_final_authority_reconciliation_v1<'request, 'freeze, 'source>(
     budget.release(charge)?;
   }
   freeze.validate_unchanged()?;
-  let observation = validate_destination_authority(&request, request.namespace.destination_header_sequence)?;
+  let before_sink = validate_destination_authority(&request, request.namespace.destination_header_sequence)?;
   let mapping_closure = MigrationFinalRootMappingClosureV1 {
     database_id: request.permit.database_id(),
     migration_id: request.permit.migration_id(),
@@ -545,7 +545,7 @@ pub fn execute_final_authority_reconciliation_v1<'request, 'freeze, 'source>(
     source_header_sequence: freeze.authority().header_sequence,
     frozen_source_root: freeze.authority().namespace_root.clone(),
     frozen_source_publication_sequence: freeze.authority().hard_publication_frontier,
-    destination_header_sequence: observation.selected.header.slot_sequence,
+    destination_header_sequence: request.namespace.destination_header_sequence,
     destination_namespace_root: request.namespace.destination_namespace_root.clone(),
     destination_tree_root: request.namespace.destination_tree_root.clone(),
     source_authority_counts: closure.source_authority_counts,
@@ -563,7 +563,7 @@ pub fn execute_final_authority_reconciliation_v1<'request, 'freeze, 'source>(
   check_cancelled(request.cancellation)?;
   freeze.validate_unchanged()?;
   let after_sink = validate_destination_authority(&request, mapping_closure.destination_header_sequence)?;
-  if after_sink.selected.header.slot_sequence != mapping_closure.destination_header_sequence
+  if after_sink.selected.header.slot_sequence != before_sink.selected.header.slot_sequence
     || after_sink.selected.header.head_hash != mapping_closure.destination_namespace_root
   {
     return Err(MigrationFinalAuthorityReconciliationErrorV1::invalid(

@@ -1046,10 +1046,8 @@ fn validate_loaded_authority(
   if authority.semantic_state.object_id != authority.root.semantic_state_root {
     return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("semantic-state edge mismatch"));
   }
-  if authority.admission.selected_header_slot_sequence > header.header.slot_sequence
-    || authority.admission.publication_sequence > header.header.write_sequence_high_water
-  {
-    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("admission sequence exceeds the captured header"));
+  if authority.admission.selected_header_slot_sequence > header.header.slot_sequence {
+    return Err(ReadViewAuthorizedFailureV1::AuthorityClosureCorrupt("admission sequence exceeds the captured header history"));
   }
   if let Some(legacy_root_hash) = &loaded.legacy_root_hash {
     if legacy_root_hash.len() != header.header.hash_algorithm.hash_length() || legacy_root_hash.iter().all(|byte| *byte == 0) {

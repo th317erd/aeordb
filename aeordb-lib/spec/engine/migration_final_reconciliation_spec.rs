@@ -1802,7 +1802,7 @@ fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
   freeze.validate_unchanged().unwrap();
   assert_eq!(fs::read(&fixture.source_path).unwrap(), before);
 
-  let stale = owner
+  let completed_retry = owner
     .complete_final_freeze(
       MigrationFinalFreezeCompletionRequestV1 {
         proof: final_authority.proof(),
@@ -1812,8 +1812,8 @@ fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
       },
       &mut retirement,
     )
-    .unwrap_err();
-  assert_eq!(stale.code(), "migration_final_authority_destination_changed");
+    .unwrap();
+  assert!(completed_retry.idempotent);
 
   let mut retry_inventory =
     FinalInventoryStream { seeds: rows.clone().into(), closure: final_inventory_closure(&fixture, &freeze, &rows, counts) };
@@ -1828,7 +1828,7 @@ fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
     &cancellation,
   ))
   .unwrap();
-  assert!(retry_authority.mapping_closure.destination_header_sequence > proof_destination_sequence);
+  assert_eq!(retry_authority.mapping_closure.destination_header_sequence, proof_destination_sequence);
   let retry = owner
     .complete_final_freeze(
       MigrationFinalFreezeCompletionRequestV1 {
@@ -1840,7 +1840,7 @@ fn only_live_final_authority_proof_can_complete_the_ampr_final_freeze() {
       &mut retirement,
     )
     .unwrap();
-  assert!(!retry.idempotent, "a newly observed destination watermark requires one monotonic AMPR update");
+  assert!(retry.idempotent, "non-HEAD header history must not change the final namespace watermark");
 }
 
 #[test]

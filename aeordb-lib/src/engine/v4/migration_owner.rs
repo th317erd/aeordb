@@ -257,6 +257,13 @@ impl Debug for MigrationStateOwnerV1 {
 }
 
 impl MigrationStateOwnerV1 {
+  pub(crate) fn observe_owned_progress_for_restart(&self, now_ms: i64) -> Result<MigrationProgressBodyV1, MigrationStateOwnerErrorV1> {
+    validate_destination_authority(&self.publisher, &self.permit)?;
+    let ((_, lease), (_, progress)) = require_migration_controls(&self.publisher, &self.permit)?;
+    validate_owned_held_controls(self, &lease, &progress, now_ms)?;
+    Ok(progress.body)
+  }
+
   pub fn observe_completed_destination_verification_if_present(
     publisher: &V4FirstAuthorityPublisher,
     permit: &MigrationPreflightPermitV1,
@@ -745,6 +752,18 @@ impl MigrationStateOwnerV1 {
         "live final-freeze proof is older than selected migration progress",
       ));
     }
+    if progress.body.state == MigrationProgressStateV1::Complete {
+      if progress.body.flags & MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD == 0
+        || progress.body.destination_header_sequence != closure.destination_header_sequence
+        || progress.body.reconciled_through_publication_sequence != closure.frozen_source_publication_sequence
+      {
+        return Err(MigrationStateOwnerErrorV1::invalid(
+          "migration_final_freeze_retry",
+          "completed final-freeze progress differs from the exact live closure proof",
+        ));
+      }
+      return Ok(progress_receipt(&progress, true));
+    }
 
     let mut body = progress.body.clone();
     body.phase = MigrationPhaseV1::FinalFreeze;
@@ -760,6 +779,15 @@ impl MigrationStateOwnerV1 {
       .proof
       .validate_for_completion(&self.permit, &self.publisher)
       .map_err(|error| MigrationStateOwnerErrorV1::invalid(error.code(), error.to_string()))?;
+    let authority_observation = self.publisher.observe()?;
+    if authority_observation.selected.header.slot_sequence < closure.destination_header_sequence
+      || authority_observation.selected.header.head_hash != closure.destination_namespace_root
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_final_freeze_authority",
+        "live destination authority no longer covers the final-freeze closure",
+      ));
+    }
     self.publish_progress_body_with_authority_expectation(
       context,
       &progress,
@@ -767,7 +795,7 @@ impl MigrationStateOwnerV1 {
       MIGRATION_PROGRESS_FLAG_SOURCE_WRITE_FREEZE_HELD,
       true,
       MutableSystemControlAuthorityExpectationV1 {
-        selected_header_sequence: closure.destination_header_sequence,
+        selected_header_sequence: authority_observation.selected.header.slot_sequence,
         head_hash: &closure.destination_namespace_root,
       },
       retirement_owner,

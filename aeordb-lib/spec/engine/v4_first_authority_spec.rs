@@ -187,6 +187,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let migration_destination_path = source_root.join("engine/v4/migration_destination.rs");
   let migration_final_authority_reconciliation_path = source_root.join("engine/v4/migration_final_authority_reconciliation.rs");
   let migration_final_reconciliation_path = source_root.join("engine/v4/migration_final_reconciliation.rs");
+  let migration_offline_run_path = source_root.join("engine/v4/migration_offline_run.rs");
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
   let migration_root_map_owner_path = source_root.join("engine/v4/migration_root_map_owner.rs");
   let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
@@ -219,6 +220,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &migration_destination_path,
       &migration_final_authority_reconciliation_path,
       &migration_final_reconciliation_path,
+      &migration_offline_run_path,
       &migration_owner_path,
       &migration_root_map_owner_path,
       &read_view_native_path,
@@ -241,6 +243,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &migration_destination_path,
     &migration_final_authority_reconciliation_path,
     &migration_final_reconciliation_path,
+    &migration_offline_run_path,
     &migration_owner_path,
     &migration_root_map_owner_path,
     &read_view_native_path,
@@ -252,6 +255,9 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     if owner_path == &migration_final_reconciliation_path {
       assert!(owner_source.contains("MigrationSourceWriteFreezeV1"));
       assert!(owner_source.contains("StorageEngine"));
+    } else if owner_path == &migration_offline_run_path {
+      assert!(owner_source.contains("StorageEngine::open_for_offline_migration_inspection"));
+      assert!(!owner_source.contains("StorageEngine::open("));
     } else if owner_path == &index_runtime_installation_path {
       assert!(owner_source.contains("StorageEngine"));
       assert!(owner_source.contains("begin_index_runtime_installation_v1"));

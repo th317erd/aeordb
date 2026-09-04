@@ -404,6 +404,7 @@ struct StagedPriorDestinationV1 {
 /// final mapping sink.
 pub struct LegacyRootMapStagedPriorLookupV1 {
   rows: Vec<StagedPriorDestinationV1>,
+  algorithm: HashAlgorithm,
   cancellation: CancellationToken,
   remaining_lookups: u64,
   _memory: MemoryReservation,
@@ -497,24 +498,43 @@ impl LegacyRootMapStagedPriorLookupV1 {
         ));
       }
     }
-    Ok(Self { rows, cancellation: workspace.cancellation.clone(), remaining_lookups: maximum_lookups, _memory: retained_memory })
+    Ok(Self {
+      rows,
+      algorithm: workspace.identity.algorithm,
+      cancellation: workspace.cancellation.clone(),
+      remaining_lookups: maximum_lookups,
+      _memory: retained_memory,
+    })
   }
-}
 
-impl MigrationFinalPriorRootMappingLookupV1 for LegacyRootMapStagedPriorLookupV1 {
-  fn lookup_destination_entity(&mut self, seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
-    check_cancelled(&self.cancellation).map_err(owner_engine_error)?;
+  pub(crate) fn lookup_destination_tree_by_legacy_root(
+    &mut self,
+    legacy_root: &[u8],
+  ) -> Result<Option<Vec<u8>>, LegacyRootMapOwnerErrorV1> {
+    check_cancelled(&self.cancellation)?;
     if self.remaining_lookups == 0 {
-      return Err(EngineError::ResourceExhausted("staged prior-root lookup exhausted its configured work bound".to_string()));
+      return Err(LegacyRootMapOwnerErrorV1::Capacity("staged prior-root lookup exhausted its configured work bound".to_string()));
+    }
+    if legacy_root.len() != self.algorithm.hash_length() || legacy_root.iter().all(|byte| *byte == 0) {
+      return Err(LegacyRootMapOwnerErrorV1::invalid(
+        "migration_root_map_prior_lookup_root",
+        "staged prior-root lookup requires one nonzero legacy root",
+      ));
     }
     self.remaining_lookups -= 1;
     Ok(
       self
         .rows
-        .binary_search_by(|row| row.legacy_root.as_slice().cmp(&seed.seed.hash))
+        .binary_search_by(|row| row.legacy_root.as_slice().cmp(legacy_root))
         .ok()
         .map(|index| self.rows[index].destination_tree.clone()),
     )
+  }
+}
+
+impl MigrationFinalPriorRootMappingLookupV1 for LegacyRootMapStagedPriorLookupV1 {
+  fn lookup_destination_entity(&mut self, seed: &MigrationFinalAuthoritySeedV1) -> EngineResult<Option<Vec<u8>>> {
+    self.lookup_destination_tree_by_legacy_root(&seed.seed.hash).map_err(owner_engine_error)
   }
 }
 
@@ -677,6 +697,14 @@ impl LegacyRootMapStagingWorkspaceV1 {
 
   pub fn workspace_path(&self) -> &Path {
     &self.workspace_path
+  }
+
+  pub const fn publication_timestamp_ms(&self) -> u64 {
+    self.publication_timestamp_ms
+  }
+
+  pub const fn is_sealed(&self) -> bool {
+    self.seal.is_some()
   }
 
   /// Revalidate a previously sealed staging closure against a newly produced

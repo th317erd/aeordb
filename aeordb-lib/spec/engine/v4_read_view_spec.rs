@@ -634,11 +634,11 @@ fn captured_header_admission_fails_before_root_lookup_and_preserves_concealment(
 }
 
 #[test]
-fn authority_high_water_and_legacy_mapping_corruption_fail_before_selected_authorization() {
+fn authority_header_sequence_and_legacy_mapping_corruption_fail_before_selected_authorization() {
   let algorithm = HashAlgorithm::Blake3_256;
   let head = hash(algorithm, 0x27);
   let mut future = FakeAuthoritySource::new(selected_header(algorithm, head.clone()), head.clone(), false);
-  future.authority.admission.publication_sequence = future.header.header.write_sequence_high_water + 1;
+  future.authority.admission.selected_header_slot_sequence = future.header.header.slot_sequence + 1;
   let future = Arc::new(future);
   let authorizer = FakeAuthorizer::standard(Arc::clone(&future.order));
   let resolver = ReadViewResolverV1::new(Arc::clone(&future), pin_coordinator(algorithm), all_capabilities_profile());

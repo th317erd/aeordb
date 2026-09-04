@@ -11,18 +11,19 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
 use std::io::Read;
 use std::mem::size_of;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::first_authority::V4FirstAuthorityPublisher;
+use super::first_authority::{PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use super::gc_retirement::{RetirementJournalBufferOptionsV1, RetirementJournalOwnerV1};
 use super::hash::digest_parts;
 use super::migration_base_clone_execution::{MigrationBaseCloneExecutionRequestV1, execute_migration_base_clone_v1};
 use super::migration_capture_replay::{
-  MigrationCaptureReplayAuthorityTemplateV1, MigrationSuccessorProjectionRequestV1, load_destination_tree, publish_migration_successor_v1,
+  MigrationCaptureReplayAuthorityTemplateV1, MigrationSuccessorProjectionRequestV1, load_destination_tree, namespace_root_for_tree,
+  publish_migration_successor_v1,
 };
 use super::migration_control::{MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MigrationPhaseV1, MigrationProgressStateV1};
 use super::migration_destination::{
@@ -59,6 +60,7 @@ use super::migration_v3_authority_inventory::{
 use super::namespace::{
   SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, decode_namespace_root, encode_semantic_state_object,
 };
+use super::root_authority::decode_root_admission_commit;
 use super::system_family::{MigrationPolicyV1, SystemFamilyPolicyDecisionV1, SystemFamilyPolicyResolverV1, SystemFamilySubjectV1};
 use crate::engine::btree::{BTreeNode, is_btree_format};
 use crate::engine::compression::decompress_bounded;
@@ -111,6 +113,24 @@ pub enum OfflineMigrationRunMilestoneV1 {
   MigrationControlsAcquired,
   SourceGcSuspended,
   PreflightRunning,
+  PreflightComplete,
+  CopyPending,
+  CopyRunning,
+  BaseCloneStaged,
+  BaseSuccessorPublished,
+  CopyComplete,
+  ReconcilePending,
+  ReconcileRunning,
+  ReconcileComplete,
+  FinalFreezePending,
+  FinalFreezeRunning,
+  FinalNamespaceReconciled,
+  FinalAuthorityStaged,
+  FinalFreezeComplete,
+  RootMapPublished,
+  DestinationVerificationPending,
+  DestinationVerificationRunning,
+  DestinationVerificationComplete,
 }
 
 pub trait OfflineMigrationRunMilestoneObserverV1 {
@@ -130,6 +150,14 @@ pub struct OfflineMigrationRunReceiptV1 {
   pub verified_root_count: u64,
   pub verified_entity_count: u64,
   pub verified_content_bytes: u64,
+}
+
+struct OfflineBaseCopyOutcomeV1 {
+  destination_head_tree: Vec<u8>,
+  destination_header_sequence: u64,
+  processed_seeds: u64,
+  published_entities: u64,
+  copied_chunk_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -506,51 +534,126 @@ fn execute_admitted_run(
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
   pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::PreflightRunning)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 0, 0, 0, 0, 0)?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::PreflightComplete)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Pending, 0, 0, 0, 0, 0)?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::CopyPending)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::CopyRunning)?;
 
   let source_basis = source.frozen_source_authority_snapshot().map_err(OfflineMigrationRunErrorV1::owned)?;
-  let base_predecessor = destination.load_selected_semantic_authority().map_err(OfflineMigrationRunErrorV1::owned)?.root_hash;
-  let authority = authority_template(permit, &base_predecessor, request.clock)?;
-  let inventory = collect_inventory(request, permit, source)?;
-  let mut seeds = inventory.into_base_clone_stream();
-  let mut root_workspace = create_root_workspace(request, permit, &memory, publication_time(clock)?)?;
-  let mut root_sink = LegacyRootMapProducerSinkV1::new(&mut root_workspace, &authority, source_basis.hard_publication_frontier)
-    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  let clone = execute_migration_base_clone_v1(MigrationBaseCloneExecutionRequestV1 {
+  let mut root_workspace = open_or_create_root_workspace(request, permit, &memory, publication_time(clock)?)?;
+  let workspace_timestamp_ms = root_workspace.publication_timestamp_ms();
+  let base_entity_timestamp_ms = checked_clock_offset(workspace_timestamp_ms, 1)?;
+  let base_successor_timestamp_ms = checked_clock_offset(workspace_timestamp_ms, 2)?;
+  let final_namespace_timestamp_ms = checked_clock_offset(workspace_timestamp_ms, 3)?;
+  let final_authority_timestamp_ms = checked_clock_offset(workspace_timestamp_ms, 4)?;
+  let initial_tree_root = initial_destination_root(permit);
+  let mut authority = authority_template(
     permit,
-    source: source.as_ref(),
-    seeds: &mut seeds,
-    seed_results: &mut root_sink,
-    destination,
-    memory: &memory,
-    cancellation: request.cancellation,
-    publication_timestamp_ms: publication_time(clock)?,
-    maximum_work_items: request.bounds.maximum_work_items,
-    maximum_memory_bytes: request.bounds.maximum_memory_bytes,
-    maximum_decoded_chunk_bytes: to_usize(request.bounds.maximum_decoded_chunk_bytes, "decoded chunk bound")?,
-    maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
-  })
+    &initial_tree_root,
+    OfflineMigrationRunClockV1 { wall_time_ms: workspace_timestamp_ms, monotonic_time_ms: request.clock.monotonic_time_ms },
+  )?;
+  authority.base_predecessor_head = namespace_root_for_tree(
+    permit.hash_algorithm(),
+    &PreparedNamespaceTreeV0 { root_hash: initial_tree_root, stored_value: Vec::new() },
+    &authority,
+  )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  drop(root_sink);
-
-  let base_tree = load_destination_tree(destination, &clone.destination_head_tree)
+  publication_time(clock)?;
+  let base = if root_workspace.is_sealed() {
+    let now_ms =
+      i64::try_from(clock.wall).map_err(|error| OfflineMigrationRunErrorV1::new("offline_migration_clock", error.to_string()))?;
+    let progress =
+      owner.observe_owned_progress_for_restart(now_ms).map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    let resumable_progress = matches!(
+      (progress.phase, progress.state),
+      (MigrationPhaseV1::FinalFreeze, MigrationProgressStateV1::Running | MigrationProgressStateV1::Complete)
+        | (MigrationPhaseV1::DestinationVerify, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running)
+    );
+    if !resumable_progress
+      || progress.destination_header_sequence == 0
+      || progress.copied_through_write_sequence != source_basis.hard_publication_frontier
+    {
+      return Err(OfflineMigrationRunErrorV1::new(
+        "offline_migration_sealed_progress",
+        "a sealed root-map workspace requires matching active final-freeze or destination-verification progress",
+      ));
+    }
+    let mut staged = LegacyRootMapStagedPriorLookupV1::snapshot(
+      &mut root_workspace,
+      &memory,
+      request.bounds.prior_lookup_maximum_memory_bytes,
+      request.bounds.maximum_authority_records,
+    )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
-    permit,
-    destination,
-    authority: &authority,
-    source_sequence: source_basis.hard_publication_frontier,
-    source_root: &source_basis.namespace_root,
-    expected_head_hash: &authority.base_predecessor_head,
-    tree: base_tree,
-    semantic_timestamp_ms: publication_time(clock)?,
-    transaction_domain: b"aeordb.offline-migration.base.transaction.v1\0",
-    closure_domain: b"aeordb.offline-migration.base.closure.v1\0",
-  })
-  .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    let destination_head_tree = staged
+      .lookup_destination_tree_by_legacy_root(permit.source_capture_head())
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?
+      .ok_or_else(|| {
+        OfflineMigrationRunErrorV1::new(
+          "offline_migration_sealed_base_mapping",
+          "sealed root-map workspace has no base mapping for the admitted source capture HEAD",
+        )
+      })?;
+    OfflineBaseCopyOutcomeV1 {
+      destination_head_tree,
+      destination_header_sequence: progress.destination_header_sequence,
+      processed_seeds: progress.namespace_count,
+      published_entities: progress.entity_count,
+      copied_chunk_bytes: progress.copied_bytes,
+    }
+  } else {
+    let inventory = collect_inventory(request, permit, source)?;
+    let mut seeds = inventory.into_base_clone_stream();
+    let mut root_sink = LegacyRootMapProducerSinkV1::new(&mut root_workspace, &authority, source_basis.hard_publication_frontier)
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    let clone = execute_migration_base_clone_v1(MigrationBaseCloneExecutionRequestV1 {
+      permit,
+      source: source.as_ref(),
+      seeds: &mut seeds,
+      seed_results: &mut root_sink,
+      destination,
+      memory: &memory,
+      cancellation: request.cancellation,
+      publication_timestamp_ms: base_entity_timestamp_ms,
+      maximum_work_items: request.bounds.maximum_work_items,
+      maximum_memory_bytes: request.bounds.maximum_memory_bytes,
+      maximum_decoded_chunk_bytes: to_usize(request.bounds.maximum_decoded_chunk_bytes, "decoded chunk bound")?,
+      maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
+    })
+    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    drop(root_sink);
+    pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::BaseCloneStaged)?;
 
-  let destination_sequence = destination.observe().map_err(OfflineMigrationRunErrorV1::owned)?.selected.header.slot_sequence;
+    let base_tree = load_destination_tree(destination, &clone.destination_head_tree)
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    let base_successor = publish_migration_successor_v1(MigrationSuccessorProjectionRequestV1 {
+      permit,
+      destination,
+      authority: &authority,
+      source_sequence: source_basis.hard_publication_frontier,
+      source_root: &source_basis.namespace_root,
+      expected_head_hash: &authority.base_predecessor_head,
+      tree: base_tree,
+      semantic_timestamp_ms: base_successor_timestamp_ms,
+      transaction_domain: b"aeordb.offline-migration.base.transaction.v1\0",
+      closure_domain: b"aeordb.offline-migration.base.closure.v1\0",
+    })
+    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+    pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::BaseSuccessorPublished)?;
+    OfflineBaseCopyOutcomeV1 {
+      destination_head_tree: clone.destination_head_tree,
+      destination_header_sequence: decode_root_admission_commit(&base_successor.admission_control, permit.hash_algorithm())
+        .map_err(OfflineMigrationRunErrorV1::owned)?
+        .selected_header_slot_sequence,
+      processed_seeds: clone.processed_seeds,
+      published_entities: clone.published_entities,
+      copied_chunk_bytes: clone.copied_chunk_bytes,
+    }
+  };
+  publication_time(clock)?;
+
+  let destination_sequence = base.destination_header_sequence;
   transition(
     &owner,
     &mut retirement,
@@ -560,10 +663,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Complete,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::CopyComplete)?;
   transition(
     &owner,
     &mut retirement,
@@ -573,10 +677,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Pending,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::ReconcilePending)?;
   transition(
     &owner,
     &mut retirement,
@@ -586,10 +691,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Running,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::ReconcileRunning)?;
   transition(
     &owner,
     &mut retirement,
@@ -599,10 +705,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Complete,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::ReconcileComplete)?;
   transition(
     &owner,
     &mut retirement,
@@ -612,10 +719,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Pending,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::FinalFreezePending)?;
   transition(
     &owner,
     &mut retirement,
@@ -625,10 +733,11 @@ fn execute_admitted_run(
     MigrationProgressStateV1::Running,
     destination_sequence,
     source_basis.hard_publication_frontier,
-    clone.processed_seeds,
-    clone.published_entities,
-    clone.copied_chunk_bytes,
+    base.processed_seeds,
+    base.published_entities,
+    base.copied_chunk_bytes,
   )?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::FinalFreezeRunning)?;
 
   let final_inventory = collect_inventory(request, permit, source)?;
   // Collect an independent verification stream before taking the final
@@ -644,16 +753,17 @@ fn execute_admitted_run(
     acquisition_timeout: request.acquisition_timeout,
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  publication_time(clock)?;
   let namespace = execute_final_namespace_reconciliation_v1(MigrationFinalNamespaceReconciliationRequestV1 {
     permit,
     freeze: &freeze,
     destination,
     last_reconciled_source_root: permit.source_capture_head(),
-    current_destination_tree_root: &clone.destination_head_tree,
+    current_destination_tree_root: &base.destination_head_tree,
     authority: &authority,
     memory: &memory,
     cancellation: request.cancellation,
-    publication_timestamp_ms: publication_time(clock)?,
+    publication_timestamp_ms: final_namespace_timestamp_ms,
     maximum_diff_memory_bytes: request.bounds.maximum_memory_bytes,
     maximum_diff_work_items: request.bounds.maximum_work_items,
     maximum_subtree_memory_bytes: request.bounds.maximum_memory_bytes,
@@ -663,6 +773,7 @@ fn execute_admitted_run(
     maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::FinalNamespaceReconciled)?;
   let mut prior = LegacyRootMapStagedPriorLookupV1::snapshot(
     &mut root_workspace,
     &memory,
@@ -670,10 +781,17 @@ fn execute_admitted_run(
     request.bounds.maximum_authority_records,
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  let legacy_final_sink = LegacyRootMapProducerSinkV1::new(&mut root_workspace, &authority, source_basis.hard_publication_frontier)
-    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let final_root_sink = if root_workspace.is_sealed() {
+    OfflineFinalRootMapSinkV1::Validate(SealedRootMapClosureValidationSinkV1::new(&root_workspace))
+  } else {
+    OfflineFinalRootMapSinkV1::Append(
+      LegacyRootMapProducerSinkV1::new(&mut root_workspace, &authority, source_basis.hard_publication_frontier)
+        .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?,
+    )
+  };
   let mut final_sink =
-    VerificationMappingCaptureSinkV1::new(legacy_final_sink, request.bounds.maximum_authority_records, request.bounds.maximum_memory_bytes);
+    VerificationMappingCaptureSinkV1::new(final_root_sink, request.bounds.maximum_authority_records, request.bounds.maximum_memory_bytes);
+  publication_time(clock)?;
   let final_authority = execute_final_authority_reconciliation_v1(MigrationFinalAuthorityReconciliationRequestV1 {
     permit,
     namespace: &namespace,
@@ -684,7 +802,7 @@ fn execute_admitted_run(
     authority: &authority,
     memory: &memory,
     cancellation: request.cancellation,
-    publication_timestamp_ms: publication_time(clock)?,
+    publication_timestamp_ms: final_authority_timestamp_ms,
     maximum_memory_bytes: request.bounds.maximum_memory_bytes,
     maximum_work_items: request.bounds.maximum_work_items,
     maximum_subtree_memory_bytes: request.bounds.maximum_memory_bytes,
@@ -695,21 +813,34 @@ fn execute_admitted_run(
     maximum_directory_depth: request.bounds.maximum_directory_depth as usize,
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::FinalAuthorityStaged)?;
   drop(final_stream);
   drop(prior);
   let detached_mappings = final_sink.into_mappings()?;
   let (updated, publication, monotonic) = clock.next()?;
-  owner
-    .complete_final_freeze(
-      MigrationFinalFreezeCompletionRequestV1 {
-        proof: final_authority.proof(),
-        updated_at_ms: updated,
-        publication_timestamp_ms: publication,
-        monotonic_now_ms: monotonic,
-      },
-      &mut retirement,
-    )
-    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let progress =
+    owner.observe_owned_progress_for_restart(updated).map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  if progress.phase == MigrationPhaseV1::FinalFreeze {
+    owner
+      .complete_final_freeze(
+        MigrationFinalFreezeCompletionRequestV1 {
+          proof: final_authority.proof(),
+          updated_at_ms: updated,
+          publication_timestamp_ms: publication,
+          monotonic_now_ms: monotonic,
+        },
+        &mut retirement,
+      )
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  } else if progress.phase != MigrationPhaseV1::DestinationVerify
+    || !matches!(progress.state, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running)
+  {
+    return Err(OfflineMigrationRunErrorV1::new(
+      "offline_migration_final_freeze_restart",
+      "restart progress neither requires nor covers final-freeze completion",
+    ));
+  }
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::FinalFreezeComplete)?;
   LegacyRootMapOwnerV1::new(destination)
     .publish(
       LegacyRootMapPublicationRequestV1 {
@@ -721,23 +852,36 @@ fn execute_admitted_run(
       &memory,
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::RootMapPublished)?;
 
   let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
   let (updated, publication, monotonic) = clock.next()?;
-  owner
-    .begin_destination_verification(
-      MigrationDestinationVerificationRequestV1 {
-        proof: final_authority.proof(),
-        root_map: &root_map,
-        cancellation: request.cancellation,
-        expected_map_generation: 1,
-        updated_at_ms: updated,
-        publication_timestamp_ms: publication,
-        monotonic_now_ms: monotonic,
-      },
-      &mut retirement,
-    )
-    .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let progress =
+    owner.observe_owned_progress_for_restart(updated).map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  if progress.phase == MigrationPhaseV1::FinalFreeze
+    || (progress.phase == MigrationPhaseV1::DestinationVerify && progress.state == MigrationProgressStateV1::Pending)
+  {
+    owner
+      .begin_destination_verification(
+        MigrationDestinationVerificationRequestV1 {
+          proof: final_authority.proof(),
+          root_map: &root_map,
+          cancellation: request.cancellation,
+          expected_map_generation: 1,
+          updated_at_ms: updated,
+          publication_timestamp_ms: publication,
+          monotonic_now_ms: monotonic,
+        },
+        &mut retirement,
+      )
+      .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  } else if progress.phase != MigrationPhaseV1::DestinationVerify || progress.state != MigrationProgressStateV1::Running {
+    return Err(OfflineMigrationRunErrorV1::new(
+      "offline_migration_destination_verification_restart",
+      "restart progress neither requires nor covers pending destination verification",
+    ));
+  }
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::DestinationVerificationPending)?;
   drop(root_map);
   let root_map = open_root_map(destination, permit, request.cancellation, &memory)?;
   let (updated, publication, monotonic) = clock.next()?;
@@ -755,6 +899,7 @@ fn execute_admitted_run(
       &mut retirement,
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::DestinationVerificationRunning)?;
   drop(root_map);
 
   let mut verification_stream = verification_inventory.into_final_authority_stream();
@@ -786,6 +931,7 @@ fn execute_admitted_run(
       &mut retirement,
     )
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::DestinationVerificationComplete)?;
   freeze.validate_unchanged().map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
   let checksum = file_blake3(request.source, request.cancellation)?;
   if checksum != permit.source_complete_file_checksum() {
@@ -801,8 +947,8 @@ fn execute_admitted_run(
     destination_full_verified: true,
     source_complete_file_checksum: checksum,
     destination_header_sequence: final_header.slot_sequence,
-    copied_entity_count: clone.published_entities,
-    copied_content_bytes: clone.copied_chunk_bytes,
+    copied_entity_count: base.published_entities,
+    copied_content_bytes: base.copied_chunk_bytes,
     verified_root_count: verification.roots,
     verified_entity_count: verification.entities,
     verified_content_bytes: verification.content_bytes,
@@ -922,6 +1068,27 @@ fn create_root_workspace(
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))
 }
 
+fn open_or_create_root_workspace(
+  request: &OfflineMigrationRunRequestV1<'_>,
+  permit: &MigrationPreflightPermitV1,
+  memory: &MemoryCoordinator,
+  publication_timestamp_ms: u64,
+) -> Result<LegacyRootMapStagingWorkspaceV1, OfflineMigrationRunErrorV1> {
+  if request.resume {
+    match fs::symlink_metadata(root_workspace_path(request, permit)) {
+      Ok(_) => return reopen_root_workspace(request, permit, memory),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => {
+        return Err(OfflineMigrationRunErrorV1::new(
+          "offline_migration_root_workspace_path",
+          format!("failed to inspect the manifest-bound root-map workspace: {error}"),
+        ));
+      }
+    }
+  }
+  create_root_workspace(request, permit, memory, publication_timestamp_ms)
+}
+
 fn reopen_root_workspace(
   request: &OfflineMigrationRunRequestV1<'_>,
   permit: &MigrationPreflightPermitV1,
@@ -947,10 +1114,13 @@ fn reopen_root_workspace(
     to_usize(request.bounds.root_map_maximum_publication_batch_bytes, "root-map publication bound")?,
   )
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-  let path =
-    request.workspace.join(hex::encode(permit.database_id())).join(hex::encode(permit.migration_id())).join("root-map-0000000000000001");
+  let path = root_workspace_path(request, permit);
   LegacyRootMapStagingWorkspaceV1::reopen(&path, identity, options, request.cancellation.clone(), memory)
     .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))
+}
+
+fn root_workspace_path(request: &OfflineMigrationRunRequestV1<'_>, permit: &MigrationPreflightPermitV1) -> PathBuf {
+  request.workspace.join(hex::encode(permit.database_id())).join(hex::encode(permit.migration_id())).join("root-map-0000000000000001")
 }
 
 fn initial_destination_root(permit: &MigrationPreflightPermitV1) -> Vec<u8> {
@@ -1015,6 +1185,14 @@ fn publication_time(clock: &mut RunClockV1) -> Result<u64, OfflineMigrationRunEr
   clock.next().map(|(_, publication, _)| publication)
 }
 
+fn checked_clock_offset(base_timestamp_ms: u64, steps: u64) -> Result<u64, OfflineMigrationRunErrorV1> {
+  CLOCK_STEP_MS
+    .checked_mul(steps)
+    .and_then(|offset| base_timestamp_ms.checked_add(offset))
+    .filter(|timestamp| *timestamp <= i64::MAX as u64)
+    .ok_or_else(|| OfflineMigrationRunErrorV1::new("offline_migration_clock", "durable migration timestamp anchor overflowed"))
+}
+
 fn validate_identity(identity: OfflineMigrationRunIdentityV1) -> Result<(), OfflineMigrationRunErrorV1> {
   if [
     identity.database_id,
@@ -1050,6 +1228,61 @@ struct DetachedVerificationMappingV1 {
   source_root: Vec<u8>,
   system_family_id: u16,
   destination_entity: Option<Vec<u8>>,
+}
+
+struct SealedRootMapClosureValidationSinkV1<'a> {
+  workspace: &'a LegacyRootMapStagingWorkspaceV1,
+  observed_mappings: u64,
+  finished: bool,
+}
+
+impl<'a> SealedRootMapClosureValidationSinkV1<'a> {
+  const fn new(workspace: &'a LegacyRootMapStagingWorkspaceV1) -> Self {
+    Self { workspace, observed_mappings: 0, finished: false }
+  }
+}
+
+impl MigrationFinalRootMappingSinkV1 for SealedRootMapClosureValidationSinkV1<'_> {
+  fn record_root_mapping(&mut self, _mapping: &MigrationFinalRootMappingV1) -> crate::engine::EngineResult<()> {
+    if self.finished {
+      return Err(crate::engine::EngineError::InvalidInput("sealed root-map validation received a mapping after closure".to_string()));
+    }
+    self.observed_mappings = self
+      .observed_mappings
+      .checked_add(1)
+      .ok_or_else(|| crate::engine::EngineError::ResourceExhausted("sealed root-map validation mapping count overflowed".to_string()))?;
+    Ok(())
+  }
+
+  fn finish_root_mappings(&mut self, closure: &MigrationFinalRootMappingClosureV1) -> crate::engine::EngineResult<()> {
+    if self.finished || self.observed_mappings != closure.mapping_count {
+      return Err(crate::engine::EngineError::InvalidInput("sealed root-map validation closure is duplicate or incomplete".to_string()));
+    }
+    self.workspace.validate_sealed_final_closure(closure).map_err(|error| crate::engine::EngineError::InvalidInput(error.to_string()))?;
+    self.finished = true;
+    Ok(())
+  }
+}
+
+enum OfflineFinalRootMapSinkV1<'a> {
+  Append(LegacyRootMapProducerSinkV1<'a>),
+  Validate(SealedRootMapClosureValidationSinkV1<'a>),
+}
+
+impl MigrationFinalRootMappingSinkV1 for OfflineFinalRootMapSinkV1<'_> {
+  fn record_root_mapping(&mut self, mapping: &MigrationFinalRootMappingV1) -> crate::engine::EngineResult<()> {
+    match self {
+      Self::Append(sink) => sink.record_root_mapping(mapping),
+      Self::Validate(sink) => sink.record_root_mapping(mapping),
+    }
+  }
+
+  fn finish_root_mappings(&mut self, closure: &MigrationFinalRootMappingClosureV1) -> crate::engine::EngineResult<()> {
+    match self {
+      Self::Append(sink) => sink.finish_root_mappings(closure),
+      Self::Validate(sink) => sink.finish_root_mappings(closure),
+    }
+  }
 }
 
 struct SelectedRootMapValidationSinkV1<'a, 'destination> {
