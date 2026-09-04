@@ -18,13 +18,14 @@ use super::first_authority::{
 };
 use super::private_workspace::is_canonical_lexical_absolute_utf8_path;
 use super::hash::digest_parts;
-use super::migration_preflight::MigrationPreflightPermitV1;
+use super::migration_preflight::{AuthorityInventoryCountsV1, MigrationPreflightPermitV1};
 use super::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use super::system_family::embedded_system_family_registry;
 use crate::engine::disk_kv_store::DiskKVStore;
 use crate::engine::durability_coordinator::DurabilityCoordinator;
 use crate::engine::emergency_spill::create_new_regular_file_read_write_no_follow;
-use crate::engine::kv_stages::initial_block_size;
+use crate::engine::kv_pages::{page_size, stage_for_count};
+use crate::engine::kv_stages::{KV_STAGE_SIZES, stage_params};
 use crate::engine::native_durability::{
   PlatformFileIdentityDescriptorV1, platform_file_identity, platform_file_identity_from_file, sync_directory_native, sync_file_all_native,
   verify_file_bytes_native, write_file_at_native,
@@ -34,6 +35,14 @@ const INITIAL_HEADER_SEQUENCE: u64 = 1;
 const INITIAL_WRITE_SEQUENCE: u64 = 1;
 const SYSTEM_FAMILY_REGISTRY_VERSION: u16 = 1;
 const NVT_VERSION: u8 = 1;
+// Base clone emits no more than one distinct content locator per verified v3
+// entity. Each retained authority root can additionally require a NamespaceRoot,
+// its admission witnesses, and root-map authority/page artifacts; eight leaves
+// explicit headroom above the current five-entity package. The fixed reserve
+// covers first authority, migration controls, progress revisions, and journal
+// artifacts without deriving capacity from an operator-supplied maximum.
+const OFFLINE_DESTINATION_FIXED_KV_ENTRY_HEADROOM: u64 = 4_096;
+const OFFLINE_DESTINATION_KV_ENTRIES_PER_AUTHORITY_ROOT: u64 = 8;
 const PATH_DIGEST_DOMAIN: &[u8] = b"aeordb.migration-destination-path.v1\0";
 const CLOSURE_DOMAIN: &[u8] = b"aeordb.migration-destination-closure.v1\0";
 
@@ -286,6 +295,22 @@ pub fn initialize_migration_destination_v1(
   initialize_migration_destination_with_observer_v1(request, &mut NoopMigrationDestinationInitializationObserverV1)
 }
 
+pub(super) fn initialize_migration_destination_for_offline_run_v1(
+  request: MigrationDestinationInitializationRequestV1<'_>,
+  verified_source_entries: u64,
+) -> Result<InitializedMigrationDestinationV1, MigrationDestinationInitializationErrorV1> {
+  let initial_kv_stage = offline_migration_initial_kv_stage(
+    verified_source_entries,
+    request.permit.source_authority_counts(),
+    request.permit.hash_algorithm().hash_length(),
+  )?;
+  initialize_migration_destination_with_observer_and_stage_v1(
+    request,
+    initial_kv_stage,
+    &mut NoopMigrationDestinationInitializationObserverV1,
+  )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 enum MigrationDestinationInitializationPhaseV1 {
@@ -331,8 +356,16 @@ fn initialize_migration_destination_with_observer_v1(
   request: MigrationDestinationInitializationRequestV1<'_>,
   observer: &mut impl MigrationDestinationInitializationObserverV1,
 ) -> Result<InitializedMigrationDestinationV1, MigrationDestinationInitializationErrorV1> {
+  initialize_migration_destination_with_observer_and_stage_v1(request, 0, observer)
+}
+
+fn initialize_migration_destination_with_observer_and_stage_v1(
+  request: MigrationDestinationInitializationRequestV1<'_>,
+  initial_kv_stage: usize,
+  observer: &mut impl MigrationDestinationInitializationObserverV1,
+) -> Result<InitializedMigrationDestinationV1, MigrationDestinationInitializationErrorV1> {
   validate_before_create(&request)?;
-  let prepared = prepare_before_create(&request)?;
+  let prepared = prepare_before_create(&request, initial_kv_stage)?;
   revalidate_destination_absent(request.destination)?;
   if request.cancellation.is_cancelled() {
     return Err(MigrationDestinationInitializationErrorV1::before(
@@ -370,7 +403,7 @@ fn initialize_migration_destination_with_observer_v1(
     request.permit.hash_algorithm(),
     prepared.header.kv_block_offset,
     prepared.header.hot_tail_offset,
-    0,
+    initial_kv_stage,
     coordinator.clone(),
   )
   .map_err(|error| created_error("migration_destination_kv", error.to_string()))?;
@@ -568,8 +601,55 @@ fn revalidate_destination_absent(
   }
 }
 
+fn offline_migration_initial_kv_stage(
+  verified_source_entries: u64,
+  authority_counts: AuthorityInventoryCountsV1,
+  hash_width: usize,
+) -> Result<usize, MigrationDestinationInitializationErrorV1> {
+  let authority_headroom = authority_counts.roots.checked_mul(OFFLINE_DESTINATION_KV_ENTRIES_PER_AUTHORITY_ROOT).ok_or_else(|| {
+    MigrationDestinationInitializationErrorV1::before(
+      "migration_destination_kv_capacity",
+      "migration authority KV-entry headroom overflowed",
+    )
+  })?;
+  let projected_entries = verified_source_entries
+    .checked_add(authority_headroom)
+    .and_then(|entries| entries.checked_add(OFFLINE_DESTINATION_FIXED_KV_ENTRY_HEADROOM))
+    .ok_or_else(|| {
+      MigrationDestinationInitializationErrorV1::before(
+        "migration_destination_kv_capacity",
+        "migration destination KV-entry projection overflowed",
+      )
+    })?;
+  let projected_entries = usize::try_from(projected_entries).map_err(|error| {
+    MigrationDestinationInitializationErrorV1::before(
+      "migration_destination_kv_capacity",
+      format!("migration destination KV-entry projection is not addressable: {error}"),
+    )
+  })?;
+  let fitting_stage = stage_for_count(projected_entries, hash_width);
+  let maximum_stage = KV_STAGE_SIZES.len().checked_sub(1).ok_or_else(|| {
+    MigrationDestinationInitializationErrorV1::before("migration_destination_kv_capacity", "migration destination KV stage table is empty")
+  })?;
+  let (_, fitting_buckets) = stage_params(fitting_stage, page_size(hash_width));
+  let fitting_capacity = fitting_buckets.checked_mul(crate::engine::kv_pages::MAX_ENTRIES_PER_PAGE).ok_or_else(|| {
+    MigrationDestinationInitializationErrorV1::before("migration_destination_kv_capacity", "migration destination KV capacity overflowed")
+  })?;
+  if projected_entries >= fitting_capacity {
+    return Err(MigrationDestinationInitializationErrorV1::before(
+      "migration_destination_kv_capacity",
+      "verified source and migration-authority entries exceed the largest supported destination KV stage",
+    ));
+  }
+  // The standalone shadow publisher deliberately does not own the runtime KV
+  // expansion state machine. Reserve one complete growth tier so normal hash
+  // bucket variance cannot strand a valid migration at the nominal fill limit.
+  Ok(fitting_stage.saturating_add(1).min(maximum_stage))
+}
+
 fn prepare_before_create(
   request: &MigrationDestinationInitializationRequestV1<'_>,
+  initial_kv_stage: usize,
 ) -> Result<PreparedMigrationDestinationV1, MigrationDestinationInitializationErrorV1> {
   let algorithm = request.permit.hash_algorithm();
   let registry = embedded_system_family_registry(algorithm)
@@ -580,7 +660,18 @@ fn prepare_before_create(
       "embedded SystemFamily registry differs from preflight",
     ));
   }
-  let kv_block_length = initial_block_size();
+  let kv_block_stage = u8::try_from(initial_kv_stage).map_err(|error| {
+    MigrationDestinationInitializationErrorV1::before(
+      "migration_destination_kv_capacity",
+      format!("initial destination KV stage is not persistable: {error}"),
+    )
+  })?;
+  let kv_block_length = KV_STAGE_SIZES.get(initial_kv_stage).copied().ok_or_else(|| {
+    MigrationDestinationInitializationErrorV1::before(
+      "migration_destination_kv_capacity",
+      "initial destination KV stage is outside the supported stage table",
+    )
+  })?;
   let hot_tail_offset = DATABASE_HEADER_V4_DATA_OFFSET.checked_add(kv_block_length).ok_or_else(|| {
     MigrationDestinationInitializationErrorV1::before("migration_destination_layout", "initial destination layout overflowed")
   })?;
@@ -598,7 +689,7 @@ fn prepare_before_create(
     kv_block_offset: DATABASE_HEADER_V4_DATA_OFFSET,
     kv_block_length,
     kv_block_version: DiskKVStore::CURRENT_KV_BLOCK_VERSION,
-    kv_block_stage: 0,
+    kv_block_stage,
     resize_in_progress: false,
     resize_target_stage: 0,
     nvt_offset: hot_tail_offset,

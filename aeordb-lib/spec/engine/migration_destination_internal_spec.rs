@@ -273,6 +273,24 @@ fn cancellation_is_honored_at_every_safe_prepublication_boundary() {
   }
 }
 
+#[test]
+fn offline_destination_stage_uses_verified_source_and_authority_headroom() {
+  let counts = AuthorityInventoryCountsV1 { roots: 1, ..AuthorityInventoryCountsV1::default() };
+
+  assert_eq!(offline_migration_initial_kv_stage(0, counts, HashAlgorithm::Blake3_256.hash_length()).unwrap(), 2);
+  assert_eq!(offline_migration_initial_kv_stage(66_893, counts, HashAlgorithm::Blake3_256.hash_length()).unwrap(), 3);
+  assert_eq!(offline_migration_initial_kv_stage(66_893, counts, HashAlgorithm::Sha512.hash_length()).unwrap(), 4);
+}
+
+#[test]
+fn offline_destination_stage_refuses_unrepresentable_source_capacity() {
+  let counts = AuthorityInventoryCountsV1 { roots: u64::MAX, ..AuthorityInventoryCountsV1::default() };
+
+  let error = offline_migration_initial_kv_stage(u64::MAX, counts, HashAlgorithm::Blake3_256.hash_length()).unwrap_err();
+
+  assert_eq!(error.code(), "migration_destination_kv_capacity");
+}
+
 #[cfg(unix)]
 #[test]
 fn destination_path_substitution_reports_the_original_open_file_identity() {

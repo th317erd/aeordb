@@ -66,6 +66,10 @@ struct Fixture {
 
 impl Fixture {
   fn new() -> Self {
+    Self::with_additional_files(0)
+  }
+
+  fn with_additional_files(additional_files: usize) -> Self {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     let source = root.join("source-v3.aeordb");
@@ -85,6 +89,11 @@ impl Fixture {
       .store_file_buffered(&context, "/nested/.aeordb-logs/node-local.log", b"omit this node-local log", Some("text/plain"))
       .unwrap();
     operations.store_file_buffered(&context, "/nested/current.bin", b"current bytes\0\xff", Some("application/octet-stream")).unwrap();
+    for index in 0..additional_files {
+      operations
+        .store_file_buffered(&context, &format!("/capacity-{index:04}.bin"), &index.to_le_bytes(), Some("application/octet-stream"))
+        .unwrap();
+    }
     engine.shutdown().unwrap();
     Self {
       _temporary: temporary,
@@ -168,6 +177,32 @@ fn real_offline_run_reaches_verified_shadow_without_changing_the_v3_source() {
   assert_eq!(receipt.verified_root_count, 2);
   assert!(receipt.verified_entity_count >= 7);
   assert_eq!(receipt.verified_content_bytes, 51);
+}
+
+#[test]
+fn offline_run_sizes_destination_kv_for_a_source_that_exceeds_stage_zero_and_resumes() {
+  let fixture = Fixture::with_additional_files(900);
+  let cancellation = CancellationToken::new();
+  let source_before = file_blake3(&fixture.source);
+
+  let receipt = execute_offline_migration_v1(fixture.request(&cancellation)).unwrap();
+
+  assert!(receipt.destination_full_verified);
+  assert_eq!(file_blake3(&fixture.source), source_before);
+  let mut destination = fs::File::open(&fixture.destination).unwrap();
+  let ReadOnlyDatabaseHeader::V4(header) = read_database_header_read_only(&mut destination).unwrap() else {
+    panic!("offline migration destination must be v4");
+  };
+  assert!(header.header.kv_block_stage > 0);
+
+  let destination_before_resume = file_blake3(&fixture.destination);
+  let resumed_cancellation = CancellationToken::new();
+  let mut resumed_request = fixture.request(&resumed_cancellation);
+  resumed_request.resume = true;
+  resumed_request.clock = OfflineMigrationRunClockV1 { wall_time_ms: 1_700_000_010_000, monotonic_time_ms: 20_000 };
+  assert_eq!(execute_offline_migration_v1(resumed_request).unwrap(), receipt);
+  assert_eq!(file_blake3(&fixture.source), source_before);
+  assert_eq!(file_blake3(&fixture.destination), destination_before_resume);
 }
 
 #[test]

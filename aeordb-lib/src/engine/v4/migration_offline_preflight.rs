@@ -68,6 +68,7 @@ pub struct OfflineMigrationPreflightRequestV1<'a> {
 pub struct OfflineMigrationPreflightV1 {
   report: MigrationPreflightReportV1,
   permit: MigrationPreflightPermitV1,
+  verified_source_entries: u64,
 }
 
 impl OfflineMigrationPreflightV1 {
@@ -77,6 +78,10 @@ impl OfflineMigrationPreflightV1 {
 
   pub const fn permit(&self) -> &MigrationPreflightPermitV1 {
     &self.permit
+  }
+
+  pub(super) const fn verified_source_entries(&self) -> u64 {
+    self.verified_source_entries
   }
 }
 
@@ -121,6 +126,7 @@ struct OpenSourceEvidenceV1 {
   inventory: super::migration_preflight::SourceAuthorityInventoryV1,
   memory: MigrationMemoryEvidenceV1,
   configuration: MigrationConfigurationEvidenceV1,
+  verified_source_entries: u64,
 }
 
 pub fn collect_offline_migration_preflight_v1(
@@ -188,6 +194,7 @@ pub fn collect_offline_migration_preflight_v1(
   )?;
   let baseline = CapabilitySetV1::v4_baseline();
   let resume_manifest = request.resume_manifest;
+  let verified_source_entries = open_evidence.verified_source_entries;
   let admission = MigrationPreflightRequestV1 {
     identity: MigrationIdentityEvidenceV1 {
       database_id: request.database_id,
@@ -222,7 +229,7 @@ pub fn collect_offline_migration_preflight_v1(
   if let Some(manifest) = resume_manifest {
     manifest.validate_permit(&permit).map_err(|error| OfflineMigrationPreflightErrorV1::new(error.code(), error.to_string()))?;
   }
-  Ok(OfflineMigrationPreflightV1 { report, permit })
+  Ok(OfflineMigrationPreflightV1 { report, permit, verified_source_entries })
 }
 
 fn collect_open_source_evidence(
@@ -233,6 +240,7 @@ fn collect_open_source_evidence(
   check_cancelled(request.cancellation)?;
   let verify_report = verify_checked(engine, source.canonical_path.to_str().expect("validated UTF-8 source path"))
     .map_err(|error| OfflineMigrationPreflightErrorV1::new("offline_migration_verify", error.to_string()))?;
+  let verified_source_entries = verify_report.valid_entries;
   let verification = StrictVerificationEvidenceV1::from_complete_report(
     &verify_report,
     source.evidence.selected_header_sequence,
@@ -277,7 +285,7 @@ fn collect_open_source_evidence(
   let memory =
     MigrationMemoryEvidenceV1::from_snapshot(&memory_snapshot, request.bounds.maximum_memory_bytes, request.bounds.maximum_memory_bytes)
       .map_err(|error| OfflineMigrationPreflightErrorV1::new(error.code(), error.to_string()))?;
-  Ok(OpenSourceEvidenceV1 { verification, inventory, memory, configuration })
+  Ok(OpenSourceEvidenceV1 { verification, inventory, memory, configuration, verified_source_entries })
 }
 
 impl From<crate::engine::EngineError> for OfflineMigrationPreflightErrorV1 {

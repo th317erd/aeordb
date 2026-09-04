@@ -27,7 +27,7 @@ use super::migration_capture_replay::{
 };
 use super::migration_control::{MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED, MigrationPhaseV1, MigrationProgressStateV1};
 use super::migration_destination::{
-  MigrationDestinationInitializationRequestV1, initialize_migration_destination_v1, observe_migration_destination_path_v1,
+  MigrationDestinationInitializationRequestV1, initialize_migration_destination_for_offline_run_v1, observe_migration_destination_path_v1,
 };
 use super::migration_final_authority_reconciliation::{
   MigrationFinalAuthorityReconciliationRequestV1, MigrationFinalRootMappingClosureV1, MigrationFinalRootMappingSinkV1,
@@ -247,6 +247,7 @@ pub fn execute_offline_migration_v1(
     resume_manifest: manifest.as_ref(),
   })
   .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
+  let verified_source_entries = preflight.verified_source_entries();
   let permit = preflight.permit().clone();
   let source_path =
     request.source.to_str().ok_or_else(|| OfflineMigrationRunErrorV1::new("offline_migration_source_path", "source path is not UTF-8"))?;
@@ -270,13 +271,16 @@ pub fn execute_offline_migration_v1(
       } else {
         let destination_observation = observe_migration_destination_path_v1(request.destination)
           .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-        let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
-          permit: &permit,
-          destination: &destination_observation,
-          created_at_ms: manifest.created_at_ms(),
-          writer_fence_epoch: 1,
-          cancellation: request.cancellation,
-        })
+        let destination = initialize_migration_destination_for_offline_run_v1(
+          MigrationDestinationInitializationRequestV1 {
+            permit: &permit,
+            destination: &destination_observation,
+            created_at_ms: manifest.created_at_ms(),
+            writer_fence_epoch: 1,
+            cancellation: request.cancellation,
+          },
+          verified_source_entries,
+        )
         .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
         pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::DestinationInitialized)?;
         execute_admitted_run(&request, &permit, &source, &destination.shared_publisher(), &mut clock, &mut milestone_observer)
@@ -296,13 +300,16 @@ pub fn execute_offline_migration_v1(
       pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::ManifestDurable)?;
       let destination_observation = observe_migration_destination_path_v1(request.destination)
         .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
-      let destination = initialize_migration_destination_v1(MigrationDestinationInitializationRequestV1 {
-        permit: &permit,
-        destination: &destination_observation,
-        created_at_ms: request.clock.wall_time_ms,
-        writer_fence_epoch: 1,
-        cancellation: request.cancellation,
-      })
+      let destination = initialize_migration_destination_for_offline_run_v1(
+        MigrationDestinationInitializationRequestV1 {
+          permit: &permit,
+          destination: &destination_observation,
+          created_at_ms: request.clock.wall_time_ms,
+          writer_fence_epoch: 1,
+          cancellation: request.cancellation,
+        },
+        verified_source_entries,
+      )
       .map_err(|error| OfflineMigrationRunErrorV1::new(error.code(), error.to_string()))?;
       pause_after(&mut milestone_observer, OfflineMigrationRunMilestoneV1::DestinationInitialized)?;
       execute_admitted_run(&request, &permit, &source, &destination.shared_publisher(), &mut clock, &mut milestone_observer)
