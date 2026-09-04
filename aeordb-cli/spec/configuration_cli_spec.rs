@@ -5,7 +5,9 @@ use aeordb_cli::configuration_cli::{collect_configuration_overrides, with_config
 use clap::{Command, error::ErrorKind};
 
 fn command() -> Command {
-  with_configuration_arguments(Command::new("aeordb").subcommand(Command::new("start")).subcommand(Command::new("verify")))
+  with_configuration_arguments(
+    Command::new("aeordb").subcommand(Command::new("start")).subcommand(Command::new("migrate-v4")).subcommand(Command::new("verify")),
+  )
 }
 
 #[test]
@@ -13,6 +15,16 @@ fn start_exposes_exactly_the_frozen_configuration_cli_registry() {
   let command = command();
   let start = command.find_subcommand("start").unwrap();
   let actual = start.get_arguments().filter_map(|argument| argument.get_long()).map(|name| format!("--{name}")).collect::<BTreeSet<_>>();
+  let expected = CONFIGURATION_PROPERTIES.iter().map(|property| property.cli.to_string()).collect::<BTreeSet<_>>();
+  assert_eq!(actual, expected);
+  assert_eq!(actual.len(), 41);
+}
+
+#[test]
+fn migrate_v4_exposes_exactly_the_frozen_configuration_cli_registry() {
+  let command = command();
+  let migrate = command.find_subcommand("migrate-v4").unwrap();
+  let actual = migrate.get_arguments().filter_map(|argument| argument.get_long()).map(|name| format!("--{name}")).collect::<BTreeSet<_>>();
   let expected = CONFIGURATION_PROPERTIES.iter().map(|property| property.cli.to_string()).collect::<BTreeSet<_>>();
   assert_eq!(actual, expected);
   assert_eq!(actual.len(), 41);
@@ -40,12 +52,33 @@ fn parser_captures_raw_values_under_the_registered_cli_names() {
 }
 
 #[test]
+fn migration_parser_captures_raw_values_under_the_registered_cli_names() {
+  let matches = command()
+    .try_get_matches_from([
+      "aeordb",
+      "migrate-v4",
+      "--migration-capture-max-bytes",
+      "4GiB",
+      "--migration-capture-free-reserve-bytes",
+      "2GiB",
+      "--migration-checkpoint-after-seconds",
+      "60",
+    ])
+    .unwrap();
+  let overrides = collect_configuration_overrides(&matches).unwrap();
+  assert_eq!(overrides.len(), 3);
+  assert_eq!(overrides.get("--migration-capture-max-bytes").unwrap(), "4GiB");
+  assert_eq!(overrides.get("--migration-capture-free-reserve-bytes").unwrap(), "2GiB");
+  assert_eq!(overrides.get("--migration-checkpoint-after-seconds").unwrap(), "60");
+}
+
+#[test]
 fn every_registered_argument_accepts_one_explicit_value() {
   for property in CONFIGURATION_PROPERTIES {
     let value = match property.kind {
       "boolean" => "true",
       "optional_bytes" => "null",
-      "path_or_auto" => "/var/lib/aeordb/runtime",
+      "path_or_auto" => "/tmp/codex/aeordb-runtime",
       _ => "1",
     };
     let matches = command()

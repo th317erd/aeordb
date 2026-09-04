@@ -132,7 +132,9 @@ cmp -s "$docs_manifest" "$docs_source" || fail "documentation page inventory dri
 
 migration_doc="$repo_root/docs/src/operations/migration.md"
 [[ -f "$migration_doc" ]] || fail "missing v3-to-v4 migration operator documentation"
-rg -Fq 'There is currently no public `aeordb migrate`, `aeordb cutover`, HTTP' "$migration_doc" \
+rg -Fq '`aeordb migrate-v4` builds and verifies a separate shadow only.' "$migration_doc" \
+  || fail "migration documentation does not expose the versioned shadow-only command"
+rg -Fq 'public `aeordb cutover`, HTTP migration route, service activation' "$migration_doc" \
   || fail "migration documentation does not preserve the no-public-activation boundary"
 rg -Fq 'Operator acceptance and first v4 write' "$migration_doc" \
   || fail "migration documentation does not separate acceptance from the first v4 write"

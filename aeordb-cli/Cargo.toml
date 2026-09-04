@@ -79,6 +79,10 @@ name = "deployment_spec"
 path = "spec/deployment_spec.rs"
 
 [[test]]
+name = "migration_v4_cli_spec"
+path = "spec/migration_v4_cli_spec.rs"
+
+[[test]]
 name = "status_spec"
 path = "spec/status_spec.rs"
 

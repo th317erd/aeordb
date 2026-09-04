@@ -11,6 +11,7 @@
 //! - `aeordb diff` — create a patch between versions
 //! - `aeordb import` — import a backup or patch
 //! - `aeordb promote` — promote a version hash to HEAD
+//! - `aeordb migrate-v4` — build and verify a separate v4 shadow
 //! - `aeordb emergency-reset` — reset the root API key
 
 use aeordb_cli::commands;
@@ -257,6 +258,8 @@ enum Commands {
     #[arg(long)]
     json: bool,
   },
+  /// Build and verify a separate v4 shadow from an offline v3 source copy
+  MigrateV4(commands::migrate_v4::MigrateV4Args),
 }
 
 #[tokio::main]
@@ -446,6 +449,17 @@ async fn main() {
           eprintln!("Deployment transition-state inspection failed: {error}");
           std::process::exit(1);
         }
+      }
+    }
+    Commands::MigrateV4(arguments) => {
+      let json = arguments.json;
+      if let Err(error) = commands::migrate_v4::run(arguments, command_line_overrides).await {
+        if json {
+          eprintln!("{}", error.json());
+        } else {
+          eprintln!("Migration failed: {error}");
+        }
+        std::process::exit(1);
       }
     }
   }

@@ -71,12 +71,12 @@ ordinary startup does not reinterpret v3 bytes as v4.
   state machine selects it; migration workspaces are never service authority.
 
 ### Migration policy
-- There is currently no public `aeordb migrate`/`cutover` command or HTTP
-  migration route and no automatic v3-to-v4 activation.
-- A future public format transition must ship with versioned, documented,
-  bounded side-by-side orchestration, exact capability checks, copied-data
-  rehearsal, rollback, and explicit acceptance. An in-place byte rewrite is
-  not an acceptable migration policy.
+- `aeordb migrate-v4` provides versioned, bounded, side-by-side shadow creation
+  and complete verification for an offline v3 copy. It never rewrites the
+  source or activates the destination.
+- There is no public `cutover` command or HTTP migration route and no automatic
+  v3-to-v4 activation. Cutover, rollback, and explicit acceptance remain
+  separately gated; an in-place byte rewrite is not an acceptable policy.
 - See [V3-to-V4 Migration and Cutover](./migration.md) for the current release
   boundary.
 

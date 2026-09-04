@@ -4,6 +4,7 @@ pub mod emergency_reset;
 pub mod export;
 pub mod gc;
 pub mod import_cmd;
+pub mod migrate_v4;
 pub mod probe;
 pub mod promote;
 pub mod start;

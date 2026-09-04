@@ -5,10 +5,12 @@ side-by-side migration substrate. The currently shipped service still selects
 the v3 compatibility runtime for ordinary database opens, reads, writes,
 queries, and garbage collection.
 
-> **There is currently no public `aeordb migrate`, `aeordb cutover`, HTTP
-> migration route, or automatic v3-to-v4 upgrade.** Do not call internal Rust
-> migration modules, edit migration controls, rename database artifacts by
-> hand, or treat a normal server restart as a v4 migration.
+> **`aeordb migrate-v4` builds and verifies a separate shadow only. There is no
+> public `aeordb cutover`, HTTP migration route, service activation, operator
+> acceptance, first-v4-write, or automatic upgrade command.** Do not call
+> internal Rust migration modules, edit migration controls, rename database
+> artifacts by hand, or treat a successful shadow receipt or normal server
+> restart as v4 acceptance.
 
 This page documents the release boundary and the operator protocol that the
 staged migration implementation enforces. It is not authorization to run a
@@ -23,7 +25,8 @@ cutover, first v4 write, or destructive v4 garbage collection.
 | V3 readers and recovery | Required and retained |
 | V4 formats, bounded readers/writers, roots, lifecycle, GC, native indexes, and query implementation | Implemented and independently tested |
 | Side-by-side clone, capture, reconciliation, verification, cutover journal, rollback, and crash recovery | Implemented as an internal/rehearsal substrate |
-| Public migration CLI or HTTP API | Not available |
+| Public migration CLI | `aeordb migrate-v4` for offline shadow creation/verification only |
+| Public cutover or HTTP migration API | Not available |
 | Automatic v3-to-v4 migration on startup | Disabled |
 | Copied-production rehearsal and canary | Require explicit environment/data authorization |
 | Operator acceptance and first v4 write | Not performed by ordinary startup or deployment |
@@ -45,10 +48,10 @@ Do not confuse these independent operations:
    FileRecord payloads through the current writer and populate fields such as
    whole-file `content_hash`. See [Reindexing](./reindex.md). This also is not a
    v4 database migration.
-3. **V3-to-v4 side-by-side migration.** The staged campaign builds a separate
-   destination, captures concurrent source changes, reconciles exact authority,
-   verifies closure, and changes the service-path identity only through a
-   journaled cutover. This operation is not currently exposed to operators.
+3. **V3-to-v4 side-by-side migration.** `aeordb migrate-v4` exposes the
+   offline, source-invariant shadow creation and complete verification portion.
+   Changing the service-path identity still requires the separately gated
+   journaled cutover substrate and is not exposed to operators.
 
 `aeordb deployment-check` is likewise a binary-replacement safety probe. Its
 `aeordb.v3-transition-recovery.v1` capability means the candidate understands
@@ -84,8 +87,8 @@ invariants:
 
 ## Preparing an Authorized Rehearsal
 
-The public CLI cannot start the migration. When an approved orchestration tool
-is supplied, prepare its inputs as follows:
+The public CLI can build a verified shadow but cannot cut it over. Prepare an
+authorized `aeordb migrate-v4` run as follows:
 
 1. Stop or snapshot through a supported mechanism before making a byte copy.
    Do not assume that copying a live, mutating database file produces a
@@ -103,6 +106,14 @@ is supplied, prepare its inputs as follows:
    migration limits. Configuration drift requires a new preflight.
 7. Define the explicit cancellation, rollback, read-only validation,
    acceptance, monitoring, and destructive-GC owners before execution.
+
+Run `aeordb migrate-v4 --help` for the complete resource-bound and registered
+configuration surface. A fresh run requires exact absolute source,
+destination, and workspace paths plus the candidate's 40-hex source commit.
+Resume uses the same three paths with `--resume`; it reloads immutable
+identities, source commit, holder, and bounds from `migration-run-v1.json` and
+refuses drift. With `--json`, retain stderr's NDJSON milestone stream and
+stdout's final versioned receipt separately.
 
 Use [Backup & Restore](./backup.md) for logical backup workflows and
 [`aeordb verify`](../cli/commands.md#aeordb-verify) for read-only integrity
@@ -123,6 +134,9 @@ The internal state machine is designed around these stop-capable phases:
 4. **Final reconciliation:** freeze the exact final source root, replay and
    reconcile capture, publish the final root map, and verify the complete
    destination against the frozen source authority.
+`aeordb migrate-v4` ends after step 4 has produced a completely verified
+destination. It exposes none of the remaining steps:
+
 5. **Read-only cutover validation:** journal each same-filesystem namespace
    transition, preserve the exact source at the backup identity, install the
    verified destination at the service identity, reopen read-only, and run
@@ -185,8 +199,11 @@ Retain, outside the repository and outside the database being exercised:
 - Run `aeordb verify` read-only against a disposable or authorized copy.
 - Run current v3 GC only under the current [GC runbook](./gc.md); do not treat
   it as v4 lifecycle retirement.
-- Wait for a versioned, documented orchestration command before attempting a
-  v3-to-v4 migration.
+- Run the versioned `aeordb migrate-v4` command only against an explicitly
+  authorized, separately checksummed offline source copy. Preserve its
+  workspace, milestone log, and receipt; use `--resume` after interruption.
+- Treat a verified shadow as non-service evidence. Do not rename it into place,
+  start a service against it, or infer cutover/acceptance authority.
 
 ## See Also
 

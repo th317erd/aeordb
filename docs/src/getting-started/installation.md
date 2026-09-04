@@ -66,12 +66,14 @@ Commands:
   deployment-capabilities
                     Report binary capabilities used by checked installers
   deployment-check Check whether a candidate may replace the current binary
+  migrate-v4       Build and verify a separate v4 shadow from an offline v3 source copy
   help             Print this message or the help of the given subcommand(s)
 ```
 
-There is no public `migrate` or `cutover` command. Installing a candidate does
-not convert an existing v3 database to v4, and the deployment transition
-capability is not a v4-acceptance flag. See
+`migrate-v4` creates and verifies a separate shadow only. There is no public
+`cutover` command. Installing a candidate does not convert an existing v3
+database to v4, and neither the deployment transition capability nor a shadow
+receipt is a v4-acceptance flag. See
 [V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## Optional: Install an Existing Binary

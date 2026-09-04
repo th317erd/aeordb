@@ -8,8 +8,9 @@ v3-to-v4 migration boundary.
 
 The currently selected service authority is the v3 compatibility runtime. The
 binary also contains the independently tested v4 format/root/GC/native-index
-and migration substrate, but ordinary startup does not select it and there is
-no public migration command. See
+and migration substrate. `aeordb migrate-v4` can build a separate verified
+shadow, but ordinary startup does not select it and no public cutover command
+exists. See
 [V3-to-V4 Migration and Cutover](../operations/migration.md).
 
 ## High-Level Overview

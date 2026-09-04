@@ -2,9 +2,11 @@
 
 Complete reference for the `aeordb` command-line interface.
 
-The current CLI has no `migrate` or `cutover` subcommand. Ordinary start,
-install, export/import, promote, reindex, and deployment checks do not activate
-the staged v4 database format. See
+The CLI exposes `migrate-v4` for building and fully verifying a separate v4
+shadow from an offline v3 source copy. It does not cut over a service path,
+accept v4, or enable v4 writes. There is no public `cutover` command. Ordinary
+start, install, export/import, promote, reindex, and deployment checks do not
+activate the staged v4 database format. See
 [V3-to-V4 Migration and Cutover](../operations/migration.md) for the exact
 release and authorization boundary.
 
@@ -179,6 +181,69 @@ A candidate without the transition-recovery capability may proceed only when
 the database is quiescent and has no active durability latch, unapplied spill,
 or incomplete repair. See [Deployment Safety](../operations/deployment-safety.md)
 for the policy matrix and installer behavior.
+
+---
+
+## `aeordb migrate-v4`
+
+Build and fully verify a separate v4 shadow from an offline v3 database copy.
+The command never rewrites the v3 source, renames a service database, performs
+cutover, grants service-write authority, records operator acceptance, or runs
+destructive v4 garbage collection.
+
+Fresh run:
+
+```bash
+aeordb migrate-v4 \
+  --source /home/operator/rehearsal/source-v3.aeordb \
+  --destination /home/operator/rehearsal/destination-v4.aeordb \
+  --workspace /home/operator/rehearsal/migration-workspace \
+  --source-commit 0123456789abcdef0123456789abcdef01234567 \
+  --json
+```
+
+Resume after a canceled, interrupted, or forcibly terminated process:
+
+```bash
+aeordb migrate-v4 \
+  --source /home/operator/rehearsal/source-v3.aeordb \
+  --destination /home/operator/rehearsal/destination-v4.aeordb \
+  --workspace /home/operator/rehearsal/migration-workspace \
+  --resume \
+  --json
+```
+
+`--source`, `--destination`, and `--workspace` must be absolute, canonical,
+UTF-8 paths. The source must be a separately preserved, quiescent v3 copy. The
+destination must be distinct and absent on a fresh run. `--source-commit` is
+the exact 40-hex commit used to build the candidate and is required only for a
+fresh run. The executable itself is SHA-256 hashed during preflight.
+
+Fresh-run resource options include `--maximum-memory-bytes`,
+`--maximum-work-items`, `--maximum-decoded-chunk-bytes`, authority/root-map
+bounds, and `--lease-duration-ms`. Byte quantities accept canonical unsigned
+integers with optional `KiB`, `MiB`, `GiB`, or `TiB` suffixes. The command also
+exposes all 41 registered runtime/lifecycle configuration arguments. At minimum,
+record the effective `migration.capture_max_bytes`,
+`migration.capture_free_reserve_bytes`, and
+`migration.checkpoint_after_seconds` values with the run evidence.
+
+Resume reopens `migration-run-v1.json` and reloads its exact identities, source
+commit, holder, paths, and resource bounds. Fresh-run bound flags are rejected
+with `--resume`. Use the same executable and effective configuration: binary,
+source, path, filesystem, configuration, or manifest drift fails closed.
+
+With `--json`, stderr is NDJSON containing
+`aeordb.offline-migration.progress.v1` milestone events, and stdout contains one
+`aeordb.offline-migration.receipt.v1` object only after complete destination
+verification. CLI syntax errors exit `2`; refused or failed migrations exit
+`1`; verified completion exits `0`. SIGINT and SIGTERM request bounded
+cancellation and wait for the worker to close. A forced process termination is
+recovered only by the explicit `--resume` command.
+
+See [V3-to-V4 Migration and Cutover](../operations/migration.md) before running
+this command. A successful shadow receipt is evidence for a later gate, not
+authorization to rename files or serve the destination.
 
 ---
 

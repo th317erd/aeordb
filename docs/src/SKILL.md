@@ -132,10 +132,12 @@ of silently accepting current HEAD. Share-link credentials are current-only.
 - If corruption is suspected, preserve the database file, lock file, configured external spill evidence, and logs before mutation. Current hot-tail recovery state is inside the database file.
 - Prefer graceful shutdown with SIGTERM/Ctrl+C and wait for completion.
 - Avoid broad unbounded searches or full-file fetches when a scoped search or range fetch will do.
-- Ordinary service operation still uses the v3 compatibility runtime. There is
-  no public `migrate` or `cutover` command/route and no automatic v4 activation.
-  Never invoke internal migration modules, rename database artifacts by hand,
-  or infer v4 acceptance from a healthy restart.
+- Ordinary service operation still uses the v3 compatibility runtime.
+  `aeordb migrate-v4` may build and verify a separate shadow from an authorized
+  offline v3 copy, but there is no public cutover command/route and no automatic
+  v4 activation. Never invoke internal migration modules, rename database
+  artifacts by hand, or infer v4 acceptance from a shadow receipt or healthy
+  restart.
 - Copied-production rehearsal, canary, installation/deployment, cutover,
   operator acceptance, first v4 write, and destructive v4 GC are distinct
   authorization boundaries. Approval for one does not approve the next.
