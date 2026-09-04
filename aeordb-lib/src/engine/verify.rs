@@ -4,6 +4,8 @@
 //! validates KV index, and produces a structured report.
 
 use std::fs::File;
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::engine::directory_ops::DirectoryOps;
 use crate::engine::errors::{EngineError, EngineResult};
@@ -416,8 +418,75 @@ pub fn verify_and_repair(engine: &StorageEngine, db_path: &str) -> VerifyReport 
   }
 }
 
-pub fn verify_and_repair_checked(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepairVerificationFrontier {
+  database_path: PathBuf,
+  file_size: u64,
+  modified: Option<SystemTime>,
+  header_sequence: u64,
+  hot_tail_offset: u64,
+}
+
+/// Opaque proof that a repair report was produced from one stable engine
+/// frontier. Callers may inspect the report for capacity planning, then
+/// consume the token exactly once to avoid repeating the full verification.
+#[must_use = "a preverified repair token must be consumed or deliberately discarded"]
+pub struct PreverifiedRepair<'engine> {
+  report: VerifyReport,
+  engine: &'engine StorageEngine,
+  frontier: RepairVerificationFrontier,
+}
+
+impl PreverifiedRepair<'_> {
+  pub fn report(&self) -> &VerifyReport {
+    &self.report
+  }
+}
+
+fn repair_verification_frontier(engine: &StorageEngine) -> EngineResult<RepairVerificationFrontier> {
+  let writer = engine.writer_read_lock()?;
+  let header = writer.file_header();
+  let metadata = std::fs::metadata(engine.database_path())?;
+  Ok(RepairVerificationFrontier {
+    database_path: engine.database_path().to_path_buf(),
+    file_size: metadata.len(),
+    modified: metadata.modified().ok(),
+    header_sequence: header.sequence,
+    hot_tail_offset: header.hot_tail_offset,
+  })
+}
+
+/// Verify once and bind the resulting report to the exact engine and durable
+/// frontier that were stable for the complete scan.
+pub fn verify_for_repair_checked<'engine>(engine: &'engine StorageEngine, db_path: &str) -> EngineResult<PreverifiedRepair<'engine>> {
+  let before = repair_verification_frontier(engine)?;
   let report = verify_checked(engine, db_path)?;
+  let after = repair_verification_frontier(engine)?;
+  if after != before {
+    return Err(EngineError::DurabilityFailure(
+      "database authority changed during pre-repair verification; refusing to create a stale repair token".to_string(),
+    ));
+  }
+  Ok(PreverifiedRepair { report, engine, frontier: after })
+}
+
+/// Consume a report created by [`verify_for_repair_checked`] without scanning
+/// the database a second time. The token is rejected if it belongs to another
+/// engine or if any bound durable/file frontier changed after verification.
+pub fn repair_preverified_report_checked(engine: &StorageEngine, verified: PreverifiedRepair<'_>) -> EngineResult<VerifyReport> {
+  if !std::ptr::eq(verified.engine, engine) {
+    return Err(EngineError::InvalidInput("preverified repair token belongs to a different storage engine".to_string()));
+  }
+  let current = repair_verification_frontier(engine)?;
+  if current != verified.frontier {
+    return Err(EngineError::InvalidInput("preverified repair token is stale because the database authority frontier changed".to_string()));
+  }
+
+  let db_path = verified.report.db_path.clone();
+  repair_report_checked(engine, &db_path, verified.report)
+}
+
+fn repair_report_checked(engine: &StorageEngine, db_path: &str, report: VerifyReport) -> EngineResult<VerifyReport> {
   let outcome = repair_verified_report(engine, &report)?;
   if outcome.messages.is_empty() {
     return Ok(report);
@@ -427,6 +496,11 @@ pub fn verify_and_repair_checked(engine: &StorageEngine, db_path: &str) -> Engin
     verify_checked(engine, db_path).map_err(|error| outcome.progress.preserve_error(error, "final_verification", db_path))?;
   final_report.repairs = outcome.messages;
   Ok(final_report)
+}
+
+pub fn verify_and_repair_checked(engine: &StorageEngine, db_path: &str) -> EngineResult<VerifyReport> {
+  let report = verify_checked(engine, db_path)?;
+  repair_report_checked(engine, db_path, report)
 }
 
 fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> EngineResult<RepairOutcome> {
@@ -1382,6 +1456,47 @@ mod repair_tests {
   use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
   use crate::engine::request_context::RequestContext;
   use crate::server::create_temp_engine_for_tests;
+
+  #[test]
+  fn preverified_repair_token_reuses_the_captured_report_without_a_second_scan() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let db_path = temp.path().join("test.aeordb");
+    let mut verified = verify_for_repair_checked(&engine, db_path.to_str().unwrap()).unwrap();
+    verified.report.file_size = 424_242;
+
+    let report = repair_preverified_report_checked(&engine, verified).unwrap();
+
+    assert_eq!(report.file_size, 424_242, "the captured report was replaced by a duplicate verification scan");
+  }
+
+  #[test]
+  fn preverified_repair_token_rejects_a_changed_durable_frontier() {
+    let (engine, temp) = create_temp_engine_for_tests();
+    let db_path = temp.path().join("test.aeordb");
+    let verified = verify_for_repair_checked(&engine, db_path.to_str().unwrap()).unwrap();
+    let key = engine.compute_hash(b"advance-after-verification").unwrap();
+    engine.store_entry(EntryType::Chunk, &key, b"new durable state").unwrap();
+    engine.force_hot_tail_flush().unwrap();
+
+    let error = repair_preverified_report_checked(&engine, verified).expect_err("a stale preverified report must not authorize repair");
+
+    assert!(matches!(error, EngineError::InvalidInput(_)), "unexpected stale-token error: {error}");
+    assert!(error.to_string().contains("stale"), "stale-token refusal must be explicit: {error}");
+  }
+
+  #[test]
+  fn preverified_repair_token_rejects_a_different_engine() {
+    let (first, first_temp) = create_temp_engine_for_tests();
+    let (second, _second_temp) = create_temp_engine_for_tests();
+    let db_path = first_temp.path().join("test.aeordb");
+    let verified = verify_for_repair_checked(&first, db_path.to_str().unwrap()).unwrap();
+
+    let error =
+      repair_preverified_report_checked(&second, verified).expect_err("a preverified report from another engine must not authorize repair");
+
+    assert!(matches!(error, EngineError::InvalidInput(_)), "unexpected wrong-engine token error: {error}");
+    assert!(error.to_string().contains("different storage engine"), "wrong-engine refusal must be explicit: {error}");
+  }
 
   #[test]
   fn checked_repair_propagates_rebuild_pressure_without_shutting_down_engine() {

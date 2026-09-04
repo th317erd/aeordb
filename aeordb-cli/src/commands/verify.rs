@@ -519,13 +519,14 @@ fn run_repair_pass(
     println!();
   }
 
-  let initial = match verify::verify_checked(engine, database) {
-    Ok(report) => report,
+  let verified = match verify::verify_for_repair_checked(engine, database) {
+    Ok(verified) => verified,
     Err(error) => {
       eprintln!("Verification could not complete before repair: {}", error);
       process::exit(1);
     }
   };
+  let initial = verified.report();
   if allow_kv_expansion && (initial.missing_kv_entries > 0 || initial.stale_kv_entries > 0) {
     let hash_length = engine.hash_algo().hash_length();
     let psize = aeordb::engine::kv_pages::page_size(hash_length);
@@ -547,7 +548,7 @@ fn run_repair_pass(
     }
   }
 
-  let report = match verify::verify_and_repair_checked(engine, database) {
+  let report = match verify::repair_preverified_report_checked(engine, verified) {
     Ok(report) => report,
     Err(error) => {
       eprintln!("Verification could not complete during repair: {}", error);
@@ -778,6 +779,16 @@ mod tests {
     let error = require_spill_apply_report(None).unwrap_err();
 
     assert!(error.contains("apply report"));
+  }
+
+  #[test]
+  fn repair_command_consumes_one_preverified_report_instead_of_rescanning() {
+    let source = include_str!("verify.rs");
+    let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+
+    assert_eq!(production.matches("verify::verify_for_repair_checked(").count(), 1);
+    assert_eq!(production.matches("verify::repair_preverified_report_checked(").count(), 1);
+    assert_eq!(production.matches("verify::verify_and_repair_checked(").count(), 0);
   }
 
   #[test]

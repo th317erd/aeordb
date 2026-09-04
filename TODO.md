@@ -1430,6 +1430,7 @@
             - [x] Make dirty rebuild resynchronize past historical malformed WAL regions without weakening the selected-frontier tail stop or explicit-rebuild strictness.
             - [x] Prevent failed partial engine initialization from publishing KV, hot-tail, or A/B-header state during `Drop`.
             - [x] Reject a selected durable WAL frontier outside physical bounds without mutation, while preserving explicit terminal-header repair.
+            - [x] Eliminate the repair CLI's duplicate full-WAL verification pass with an opaque engine/frontier-bound preverified token.
           - [ ] Require a separate strict verification pass, then remove write permission and set the repaired v3 file immutable in that order.
           - [ ] Create only one v4 shadow on `/mnt/storage`, enforce the 5 TB free-space floor, and exercise interruption/resume/parity/repeatability.
           - [ ] Treat recovery as desirable evidence while judging success primarily by permanent AeorDB hardening and honest fail-closed classification.
