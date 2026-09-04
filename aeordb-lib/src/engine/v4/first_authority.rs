@@ -22,7 +22,7 @@ use crate::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
 use tokio_util::sync::CancellationToken;
 
 use super::control_store::{SYSTEM_CONTROL_CONTENT_TYPE, discover_mutable_control};
-use super::contract_generated::kv_tag;
+use super::contract_generated::{format_hard_cap, kv_tag};
 use super::database_header::{DatabaseHeaderV4, SelectedDatabaseHeaderV4};
 use super::entity::{
   EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, WholeEntityWriteV1, checked_whole_entity_encoded_length, decode_whole_entity,
@@ -54,9 +54,10 @@ use super::gc_retirement::{
   RetirementJournalReplacementCoordinatorV1, RetirementJournalReplacementV1, RetirementJournalSinkErrorV1,
 };
 use super::gc_state::{
-  GcDirectoryRoleV1, GcStateArtifactV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, RetirementReasonV1, RootExpiryStateV1,
-  decode_gc_state_artifact, decode_retirement_journal_segment_v1, decode_root_candidate_record_v1, decode_root_expiry_record_v1,
-  retirement_journal_records_v1, validate_gc_directory_child, validate_gc_directory_page,
+  GcDirectoryRoleV1, GcStateArtifactV1, GcStateDirectoryEntryV1, GcStateDirectoryV1, RetirementJournalModelSummaryV1,
+  RetirementJournalReferenceModelV1, RetirementReasonV1, RootExpiryStateV1, decode_gc_state_artifact, decode_retirement_journal_segment_v1,
+  decode_root_candidate_record_v1, decode_root_expiry_record_v1, retirement_journal_records_v1, validate_gc_directory_child,
+  validate_gc_directory_page,
 };
 use super::gc_mark::{
   GcMarkArtifactV1, MARK_CHECKPOINT_VALUE_MAX, MarkResumeContextV1, decode_gc_mark_artifact, validate_mark_checkpoint_resume_context,
@@ -3041,6 +3042,227 @@ impl V4FirstAuthorityPublisher {
       key: entity.key.to_vec(),
       stored_value: entity.stored_value.to_vec(),
     }))
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn reconstruct_retirement_journal_summary(
+    &self,
+    cancellation: &CancellationToken,
+    memory: &MemoryCoordinator,
+    maximum_gc_artifacts: u64,
+    maximum_retirement_segments: u64,
+    maximum_retirement_records: u64,
+    maximum_memory_bytes: u64,
+  ) -> Result<Option<RetirementJournalModelSummaryV1>, FirstAuthorityPublicationErrorV1> {
+    if maximum_gc_artifacts == 0
+      || maximum_retirement_segments == 0
+      || maximum_retirement_segments > maximum_gc_artifacts
+      || maximum_retirement_records == 0
+      || maximum_memory_bytes == 0
+    {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_bounds",
+        "retirement-journal recovery requires nonzero ordered artifact, segment, record, and memory bounds",
+      ));
+    }
+    ensure_retirement_recovery_not_cancelled(cancellation)?;
+    let _root_state = self.root_state.lock().map_err(|poisoned| {
+      drop(poisoned);
+      FirstAuthorityPublicationErrorV1::StateLockPoisoned
+    })?;
+    ensure_retirement_recovery_not_cancelled(cancellation)?;
+    let captured = self.observe()?;
+    let header = &captured.selected.header;
+    if captured.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_authority",
+        "retirement-journal recovery requires non-degraded selected v4 authority",
+      ));
+    }
+    let kv = self.lock_kv()?;
+    validate_kv_header_alignment(&kv, header)?;
+    let snapshot = kv.snapshot_handle().load_full();
+    let artifact_count = snapshot.count_by_type(kv_tag::GC_ARTIFACT)?;
+    let artifact_count_u64 = u64::try_from(artifact_count).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_artifact_count",
+        format!("current GC-artifact count exceeds u64: {error}"),
+      )
+    })?;
+    if artifact_count_u64 > maximum_gc_artifacts {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_artifact_limit",
+        format!("current GC-artifact count {artifact_count_u64} exceeds its {maximum_gc_artifacts}-artifact bound"),
+      ));
+    }
+    if artifact_count == 0 {
+      ensure_retirement_recovery_authority_unchanged(self, header.slot_sequence, header.write_sequence_high_water, &header.head_hash)?;
+      return Ok(None);
+    }
+
+    const LOCATOR_MEMORY_BYTES: u64 = 256;
+    let locator_memory_bytes = artifact_count_u64.checked_mul(LOCATOR_MEMORY_BYTES).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid("retirement_journal_recovery_memory", "retirement-journal locator memory charge overflowed")
+    })?;
+    if locator_memory_bytes > maximum_memory_bytes {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_memory",
+        format!("retirement-journal locator inventory requires {locator_memory_bytes} bytes, exceeding its memory bound"),
+      ));
+    }
+    let _locator_memory = memory
+      .reserve(MemoryOwner::GarbageCollection, locator_memory_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("retirement_journal_recovery_memory", error.to_string()))?;
+    let locators = snapshot.iter_by_type(kv_tag::GC_ARTIFACT)?;
+    if locators.len() != artifact_count {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_snapshot",
+        "GC-artifact count and locator snapshot disagree",
+      ));
+    }
+    let maximum_gc_value_length = usize::try_from(format_hard_cap::GC_ARTIFACT_V1).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_entity_bound",
+        format!("GC-artifact hard cap exceeds usize: {error}"),
+      )
+    })?;
+    let maximum_gc_entity_length =
+      checked_whole_entity_encoded_length(header.hash_algorithm, header.hash_algorithm.hash_length(), maximum_gc_value_length)?;
+    let mut maximum_observed_entity_length = 0usize;
+    for locator in &locators {
+      let length = usize::try_from(locator.total_length).map_err(|error| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_entity_bound",
+          format!("GC-artifact locator length exceeds usize: {error}"),
+        )
+      })?;
+      maximum_observed_entity_length = maximum_observed_entity_length.max(length);
+    }
+    if maximum_observed_entity_length == 0 || maximum_observed_entity_length > maximum_gc_entity_length {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_entity_bound",
+        "a current GC artifact has an empty or over-limit physical entity length",
+      ));
+    }
+    let entity_memory_bytes = u64::try_from(maximum_observed_entity_length).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_memory",
+        format!("GC-artifact entity memory charge exceeds u64: {error}"),
+      )
+    })?;
+    if locator_memory_bytes.checked_add(entity_memory_bytes).is_none_or(|required| required > maximum_memory_bytes) {
+      return Err(FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_memory",
+        "retirement-journal locator and entity reads exceed their aggregate memory bound",
+      ));
+    }
+    let _entity_memory = memory
+      .reserve(MemoryOwner::GarbageCollection, entity_memory_bytes, AdmissionClass::Maintenance)
+      .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("retirement_journal_recovery_memory", error.to_string()))?;
+
+    struct RetirementSegmentLocatorV1 {
+      segment_ordinal: u64,
+      key: Vec<u8>,
+      entity_length: usize,
+    }
+    let maximum_segment_capacity = usize::try_from(maximum_retirement_segments).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_segment_limit",
+        format!("retirement-journal segment bound exceeds usize: {error}"),
+      )
+    })?;
+    let mut segments = Vec::new();
+    segments.try_reserve_exact(maximum_segment_capacity.min(artifact_count)).map_err(|error| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "retirement_journal_recovery_allocation",
+        format!("retirement-journal locator allocation failed: {error}"),
+      )
+    })?;
+    for locator in locators {
+      ensure_retirement_recovery_not_cancelled(cancellation)?;
+      if locator.type_flags != kv_tag::GC_ARTIFACT {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_locator",
+          "GC-artifact snapshot contains flags or another KV role",
+        ));
+      }
+      let entity_length = usize::try_from(locator.total_length).map_err(|error| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_entity_bound",
+          format!("GC-artifact locator length exceeds usize: {error}"),
+        )
+      })?;
+      let bytes = read_entity_bounded(&self.file, &kv, &locator.hash, maximum_gc_entity_length, header.write_sequence_high_water)?
+        .ok_or_else(|| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "retirement_journal_recovery_missing",
+            "current GC-artifact locator disappeared during retirement-journal recovery",
+          )
+        })?;
+      if bytes.len() != entity_length {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_locator",
+          "current GC-artifact locator length changed during retirement-journal recovery",
+        ));
+      }
+      let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+      if entity.entry_type != EntryTypeV4::GcArtifact
+        || entity.flags != WHOLE_ENTITY_V1_FLAG_SYSTEM
+        || entity.compression_algorithm != CompressionAlgorithm::None
+        || entity.key != locator.hash
+      {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_entity",
+          "current GC-artifact entity has invalid role, flags, compression, or key identity",
+        ));
+      }
+      let envelope = decode_gc_artifact_envelope(entity.stored_value)?;
+      if envelope.kind != GcArtifactKindV1::RetirementJournalSegment {
+        continue;
+      }
+      let segment = decode_retirement_journal_segment_v1(entity.stored_value, header.hash_algorithm)?;
+      if segment.key != locator.hash || segment.database_id != header.database_id {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_identity",
+          "retirement-journal segment key or database identity disagrees with selected authority",
+        ));
+      }
+      if u64::try_from(segments.len()).ok().is_none_or(|count| count >= maximum_retirement_segments) {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_segment_limit",
+          "retirement-journal segment count exceeds its admitted bound",
+        ));
+      }
+      segments.push(RetirementSegmentLocatorV1 { segment_ordinal: segment.segment_ordinal, key: locator.hash, entity_length });
+    }
+    if segments.is_empty() {
+      ensure_retirement_recovery_authority_unchanged(self, header.slot_sequence, header.write_sequence_high_water, &header.head_hash)?;
+      return Ok(None);
+    }
+    segments.sort_unstable_by(|left, right| left.segment_ordinal.cmp(&right.segment_ordinal).then_with(|| left.key.cmp(&right.key)));
+    let mut model = RetirementJournalReferenceModelV1::new(header.hash_algorithm, cancellation, maximum_retirement_records);
+    for locator in segments {
+      ensure_retirement_recovery_not_cancelled(cancellation)?;
+      let bytes =
+        read_entity_bounded(&self.file, &kv, &locator.key, locator.entity_length, header.write_sequence_high_water)?.ok_or_else(|| {
+          FirstAuthorityPublicationErrorV1::invalid(
+            "retirement_journal_recovery_missing",
+            "retirement-journal segment disappeared during ordered validation",
+          )
+        })?;
+      let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+      let segment = decode_retirement_journal_segment_v1(entity.stored_value, header.hash_algorithm)?;
+      if segment.segment_ordinal != locator.segment_ordinal || segment.key != locator.key {
+        return Err(FirstAuthorityPublicationErrorV1::invalid(
+          "retirement_journal_recovery_changed",
+          "retirement-journal segment changed between discovery and ordered validation",
+        ));
+      }
+      model.observe_segment(&segment).map_err(|error| FirstAuthorityPublicationErrorV1::invalid(error.code(), error.to_string()))?;
+    }
+    let summary = model.finish().map_err(|error| FirstAuthorityPublicationErrorV1::invalid(error.code(), error.to_string()))?;
+    ensure_retirement_recovery_authority_unchanged(self, header.slot_sequence, header.write_sequence_high_water, &header.head_hash)?;
+    Ok(Some(summary))
   }
 
   /// Load one immutable entity against exactly one captured v4 header.
@@ -13238,6 +13460,35 @@ fn read_entity_bounded(
     ));
   }
   Ok(Some(bytes))
+}
+
+fn ensure_retirement_recovery_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if cancellation.is_cancelled() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "retirement_journal_recovery_cancelled",
+      "retirement-journal recovery was canceled",
+    ));
+  }
+  Ok(())
+}
+
+fn ensure_retirement_recovery_authority_unchanged(
+  publisher: &V4FirstAuthorityPublisher,
+  selected_slot_sequence: u64,
+  selected_write_sequence_high_water: u64,
+  selected_head_hash: &[u8],
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  let current = publisher.observe()?;
+  if current.selected.header.slot_sequence != selected_slot_sequence
+    || current.selected.header.write_sequence_high_water != selected_write_sequence_high_water
+    || current.selected.header.head_hash != selected_head_hash
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "retirement_journal_recovery_authority_changed",
+      "selected v4 authority changed during retirement-journal recovery",
+    ));
+  }
+  Ok(())
 }
 
 struct LoadedIndexArtifactEntityV1 {

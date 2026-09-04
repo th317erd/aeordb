@@ -573,31 +573,7 @@ impl MigrationStateOwnerV1 {
       ));
     }
 
-    let body = MigrationProgressBodyV1 {
-      database_id: progress.body.database_id,
-      migration_id: progress.body.migration_id,
-      source_physical_instance_id: progress.body.source_physical_instance_id,
-      destination_physical_instance_id: progress.body.destination_physical_instance_id,
-      fencing_token: progress.body.fencing_token,
-      phase: request.phase,
-      state: request.state,
-      flags: request.flags,
-      source_header_sequence: progress.body.source_header_sequence,
-      destination_header_sequence: request.destination_header_sequence,
-      copied_through_write_sequence: request.copied_through_write_sequence,
-      captured_through_publication_sequence: progress.body.captured_through_publication_sequence,
-      reconciled_through_publication_sequence: request.reconciled_through_publication_sequence,
-      namespace_count: request.namespace_count,
-      entity_count: request.entity_count,
-      copied_bytes: request.copied_bytes,
-      updated_at_ms: request.updated_at_ms,
-      source_capture_head: progress.body.source_capture_head.clone(),
-      checkpoint_artifact: progress.body.checkpoint_artifact.clone(),
-      legacy_root_map_control_payload_hash: request.legacy_root_map_control_payload_hash,
-      effective_config_fingerprint: progress.body.effective_config_fingerprint.clone(),
-      system_family_registry_fingerprint: progress.body.system_family_registry_fingerprint.clone(),
-      last_error_evidence: request.last_error_evidence,
-    };
+    let body = progress_transition_body(&progress.body, &request);
     if body == progress.body {
       return Ok(MigrationProgressTransitionReceiptV1 {
         control_sequence: progress.sequence,
@@ -608,6 +584,39 @@ impl MigrationStateOwnerV1 {
       });
     }
     self.publish_progress_body(context, &progress, body, 0, false, retirement_owner)
+  }
+
+  /// Continue the monotonic offline transition schedule after reopening an
+  /// already persisted AMPR state. Ordinary callers retain the normal
+  /// forward-only `transition_progress` validation.
+  pub fn transition_progress_after_restart(
+    &self,
+    request: MigrationProgressTransitionRequestV1,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+  ) -> Result<MigrationProgressTransitionReceiptV1, MigrationStateOwnerErrorV1> {
+    if request.phase as u16 > MigrationPhaseV1::FinalFreeze as u16
+      || (request.phase == MigrationPhaseV1::FinalFreeze && request.state == MigrationProgressStateV1::Complete)
+    {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_progress_specialized_authority",
+        "final-freeze completion and every later phase require their specialized live-proof authority",
+      ));
+    }
+    let (_, progress) =
+      self.prepare_progress_publication(request.updated_at_ms, request.publication_timestamp_ms, request.monotonic_now_ms)?;
+    let target_body = progress_transition_body(&progress.body, &request);
+    drop(encode_migration_progress_control(progress.sequence, &target_body, self.permit.hash_algorithm())?);
+    validate_restart_progress_target(&target_body)?;
+    if persisted_progress_covers_restart_target(&progress.body, &request)? {
+      return Ok(progress_receipt(&progress, true));
+    }
+    if request.legacy_root_map_control_payload_hash != progress.body.legacy_root_map_control_payload_hash {
+      return Err(MigrationStateOwnerErrorV1::invalid(
+        "migration_progress_specialized_authority",
+        "the selected legacy root-map hash may change only through destination-verification authority",
+      ));
+    }
+    self.transition_progress(request, retirement_owner)
   }
 
   pub fn publish_capture_checkpoint(
@@ -2422,6 +2431,104 @@ fn validate_progress_transition(
     ));
   }
   Ok(())
+}
+
+fn progress_transition_body(current: &MigrationProgressBodyV1, request: &MigrationProgressTransitionRequestV1) -> MigrationProgressBodyV1 {
+  MigrationProgressBodyV1 {
+    database_id: current.database_id,
+    migration_id: current.migration_id,
+    source_physical_instance_id: current.source_physical_instance_id,
+    destination_physical_instance_id: current.destination_physical_instance_id,
+    fencing_token: current.fencing_token,
+    phase: request.phase,
+    state: request.state,
+    flags: request.flags,
+    source_header_sequence: current.source_header_sequence,
+    destination_header_sequence: request.destination_header_sequence,
+    copied_through_write_sequence: request.copied_through_write_sequence,
+    captured_through_publication_sequence: current.captured_through_publication_sequence,
+    reconciled_through_publication_sequence: request.reconciled_through_publication_sequence,
+    namespace_count: request.namespace_count,
+    entity_count: request.entity_count,
+    copied_bytes: request.copied_bytes,
+    updated_at_ms: request.updated_at_ms,
+    source_capture_head: current.source_capture_head.clone(),
+    checkpoint_artifact: current.checkpoint_artifact.clone(),
+    legacy_root_map_control_payload_hash: request.legacy_root_map_control_payload_hash.clone(),
+    effective_config_fingerprint: current.effective_config_fingerprint.clone(),
+    system_family_registry_fingerprint: current.system_family_registry_fingerprint.clone(),
+    last_error_evidence: request.last_error_evidence.clone(),
+  }
+}
+
+fn validate_restart_progress_target(target: &MigrationProgressBodyV1) -> Result<(), MigrationStateOwnerErrorV1> {
+  if matches!(target.state, MigrationProgressStateV1::Paused | MigrationProgressStateV1::Failed | MigrationProgressStateV1::Canceled) {
+    return Err(MigrationStateOwnerErrorV1::invalid(
+      "migration_restart_target_state",
+      "automatic migration restart may replay only pending, running, or complete schedule targets",
+    ));
+  }
+  if target.phase as u16 >= MigrationPhaseV1::Copy as u16 && target.flags & MIGRATION_PROGRESS_FLAG_SOURCE_GC_SUSPENDED == 0 {
+    return Err(MigrationStateOwnerErrorV1::invalid(
+      "migration_progress_gc_suspension_required",
+      "copy and later phases require durable source GC suspension",
+    ));
+  }
+  Ok(())
+}
+
+fn persisted_progress_covers_restart_target(
+  current: &MigrationProgressBodyV1,
+  target: &MigrationProgressTransitionRequestV1,
+) -> Result<bool, MigrationStateOwnerErrorV1> {
+  let current_phase = current.phase as u16;
+  let target_phase = target.phase as u16;
+  if matches!(current.state, MigrationProgressStateV1::Paused | MigrationProgressStateV1::Failed | MigrationProgressStateV1::Canceled) {
+    return Err(MigrationStateOwnerErrorV1::invalid(
+      "migration_restart_terminal_progress",
+      format!("offline migration cannot automatically continue from {:?} progress", current.state),
+    ));
+  }
+  if current_phase < target_phase {
+    return Ok(false);
+  }
+  if current_phase == target_phase {
+    let covered = matches!(
+      (current.state, target.state),
+      (MigrationProgressStateV1::Pending, MigrationProgressStateV1::Pending)
+        | (MigrationProgressStateV1::Running, MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running)
+        | (
+          MigrationProgressStateV1::Complete,
+          MigrationProgressStateV1::Pending | MigrationProgressStateV1::Running | MigrationProgressStateV1::Complete
+        )
+    );
+    if !covered {
+      return Ok(false);
+    }
+  }
+  if target.flags & current.flags != target.flags
+    || current.destination_header_sequence < target.destination_header_sequence
+    || current.copied_through_write_sequence < target.copied_through_write_sequence
+    || current.reconciled_through_publication_sequence < target.reconciled_through_publication_sequence
+    || current.namespace_count < target.namespace_count
+    || current.entity_count < target.entity_count
+    || current.copied_bytes < target.copied_bytes
+  {
+    return Err(MigrationStateOwnerErrorV1::invalid(
+      "migration_restart_progress_incomplete",
+      "persisted migration progress is later than the requested transition but does not cover its flags, watermarks, or counters",
+    ));
+  }
+  if (!all_zero(&target.legacy_root_map_control_payload_hash)
+    && current.legacy_root_map_control_payload_hash != target.legacy_root_map_control_payload_hash)
+    || (!all_zero(&target.last_error_evidence) && current.last_error_evidence != target.last_error_evidence)
+  {
+    return Err(MigrationStateOwnerErrorV1::invalid(
+      "migration_restart_progress_evidence",
+      "persisted migration progress is later than the requested transition but carries different durable evidence",
+    ));
+  }
+  Ok(true)
 }
 
 fn progress_receipt(progress: &MigrationProgressControlV1, idempotent: bool) -> MigrationProgressTransitionReceiptV1 {

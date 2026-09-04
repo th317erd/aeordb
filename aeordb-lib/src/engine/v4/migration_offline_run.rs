@@ -110,6 +110,7 @@ pub enum OfflineMigrationRunMilestoneV1 {
   DestinationInitialized,
   MigrationControlsAcquired,
   SourceGcSuspended,
+  PreflightRunning,
 }
 
 pub trait OfflineMigrationRunMilestoneObserverV1 {
@@ -445,15 +446,36 @@ fn execute_admitted_run(
   milestone_observer: &mut Option<&mut dyn OfflineMigrationRunMilestoneObserverV1>,
 ) -> Result<OfflineMigrationRunReceiptV1, OfflineMigrationRunErrorV1> {
   let memory = migration_memory(request.bounds)?;
-  let mut retirement = RetirementJournalOwnerV1::new_chain(
-    permit.hash_algorithm(),
-    permit.database_id(),
-    1,
-    1,
-    RetirementJournalBufferOptionsV1::new(1, RETIREMENT_SEGMENT_BYTES, 30_000),
-    request.cancellation,
-    &memory,
-  )
+  let retirement_options = RetirementJournalBufferOptionsV1::new(1, RETIREMENT_SEGMENT_BYTES, 30_000);
+  let retirement_summary = destination
+    .reconstruct_retirement_journal_summary(
+      request.cancellation,
+      &memory,
+      request.bounds.maximum_work_items,
+      request.bounds.maximum_work_items,
+      request.bounds.maximum_work_items,
+      request.bounds.maximum_memory_bytes,
+    )
+    .map_err(OfflineMigrationRunErrorV1::owned)?;
+  let mut retirement = match retirement_summary {
+    Some(summary) => RetirementJournalOwnerV1::resume_chain(
+      permit.hash_algorithm(),
+      permit.database_id(),
+      &summary,
+      retirement_options,
+      request.cancellation,
+      &memory,
+    ),
+    None => RetirementJournalOwnerV1::new_chain(
+      permit.hash_algorithm(),
+      permit.database_id(),
+      1,
+      1,
+      retirement_options,
+      request.cancellation,
+      &memory,
+    ),
+  }
   .map_err(OfflineMigrationRunErrorV1::owned)?;
   let (updated, publication, monotonic) = clock.next()?;
   let (owner, _) = MigrationStateOwnerV1::acquire(
@@ -482,6 +504,7 @@ fn execute_admitted_run(
   pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::SourceGcSuspended)?;
 
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
+  pause_after(milestone_observer, OfflineMigrationRunMilestoneV1::PreflightRunning)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Preflight, MigrationProgressStateV1::Complete, 0, 0, 0, 0, 0)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Pending, 0, 0, 0, 0, 0)?;
   transition(&owner, &mut retirement, clock, permit, MigrationPhaseV1::Copy, MigrationProgressStateV1::Running, 0, 0, 0, 0, 0)?;
@@ -801,7 +824,7 @@ fn transition(
 ) -> Result<(), OfflineMigrationRunErrorV1> {
   let (updated, publication, monotonic) = clock.next()?;
   owner
-    .transition_progress(
+    .transition_progress_after_restart(
       MigrationProgressTransitionRequestV1 {
         phase,
         state,
