@@ -1423,7 +1423,13 @@
               - [x] Correct the run-manifest and destination path gates for raw Windows verbatim dot segments, and keep malformed-state fixtures private under native Windows ACLs.
             - [x] Migrate the rehearsal copy, validate complete v3/v4 namespace and content parity, exercise restart/recovery and resource bounds, and retain every truthful attempt.
             - [x] Fix every defect through failing-first regression coverage and repeat until the large rehearsal is fully green.
-        - [ ] P8-1b: run the copied-production rehearsal only after separate approval to access a checksummed production-derived copy.
+        - [ ] P8-1b: run the explicitly authorized in-place repair and same-pool production-scale development migration without a full repair copy.
+          - [ ] Capture the offline service/file/pool/emergency-artifact baseline and prove the exact candidate plus protection mechanics before source mutation.
+          - [ ] Run `verify --repair --force-fix-in-place` under retained resource/capacity monitoring; never create `<database>.repaired`.
+          - [ ] Turn every repair defect into a failing-first bounded regression, fix AeorDB, rebuild the exact candidate, and retry while practical.
+          - [ ] Require a separate strict verification pass, then remove write permission and set the repaired v3 file immutable in that order.
+          - [ ] Create only one v4 shadow on `/mnt/storage`, enforce the 5 TB free-space floor, and exercise interruption/resume/parity/repeatability.
+          - [ ] Treat recovery as desirable evidence while judging success primarily by permanent AeorDB hardening and honest fail-closed classification.
       - [x] Bind v4 migration capture, checkpoint, external-run, and cutover workspaces under `migration` admission when their runtime writers are activated.
       - [x] Expose separate `file://` identity-engine memory and cache residency in runtime observability without double-counting `auth=self`.
       - [x] P8-2a: build exact-source Linux/macOS/Windows release candidates, require full embedded mdBook assets, verify version/capability/binary digests, and exercise the real documentation routes with clean shutdown.
