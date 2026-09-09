@@ -1,5 +1,12 @@
 # AeorDB v4 Repository-Only Definition-of-Done Evidence
 
+> These receipts qualify historical candidate `535004f1`. Later migration
+> development and retirement of the production repair are described in the
+> [2026-09-09 handoff](handoff-2026-09-09-gpt-6-astra.md); the current
+> [cache/progress follow-up](progress/09-repair-cache-followup.md) records its own
+> source identity, qualification and remaining gates. Preserve these older
+> receipts as history, not as all-platform release/soak proof for a newer commit.
+
 ## Boundary And Candidate
 
 - Campaign: `aeordb-v4-nvt-gc-2026-08-03`.

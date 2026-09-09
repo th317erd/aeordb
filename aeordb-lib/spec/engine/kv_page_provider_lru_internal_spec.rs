@@ -22,11 +22,15 @@ fn assert_order(provider: &KvPageProvider, expected: &VecDeque<usize>) {
 
 #[test]
 fn lru_links_remain_bounded_and_exact_across_hits_removals_and_refills() {
-  let mut file = tempfile::tempfile().unwrap();
+  let directory = tempfile::tempdir().unwrap();
+  // Windows positioned reads reopen ordinary shared database handles;
+  // anonymous tempfile handles deliberately disallow that sharing mode.
+  let mut file = File::options().read(true).write(true).create_new(true).open(directory.path().join("lru-pages.aeordb")).unwrap();
   let page = crate::engine::kv_pages::serialize_page(&[], 32);
   for _ in 0..32 {
     file.write_all(&page).unwrap();
   }
+  file.sync_all().unwrap();
   let memory = MemoryCoordinator::new(MemoryPolicy::new(1 << 20, 2 << 20, 65536, 65536).unwrap());
   memory.update_host_sample(HostMemorySample { rss_bytes: 0, host_available_bytes: Some(8 << 20), ..Default::default() }).unwrap();
   let provider = KvPageProvider::new(file, 0, HashAlgorithm::Blake3_256, 32, (page.len() * 16) as u64, Some(memory)).unwrap();

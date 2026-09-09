@@ -372,18 +372,151 @@ e56c06909236e192446e1c062384b722e93aa11868cde0fd10c939b12c9f24ed  macos/native-w
 The handoff's bounded cache/progress correction and authorized inherited audit
 remediation are qualified by the evidence above. This is **not** a claim that
 the whole refactor has renewed all-platform release qualification. Native
-Windows could not run because `ssh win11vm` refused its forwarded connection;
-the owner has been asked to restore it. The full macOS workspace, multi-day
+Windows could not run at the initial landing because `ssh win11vm` refused its
+forwarded connection; the continuation below records the restored VM and native
+results. The full macOS workspace, multi-day
 soaks and 11.6 GB media rehearsal were not repeated for this patch. Current
 disposable real CLI repair, verification, payload readback, migration/restart
 and source-preservation cases passed; historical large/soak receipts are not
 being relabeled as evidence for this revision.
 
-Next action: run the affected native Windows matrix after VM SSH is restored,
-then evaluate remaining release qualification against the parent plan. Do not
+The next action at that checkpoint was the affected native Windows matrix,
+followed by evaluation of remaining release qualification against the parent plan. Do not
 allocate another large rehearsal copy below the recorded free-space floor.
 The retained 4.77 TB production-derived database is still immutable, mode 0444,
 with the exact stat tuple recorded above and its service offline (`MainPID=0`).
 It was not written, copied, reopened for repair or deleted. Production activation,
 retained-database reuse/deletion, deployment, cutover, destructive GC and the
 first-v4-write boundary remain separately gated.
+
+## Native Windows continuation
+
+The owner booted `win11vm`; SSH became reachable on 2026-09-09. This continuation
+qualifies exact pushed commit `0b20792bfb485f75b69c16dff128c80c748a0536`, not
+the VM's old dirty clone. A new detached worktree is at
+`C:\Users\wyatt\.cache\codex\aeordb-tests\p8-cache-progress-20260909\source`;
+the unchanged original clone remains at `C:\Users\wyatt\Projects\aeordb`.
+Evidence and private temporary directories are siblings of the new source.
+The native x86_64 MSVC toolchain is Rust/Cargo 1.96.0. Initial C: free space was
+24,537,096,192 bytes; the runner uses one build job/test thread, no incremental
+or debug-symbol data, the existing native target, a 45-minute per-command
+deadline and an 8 GB free-space floor sampled every minute. Debug assertions
+and overflow checks remain enabled. No Cargo target artifact is transferred.
+
+- [x] Restore SSH, inspect resources, preserve the dirty clone, and create an
+      exact-commit detached source tree.
+- [x] Verify the frozen lock/source manifest and pass the narrow cache target
+      after correcting its native file fixture (first failure retained below).
+- [x] Run the same affected library/ownership and complete CLI native matrix.
+- [x] Record native results/resource evidence and prepare the verified follow-up landing.
+
+No production or retained-database boundary changes in this continuation.
+
+### Failing-first native fixture correction
+
+The initial cache target built successfully but failed before the LRU exercise:
+Windows returned sharing violation 32 on the first ordinary page read. The new
+internal test had used `tempfile::tempfile()`, whose Windows implementation sets
+`share_mode(0)`. Native positioned reads intentionally use `ReOpenFile` so reads
+cannot disturb the caller's cursor; that exclusive anonymous handle cannot be
+reopened. The existing integration fixtures already use shared ordinary files.
+
+The correction changes only this test's backing file to a create-new file in
+its owned temporary directory, with a synced page image. All 10,000 mixed-step,
+100,000 hot-hit and exact-link/eviction assertions remain. No production cache,
+native I/O or sharing policy changes. The other anonymous-file poison helper
+never reaches disk reads; its poison/lifetime tests passed and need no change.
+The first Windows result remains failed evidence (`native-windows-cache.*`):
+5 passed, 1 failed, 640 filtered, 483.12s including the dependency build.
+
+Corrected source is 0b20792b plus this one test-file change, sealed by the
+41-file `source-windows-fixture.sha256` manifest with SHA-256
+`5bac46fd1dd4d5deba6ec351c32bb8f6cae1253d95868d2e218c6367e5354338`.
+The narrow test is rerun natively on all three hosts before evidence landing;
+full Linux and affected macOS production-code receipts remain applicable because
+no production bytes changed. Windows broad stages use distinct `*-fixture`
+log names and were queued behind the corrected cache prerequisite.
+
+Corrected narrow cache tests pass 6/6 on all three platforms: Windows in 121.08s
+including rebuild (0.29s test execution), Linux in 56.55s compilation plus 0.13s
+tests, and macOS in 28.61s including compilation (0.10s tests, maximum RSS
+3,239,084,032 bytes, zero swaps). The broader Windows results follow below. The
+cached mdBook 0.5.2 directory is explicitly on the runner's PATH; the corrected
+build refreshes only `docs/book.toml`'s timestamp to replace the first cache-only
+build's documentation fallback, without changing tracked bytes. The native
+pre-existing unused import in `task_worker_retention_internal_spec.rs` remains
+a warning, not a suppressed or newly introduced failure.
+
+### Windows gate closure
+
+All corrected native commands exited 0, with no deadline/disk termination.
+Receipts bind the exact 0b20792b production source plus the single fixture
+correction committed with this evidence. Its file SHA-256 is
+`f9e76cd2869be36cfa6377406339882650a7896f824e5898e12ad7c3c192b03c`.
+The final 41-file manifest matches on laptop, desktop, macOS and Windows; the
+frozen root lock remains unchanged. The new test fixture is the only changed
+source/spec file relative to the previously pushed correction.
+
+| Native gate | Result | Elapsed including compilation |
+|---|---|---|
+| Library-internal and 12 affected storage/migration/ownership targets | 962 passed across 13 targets; no failures, ignores or filtering | 517.96s |
+| Complete CLI `--all-targets --no-fail-fast` | 210 passed across 21 targets; 7 existing intentional ignores; no failures or filtering | 269.38s |
+| Corrected narrow cache target | 6 passed; all mixed-step/hot-hit assertions retained | 121.08s |
+
+The two broad commands pass **1,172** native Windows tests across **34** targets;
+the six narrow executions are additional reruns, not six new cases. Differences
+from macOS counts come from existing platform conditionals, including Unix-only
+permission, retention and signal tests; no platform skips were added here.
+The Windows matrix includes the 65,536-page eviction-work bound, all fixed-width
+reader regressions, the 1,503-entry audit, 16 real offline migration/restart
+cases, source-byte preservation and all three new real CLI repair/progress
+cases. Both required test commands and their environment/source identities are
+recorded in the result JSON files.
+
+The affected matrix finished at `2026-09-09T22:52:34Z`; the CLI suite finished at
+`2026-09-09T22:57:04Z`. Minimum sampled C: free space across the corrected broad
+run was 22,368,522,240 bytes and post-run free space was 22,369,230,848 bytes,
+well above the 8 GB guard. No process remained under the native test target
+after completion. No data/cache deletion or VM/service shutdown was performed.
+The final fixture also passed strict Linux workspace/all-target Clippy in
+52.98s, plus formatting and diff hygiene. Linux Data remained above its separate
+250 GB floor (256,884,416,512 bytes after Clippy).
+
+Windows originals remain in the VM campaign's `evidence/`. A durable mirror is
+`wyatt-desktop:/media/Data/AeorDB/Tests/p8-cache-progress-20260909/evidence/windows/`;
+a second log copy is under laptop
+`~/.cache/codex/aeordb-cache-progress-20260909/windows-evidence/`.
+The final native runner and queue are archived in the desktop mirror as
+`run-windows.ps1` and `continue-windows.ps1`. Their SHA-256 values are
+`b4b02ef20e74a8cc5534b63cc9959549a76f7584e2cb9f55c37dffdfd50313f5` and
+`490e4f7736fba3928c1701c157136cd5a23eccb7bde2eb76d2a905bdac563739`.
+
+```text
+52f014f4ffa48a95a55474fb99d8c7784552acb11495b55c7a7bee226a431171  windows/native-windows-cache.stdout.log
+8f1a1eb1b2987467d2f0e44ff17269b41bdc2234ae6b8387f003bbc40911d09d  windows/native-windows-cache.stderr.log
+3dc57a28354036478ce365b70bd602ebcad45a8ae10dd7a9e6ba009f53dbfdde  windows/native-windows-cache.result.json
+db5fb48f617f5684cc22f89cfa258e873f9a8172bcd5960f288db67f3fb042f6  windows/native-windows-cache-fixture.stdout.log
+76ffa088e9c9cef3557dc80b0aea009297d70d10935f7ddee132132fa48a434e  windows/native-windows-cache-fixture.stderr.log
+9ce638a4c57cfdac665ee6077942d1225b832eaef03b02559c48ad31a04231e1  windows/native-windows-cache-fixture.result.json
+e38901e128d16f49d1d301414dd18c6b6f0a7ab20eb5fcbe1b60776207409dc2  windows/native-windows-affected-fixture.stdout.log
+080a651e98cf4bab31edae55c4ecabd8d8702627a75315e296646519d8d41d80  windows/native-windows-affected-fixture.stderr.log
+4a633ca377887881322cbf2368c53f8243bffebf892495a6f2ffb19098033042  windows/native-windows-affected-fixture.result.json
+fefcab62a7656f224e950a59e51118542dd61784d21e7906460011bb9373e317  windows/native-windows-affected-fixture.guard.log
+8faa8f1db6ae69e02c33601f3e6c52cfe9e090114460caef9472ee38343ddde0  windows/native-windows-cli-fixture.stdout.log
+e3554ac11334f3ec6068fa004ad3291b064f4269cbbbadb21a82e56bf30c4aed  windows/native-windows-cli-fixture.stderr.log
+2047c9f3fb5b4b79b13e8343184cf31b31080c06ce78a6a6e0b6eea0a26f421c  windows/native-windows-cli-fixture.result.json
+5c97834448fca869f25c79b4f9680fef768bc0e9ea9b25f8a029c27f4b881b0a  windows/native-windows-cli-fixture.guard.log
+7b98a9ed46625d6d414f57a971b628dda9bed9183e891d5b33abe438d187ddb4  windows-fixture-linux.log
+5fc9229f8f68149ea06d9f7b35208ec959c4fa4cda263090b41184e34f5e2843  macos/windows-fixture-macos.log
+f01373fdde1ce84e1e656d9c85e7b6e4989830fcb195948f2ac19eced07c3d52  windows-fixture-clippy.log
+```
+
+This closes the pending native Windows gate for the cache/progress correction.
+It does not re-run or reattribute the historical release builds, multi-day
+soaks or large-media rehearsal. The completion report and DoD packet now carry
+explicit historical-candidate notices linking to the handoff and this ledger.
+Release-build and long-duration qualification should be refreshed for a future
+release; those are distinct from the separately authorized operational canary
+and cutover. This is not authorization to resume the retired corrupt-database
+repair. The retained production file remains protected and offline; no
+operational authority was activated by these tests.

@@ -1,5 +1,13 @@
 # AeorDB v4 Repository-Only Completion Report
 
+> Historical qualification snapshot for `535004f1`, not the latest development
+> revision. Subsequent migration-development corrections, the retired production
+> repair experiment and the retained-file boundary are recorded in the
+> [2026-09-09 handoff](handoff-2026-09-09-gpt-6-astra.md). Current cache/progress
+> corrections and exact-revision test evidence are in the
+> [follow-up ledger](progress/09-repair-cache-followup.md). The release/soak
+> results below must not be attributed to that later revision.
+
 ## Result
 
 The authorized repository implementation and qualification boundary is complete. The exact implementation candidate is commit `535004f166ad4cfaf8e7ab740458f2ef4733d2bc` on `development`; later commits through this report contain documentation and evidence reconciliation only. Linux, native macOS arm64, native Windows x86_64 MSVC, live reopen, constrained-resource, three 12-hour stages, and the final 100-case restart-resilience qualification are green.
