@@ -689,6 +689,10 @@ impl DiskKVStore {
     self.page_provider.as_ref().map(KvPageProvider::stats).transpose()
   }
 
+  pub(crate) fn page_provider(&self) -> Option<KvPageProvider> {
+    self.page_provider.clone()
+  }
+
   pub(crate) fn bounded_page_configuration(&self) -> Option<(MemoryCoordinator, u64)> {
     self.bounded_page_config.as_ref().map(|config| (config.coordinator.clone(), config.max_resident_bytes))
   }

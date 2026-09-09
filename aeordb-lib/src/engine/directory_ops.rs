@@ -4174,7 +4174,11 @@ impl<'a> DirectoryOps<'a> {
     let mut skipped_dangling = 0;
     let mut skipped_error = 0;
 
+    let scan_progress =
+      crate::engine::maintenance_progress::MaintenanceProgress::new("directory_repair_scan", "entries", self.engine.kv_page_provider()?);
+
     self.engine.visit_kv_entries_for_repair(|entry| {
+      scan_progress.advance(1);
       if cancellation.load(std::sync::atomic::Ordering::Acquire) {
         return Err(EngineError::ShuttingDown);
       }
@@ -4232,6 +4236,12 @@ impl<'a> DirectoryOps<'a> {
       }
     })?;
 
+    scan_progress.complete();
+    let publish_progress = crate::engine::maintenance_progress::MaintenanceProgress::new(
+      "directory_repair_publish",
+      "directories",
+      self.engine.kv_page_provider()?,
+    );
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut dirs_written = 0usize;
     for depth in (0..=workspace.max_depth()).rev() {
@@ -4251,6 +4261,7 @@ impl<'a> DirectoryOps<'a> {
         let (content_key, dir_size) = match store_result {
           Ok(stored) => {
             dirs_written += 1;
+            publish_progress.advance(1);
             if let Err(error) = release_result {
               return Err(directory_repair_failure(error, dirs_written, "release_group", &dir_path));
             }
@@ -4287,6 +4298,7 @@ impl<'a> DirectoryOps<'a> {
       }
     }
 
+    publish_progress.complete();
     tracing::debug!(
       file_records_found,
       symlink_records_found,
@@ -4349,11 +4361,17 @@ impl<'a> DirectoryOps<'a> {
     family_policy: SystemFamilyPolicyResolver,
     memory: &mut OperationMemoryBudget,
   ) -> EngineResult<Vec<ChildEntry>> {
+    let progress = crate::engine::maintenance_progress::MaintenanceProgress::new(
+      "targeted_directory_repair_scan",
+      "entries",
+      self.engine.kv_page_provider()?,
+    );
     let mut children: std::collections::BTreeMap<String, ChildEntry> = std::collections::BTreeMap::new();
     self.collect_existing_directory_children_for_repair(dir_path, hash_length, algo, family_policy, &mut children, memory)?;
 
     let cancellation = self.engine.repair_cancellation();
     self.engine.visit_kv_entries_for_repair(|entry| {
+      progress.advance(1);
       if cancellation.load(std::sync::atomic::Ordering::Acquire) {
         return Err(EngineError::ShuttingDown);
       }
@@ -4390,6 +4408,7 @@ impl<'a> DirectoryOps<'a> {
       Ok(true)
     })?;
 
+    progress.complete();
     Ok(children.into_values().collect())
   }
 

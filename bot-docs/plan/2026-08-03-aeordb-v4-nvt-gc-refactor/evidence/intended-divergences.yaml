@@ -133,6 +133,35 @@ allowed_divergences:
       - interrupted settlement is recoverable
     proof: complete physical model, overlap assertions, and allocator fault tests
 
+  - id: V4-REPAIR-PROGRESS-AND-BOUNDED-EVICTION
+    phase: P8-retirement-followup
+    behavior: >-
+      replace full-cache victim scans with bounded intrusive LRU bookkeeping;
+      emit bounded logical maintenance phase/cache progress, enabled by default
+      for the verify CLI without enabling unrelated informational diagnostics.
+    authorization: 2026-09-09 repair-retirement handoff and explicit user continuation
+    preserves:
+      - KV page placement, bytes, lookup and snapshot generation semantics
+      - cache byte caps, reservations, coalesced reads and failure behavior
+      - explicit AEORDB_LOG override precedence
+      - verification report and exit status remain the integrity authority
+      - retained production-derived database remains offline and immutable
+    proof: progress/09-repair-cache-followup.md; deterministic candidate-count regression, independent LRU oracle, phase interruption tests and real CLI repair/strict verification
+
+  - id: V4-CHECKED-FIXED-WIDTH-READS
+    phase: P8-retirement-followup-audit
+    behavior: >-
+      consolidate fixed-width byte reads so out-of-bounds offsets, including
+      arithmetic-overflow offsets, return the existing typed truncation errors
+      instead of panicking before the range check.
+    authorization: explicit user approval to resolve inherited audit debt without raising its limit
+    preserves:
+      - persistent bytes and little-endian numeric interpretation
+      - ordinary truncation error classes, codes and context
+      - cursor and allocation accounting on failed reads
+      - no production database, service or deployment changes
+    proof: progress/09-repair-cache-followup.md; 15 real-module failing-first overflow regressions, bounded-reader state tests and independent format fixtures
+
 forbidden_divergences:
   - redesigning KV ordering, page placement, or lookup semantics
   - making NVT or any derived index authoritative

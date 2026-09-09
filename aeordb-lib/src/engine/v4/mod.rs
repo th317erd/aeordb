@@ -3,6 +3,11 @@
 //! This module does not activate v4 readers or writers. It gives later phases
 //! one checked source for permanent IDs and limits.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../spec/engine/v4_fixed_width_internal_spec.rs"]
+mod fixed_width_test_support;
+
 #[rustfmt::skip]
 pub mod contract_generated;
 pub mod admission;

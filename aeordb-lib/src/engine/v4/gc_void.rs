@@ -1654,9 +1654,13 @@ fn write_exact_capabilities(bytes: &mut [u8]) {
   }
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(i64_at: i64);
+
 fn i64_at(bytes: &[u8], offset: usize) -> FormatResult<i64> {
-  let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("sweep_void_truncated", format!("i64 at offset {offset}")))?;
-  Ok(i64::from_le_bytes(raw.try_into().expect("checked sweep/Void i64 width")))
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
+    .ok_or_else(|| trailing_error("sweep_void_truncated", format!("i64 at offset {offset}")))?;
+  Ok(i64::from_le_bytes(raw))
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

@@ -148,6 +148,49 @@ The Dashboard shows:
 
 ## Incident Workflow
 
+### Offline verification and repair progress
+
+Verification and repair emit structured `INFO` events on the
+`aeordb::maintenance_progress` tracing target. Each event identifies `phase`,
+`unit`, `status`, logical `units`, `elapsed_ms`, and
+`average_units_per_second`. Phases distinguish WAL scanning, external merges,
+KV scanning/comparison, directory and child traversal, path FileRecords/chunks,
+snapshot traversal, repair scans/publication, and final verification.
+The `aeordb verify` command enables this target by default while keeping other
+diagnostics at warning level. `AEORDB_LOG` still overrides the entire filter
+(for example, `AEORDB_LOG=off` suppresses logging without hiding the final
+integrity report).
+
+Each phase emits `started`, then at most one periodic `running` event per ten
+seconds at work boundaries, and finally `completed` or `interrupted`. Errors,
+cancellation, and unwinding do not emit successful completion. These are not
+independent watchdog heartbeats: a blocked I/O operation or nested operation
+without an instrumented boundary can delay the next event. An unchanged counter
+alone cannot distinguish slow I/O from a stalled operation.
+
+Units count work, not unique files: merges may visit records on multiple passes,
+and tree phases include directory, child, and chunk visits. Rates are averages
+for the current phase, not an ETA or a known total. `completed` means the phase
+finished traversing; the verification report and command exit status still
+determine database integrity. A completed repair action is not proof that final
+verification passed.
+
+Events also include `cache_hits`, `cache_misses`, `cache_disk_reads`,
+`cache_evictions`, `cache_eviction_candidates`, `cache_read_failures`,
+`cache_deferrals`, and resident page/byte gauges. Counters are cumulative for
+the observed cache, not per-phase deltas. Evictions include invalidations;
+candidate examinations count only capacity/pressure victim selection, now one
+resident candidate per eviction rather than a full-cache scan.
+
+Interpret those numbers only when `cache_state` is `available`. `busy`,
+`poisoned`, `absent`, or `retired` means the accompanying zeroes are placeholders,
+not measured inactivity. Sampling never waits for the cache mutex or walks
+historical pages. The observer holds a weak reference so a KV layout replacement
+can retire its old cache without telemetry keeping its pages resident. A new
+phase observes the replacement cache; do not subtract counters across caches.
+
+### Investigation steps
+
 1. Check public startup/readiness without credentials:
 
    ```bash

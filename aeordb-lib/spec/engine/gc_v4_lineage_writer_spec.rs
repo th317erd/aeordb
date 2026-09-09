@@ -439,6 +439,17 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
   assert!(index_runtime_installation.contains("IndexScopeOrdinalStoreRegistryV1::new"));
   assert!(index_runtime_installation.contains("Arc::clone(&request.retirement_owner)"));
   assert!(!index_runtime_installation.contains("RetirementJournalOwnerV1::"));
+  // The offline adapter reconstructs this same chain and hands it to the
+  // fenced migration owners; it is not an independent publication authority.
+  let migration_offline_run = fs::read_to_string(source_root.join("engine/v4/migration_offline_run.rs")).unwrap();
+  assert!(migration_offline_run.contains("reconstruct_retirement_journal_summary("));
+  assert!(migration_offline_run.contains("RetirementJournalOwnerV1::resume_chain("));
+  assert!(migration_offline_run.contains("MigrationStateOwnerV1::acquire_or_takeover_for_restart("));
+  assert!(migration_offline_run.contains("MigrationSourceGcSuspensionOwnerV1::suspend("));
+  assert!(migration_offline_run.contains("retirement_owner: &mut retirement"));
+  assert!(!migration_offline_run.contains("retirement.append"));
+  assert!(!migration_offline_run.contains("retirement.flush"));
+  assert!(!migration_offline_run.contains("publish_mutable_system_control"));
 
   let mut callers = Vec::new();
   let mut sources = Vec::new();
@@ -464,6 +475,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
       PathBuf::from("engine/v4/migration_capture_replay.rs"),
       PathBuf::from("engine/v4/migration_capture_runtime.rs"),
       PathBuf::from("engine/v4/migration_cutover_rehearsal.rs"),
+      PathBuf::from("engine/v4/migration_offline_run.rs"),
       PathBuf::from("engine/v4/migration_owner.rs"),
       PathBuf::from("engine/v4/migration_root_map_owner.rs"),
       PathBuf::from("engine/v4/migration_source_gc.rs"),

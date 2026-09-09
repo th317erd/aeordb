@@ -2,18 +2,19 @@ use std::process::Command;
 
 use aeordb::engine::{DirectoryOps, RequestContext, StorageEngine};
 
-fn seeded_database() -> (tempfile::TempDir, std::path::PathBuf) {
+fn seeded_database() -> (tempfile::TempDir, std::path::PathBuf, StorageEngine) {
   let temporary = tempfile::tempdir().unwrap();
   let database = temporary.path().join("gc-cli.aeordb");
   let engine = StorageEngine::create(database.to_str().unwrap()).unwrap();
   DirectoryOps::new(&engine).store_file_buffered(&RequestContext::system(), "/live.txt", b"live", Some("text/plain")).unwrap();
   engine.shutdown().unwrap();
-  (temporary, database)
+  (temporary, database, engine)
 }
 
 #[test]
 fn cli_dry_run_executes_the_real_gc_command_path() {
-  let (_temporary, database) = seeded_database();
+  let (_temporary, database, engine) = seeded_database();
+  drop(engine);
 
   let output =
     Command::new(env!("CARGO_BIN_EXE_aeordb")).args(["gc", "-D", database.to_str().unwrap(), "--dry-run"]).output().expect("run aeordb gc");
@@ -26,8 +27,9 @@ fn cli_dry_run_executes_the_real_gc_command_path() {
 
 #[test]
 fn cli_surfaces_database_open_failure_without_starting_gc() {
-  let (_temporary, database) = seeded_database();
-  let _locked = StorageEngine::open(database.to_str().unwrap()).unwrap();
+  // Retain the original fixture lease. Releasing and immediately reacquiring
+  // it introduces a fixture-only race with concurrently spawned CLI children.
+  let (_temporary, database, _locked) = seeded_database();
 
   let output = Command::new(env!("CARGO_BIN_EXE_aeordb"))
     .args(["gc", "-D", database.to_str().unwrap(), "--dry-run"])

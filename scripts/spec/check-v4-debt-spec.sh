@@ -15,10 +15,21 @@ required_chain="\"\$repo_root/scripts/plan/check-v4-debt.sh\" \\"
 rg -q --fixed-strings "$required_chain" "$contract_gate" \
   || fail "the independent v4 contract gate does not invoke the debt gate"
 
-fixture=$(mktemp -d /tmp/codex/check-v4-debt-spec.XXXXXX)
+if command -v timeout >/dev/null 2>&1; then
+  deadline_command=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  deadline_command=gtimeout
+else
+  fail "timeout or gtimeout is required"
+fi
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/check-v4-debt-spec.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/src"
-printf 'TIMED_SHIM\nPERMANENT_PROJECTION\n' >"$fixture/src/allowed.rs"
+reset_allowed_file() {
+  printf 'TIMED_SHIM\nPERMANENT_PROJECTION\n' >"$fixture/src/allowed.rs"
+}
+reset_allowed_file
 
 baseline_policy="$fixture/policy.json"
 jq -n '
@@ -67,7 +78,7 @@ run_gate() {
   AEORDB_V4_DEBT_ROOT="$fixture" \
     AEORDB_V4_DEBT_POLICY="$1" \
     AEORDB_V4_DEBT_CAMPAIGN_ID="test-campaign" \
-    timeout 5s "$gate"
+    "$deadline_command" 5s "$gate"
 }
 
 expect_failure() {
@@ -85,6 +96,17 @@ valid_output="$fixture/valid.out"
 run_gate "$baseline_policy" >"$valid_output"
 rg -q --fixed-strings 'v4 debt check: PASS (3 reviewed entries, 2 retained matches)' "$valid_output" \
   || fail "valid reviewed policy did not report its retained-match count"
+
+mkdir -p "$fixture/src/nested directory"
+printf 'TIMED_SHIM\n' >"$fixture/src/nested directory/allowed file.rs"
+spaced_paths="$fixture/spaced-paths.json"
+jq '(.entries[] | select(.id == "timed")) |=
+  (.scan_roots = ["src/nested directory"] | .allowed_paths = ["src/nested directory/allowed file.rs"])' \
+  "$baseline_policy" >"$spaced_paths"
+run_gate "$spaced_paths" >"$fixture/spaced-paths.out"
+rg -q --fixed-strings 'v4 debt check: PASS (3 reviewed entries, 2 retained matches)' "$fixture/spaced-paths.out" \
+  || fail "paths containing spaces were split or skipped"
+rm -f "$fixture/src/nested directory/allowed file.rs"
 
 missing_policy="$fixture/missing-policy.json"
 expect_failure missing-policy "policy is missing: $missing_policy" "$missing_policy"
@@ -171,11 +193,11 @@ rm -f "$fixture/src/unreviewed.rs"
 
 printf 'TIMED_SHIM\n' >>"$fixture/src/allowed.rs"
 expect_failure match-growth "entry 'timed' match count 2 exceeds maximum_matches 1" "$baseline_policy"
-sed -i '$d' "$fixture/src/allowed.rs"
+reset_allowed_file
 
 printf 'DEAD_STUB\n' >>"$fixture/src/allowed.rs"
 expect_failure forbidden-match "forbidden entry 'forbidden' matched: src/allowed.rs" "$baseline_policy"
-sed -i '$d' "$fixture/src/allowed.rs"
+reset_allowed_file
 
 stale_allowed="$fixture/stale-allowed.json"
 jq '(.entries[] | select(.id == "timed") | .allowed_paths) = ["src/missing.rs"]' "$baseline_policy" >"$stale_allowed"

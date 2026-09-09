@@ -27,8 +27,13 @@ fn prepare_source_for_repair_copy<Engine, OpenError, ShutdownError>(
 }
 
 pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
-  // Initialize logging so debug/trace output works with AEORDB_LOG env var.
-  if let Err(error) = try_initialize_logging(&LogConfig { format: LogFormat::Pretty, level: "warn".to_string(), ..LogConfig::default() }) {
+  // Keep ordinary diagnostics at warn while exposing bounded maintenance
+  // progress. An explicit AEORDB_LOG filter still takes precedence.
+  if let Err(error) = try_initialize_logging(&LogConfig {
+    format: LogFormat::Pretty,
+    level: "warn,aeordb::maintenance_progress=info".to_string(),
+    ..LogConfig::default()
+  }) {
     eprintln!("Error: {error}");
     process::exit(1);
   }

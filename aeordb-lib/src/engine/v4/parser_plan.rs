@@ -307,18 +307,19 @@ fn is_canonical_mime_essence(value: &[u8]) -> bool {
   })
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32);
+
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let raw = bytes
-    .get(offset..offset + 2)
+  let raw = super::reader::fixed_array_at::<2>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "parser_u16_truncated", format!("u16 at {offset}")))?;
-  Ok(u16::from_le_bytes(raw.try_into().expect("checked parser u16 length")))
+  Ok(u16::from_le_bytes(raw))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes
-    .get(offset..offset + 4)
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "parser_u32_truncated", format!("u32 at {offset}")))?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked parser u32 length")))
+  Ok(u32::from_le_bytes(raw))
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {

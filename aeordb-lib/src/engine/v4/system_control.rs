@@ -1547,29 +1547,37 @@ fn zero_hash_at(bytes: &[u8], offset: usize, width: usize) -> FormatResult<bool>
   Ok(all_zero(hash))
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32, i32_at: i32, u64_at: u64, i64_at: i64);
+
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let raw = bytes.get(offset..offset + 2).ok_or_else(|| trailing_error("system_control_truncated", format!("u16 at offset {offset}")))?;
-  Ok(u16::from_le_bytes(raw.try_into().expect("checked control u16 width")))
+  let raw = super::reader::fixed_array_at::<2>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_control_truncated", format!("u16 at offset {offset}")))?;
+  Ok(u16::from_le_bytes(raw))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes.get(offset..offset + 4).ok_or_else(|| trailing_error("system_control_truncated", format!("u32 at offset {offset}")))?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked control u32 width")))
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_control_truncated", format!("u32 at offset {offset}")))?;
+  Ok(u32::from_le_bytes(raw))
 }
 
 fn i32_at(bytes: &[u8], offset: usize) -> FormatResult<i32> {
-  let raw = bytes.get(offset..offset + 4).ok_or_else(|| trailing_error("system_control_truncated", format!("i32 at offset {offset}")))?;
-  Ok(i32::from_le_bytes(raw.try_into().expect("checked control i32 width")))
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_control_truncated", format!("i32 at offset {offset}")))?;
+  Ok(i32::from_le_bytes(raw))
 }
 
 fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
-  let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("system_control_truncated", format!("u64 at offset {offset}")))?;
-  Ok(u64::from_le_bytes(raw.try_into().expect("checked control u64 width")))
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_control_truncated", format!("u64 at offset {offset}")))?;
+  Ok(u64::from_le_bytes(raw))
 }
 
 fn i64_at(bytes: &[u8], offset: usize) -> FormatResult<i64> {
-  let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("system_control_truncated", format!("i64 at offset {offset}")))?;
-  Ok(i64::from_le_bytes(raw.try_into().expect("checked control i64 width")))
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_control_truncated", format!("i64 at offset {offset}")))?;
+  Ok(i64::from_le_bytes(raw))
 }
 
 fn all_zero(bytes: &[u8]) -> bool {

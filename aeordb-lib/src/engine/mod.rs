@@ -67,6 +67,7 @@ pub mod kv_store;
 pub mod legacy_nvt_v1;
 pub mod lifecycle_config;
 pub mod lost_found;
+pub(crate) mod maintenance_progress;
 pub mod memory_coordinator;
 pub mod merge;
 pub mod merge_patch;

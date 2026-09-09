@@ -956,14 +956,19 @@ fn descriptor_key_cmp(left: &SystemFamilyDescriptorV1<'_>, right: &SystemFamilyD
   ))
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32);
+
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let raw = bytes.get(offset..offset + 2).ok_or_else(|| trailing_error("system_family_truncated", format!("u16 at offset {offset}")))?;
-  Ok(u16::from_le_bytes(raw.try_into().expect("checked system-family u16 width")))
+  let raw = super::reader::fixed_array_at::<2>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_family_truncated", format!("u16 at offset {offset}")))?;
+  Ok(u16::from_le_bytes(raw))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes.get(offset..offset + 4).ok_or_else(|| trailing_error("system_family_truncated", format!("u32 at offset {offset}")))?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked system-family u32 width")))
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
+    .ok_or_else(|| trailing_error("system_family_truncated", format!("u32 at offset {offset}")))?;
+  Ok(u32::from_le_bytes(raw))
 }
 
 fn checked_add(left: usize, right: usize, context: &'static str) -> FormatResult<usize> {

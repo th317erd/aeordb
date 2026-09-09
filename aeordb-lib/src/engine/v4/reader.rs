@@ -60,6 +60,12 @@ impl Error for FormatError {}
 
 pub type FormatResult<T> = Result<T, FormatError>;
 
+/// Read a fixed-width field without allocation or unchecked offset arithmetic.
+/// Callers retain their format-specific error when the field is out of bounds.
+pub(crate) fn fixed_array_at<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+  bytes.get(offset..)?.first_chunk::<N>().copied()
+}
+
 #[derive(Debug)]
 pub struct BoundedReader<'a> {
   bytes: &'a [u8],
@@ -117,19 +123,32 @@ impl<'a> BoundedReader<'a> {
   }
 
   pub fn read_u16(&mut self) -> FormatResult<u16> {
-    Ok(u16::from_le_bytes(self.read_exact(2)?.try_into().expect("exact slice length")))
+    Ok(u16::from_le_bytes(self.read_array()?))
   }
 
   pub fn read_u32(&mut self) -> FormatResult<u32> {
-    Ok(u32::from_le_bytes(self.read_exact(4)?.try_into().expect("exact slice length")))
+    Ok(u32::from_le_bytes(self.read_array()?))
   }
 
   pub fn read_u64(&mut self) -> FormatResult<u64> {
-    Ok(u64::from_le_bytes(self.read_exact(8)?.try_into().expect("exact slice length")))
+    Ok(u64::from_le_bytes(self.read_array()?))
   }
 
   pub fn read_i64(&mut self) -> FormatResult<i64> {
-    Ok(i64::from_le_bytes(self.read_exact(8)?.try_into().expect("exact slice length")))
+    Ok(i64::from_le_bytes(self.read_array()?))
+  }
+
+  fn read_array<const N: usize>(&mut self) -> FormatResult<[u8; N]> {
+    let value = fixed_array_at(self.bytes, self.offset).ok_or_else(|| {
+      FormatError::new(
+        MalformedInputClass::TruncationOrTrailingBytes,
+        "truncated_input",
+        format!("need {N} bytes at {}, only {} remain", self.offset, self.remaining()),
+      )
+    })?;
+    // The successful bounded read proves this sum is at most bytes.len().
+    self.offset += N;
+    Ok(value)
   }
 
   pub fn read_u32_length_prefixed(&mut self, field_cap: usize) -> FormatResult<Vec<u8>> {
@@ -187,3 +206,7 @@ impl<'a> BoundedReader<'a> {
     Ok(())
   }
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/v4_reader_internal_spec.rs"]
+mod reader_internal_spec;

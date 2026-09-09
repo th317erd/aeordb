@@ -816,19 +816,22 @@ pub(crate) fn verify_index_crc(value: &[u8]) -> FormatResult<()> {
   Ok(())
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32, u64_at: u64);
+
 pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let value = bytes.get(offset..offset + 2).ok_or_else(|| truncated_error(offset, 2))?;
-  Ok(u16::from_le_bytes(value.try_into().expect("exact slice length")))
+  let value = super::reader::fixed_array_at::<2>(bytes, offset).ok_or_else(|| truncated_error(offset, 2))?;
+  Ok(u16::from_le_bytes(value))
 }
 
 pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let value = bytes.get(offset..offset + 4).ok_or_else(|| truncated_error(offset, 4))?;
-  Ok(u32::from_le_bytes(value.try_into().expect("exact slice length")))
+  let value = super::reader::fixed_array_at::<4>(bytes, offset).ok_or_else(|| truncated_error(offset, 4))?;
+  Ok(u32::from_le_bytes(value))
 }
 
 pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
-  let value = bytes.get(offset..offset + 8).ok_or_else(|| truncated_error(offset, 8))?;
-  Ok(u64::from_le_bytes(value.try_into().expect("exact slice length")))
+  let value = super::reader::fixed_array_at::<8>(bytes, offset).ok_or_else(|| truncated_error(offset, 8))?;
+  Ok(u64::from_le_bytes(value))
 }
 
 fn truncated_error(offset: usize, width: usize) -> FormatError {

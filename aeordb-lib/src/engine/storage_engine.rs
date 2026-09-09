@@ -1888,7 +1888,11 @@ impl StorageEngine {
   }
 
   pub fn kv_page_provider_stats(&self) -> EngineResult<Option<crate::engine::kv_page_provider::KvPageProviderStats>> {
-    self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.kv_page_provider_stats()
+    self.kv_page_provider()?.as_ref().map(crate::engine::kv_page_provider::KvPageProvider::stats).transpose()
+  }
+
+  pub(crate) fn kv_page_provider(&self) -> EngineResult<Option<crate::engine::kv_page_provider::KvPageProvider>> {
+    Ok(self.kv_writer.lock().map_err(|error| EngineError::IoError(std::io::Error::other(error.to_string())))?.page_provider())
   }
 
   pub fn memory_coordinator_snapshot(&self) -> Result<MemoryCoordinatorSnapshot, MemoryCoordinatorError> {

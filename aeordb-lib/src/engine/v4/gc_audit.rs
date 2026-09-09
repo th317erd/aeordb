@@ -1364,9 +1364,13 @@ fn presence(flags: u8, bit: u8) -> bool {
   flags & (1 << bit) != 0
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(i64_at: i64);
+
 fn i64_at(bytes: &[u8], offset: usize) -> FormatResult<i64> {
-  let raw = bytes.get(offset..offset + 8).ok_or_else(|| trailing_error("gc_audit_truncated", format!("i64 at offset {offset}")))?;
-  Ok(i64::from_le_bytes(raw.try_into().expect("checked audit i64 width")))
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
+    .ok_or_else(|| trailing_error("gc_audit_truncated", format!("i64 at offset {offset}")))?;
+  Ok(i64::from_le_bytes(raw))
 }
 
 fn all_zero(bytes: &[u8]) -> bool {

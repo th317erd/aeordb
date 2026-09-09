@@ -11,6 +11,65 @@ use aeordb::engine::memory_coordinator::{HostMemorySample, MemoryCoordinator, Me
 const KV_OFFSET: u64 = 256;
 const BUCKETS: usize = 4;
 
+#[test]
+fn eviction_candidate_work_is_constant_as_residency_grows() {
+  for capacity in [16, 256, 4096, 65536] {
+    let directory = tempfile::tempdir().unwrap();
+    let expected = serialize_page(&[entry(1)], 32);
+    let file = write_pages(&directory.path().join("eviction-work.aeordb"), &vec![expected.clone(); capacity + 128]);
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(256 << 20, 512 << 20, 16 << 20, 16 << 20).unwrap());
+    memory.update_host_sample(HostMemorySample { rss_bytes: 0, host_available_bytes: Some(1 << 30), ..Default::default() }).unwrap();
+    let provider =
+      KvPageProvider::new(file, KV_OFFSET, HashAlgorithm::Blake3_256, capacity + 128, (capacity * expected.len()) as u64, Some(memory))
+        .unwrap();
+    for bucket in 0..capacity {
+      provider.read_page(bucket).unwrap();
+    }
+    let before = provider.stats().unwrap();
+    for bucket in capacity..capacity + 128 {
+      assert_eq!(provider.read_page(bucket).unwrap().as_ref(), expected);
+    }
+    let after = provider.stats().unwrap();
+    assert_eq!(after.resident_pages, capacity as u64);
+    assert_eq!(after.evictions - before.evictions, 128);
+    assert_eq!(after.disk_reads - before.disk_reads, 128);
+    assert_eq!(after.eviction_candidates - before.eviction_candidates, 128, "victim selection scanned the cache at capacity {capacity}");
+  }
+}
+
+#[test]
+fn cache_accesses_match_an_independent_lru_oracle_under_churn() {
+  use std::collections::VecDeque;
+
+  for capacity in [1, 2, 3, 4] {
+    let directory = tempfile::tempdir().unwrap();
+    let expected = pages();
+    let file = write_pages(&directory.path().join("lru-oracle.aeordb"), &expected);
+    let memory = coordinator();
+    let provider = provider(&file, capacity as u64 * page_size(32) as u64, memory.clone());
+    let mut lru = VecDeque::new();
+    let mut random = 17u64;
+    for _ in 0..2048 {
+      random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+      let bucket = ((random >> 32) as usize) % BUCKETS;
+      let position = lru.iter().position(|resident| *resident == bucket);
+      let before = provider.stats().unwrap();
+      assert_eq!(provider.read_page(bucket).unwrap().as_ref(), expected[bucket]);
+      let after = provider.stats().unwrap();
+      assert_eq!(after.hits - before.hits, u64::from(position.is_some()));
+      assert_eq!(after.disk_reads - before.disk_reads, u64::from(position.is_none()));
+      if let Some(position) = position {
+        lru.remove(position);
+      } else if lru.len() == capacity {
+        lru.pop_front();
+      }
+      lru.push_back(bucket);
+      assert_eq!(after.resident_pages, lru.len() as u64);
+      assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::KvResidentPages).unwrap().reserved_bytes, after.resident_bytes);
+    }
+  }
+}
+
 fn entry(hash_byte: u8) -> KVEntry {
   KVEntry { type_flags: KV_TYPE_CHUNK, hash: vec![hash_byte; 32], offset: u64::from(hash_byte) * 100, total_length: 64 }
 }
@@ -70,6 +129,33 @@ fn positioned_reads_are_exact_and_lru_residency_never_exceeds_the_byte_cap() {
   let owner = coordinator.snapshot().unwrap().owner(MemoryOwner::KvResidentPages).unwrap().clone();
   assert_eq!(owner.reserved_bytes, stats.resident_bytes);
   assert_eq!(owner.active_reservations, stats.resident_pages);
+}
+
+#[test]
+fn deferred_or_failed_loads_do_not_reorder_or_evict_resident_pages() {
+  let directory = tempfile::tempdir().unwrap();
+  let mut expected = pages();
+  expected[2][20] ^= 0x80;
+  let file = write_pages(&directory.path().join("lru-failed-load.aeordb"), &expected);
+  let memory = coordinator();
+  let provider = provider(&file, page_size(32) as u64 * 2, memory.clone());
+  provider.read_page(0).unwrap();
+  provider.read_page(1).unwrap();
+  assert!(provider.read_page(2).is_err());
+  assert_eq!(provider.stats().unwrap().evictions, 0);
+  memory
+    .update_host_sample(HostMemorySample { rss_bytes: 128 * 1024, host_available_bytes: Some(1024 * 1024), ..Default::default() })
+    .unwrap();
+  assert_eq!(provider.read_page(3).unwrap().as_ref(), expected[3]);
+  assert_eq!(provider.stats().unwrap().cache_deferrals, 1);
+  assert_eq!(provider.stats().unwrap().evictions, 0);
+  memory.update_host_sample(HostMemorySample { rss_bytes: 0, host_available_bytes: Some(1024 * 1024), ..Default::default() }).unwrap();
+  provider.read_page(3).unwrap();
+  let before = provider.stats().unwrap();
+  provider.read_page(1).unwrap();
+  assert_eq!(provider.stats().unwrap().hits, before.hits + 1, "failed/deferred loads changed the LRU victim");
+  provider.read_page(0).unwrap();
+  assert_eq!(provider.stats().unwrap().misses, before.misses + 1);
 }
 
 #[test]

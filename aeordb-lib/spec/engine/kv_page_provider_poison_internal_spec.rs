@@ -24,6 +24,20 @@ fn poison_state(provider: &KvPageProvider) {
   assert!(unwind.is_err());
 }
 
+#[test]
+fn activity_monitor_is_nonblocking_and_does_not_retain_retired_caches() {
+  let provider = provider();
+  let monitor = provider.activity_monitor();
+  let guard = provider.lock().unwrap();
+  assert_eq!(monitor.activity().state, "busy");
+  drop(guard);
+  assert_eq!(monitor.activity().state, "available");
+  poison_state(&provider);
+  assert_eq!(monitor.activity().state, "poisoned");
+  drop(provider);
+  assert_eq!(monitor.activity().state, "retired");
+}
+
 fn poisoned_state(provider: &KvPageProvider) -> std::sync::MutexGuard<'_, PageCacheState> {
   match provider.inner.state.lock() {
     Ok(_) => panic!("KV page provider unexpectedly lost its poison state"),

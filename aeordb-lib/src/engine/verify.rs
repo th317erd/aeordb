@@ -3,6 +3,10 @@
 //! Scans the append log, verifies entry hashes, checks directory consistency,
 //! validates KV index, and produces a structured report.
 
+#[cfg(test)]
+#[path = "../../spec/engine/verify_progress_internal_spec.rs"]
+mod verify_progress_internal_spec;
+
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -15,6 +19,7 @@ use crate::engine::hot_tail;
 use crate::engine::kv_rebuild_workspace::{KvRebuildWorkspace, RebuildOrder, ResolvedKvRecord};
 use crate::engine::kv_store::{KV_FLAG_DELETED, KV_TYPE_VOID};
 use crate::engine::memory_coordinator::{AdmissionClass, CriticalMemoryPurpose, MemoryOwner};
+use crate::engine::maintenance_progress::MaintenanceProgress;
 use crate::engine::operation_memory::OperationMemoryBudget;
 use crate::engine::storage_engine::StorageEngine;
 use crate::engine::system_family_policy::VerifyPathSelection;
@@ -324,24 +329,37 @@ fn verify_checked_inner(engine: &StorageEngine, db_path: &str) -> EngineResult<V
   report.file_size = std::fs::metadata(engine.database_path())?.len();
   report.hash_algorithm = format!("{:?}", engine.hash_algo());
 
-  check_hot_tail_voids(engine, &mut report)?;
-  let expected = scan_entries(engine, &mut report)?;
-  let actual = scan_kv_index(engine, &mut report)?;
-  compare_kv_runs(&mut report, &expected, &actual)?;
+  verification_phase(engine, "hot_tail_voids", "voids", |progress| check_hot_tail_voids(engine, &mut report, progress))?;
+  let mut expected = verification_phase(engine, "wal_entries", "entries", |progress| scan_entries(engine, &mut report, progress))?;
+  verification_phase(engine, "expected_merge", "records", |progress| expected.finish_with_progress(Some(progress)))?;
+  let mut actual = verification_phase(engine, "kv_entries", "entries", |progress| scan_kv_index(engine, &mut report, progress))?;
+  verification_phase(engine, "actual_merge", "records", |progress| actual.finish_with_progress(Some(progress)))?;
+  verification_phase(engine, "kv_compare", "comparisons", |progress| compare_kv_runs(&mut report, &expected, &actual, progress))?;
   drop(expected);
   drop(actual);
 
   // Phase 3: Check directory consistency
-  check_directories(engine, &mut report)?;
-  check_path_file_records(engine, &mut report)?;
+  verification_phase(engine, "directories", "visits", |progress| check_directories(engine, &mut report, progress))?;
+  verification_phase(engine, "path_file_records", "visits", |progress| check_path_file_records(engine, &mut report, progress))?;
 
   report.non_head_retained_logical_data_size = report.retained_logical_data_size.saturating_sub(report.logical_data_size);
   report.dedup_savings = report.logical_data_size.saturating_sub(report.chunk_data_size);
 
   // Phase 4: Check snapshot tree integrity (detects GC damage)
-  check_snapshot_integrity(engine, &mut report)?;
+  verification_phase(engine, "snapshots", "visits", |progress| check_snapshot_integrity(engine, &mut report, progress))?;
 
   Ok(report)
+}
+
+fn verification_phase<T>(
+  engine: &StorageEngine,
+  phase: &'static str,
+  unit: &'static str,
+  action: impl FnOnce(&MaintenanceProgress) -> EngineResult<T>,
+) -> EngineResult<T> {
+  // Capture the provider before visitors take the KV writer lock. Reporting
+  // uses only a nonblocking cache lock and never reenters storage authority.
+  MaintenanceProgress::run(phase, unit, engine.kv_page_provider()?, action)
 }
 
 /// Run the final clean verification pass for an explicit durability repair.
@@ -487,13 +505,21 @@ pub fn repair_preverified_report_checked(engine: &StorageEngine, verified: Preve
 }
 
 fn repair_report_checked(engine: &StorageEngine, db_path: &str, report: VerifyReport) -> EngineResult<VerifyReport> {
-  let outcome = repair_verified_report(engine, &report)?;
+  let outcome = verification_phase(engine, "repair_actions", "actions", |activity| {
+    let outcome = repair_verified_report(engine, &report)?;
+    activity.advance(outcome.progress.completed() as u64);
+    Ok(outcome)
+  })?;
   if outcome.messages.is_empty() {
     return Ok(report);
   }
 
-  let mut final_report =
-    verify_checked(engine, db_path).map_err(|error| outcome.progress.preserve_error(error, "final_verification", db_path))?;
+  let mut final_report = verification_phase(engine, "final_verification", "passes", |activity| {
+    let report = verify_checked(engine, db_path)?;
+    activity.advance(1);
+    Ok(report)
+  })
+  .map_err(|error| outcome.progress.preserve_error(error, "final_verification", db_path))?;
   final_report.repairs = outcome.messages;
   Ok(final_report)
 }
@@ -510,9 +536,12 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
 
   // Repair 1: Rebuild KV if there are missing or stale entries
   if report.missing_kv_entries > 0 || report.stale_kv_entries > 0 {
-    engine
-      .rebuild_kv_unrouted()
-      .map_err(|error| progress.preserve_error(error, "kv_rebuild", engine.database_path().to_string_lossy().as_ref()))?;
+    verification_phase(engine, "repair_kv_rebuild", "passes", |activity| {
+      engine.rebuild_kv_unrouted()?;
+      activity.advance(1);
+      Ok(())
+    })
+    .map_err(|error| progress.preserve_error(error, "kv_rebuild", engine.database_path().to_string_lossy().as_ref()))?;
     progress.kv_rebuilds = progress.kv_rebuilds.saturating_add(1);
     mutated = true;
     repairs
@@ -581,6 +610,7 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
   if !report.stale_dir_path_keys.is_empty() {
     let ops = DirectoryOps::new(engine);
     let mut repaired = 0usize;
+    let activity = MaintenanceProgress::new("repair_stale_locators", "locators", engine.kv_page_provider()?);
     for path in &report.stale_dir_path_keys {
       let changed =
         ops.repair_stale_dir_key_unrouted(path).map_err(|error| progress.preserve_error(error, "stale_directory_locator", path))?;
@@ -588,7 +618,9 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
         repaired = repaired.saturating_add(1);
         progress.stale_locators = progress.stale_locators.saturating_add(1);
       }
+      activity.advance(1);
     }
+    activity.complete();
     mutated |= repaired > 0;
     repairs.push(format!("Stale dir_keys rewritten: {} fixed", repaired));
   }
@@ -626,7 +658,7 @@ fn repair_verified_report(engine: &StorageEngine, report: &VerifyReport) -> Engi
 /// the set of KV hash keys expected to be live. Void entries are storage
 /// bookkeeping, not user/content records, so they are counted in the storage
 /// summary but excluded from live-KV completeness checks.
-fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<KvRebuildWorkspace> {
+fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<KvRebuildWorkspace> {
   let coordinator = engine.memory_coordinator();
   let mut expected = KvRebuildWorkspace::new_for_purpose(
     engine.database_path(),
@@ -638,6 +670,7 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResu
   )?;
   let mut scanner = engine.writer_read_lock()?.scan_entries_reporting_current_wal(Some(engine.repair_cancellation()))?;
   while let Some(result) = scanner.next_verify_entry() {
+    progress.advance(1);
     match result {
       Ok(scanned) => {
         report.total_entries = report.total_entries.saturating_add(1);
@@ -701,11 +734,10 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResu
       scanner.skipped_region_bytes()
     ));
   }
-  expected.finish()?;
   Ok(expected)
 }
 
-fn scan_kv_index(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<KvRebuildWorkspace> {
+fn scan_kv_index(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<KvRebuildWorkspace> {
   let coordinator = engine.memory_coordinator();
   let mut actual = KvRebuildWorkspace::new_for_purpose(
     engine.database_path(),
@@ -721,6 +753,7 @@ fn scan_kv_index(engine: &StorageEngine, report: &mut VerifyReport) -> EngineRes
     (header.kv_block_offset.saturating_add(header.kv_block_length), writer.current_offset())
   };
   engine.visit_kv_entries_for_repair(|entry| {
+    progress.advance(1);
     if entry.entry_type() == KV_TYPE_VOID {
       return Ok(true);
     }
@@ -747,16 +780,23 @@ fn scan_kv_index(engine: &StorageEngine, report: &mut VerifyReport) -> EngineRes
     )?;
     Ok(true)
   })?;
-  actual.finish()?;
   Ok(actual)
 }
 
-fn compare_kv_runs(report: &mut VerifyReport, expected: &KvRebuildWorkspace, actual: &KvRebuildWorkspace) -> EngineResult<()> {
+fn compare_kv_runs(
+  report: &mut VerifyReport,
+  expected: &KvRebuildWorkspace,
+  actual: &KvRebuildWorkspace,
+  progress: &MaintenanceProgress,
+) -> EngineResult<()> {
   let mut expected_cursor = expected.resolved_cursor()?;
   let mut actual_cursor = actual.resolved_cursor()?;
   let mut expected_entry = next_live_record(&mut expected_cursor)?;
   let mut actual_entry = next_live_record(&mut actual_cursor)?;
   loop {
+    if expected_entry.is_some() || actual_entry.is_some() {
+      progress.advance(1);
+    }
     match (&expected_entry, &actual_entry) {
       (Some(expected), Some(actual)) if expected.hash < actual.hash => {
         record_missing(report, expected);
@@ -825,7 +865,7 @@ fn short_hash(hash: &[u8]) -> String {
   hex::encode(&hash[..8.min(hash.len())])
 }
 
-fn check_hot_tail_voids(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
+fn check_hot_tail_voids(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<()> {
   let mut file = File::open(engine.database_path())?;
   let (header, _) = read_active_header(&mut file)?;
   if header.hot_tail_offset == 0 {
@@ -841,6 +881,7 @@ fn check_hot_tail_voids(engine: &StorageEngine, report: &mut VerifyReport) -> En
   let cancellation = engine.repair_cancellation();
   let mut inspect_void = |index: u64, void: crate::engine::hot_tail::VoidRecord| -> EngineResult<()> {
     ensure_repair_active(engine)?;
+    progress.advance(1);
     report.voids = report.voids.saturating_add(1);
     report.void_bytes = report.void_bytes.saturating_add(void.size as u64);
     if !StorageEngine::valid_reusable_range(void.offset, void.size, wal_start, validation_end) {
@@ -891,11 +932,11 @@ fn check_hot_tail_voids(engine: &StorageEngine, report: &mut VerifyReport) -> En
   Ok(())
 }
 
-fn check_directories(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
+fn check_directories(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<()> {
   let ops = DirectoryOps::new(engine);
 
   // List root directory and recursively check all children
-  check_directory_recursive(&ops, engine, "/", report, 0)
+  check_directory_recursive(&ops, engine, "/", report, 0, progress)
 }
 
 fn check_directory_recursive(
@@ -904,6 +945,7 @@ fn check_directory_recursive(
   path: &str,
   report: &mut VerifyReport,
   depth: usize,
+  progress: &MaintenanceProgress,
 ) -> EngineResult<()> {
   // Limit recursion depth to prevent infinite loops on corrupt directory cycles
   if depth > 100 {
@@ -913,13 +955,15 @@ fn check_directory_recursive(
   ensure_repair_active(engine)?;
 
   report.directories_checked = report.directories_checked.saturating_add(1);
+  progress.advance(1);
 
   let result = ops.visit_directory_for_verification(path, |child| {
     ensure_repair_active(engine)?;
+    progress.advance(1);
     let child_path = if path == "/" { format!("/{}", child.name) } else { format!("{}/{}", path.trim_end_matches('/'), child.name) };
 
     match EntryType::from_u8(child.entry_type) {
-      Ok(EntryType::DirectoryIndex) => check_directory_recursive(ops, engine, &child_path, report, depth + 1)?,
+      Ok(EntryType::DirectoryIndex) => check_directory_recursive(ops, engine, &child_path, report, depth + 1, progress)?,
       Ok(EntryType::FileRecord) => {
         report.logical_data_size = report.logical_data_size.saturating_add(child.total_size);
         let key = crate::engine::directory_ops::file_path_hash(&child_path, &engine.hash_algo())?;
@@ -990,8 +1034,7 @@ fn format_btree_directory_issue(issue: &BTreeDirectoryIssue) -> String {
   format!("{} (B-tree node {}: {})", issue.path, issue.node_hash.as_deref().unwrap_or("inline-root"), issue.reason)
 }
 
-fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
-  let hash_length = engine.hash_algo().hash_length();
+fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<()> {
   let algo = engine.hash_algo();
   let family_policy = SystemFamilyPolicyResolver::new(algo)?;
   let mut memory = OperationMemoryBudget::new(
@@ -1003,12 +1046,13 @@ fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) ->
     None,
   )?;
   let result = engine.visit_kv_entries_for_repair(|entry| {
+    progress.advance(1);
     if entry.entry_type() != crate::engine::kv_store::KV_TYPE_FILE_RECORD {
       return Ok(true);
     }
     ensure_repair_active(engine)?;
     let checkpoint = memory.checkpoint();
-    let result = check_path_file_record_entry(engine, entry, hash_length, &algo, family_policy, report, &mut memory);
+    let result = check_path_file_record_entry(engine, entry, &algo, family_policy, report, &mut memory, progress);
     let release = memory.release_to(checkpoint, "FileRecord verification entry release failed");
     match (result, release) {
       (Ok(()), Ok(())) => Ok(true),
@@ -1023,11 +1067,11 @@ fn check_path_file_records(engine: &StorageEngine, report: &mut VerifyReport) ->
 fn check_path_file_record_entry(
   engine: &StorageEngine,
   entry: &crate::engine::kv_store::KVEntry,
-  hash_length: usize,
   algo: &crate::engine::hash_algorithm::HashAlgorithm,
   family_policy: SystemFamilyPolicyResolver,
   report: &mut VerifyReport,
   memory: &mut OperationMemoryBudget,
+  progress: &MaintenanceProgress,
 ) -> EngineResult<()> {
   let header = match engine.get_entry_header(&entry.hash) {
     Ok(Some(header)) => header,
@@ -1060,7 +1104,7 @@ fn check_path_file_record_entry(
     }
     return Ok(());
   }
-  let record = match crate::engine::file_record::FileRecord::deserialize(&value, hash_length, header.entry_version) {
+  let record = match crate::engine::file_record::FileRecord::deserialize(&value, algo.hash_length(), header.entry_version) {
     Ok(record) => record,
     Err(error) => {
       record_verification_error(report, format!("FileRecord {} is malformed: {error}", short_hash(&entry.hash)));
@@ -1099,6 +1143,7 @@ fn check_path_file_record_entry(
   let mut missing_examples = Vec::with_capacity(3);
   for chunk_hash in &record.chunk_hashes {
     ensure_repair_active(engine)?;
+    progress.advance(1);
     match engine.get_entry_header(chunk_hash) {
       Ok(Some(chunk_header)) if chunk_header.entry_type == EntryType::Chunk => {}
       Ok(Some(chunk_header)) => {
@@ -1128,7 +1173,7 @@ fn check_path_file_record_entry(
 
 /// Phase 4: Walk each snapshot's directory tree and verify all entries
 /// are reachable. Detects damage from GC sweeping snapshot-referenced data.
-fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport) -> EngineResult<()> {
+fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport, progress: &MaintenanceProgress) -> EngineResult<()> {
   let hash_length = engine.hash_algo().hash_length();
   let mut memory = OperationMemoryBudget::new(
     engine,
@@ -1139,13 +1184,14 @@ fn check_snapshot_integrity(engine: &StorageEngine, report: &mut VerifyReport) -
     None,
   )?;
   engine.visit_kv_entries_for_repair(|entry| {
+    progress.advance(1);
     if entry.entry_type() != crate::engine::kv_store::KV_TYPE_SNAPSHOT {
       return Ok(true);
     }
     ensure_repair_active(engine)?;
     report.snapshots_checked = report.snapshots_checked.saturating_add(1);
     let checkpoint = memory.checkpoint();
-    let result = verify_snapshot_entry(engine, entry, hash_length, report, &mut memory);
+    let result = verify_snapshot_entry(engine, entry, hash_length, report, &mut memory, progress);
     let release = memory.release_to(checkpoint, "snapshot verification entry release failed");
     match (result, release) {
       (Ok(()), Ok(())) => Ok(true),
@@ -1192,6 +1238,7 @@ fn verify_snapshot_entry(
   hash_length: usize,
   report: &mut VerifyReport,
   memory: &mut OperationMemoryBudget,
+  progress: &MaintenanceProgress,
 ) -> EngineResult<()> {
   let header = match engine.get_entry_header(&entry.hash) {
     Ok(Some(header)) => header,
@@ -1228,7 +1275,7 @@ fn verify_snapshot_entry(
 
   let mut missing_count = 0u64;
   let mut missing_details = Vec::with_capacity(5);
-  walk_snapshot_tree(engine, &snapshot.root_hash, "/", hash_length, &mut missing_count, &mut missing_details, 0, memory)?;
+  walk_snapshot_tree(engine, &snapshot.root_hash, "/", hash_length, &mut missing_count, &mut missing_details, 0, memory, progress)?;
   if missing_count > 0 {
     record_broken_snapshot(
       report,
@@ -1269,8 +1316,10 @@ fn walk_snapshot_tree(
   missing_details: &mut Vec<String>,
   depth: usize,
   memory: &mut OperationMemoryBudget,
+  progress: &MaintenanceProgress,
 ) -> EngineResult<()> {
   ensure_repair_active(engine)?;
+  progress.advance(1);
   if depth > 100 {
     record_snapshot_missing(missing_count, missing_details, format!("{} (directory depth exceeds 100)", dir_path));
     return Ok(());
@@ -1310,7 +1359,7 @@ fn walk_snapshot_tree(
 
     if crate::engine::btree::is_btree_format(&value) {
       let mut visitor = |child: &crate::engine::directory_entry::ChildEntry| -> EngineResult<bool> {
-        walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory)?;
+        walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory, progress)?;
         Ok(true)
       };
       let visit = crate::engine::btree::btree_visit_from_node_with_mode(
@@ -1329,7 +1378,7 @@ fn walk_snapshot_tree(
     }
 
     if let Err(error) = DirectoryOps::visit_bounded_flat_children(&value, hash_length, header.entry_version, |child| {
-      walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory)?;
+      walk_snapshot_child(engine, child, dir_path, hash_length, missing_count, missing_details, depth, memory, progress)?;
       Ok(true)
     }) {
       if is_operational_verification_error(&error) {
@@ -1357,13 +1406,15 @@ fn walk_snapshot_child(
   missing_details: &mut Vec<String>,
   depth: usize,
   memory: &mut OperationMemoryBudget,
+  progress: &MaintenanceProgress,
 ) -> EngineResult<()> {
   ensure_repair_active(engine)?;
+  progress.advance(1);
   let child_path = if dir_path == "/" { format!("/{}", child.name) } else { format!("{}/{}", dir_path, child.name) };
 
   match crate::engine::entry_type::EntryType::from_u8(child.entry_type) {
     Ok(crate::engine::entry_type::EntryType::DirectoryIndex) => {
-      walk_snapshot_tree(engine, &child.hash, &child_path, hash_length, missing_count, missing_details, depth + 1, memory)
+      walk_snapshot_tree(engine, &child.hash, &child_path, hash_length, missing_count, missing_details, depth + 1, memory, progress)
     }
     Ok(crate::engine::entry_type::EntryType::FileRecord) => {
       let header = match engine.get_entry_header_including_deleted(&child.hash) {
@@ -1402,6 +1453,7 @@ fn walk_snapshot_child(
         };
         for chunk_hash in &record.chunk_hashes {
           ensure_repair_active(engine)?;
+          progress.advance(1);
           match engine.get_entry_header_including_deleted(chunk_hash) {
             Ok(Some(chunk_header)) if chunk_header.entry_type == EntryType::Chunk => {}
             Ok(Some(chunk_header)) => record_snapshot_missing(

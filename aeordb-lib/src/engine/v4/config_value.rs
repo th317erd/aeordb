@@ -610,18 +610,19 @@ fn summary(tag_name: &'static str, detail_name: &'static str, detail: usize) -> 
   CanonicalValueSummary { tag_name, detail_name, detail }
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u32_at: u32, u64_at: u64);
+
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes
-    .get(offset..offset + 4)
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "config_u32_truncated", format!("u32 at offset {offset}")))?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked config u32 length")))
+  Ok(u32::from_le_bytes(raw))
 }
 
 fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
-  let raw = bytes
-    .get(offset..offset + 8)
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "config_u64_truncated", format!("u64 at offset {offset}")))?;
-  Ok(u64::from_le_bytes(raw.try_into().expect("checked config u64 length")))
+  Ok(u64::from_le_bytes(raw))
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {

@@ -330,6 +330,13 @@ impl KvRebuildWorkspace {
   }
 
   pub(crate) fn finish(&mut self) -> EngineResult<()> {
+    self.finish_with_progress(None)
+  }
+
+  pub(crate) fn finish_with_progress(
+    &mut self,
+    progress: Option<&crate::engine::maintenance_progress::MaintenanceProgress>,
+  ) -> EngineResult<()> {
     self.check_cancelled()?;
     if self.final_run.is_some() {
       return Ok(());
@@ -342,21 +349,21 @@ impl KvRebuildWorkspace {
       if level.is_empty() {
         continue;
       }
-      consolidated.push(self.merge_runs(level)?);
+      consolidated.push(self.merge_runs(level, progress)?);
     }
     while consolidated.len() > 1 {
       self.check_cancelled()?;
       let take = consolidated.len().min(self.merge_fanout);
       let group: Vec<RunFile> = consolidated.drain(..take).collect();
-      consolidated.push(self.merge_runs(group)?);
+      consolidated.push(self.merge_runs(group, progress)?);
     }
     let final_run = match consolidated.pop() {
       Some(run) => run,
       None => self.write_run(&[])?,
     };
-    validate_run(&final_run, self.hash_algo, self.hash_length, self.record_length)?;
+    validate_run(&final_run, self.hash_algo, self.hash_length, self.record_length, progress)?;
     self.final_run = Some(final_run);
-    self.resolved_record_count = Some(self.count_resolved_records()?);
+    self.resolved_record_count = Some(self.count_resolved_records(progress)?);
     Ok(())
   }
 
@@ -393,9 +400,12 @@ impl KvRebuildWorkspace {
     })
   }
 
-  fn count_resolved_records(&self) -> EngineResult<u64> {
+  fn count_resolved_records(&self, progress: Option<&crate::engine::maintenance_progress::MaintenanceProgress>) -> EngineResult<u64> {
     let mut count = 0u64;
     self.visit_resolved(|_| {
+      if let Some(progress) = progress {
+        progress.advance(1);
+      }
       count = count.checked_add(1).ok_or_else(|| EngineError::ResourceExhausted("rebuild resolved record count overflow".to_string()))?;
       Ok(())
     })?;
@@ -427,7 +437,7 @@ impl KvRebuildWorkspace {
       return Ok(());
     }
     let group = std::mem::take(&mut self.levels[level]);
-    let merged = self.merge_runs(group)?;
+    let merged = self.merge_runs(group, None)?;
     self.add_run(level + 1, merged)
   }
 
@@ -443,7 +453,11 @@ impl KvRebuildWorkspace {
     Ok(RunFile { path, record_count })
   }
 
-  fn merge_runs(&mut self, runs: Vec<RunFile>) -> EngineResult<RunFile> {
+  fn merge_runs(
+    &mut self,
+    runs: Vec<RunFile>,
+    progress: Option<&crate::engine::maintenance_progress::MaintenanceProgress>,
+  ) -> EngineResult<RunFile> {
     self.check_cancelled()?;
     if runs.len() == 1 {
       return Ok(runs.into_iter().next().expect("one run"));
@@ -470,6 +484,9 @@ impl KvRebuildWorkspace {
       }
       writer.write_record(&item.record)?;
       merged_count = merged_count.saturating_add(1);
+      if let Some(progress) = progress {
+        progress.advance(1);
+      }
       if let Some(record) = readers[item.reader_index].next_record()? {
         heap.push(HeapRecord { record, reader_index: item.reader_index });
       }
@@ -764,9 +781,19 @@ impl RunReader {
   }
 }
 
-fn validate_run(run: &RunFile, hash_algo: HashAlgorithm, hash_length: usize, record_length: usize) -> EngineResult<()> {
+fn validate_run(
+  run: &RunFile,
+  hash_algo: HashAlgorithm,
+  hash_length: usize,
+  record_length: usize,
+  progress: Option<&crate::engine::maintenance_progress::MaintenanceProgress>,
+) -> EngineResult<()> {
   let mut reader = RunReader::open(run, hash_algo, hash_length, record_length)?;
-  while reader.next_record()?.is_some() {}
+  while reader.next_record()?.is_some() {
+    if let Some(progress) = progress {
+      progress.advance(1);
+    }
+  }
   Ok(())
 }
 

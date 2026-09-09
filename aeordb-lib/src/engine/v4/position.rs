@@ -886,18 +886,21 @@ fn validate_present_component(tag: u16, payload: &[u8]) -> FormatResult<Position
   }
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32);
+
 fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let raw = bytes.get(offset..offset + 2).ok_or_else(|| {
+  let raw = super::reader::fixed_array_at::<2>(bytes, offset).ok_or_else(|| {
     error(MalformedInputClass::TruncationOrTrailingBytes, "invalid_position_cursor", format!("u16 at offset {offset} is truncated"))
   })?;
-  Ok(u16::from_le_bytes(raw.try_into().expect("checked position u16 width")))
+  Ok(u16::from_le_bytes(raw))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes.get(offset..offset + 4).ok_or_else(|| {
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset).ok_or_else(|| {
     error(MalformedInputClass::TruncationOrTrailingBytes, "invalid_position_cursor", format!("u32 at offset {offset} is truncated"))
   })?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked position u32 width")))
+  Ok(u32::from_le_bytes(raw))
 }
 
 fn length_error(context: impl Into<String>) -> FormatError {

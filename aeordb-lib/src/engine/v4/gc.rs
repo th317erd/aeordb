@@ -608,25 +608,25 @@ pub fn immutable_gc_artifact_key(algorithm: HashAlgorithm, kind: GcArtifactKindV
   digest_parts(algorithm, &[b"aeordb.gc-artifact.immutable.v1\0", &kind_bytes, complete_value])
 }
 
+#[cfg(test)]
+fixed_width_reader_tests!(u16_at: u16, u32_at: u32, u64_at: u64);
+
 pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> FormatResult<u16> {
-  let raw = bytes
-    .get(offset..offset + 2)
+  let raw = super::reader::fixed_array_at::<2>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "gc_artifact_truncated", format!("u16 at offset {offset}")))?;
-  Ok(u16::from_le_bytes(raw.try_into().expect("checked GC u16 width")))
+  Ok(u16::from_le_bytes(raw))
 }
 
 pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> FormatResult<u32> {
-  let raw = bytes
-    .get(offset..offset + 4)
+  let raw = super::reader::fixed_array_at::<4>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "gc_artifact_truncated", format!("u32 at offset {offset}")))?;
-  Ok(u32::from_le_bytes(raw.try_into().expect("checked GC u32 width")))
+  Ok(u32::from_le_bytes(raw))
 }
 
 pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> FormatResult<u64> {
-  let raw = bytes
-    .get(offset..offset + 8)
+  let raw = super::reader::fixed_array_at::<8>(bytes, offset)
     .ok_or_else(|| error(MalformedInputClass::TruncationOrTrailingBytes, "gc_artifact_truncated", format!("u64 at offset {offset}")))?;
-  Ok(u64::from_le_bytes(raw.try_into().expect("checked GC u64 width")))
+  Ok(u64::from_le_bytes(raw))
 }
 
 fn checked_gc_u16(value: usize, context: &'static str) -> FormatResult<u16> {

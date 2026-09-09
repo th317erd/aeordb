@@ -34,7 +34,10 @@ jq -e --arg campaign "$campaign_id" '
 duplicate_ids=$(jq -r '.entries | group_by(.id)[] | select(length > 1) | .[0].id' "$policy")
 [[ -z "$duplicate_ids" ]] || fail "policy contains duplicate entry id: $(printf '%s' "$duplicate_ids" | head -n 1)"
 
-mapfile -t entry_ids < <(jq -r '.entries[].id' "$policy")
+entry_ids=()
+while IFS= read -r id; do
+  entry_ids+=("$id")
+done < <(jq -r '.entries[].id' "$policy")
 retained_matches=0
 
 for id in "${entry_ids[@]}"; do
@@ -68,8 +71,14 @@ for id in "${entry_ids[@]}"; do
   [[ "$(jq '[.scan_roots[]] | length == (unique | length)' <<<"$entry")" == true ]] || fail "entry '$id' repeats a scan root"
   [[ "$(jq '[.allowed_paths[]] | length == (unique | length)' <<<"$entry")" == true ]] || fail "entry '$id' repeats an allowed path"
 
-  mapfile -t scan_roots < <(jq -r '.scan_roots[]' <<<"$entry")
-  mapfile -t allowed_paths < <(jq -r '.allowed_paths[]' <<<"$entry")
+  scan_roots=()
+  while IFS= read -r scan_root; do
+    scan_roots+=("$scan_root")
+  done < <(jq -r '.scan_roots[]' <<<"$entry")
+  allowed_paths=()
+  while IFS= read -r allowed_path; do
+    allowed_paths+=("$allowed_path")
+  done < <(jq -r '.allowed_paths[]' <<<"$entry")
   if [[ "$classification" == forbidden && ${#allowed_paths[@]} -ne 0 ]]; then
     fail "forbidden entry '$id' must not allow paths"
   fi
@@ -78,7 +87,9 @@ for id in "${entry_ids[@]}"; do
     safe_relative_path "$scan_root" || fail "entry '$id' has unsafe scan root: $scan_root"
     [[ -e "$repo_root/$scan_root" ]] || fail "entry '$id' scan root is missing: $scan_root"
   done
-  for allowed_path in "${allowed_paths[@]}"; do
+  # Bash 3.2 treats an empty array as unset under nounset. Preserve zero
+  # iterations for forbidden entries and quoting for paths containing spaces.
+  for allowed_path in ${allowed_paths[@]+"${allowed_paths[@]}"}; do
     safe_relative_path "$allowed_path" || fail "entry '$id' has unsafe allowed path: $allowed_path"
     [[ -f "$repo_root/$allowed_path" ]] || fail "entry '$id' allowed path is missing: $allowed_path"
     covered=false
@@ -124,7 +135,7 @@ for id in "${entry_ids[@]}"; do
     [[ -n "$match" ]] || continue
     match_path=${match%%:*}
     reviewed=false
-    for allowed_path in "${allowed_paths[@]}"; do
+    for allowed_path in ${allowed_paths[@]+"${allowed_paths[@]}"}; do
       if [[ "$match_path" == "$allowed_path" ]]; then
         reviewed=true
         break
@@ -145,7 +156,7 @@ for id in "${entry_ids[@]}"; do
     fail "entry '$id' match count $match_count exceeds maximum_matches $maximum_matches"
   fi
 
-  for allowed_path in "${allowed_paths[@]}"; do
+  for allowed_path in ${allowed_paths[@]+"${allowed_paths[@]}"}; do
     if ! awk -F: -v path="$allowed_path" '$1 == path { found=1 } END { exit(found ? 0 : 1) }' "$matches"; then
       rm -f "$matches"
       fail "entry '$id' allowed path has no current match: $allowed_path"

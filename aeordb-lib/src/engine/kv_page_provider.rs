@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError, Weak};
 
 #[cfg(test)]
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -13,7 +13,8 @@ use crate::engine::native_durability::read_exact_at_platform;
 
 struct CachedPage {
   data: Arc<[u8]>,
-  last_access: u64,
+  previous: Option<usize>,
+  next: Option<usize>,
   _reservation: MemoryReservation,
 }
 
@@ -38,12 +39,14 @@ struct PendingUpdate {
 struct PageCacheState {
   pages: HashMap<usize, CachedPage>,
   loading: HashSet<usize>,
-  access_clock: u64,
+  oldest: Option<usize>,
+  newest: Option<usize>,
   resident_bytes: u64,
   hits: u64,
   misses: u64,
   disk_reads: u64,
   evictions: u64,
+  eviction_candidates: u64,
   read_failures: u64,
   cache_deferrals: u64,
   committed_generation: u64,
@@ -64,6 +67,8 @@ pub struct KvPageProviderStats {
   pub misses: u64,
   pub disk_reads: u64,
   pub evictions: u64,
+  /// Resident pages examined while selecting eviction victims.
+  pub eviction_candidates: u64,
   pub read_failures: u64,
   pub cache_deferrals: u64,
   pub historical_pages: u64,
@@ -72,6 +77,21 @@ pub struct KvPageProviderStats {
   pub pending_bytes: u64,
   pub committed_generation: u64,
   pub active_snapshots: u64,
+}
+
+/// Constant-time, nonblocking cache telemetry; no historical-generation walk.
+#[derive(Default)]
+pub(crate) struct KvPageActivity {
+  pub state: &'static str,
+  pub resident_pages: u64,
+  pub resident_bytes: u64,
+  pub hits: u64,
+  pub misses: u64,
+  pub disk_reads: u64,
+  pub evictions: u64,
+  pub eviction_candidates: u64,
+  pub read_failures: u64,
+  pub cache_deferrals: u64,
 }
 
 struct KvPageProviderInner {
@@ -86,6 +106,10 @@ struct KvPageProviderInner {
   loaded: Condvar,
   #[cfg(test)]
   page_read_test_hook: Mutex<Option<PageReadTestHook>>,
+}
+
+pub(crate) struct KvPageActivityMonitor {
+  inner: Weak<KvPageProviderInner>,
 }
 
 #[cfg(test)]
@@ -295,11 +319,9 @@ impl KvPageProvider {
         return Err(EngineError::DurabilityFailure(format!("KV page publication is poisoned: {reason}")));
       }
 
-      state.access_clock = state.access_clock.saturating_add(1);
-      let access_clock = state.access_clock;
-      if let Some(page) = state.pages.get_mut(&bucket) {
-        page.last_access = access_clock;
+      if let Some(page) = state.pages.get(&bucket) {
         let data = Arc::clone(&page.data);
+        make_cached_page_newest(&mut state, bucket);
         state.hits = state.hits.saturating_add(1);
         return Ok(data);
       }
@@ -369,10 +391,10 @@ impl KvPageProvider {
         }
       }
       remove_cached_page(&mut state, bucket);
-      state.access_clock = state.access_clock.saturating_add(1);
-      let last_access = state.access_clock;
+      let previous = state.newest;
       state.resident_bytes = state.resident_bytes.saturating_add(page_bytes);
-      state.pages.insert(bucket, CachedPage { data: Arc::clone(&data), last_access, _reservation: reservation });
+      state.pages.insert(bucket, CachedPage { data: Arc::clone(&data), previous, next: None, _reservation: reservation });
+      append_cached_page(&mut state, bucket);
     } else {
       state.cache_deferrals = state.cache_deferrals.saturating_add(1);
     }
@@ -529,6 +551,7 @@ impl KvPageProvider {
       misses: state.misses,
       disk_reads: state.disk_reads,
       evictions: state.evictions,
+      eviction_candidates: state.eviction_candidates,
       read_failures: state.read_failures,
       cache_deferrals: state.cache_deferrals,
       historical_pages,
@@ -538,6 +561,35 @@ impl KvPageProvider {
       committed_generation: state.committed_generation,
       active_snapshots: state.active_generations.values().copied().sum(),
     })
+  }
+
+  pub(crate) fn activity_monitor(&self) -> KvPageActivityMonitor {
+    KvPageActivityMonitor { inner: Arc::downgrade(&self.inner) }
+  }
+}
+
+impl KvPageActivityMonitor {
+  pub(crate) fn activity(&self) -> KvPageActivity {
+    let Some(inner) = self.inner.upgrade() else {
+      return KvPageActivity { state: "retired", ..Default::default() };
+    };
+    let activity = match inner.state.try_lock() {
+      Ok(state) => KvPageActivity {
+        state: "available",
+        resident_pages: state.pages.len() as u64,
+        resident_bytes: state.resident_bytes,
+        hits: state.hits,
+        misses: state.misses,
+        disk_reads: state.disk_reads,
+        evictions: state.evictions,
+        eviction_candidates: state.eviction_candidates,
+        read_failures: state.read_failures,
+        cache_deferrals: state.cache_deferrals,
+      },
+      Err(TryLockError::WouldBlock) => KvPageActivity { state: "busy", ..Default::default() },
+      Err(TryLockError::Poisoned(_)) => KvPageActivity { state: "poisoned", ..Default::default() },
+    };
+    activity
   }
 }
 
@@ -676,16 +728,65 @@ fn remove_cached_page(state: &mut PageCacheState, bucket: usize) -> bool {
   let Some(evicted) = state.pages.remove(&bucket) else {
     return false;
   };
+  unlink_cached_page(state, evicted.previous, evicted.next);
   state.resident_bytes = state.resident_bytes.saturating_sub(evicted.data.len() as u64);
   state.evictions = state.evictions.saturating_add(1);
   true
 }
 
 fn evict_oldest_page(state: &mut PageCacheState) -> bool {
-  let Some(oldest) = state.pages.iter().min_by_key(|(_, page)| page.last_access).map(|(bucket, _)| *bucket) else {
+  let Some(oldest) = state.oldest else {
     return false;
   };
+  state.eviction_candidates = state.eviction_candidates.saturating_add(1);
   remove_cached_page(state, oldest)
+}
+
+// The resident entries themselves own the LRU links. All mutations occur under
+// the same cache mutex; pending/historical pages never participate. Each helper
+// performs a bounded number of hash lookups and retains no stale access records.
+fn unlink_cached_page(state: &mut PageCacheState, previous: Option<usize>, next: Option<usize>) {
+  if let Some(previous) = previous {
+    if let Some(page) = state.pages.get_mut(&previous) {
+      page.next = next;
+    }
+  } else {
+    state.oldest = next;
+  }
+  if let Some(next) = next {
+    if let Some(page) = state.pages.get_mut(&next) {
+      page.previous = previous;
+    }
+  } else {
+    state.newest = previous;
+  }
+}
+
+fn append_cached_page(state: &mut PageCacheState, bucket: usize) {
+  if let Some(newest) = state.newest {
+    if let Some(page) = state.pages.get_mut(&newest) {
+      page.next = Some(bucket);
+    }
+  } else {
+    state.oldest = Some(bucket);
+  }
+  state.newest = Some(bucket);
+}
+
+fn make_cached_page_newest(state: &mut PageCacheState, bucket: usize) {
+  if state.newest == Some(bucket) {
+    return;
+  }
+  let Some(page) = state.pages.get(&bucket) else {
+    return;
+  };
+  let (previous, next) = (page.previous, page.next);
+  unlink_cached_page(state, previous, next);
+  if let Some(page) = state.pages.get_mut(&bucket) {
+    page.previous = state.newest;
+    page.next = None;
+  }
+  append_cached_page(state, bucket);
 }
 
 fn prune_historical_pages(state: &mut PageCacheState) {
@@ -705,3 +806,7 @@ fn prune_historical_pages(state: &mut PageCacheState) {
 #[cfg(test)]
 #[path = "../../spec/engine/kv_page_provider_poison_internal_spec.rs"]
 mod kv_page_provider_poison_internal_spec;
+
+#[cfg(test)]
+#[path = "../../spec/engine/kv_page_provider_lru_internal_spec.rs"]
+mod kv_page_provider_lru_internal_spec;
