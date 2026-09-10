@@ -69,7 +69,8 @@ fn legacy_soak_builds_are_job_bounded_and_diagnostics_use_owned_scratch() {
   assert!(soak.contains("CARGO_BUILD_JOBS=\"${CARGO_BUILD_JOBS:-4}\""));
   assert!(soak.contains("-j \"$CARGO_BUILD_JOBS\""));
   assert!(soak.contains("AEORDB_SOAK_SCRATCH"));
-  assert!(soak.contains("mktemp -p \"$SCRATCH_ROOT\""));
+  assert_eq!(soak.matches("mktemp -d -p \"$SCRATCH_ROOT\"").count(), 2, "both crash modes require owned diagnostic directories");
+  assert_eq!(soak.matches("copy_db_for_diagnostic \"$DB\" \"$verify_db\"").count(), 2, "both modes must preserve the original crash image");
   assert!(!soak.lines().any(|line| line.trim() == "verify_log=\"$(mktemp)\""));
   assert!(!soak.lines().any(|line| line.trim() == "diag_dir=\"$(mktemp -d)\""));
 }
@@ -82,8 +83,8 @@ fn legacy_soak_propagates_diagnostic_failures_to_process_status() {
   assert_eq!(soak.matches("|| verify_status=$?").count(), 2, "both crash modes must retain the verifier exit status");
   assert_eq!(
     soak.matches("SOAK_FAILURES=$((SOAK_FAILURES + 1))").count(),
-    2,
-    "each crash mode must accumulate failed iterations instead of printing and forgetting them"
+    5,
+    "S2 worker/copy/verification and S3 copy/diagnostic failures must all contribute to the failing exit status"
   );
   assert!(soak.contains("finish_chaos_soak"), "the soak harness must centralize its final pass/fail exit contract");
   assert!(soak.contains("if [ \"$SOAK_FAILURES\" -gt 0 ]; then"), "retained diagnostic failures must produce a failing process status");
@@ -98,6 +99,13 @@ fn legacy_soak_propagates_diagnostic_failures_to_process_status() {
     2,
     "both crash modes must reject every verifier issue except an explicitly counted torn terminal header"
   );
+  assert_eq!(soak.matches("verify_after_normal_reopen \"$verify_db\" \"$verify_log\"").count(), 2);
+  let reopen = soak.split("verify_after_normal_reopen() {").nth(1).unwrap().split("\n}").next().unwrap();
+  let normal_open = reopen.find("probe -D \"$database\" --growth-stats").unwrap();
+  let read_only_verify = reopen.find("verify -D \"$database\"").unwrap();
+  assert!(normal_open < read_only_verify, "normal recovery must be explicit and precede read-only verification");
+  assert!(reopen.contains("|| return $?"), "a failed normal open must not reach verification");
+  assert!(!reopen.contains("--repair"), "ordinary crash recovery must not be hidden by an explicit repair pass");
 }
 
 #[test]

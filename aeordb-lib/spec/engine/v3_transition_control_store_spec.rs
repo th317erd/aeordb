@@ -242,6 +242,27 @@ fn v3_spill_artifact(
 }
 
 #[test]
+fn offline_read_only_verification_preserves_active_and_completed_recovery_controls() {
+  for active in [true, false] {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("verify-transition-controls.aeordb");
+    let engine = StorageEngine::create(db_path.to_str().unwrap()).unwrap();
+    DirectoryOps::new(&engine).ensure_root_directory(&RequestContext::system()).unwrap();
+    publish_recovery_controls(&engine, [0x42; 16], active);
+    engine.shutdown().unwrap();
+    drop(engine);
+    let before = fs::read(&db_path).unwrap();
+    let result = verify::verify_database_read_only(db_path.to_str().unwrap());
+    if active {
+      assert!(matches!(result, Err(aeordb::engine::EngineError::DurabilityFailure(_))), "{result:?}");
+    } else {
+      assert!(result.is_ok(), "{result:?}");
+    }
+    assert!(before == fs::read(&db_path).unwrap(), "read-only verification republished persistent recovery state");
+  }
+}
+
+#[test]
 fn active_persistent_recovery_controls_restore_read_only_admission_after_reopen() {
   let temp = tempfile::tempdir().unwrap();
   let db_path = temp.path().join("transition-controls-active.aeordb");

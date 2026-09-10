@@ -12,19 +12,23 @@ cp "$repository/scripts/lib/soak-cycle.sh" "$fixture/scripts/lib/soak-cycle.sh"
 cp "$repository/scripts/spec/fixtures/soak-failure-worker.sh" "$fixture/target/release/soak-worker"
 cp "$repository/scripts/spec/fixtures/soak-failure-worker.sh" "$fixture/target/release/crash-soak-worker"
 cp "$repository/scripts/spec/fixtures/soak-failure-cli.sh" "$fixture/target/release/aeordb"
+cp "$repository/scripts/spec/fixtures/soak-failure-copy.sh" "$fixture/bin/cp"
 ln -s /usr/bin/true "$fixture/bin/cargo"
 chmod +x "$fixture/target/release/soak-worker" "$fixture/target/release/crash-soak-worker" "$fixture/target/release/aeordb"
+chmod +x "$fixture/bin/cp"
 export PATH="$fixture/bin:$PATH"
 export AEORDB_SOAK_HOURS=1 AEORDB_SOAK_DURATION_SECS=4
 export AEORDB_SOAK_S2_KILL_MIN_SECS=1 AEORDB_SOAK_S2_KILL_MAX_SECS=1
 export AEORDB_SOAK_S3_KILL_MIN_SECS=1 AEORDB_SOAK_S3_KILL_MAX_SECS=1
 export AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS=5
 failures=0
-for scenario in s1-failure s1-pass s2-verify s2-malformed s2-early s3-verify s3-checkpoint s3-early s2-pass s3-pass; do
+for scenario in s1-failure s1-pass s2-copy s2-reopen s2-verify s2-malformed s2-early \
+  s3-copy s3-copy-probe s3-copy-checkpoint s3-reopen s3-verify s3-checkpoint s3-early s2-pass s3-pass; do
   run_directory="$fixture/$scenario"
   mkdir -p "$run_directory/source" "$run_directory/scratch"
   export AEORDB_SOAK_FAILURE_SCENARIO="$scenario"
   export AEORDB_SOAK_FAILURE_STARTS="$run_directory/starts"
+  export AEORDB_SOAK_FAILURE_OPERATIONS="$run_directory/operations"
   export AEORDB_SOAK_DB="$run_directory/soak.aeordb"
   export AEORDB_SOAK_SOURCE="$run_directory/source"
   export AEORDB_SOAK_SCRATCH="$run_directory/scratch"
@@ -67,5 +71,24 @@ for scenario in s1-failure s1-pass s2-verify s2-malformed s2-early s3-verify s3-
       fi
       ;;
   esac
+  case "$scenario" in
+    *-copy*)
+      if test -e "$run_directory/operations"; then
+        printf 'FAIL %s: incomplete diagnostic copies reached the CLI\n' "$scenario"
+        failures=$((failures + 1))
+      fi
+      ;;
+    *-reopen)
+      if test "$(awk '$1 == "probe" && $2 == "--growth-stats" { n++ } END { print n+0 }' "$run_directory/operations")" -ne 1 \
+        || test "$(awk '$1 == "verify" { n++ } END { print n+0 }' "$run_directory/operations")" -ne 0; then
+        printf 'FAIL %s: failed startup must stop before verification\n' "$scenario"
+        failures=$((failures + 1))
+      fi
+      ;;
+  esac
+  if test "$(cat "$AEORDB_SOAK_DB")" != 'disposable simulated database'; then
+    printf 'FAIL %s: diagnostics modified the original crash image\n' "$scenario"
+    failures=$((failures + 1))
+  fi
 done
 test "$failures" -eq 0

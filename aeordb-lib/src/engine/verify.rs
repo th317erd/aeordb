@@ -303,7 +303,26 @@ impl VerifyReport {
   }
 }
 
-/// Run a full integrity check on the database.
+/// Open, verify and close an offline database without changing its bytes.
+///
+/// Startup recovery that requires writes is refused, not performed implicitly.
+/// The database handles are OS-read-only; the normal exclusive lock sidecar and
+/// bounded verification scratch space still require writable locations. No
+/// engine escapes this scope, so callers cannot turn inspection into mutation.
+pub fn verify_database_read_only(db_path: &str) -> EngineResult<VerifyReport> {
+  let engine = StorageEngine::open_for_offline_migration_inspection(db_path, Default::default())?;
+  let result = if engine.persistent_durability_recovery().is_some_and(|recovery| recovery.blocks_writes) {
+    Err(EngineError::DurabilityFailure("unresolved persistent durability recovery state; explicit repair is required".to_string()))
+  } else {
+    verify_checked(&engine, db_path)
+  };
+  engine.shutdown()?;
+  result
+}
+
+/// Run a full integrity check on an already-open engine. This does not undo
+/// mutations performed by a writable open or prevent publication on its close;
+/// offline callers requiring source preservation use `verify_database_read_only`.
 pub fn verify(engine: &StorageEngine, db_path: &str) -> VerifyReport {
   match verify_checked(engine, db_path) {
     Ok(report) => report,

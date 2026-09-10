@@ -3411,7 +3411,7 @@ impl StorageEngine {
 
     if let Err(error) = lock_file.try_lock_exclusive() {
       let database_path = lock_path.trim_end_matches(".lock");
-      let message = if error.kind() == std::io::ErrorKind::WouldBlock {
+      let message = if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
         format!("Database '{database_path}' is locked by another process. Only one process can open a database at a time.")
       } else {
         format!("Failed to acquire the database lock for '{database_path}': {error}")

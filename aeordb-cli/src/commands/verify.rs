@@ -96,6 +96,20 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     println!();
   }
 
+  if !repair {
+    match verify::verify_database_read_only(database) {
+      Ok(report) => print_report(&report, database, false, force_fix_in_place),
+      Err(error) => {
+        eprintln!("Read-only verification could not complete: {error}");
+        eprintln!("The database was not repaired. Preserve the source before explicitly requesting recovery:");
+        eprintln!("  aeordb verify --repair -D {database}");
+        let status = if matches!(error, aeordb::engine::EngineError::DurabilityFailure(_)) { 2 } else { 1 };
+        process::exit(status);
+      }
+    }
+    return;
+  }
+
   // If repairing without --force-fix-in-place, work on a copy.
   let work_path = if repair && !force_fix_in_place {
     let repaired_path = format!("{}.repaired", database);
@@ -161,14 +175,6 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
       // current format, reset hot_tail_offset if it's past EOF, then
       // reopen. StorageEngine::open's dirty-startup path rebuilds the
       // KV from a full WAL scan and recovers the data.
-      if !repair {
-        eprintln!("Error opening database: {}", open_error);
-        eprintln!();
-        eprintln!("  Run with --repair to attempt low-level header recovery:");
-        eprintln!("    aeordb verify --repair -D {}", database);
-        process::exit(1);
-      }
-
       println!("Initial open failed: {}", open_error);
       println!("Attempting low-level header repair...");
 
@@ -222,14 +228,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     }
   };
 
-  if !repair && engine.persistent_durability_recovery().is_some_and(|recovery| recovery.blocks_writes) {
-    eprintln!("Fatal: this database has unresolved persistent durability recovery state.");
-    eprintln!("Run:");
-    eprintln!("  aeordb verify --repair --force-fix-in-place -D {}", database);
-    process::exit(2);
-  }
-
-  let mut report = if repair {
+  let mut report = {
     if force_fix_in_place {
       println!("Running with --repair --force-fix-in-place...");
     } else {
@@ -271,14 +270,6 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
         }
       }
     }
-  } else {
-    match verify::verify_checked(&engine, database) {
-      Ok(report) => report,
-      Err(error) => {
-        eprintln!("Verification could not complete: {}", error);
-        process::exit(1);
-      }
-    }
   };
 
   if let Some(apply_report) = &spill_apply_report {
@@ -302,7 +293,10 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
     report.repairs.push(format!("Emergency spill artifacts marked applied: {}", emergency_spills.len()));
   }
 
-  // Print report
+  print_report(&report, database, repair, force_fix_in_place);
+}
+
+fn print_report(report: &verify::VerifyReport, database: &str, repair: bool, force_fix_in_place: bool) {
   println!("Database: {}", report.db_path);
   println!("File size: {}", format_bytes(report.file_size));
   println!("Hash algorithm: {}", report.hash_algorithm);
@@ -334,7 +328,7 @@ pub fn run(database: &str, repair: bool, force_fix_in_place: bool, yes: bool) {
   }
   println!();
 
-  print!("{}", format_storage_summary(&report));
+  print!("{}", format_storage_summary(report));
 
   println!("Directory Consistency:");
   println!("  Directories:        {:>8}", report.directories_checked);

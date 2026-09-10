@@ -1177,12 +1177,12 @@ fn migration_architecture_allows_only_reviewed_offline_orchestration_and_capture
     .collect::<Vec<_>>();
   assert_eq!(
     inspection_open_callers.len(),
-    3,
-    "read-only source open escaped its reviewed migration boundary: {inspection_open_callers:?}"
+    4,
+    "read-only source open escaped its reviewed migration/verification boundary: {inspection_open_callers:?}"
   );
   assert!(inspection_open_callers.iter().all(|path| matches!(
     path.file_name().and_then(|value| value.to_str()),
-    Some("storage_engine.rs" | "migration_offline_preflight.rs" | "migration_offline_run.rs")
+    Some("storage_engine.rs" | "migration_offline_preflight.rs" | "migration_offline_run.rs" | "verify.rs")
   )));
   let storage_engine = sources
     .iter()
@@ -1191,6 +1191,14 @@ fn migration_architecture_allows_only_reviewed_offline_orchestration_and_capture
     .unwrap();
   assert!(storage_engine.contains("pub(crate) fn open_for_offline_migration_inspection("));
   assert!(!storage_engine.contains("pub fn open_for_offline_migration_inspection("));
+  let verifier = include_str!("../../src/engine/verify.rs");
+  let offline_verifier = verifier.split("pub fn verify_database_read_only(").nth(1).unwrap().split("\n}").next().unwrap();
+  assert!(offline_verifier.contains("-> EngineResult<VerifyReport>"));
+  assert!(offline_verifier.contains("StorageEngine::open_for_offline_migration_inspection("));
+  assert!(offline_verifier.contains("engine.shutdown()?"));
+  for forbidden in ["StorageEngine::open(", "verify_and_repair", "publish_namespace_root", "update_head("] {
+    assert!(!offline_verifier.contains(forbidden), "offline verification gained a writer: {forbidden}");
+  }
   assert!(storage_engine.contains("AppendWriter::open_read_only("));
   let append_writer = sources
     .iter()

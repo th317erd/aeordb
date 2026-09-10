@@ -125,6 +125,15 @@ copy_db_for_diagnostic() {
   cp -a "$src" "$dest"
 }
 
+verify_after_normal_reopen() {
+  local database="$1"
+  local log="$2"
+  # Crash recovery belongs to normal runtime startup, not read-only verify.
+  # Only call this on a diagnostic copy: a failed reopen may have written bytes.
+  ./target/release/aeordb probe -D "$database" --growth-stats > "$log" 2>&1 || return $?
+  ./target/release/aeordb verify -D "$database" >> "$log" 2>&1
+}
+
 finish_chaos_soak() {
   local mode="$1"
   local iterations="$2"
@@ -284,12 +293,13 @@ case "$MODE" in
       wait "$pmap_pid" 2>/dev/null
       cycle_failed=0
       if [ "$worker_window_ok" != "1" ]; then
-        cycle_failed=1
+        SOAK_FAILURES=$((SOAK_FAILURES + 1))
+        echo "[$(date +%T)] iteration $iteration: preserving unexpected worker exit before recovery"
+        break
       fi
 
-      # Quick verify: try to open the database and read N random committed
-      # paths. The repair-aware open path inside aeordb handles the dirty
-      # startup; we just need a smoke test that it works.
+      # Exercise normal dirty startup on a copy, then inspect it read-only.
+      # Retain the original crash image and failed diagnostic copy on error.
       #
       # `aeordb verify` exits non-zero on any has_issues() — including
       # `corrupt_header > 0`. For S2's expected behavior, a SIGKILL that
@@ -304,9 +314,16 @@ case "$MODE" in
       #   - missing_children > 0   (directory tree forgot a child)
       #   - unlisted_files > 0     (file exists but parent doesn't list it)
       #   - broken_snapshots > 0   (snapshot root unreachable)
-      verify_log="$(mktemp -p "$SCRATCH_ROOT" verify.XXXXXX)"
+      diag_dir="$(mktemp -d -p "$SCRATCH_ROOT" diagnostics.XXXXXX)" || exit 1
+      verify_db="$diag_dir/verify.aeordb"
+      if ! copy_db_for_diagnostic "$DB" "$verify_db"; then
+        echo "[$(date +%T)] iteration $iteration: diagnostic copy failed; preserving $DB and $diag_dir"
+        SOAK_FAILURES=$((SOAK_FAILURES + 1))
+        break
+      fi
+      verify_log="$diag_dir/verify.log"
       verify_status=0
-      ./target/release/aeordb verify -D "$DB" > "$verify_log" 2>&1 || verify_status=$?
+      verify_after_normal_reopen "$verify_db" "$verify_log" || verify_status=$?
       # Parse the report. `awk` prints the numeric value in each line.
       get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
       corrupt_hash=$(get_field "Corrupt hash")
@@ -324,7 +341,7 @@ case "$MODE" in
       stale_dir_keys=$(count_report_lines "Stale dir_key entries (")
       if verify_report_is_acceptable; then
         echo "[$(date +%T)] iteration $iteration: verify OK (status=$verify_status, corrupt_header=$corrupt_header — expected SIGKILL tail)"
-        rm -f "$verify_log"
+        rm -rf "$diag_dir"
       else
         echo "[$(date +%T)] iteration $iteration: verify reported real issues — see $verify_log"
         echo "  status=$verify_status corrupt_hash=${corrupt_hash:-?} corrupt_header=${corrupt_header:-?} stale=${stale:-?} \
@@ -411,18 +428,22 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
       kill "$pmap_pid" 2>/dev/null
       wait "$pmap_pid" 2>/dev/null
 
-      diag_dir="$(mktemp -d -p "$SCRATCH_ROOT" diagnostics.XXXXXX)"
+      diag_dir="$(mktemp -d -p "$SCRATCH_ROOT" diagnostics.XXXXXX)" || exit 1
       verify_db="$diag_dir/verify.aeordb"
       probe_db="$diag_dir/probe.aeordb"
       checkpoint_copy="$diag_dir/checkpoint.tsv"
-      copy_db_for_diagnostic "$DB" "$verify_db"
-      copy_db_for_diagnostic "$DB" "$probe_db"
-      cp -a "$CHECKPOINT" "$checkpoint_copy"
+      if ! { copy_db_for_diagnostic "$DB" "$verify_db" \
+        && copy_db_for_diagnostic "$DB" "$probe_db" \
+        && cp -a "$CHECKPOINT" "$checkpoint_copy"; }; then
+        echo "[$(date +%T)] iteration $iteration: diagnostic copy failed; preserving $DB and $diag_dir"
+        SOAK_FAILURES=$((SOAK_FAILURES + 1))
+        break
+      fi
       diag_ok=$worker_window_ok
 
       verify_log="$diag_dir/verify.log"
       verify_status=0
-      ./target/release/aeordb verify -D "$verify_db" > "$verify_log" 2>&1 || verify_status=$?
+      verify_after_normal_reopen "$verify_db" "$verify_log" || verify_status=$?
       get_field() { awk -v label="$1" '$0 ~ "^  " label ":" { print $NF; exit }' "$verify_log"; }
       corrupt_hash=$(get_field "Corrupt hash")
       corrupt_header=$(get_field "Corrupt header")

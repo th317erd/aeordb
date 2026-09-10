@@ -1446,7 +1446,7 @@
     {
       "id": "esq-v1-772aa32e707e40b33175-00",
       "file": "aeordb-cli/src/commands/verify.rs",
-      "line": 614,
+      "line": 608,
       "column": 70,
       "enclosing_item": "print_emergency_spill_summary",
       "kind": "default_on_error",
@@ -11946,7 +11946,7 @@
     {
       "id": "esq-v1-0f6054899b2cd2584667-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 313,
+      "line": 332,
       "column": 26,
       "enclosing_item": "verify",
       "kind": "default_on_error",
@@ -11956,7 +11956,7 @@
     {
       "id": "esq-v1-6722d42da1146d915641-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 432,
+      "line": 451,
       "column": 26,
       "enclosing_item": "verify_and_repair",
       "kind": "default_on_error",
@@ -11966,7 +11966,7 @@
     {
       "id": "esq-v1-be6c8cc33da7ca3f7eca-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 471,
+      "line": 490,
       "column": 15,
       "enclosing_item": "repair_verification_frontier",
       "kind": "result_to_option",
@@ -11976,7 +11976,7 @@
     {
       "id": "esq-v1-c303030dbde447ed8fc4-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 897,
+      "line": 916,
       "column": 25,
       "enclosing_item": "check_hot_tail_voids",
       "kind": "default_on_error",
@@ -11986,7 +11986,7 @@
     {
       "id": "esq-v1-640887f76ff46c2abfb2-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 1034,
+      "line": 1053,
       "column": 77,
       "enclosing_item": "format_btree_directory_issue",
       "kind": "default_on_error",

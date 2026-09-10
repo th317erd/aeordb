@@ -479,7 +479,7 @@ fn database_lock_failures_preserve_non_conflict_operating_system_evidence() {
   let lock_function = &storage_engine[start..end];
 
   assert!(!lock_function.contains("try_lock_exclusive().map_err(|_|"));
-  assert!(lock_function.contains("std::io::ErrorKind::WouldBlock"));
+  assert!(lock_function.contains("error.raw_os_error() == fs2::lock_contended_error().raw_os_error()"));
   assert!(lock_function.contains("error.kind()"));
   assert!(lock_function.contains("{error}"));
 }

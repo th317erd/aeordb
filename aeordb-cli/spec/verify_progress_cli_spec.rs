@@ -29,14 +29,16 @@ impl Fixture {
   }
 
   fn run(&self, repair: bool, filter: Option<&str>) -> Output {
+    let arguments = if repair { &["--repair", "--force-fix-in-place"][..] } else { &[] };
+    self.run_command("verify", arguments, filter)
+  }
+
+  fn run_command(&self, subcommand: &str, arguments: &[&str], filter: Option<&str>) -> Output {
     // File-backed output avoids deadlocking a verbose child on a full pipe.
     let stdout_path = self.directory.path().join("stdout.log");
     let stderr_path = self.directory.path().join("stderr.log");
     let mut command = Command::new(env!("CARGO_BIN_EXE_aeordb"));
-    command.args(["verify", "-D", self.database.to_str().unwrap()]).env_remove("AEORDB_LOG").env("NO_COLOR", "1");
-    if repair {
-      command.args(["--repair", "--force-fix-in-place"]);
-    }
+    command.args([subcommand, "-D", self.database.to_str().unwrap()]).args(arguments).env_remove("AEORDB_LOG").env("NO_COLOR", "1");
     if let Some(filter) = filter {
       command.env("AEORDB_LOG", filter);
     }
@@ -53,11 +55,105 @@ impl Fixture {
       if Instant::now() >= deadline {
         child.kill().unwrap();
         child.wait().unwrap();
-        panic!("verify CLI exceeded 30 seconds; output: {}", std::fs::read_to_string(stdout_path).unwrap());
+        panic!("{subcommand} CLI exceeded 30 seconds; output: {}", std::fs::read_to_string(stdout_path).unwrap());
       }
       std::thread::sleep(Duration::from_millis(20));
     }
   }
+}
+
+#[test]
+fn verify_cli_preserves_clean_database_bytes_and_modification_time() {
+  let fixture = Fixture::new(false);
+  let before = std::fs::read(&fixture.database).unwrap();
+  let modified_before = std::fs::metadata(&fixture.database).unwrap().modified().unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert!(output.status.success(), "{output:?}");
+  assert!(before == std::fs::read(&fixture.database).unwrap(), "non-repair verification changed clean database bytes");
+  assert_eq!(std::fs::metadata(&fixture.database).unwrap().modified().unwrap(), modified_before);
+}
+
+#[test]
+fn verify_cli_reports_stale_locators_without_changing_source_bytes() {
+  let fixture = Fixture::new(true);
+  let before = std::fs::read(&fixture.database).unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert_eq!(output.status.code(), Some(2), "{output:?}");
+  assert!(String::from_utf8_lossy(&output.stdout).contains("Stale dir_key entries"), "{output:?}");
+  assert!(before == std::fs::read(&fixture.database).unwrap(), "verification changed the stale-locator evidence");
+}
+
+#[test]
+fn verify_cli_accepts_a_read_only_clean_database_without_rewriting_it() {
+  let fixture = Fixture::new(false);
+  let before = std::fs::read(&fixture.database).unwrap();
+  let original_permissions = std::fs::metadata(&fixture.database).unwrap().permissions();
+  let mut read_only = original_permissions.clone();
+  read_only.set_readonly(true);
+  std::fs::set_permissions(&fixture.database, read_only).unwrap();
+  let output = fixture.run(false, Some("off"));
+  std::fs::set_permissions(&fixture.database, original_permissions).unwrap();
+  assert!(output.status.success(), "{output:?}");
+  assert!(before == std::fs::read(&fixture.database).unwrap(), "verification changed an OS-read-only source");
+}
+
+#[test]
+fn verify_cli_refuses_recovery_needing_state_without_mutating_it() {
+  let fixture = Fixture::new(false);
+  let length = std::fs::metadata(&fixture.database).unwrap().len();
+  std::fs::OpenOptions::new().write(true).open(&fixture.database).unwrap().set_len(length - 7).unwrap();
+  let before = std::fs::read(&fixture.database).unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert!(!output.status.success(), "read-only verification silently recovered a truncated source: {output:?}");
+  assert!(before == std::fs::read(&fixture.database).unwrap(), "verification changed a source requiring explicit recovery");
+}
+
+#[test]
+fn normal_startup_recovery_remains_explicit_and_subsequent_verification_is_read_only() {
+  let fixture = Fixture::new(false);
+  let length = std::fs::metadata(&fixture.database).unwrap().len();
+  std::fs::OpenOptions::new().write(true).open(&fixture.database).unwrap().set_len(length - 7).unwrap();
+  let damaged = std::fs::read(&fixture.database).unwrap();
+  let reopen = fixture.run_command("probe", &["--growth-stats"], Some("off"));
+  assert!(reopen.status.success(), "{reopen:?}");
+  let recovered = std::fs::read(&fixture.database).unwrap();
+  assert!(recovered != damaged, "explicit normal startup did not publish its recovery");
+  let verify = fixture.run(false, Some("off"));
+  assert!(verify.status.success(), "{verify:?}");
+  assert!(recovered == std::fs::read(&fixture.database).unwrap());
+  let engine = StorageEngine::open(fixture.database.to_str().unwrap()).unwrap();
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/docs/file.txt").unwrap(), b"retained repair proof");
+  engine.shutdown().unwrap();
+}
+
+#[test]
+fn verify_cli_refuses_malformed_sources_without_rewriting_them() {
+  let fixture = Fixture::new(false);
+  std::fs::write(&fixture.database, b"not a database").unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert!(!output.status.success(), "{output:?}");
+  assert_eq!(std::fs::read(&fixture.database).unwrap(), b"not a database");
+}
+
+#[test]
+fn verify_cli_does_not_create_a_missing_database() {
+  let fixture = Fixture::new(false);
+  std::fs::remove_file(&fixture.database).unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert!(!output.status.success(), "{output:?}");
+  assert!(!fixture.database.exists());
+}
+
+#[test]
+fn verify_cli_respects_the_exclusive_database_lock_without_changing_source_bytes() {
+  let fixture = Fixture::new(false);
+  let owner = StorageEngine::open(fixture.database.to_str().unwrap()).unwrap();
+  let before = std::fs::read(&fixture.database).unwrap();
+  let output = fixture.run(false, Some("off"));
+  assert!(!output.status.success(), "{output:?}");
+  assert!(String::from_utf8_lossy(&output.stderr).contains("locked by another process"), "{output:?}");
+  assert!(before == std::fs::read(&fixture.database).unwrap(), "a rejected lock acquisition changed the source");
+  owner.shutdown().unwrap();
 }
 
 #[test]

@@ -306,6 +306,24 @@ aeordb verify --repair --force-fix-in-place --database data.aeordb
 aeordb verify --repair --force-fix-in-place --yes --database data.aeordb
 ```
 
+### Read-only verification
+
+Without `--repair`, verification opens the database file with OS-read-only
+handles and closes without publishing headers, KV pages, or recovery state.
+It accepts a read-only database file, but still needs the normal exclusive
+database lock sidecar and writable bounded scratch space. It refuses a source
+that requires startup recovery, legacy layout conversion, or interrupted KV
+expansion; it does not silently repair that state before inspecting it.
+
+Preserve suspect source bytes before explicitly requesting recovery. Normal
+runtime opens (including most `probe` modes) can perform startup recovery and
+publish on close; they are not substitutes for read-only inspection. The
+`--repair` workflow remains mutating, including its pre-copy source flush when
+repairing into `<database>.repaired`.
+
+Exit status is 0 for a completed clean check, 2 for reported integrity issues or
+unresolved durability recovery, and 1 for an incomplete check/open failure.
+
 ### Directory Tree Repair
 
 `aeordb verify` reports damaged B-tree directory branches under the Directory Consistency section. Normal read paths can return the readable portion of a damaged B-tree directory, but verification surfaces the missing or corrupt branch so it is not silently hidden.

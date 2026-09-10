@@ -1,6 +1,20 @@
 use aeordb::engine::StorageEngine;
 
 #[test]
+fn lock_file_creation_failure_is_not_misreported_as_contention() {
+  let temp_dir = tempfile::tempdir().unwrap();
+  let db_path = temp_dir.path().join("unavailable-lock.aeordb");
+  std::fs::create_dir(temp_dir.path().join("unavailable-lock.aeordb.lock")).unwrap();
+  let error = match StorageEngine::create(db_path.to_str().unwrap()) {
+    Err(error) => error,
+    Ok(_) => panic!("a directory cannot be used as the lock file"),
+  };
+  assert!(error.to_string().contains("Failed to create lock file"), "{error}");
+  assert!(!error.to_string().contains("locked by another process"), "{error}");
+  assert!(!db_path.exists(), "lock failure must precede database creation");
+}
+
+#[test]
 fn second_open_of_same_database_is_rejected() {
   let temp_dir = tempfile::tempdir().unwrap();
   let db_path = temp_dir.path().join("test.aeordb");
