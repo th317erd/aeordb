@@ -102,6 +102,23 @@ uses the corrected shell harness with only its repository-root path relocated to
 that clean source; record both harness and executable hashes separately. Never
 attribute the original continuation-on-failure behavior to the corrected harness.
 
+### Adjacent S1 false-success correction
+
+Extending the same fixture perimeter to S1 reproduced another inherited runner
+defect: a worker exiting 7 was followed by `S1 complete` and runner exit 0. S1 now
+captures and returns the worker's exact nonzero status after retiring its own
+memory sampler, preserving database/log evidence. A normally completed worker
+still returns zero. No workload or engine behavior changed.
+
+The combined suite now contains ten scenario cases plus the existing helper
+checks, and passes on Linux and native macOS Bash 3.2. Failing-first output
+`soak-s1-red.log` has SHA-256
+`0574f6536450fb34c8c243627b98f0f6ec8ffe42da0a2bc44517908e05c4eb39`;
+both final green logs have SHA-256
+`f2cfbaa9cf692e9541af1f6e430ee348acb769f0353b9a724aa1e9bf5a6d0373`.
+Syntax and diff checks pass. Existing Rust qualification remains applicable:
+Rust/Cargo/embedded-documentation inputs are unchanged from 3b48de7e.
+
 ## Current release results and locations
 
 Desktop campaign: `/media/Data/AeorDB/Tests/p9-release-3b48de7e-20260910/`.
@@ -128,7 +145,21 @@ The shared 53-file portal-input archive has SHA-256
 
 ## Current action
 
-The current-release 8 GiB/no-swap overlap gate is running. Next: representative
-media copy/migration/interruption/resume, crash matrix and short soak preflights,
-then three sequential 12-hour stages. Final packet reconciliation is still open.
-No production operation or current long-soak result has been claimed.
+The current-release 120-second 8 GiB/no-swap overlap gate passed at 16:35:58 UTC:
+2,002,620,416-byte memory peak, zero swap, three completed KV expansions, no
+functional failures. Health p50/p95/p99/max: 0.595/14.440/101.058/678.747 ms.
+The test overlapped 1,151 writes, 2,928 reads, 894 blob commits, 310 searches,
+44 reindex tasks, 45 dry-run GC operations and 60 cancellation probes.
+
+The desktop's `run-linux-sequence.sh` is active (initial PID 3367176), with
+`sequence-launch.log`, `evidence/linux-sequence.tsv` and eventual
+`evidence/linux-sequence.exit` as its authoritative progress/termination records.
+It started media qualification at 16:38:50 UTC and queues release-mode CLI tests,
+100 crash-suite passes, short soak preflights and three sequential 12-hour stages.
+Every stage has a deadline/free-space guard; a failed stage stops the sequence.
+No force-unmount test is enabled (`AEORDB_CRASH_SOAK_TMPFS` is explicitly unset).
+Cycle scheduling is seeded; the inherited worker remains wall-clock-seeded,
+with actual checkpoint traces retained. Do not claim fully deterministic soaks.
+
+Final packet reconciliation remains open. No production operation or current
+long-soak success has been claimed.

@@ -211,10 +211,15 @@ case "$MODE" in
     # Capture the current worker IDs before leaving this case arm.
     # shellcheck disable=SC2064
     trap "kill $worker_pid $pmap_pid 2>/dev/null" EXIT INT TERM
-    wait "$worker_pid"
-    kill "$pmap_pid" 2>/dev/null
-    wait "$pmap_pid" 2>/dev/null
+    worker_status=0
+    wait "$worker_pid" || worker_status=$?
+    kill "$pmap_pid" 2>/dev/null || true
+    wait "$pmap_pid" 2>/dev/null || true
     trap - EXIT INT TERM
+    if [ "$worker_status" -ne 0 ]; then
+      echo "S1 FAILED. Worker exited with status $worker_status; database and logs retained."
+      exit "$worker_status"
+    fi
     echo
     echo "S1 complete."
     echo "  Run: $0 summarize ${DB}.metrics.tsv"

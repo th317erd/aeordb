@@ -20,7 +20,7 @@ export AEORDB_SOAK_S2_KILL_MIN_SECS=1 AEORDB_SOAK_S2_KILL_MAX_SECS=1
 export AEORDB_SOAK_S3_KILL_MIN_SECS=1 AEORDB_SOAK_S3_KILL_MAX_SECS=1
 export AEORDB_SOAK_S3_STARTUP_TIMEOUT_SECS=5
 failures=0
-for scenario in s2-verify s2-malformed s2-early s3-verify s3-checkpoint s3-early s2-pass s3-pass; do
+for scenario in s1-failure s1-pass s2-verify s2-malformed s2-early s3-verify s3-checkpoint s3-early s2-pass s3-pass; do
   run_directory="$fixture/$scenario"
   mkdir -p "$run_directory/source" "$run_directory/scratch"
   export AEORDB_SOAK_FAILURE_SCENARIO="$scenario"
@@ -34,6 +34,22 @@ for scenario in s2-verify s2-malformed s2-early s3-verify s3-checkpoint s3-early
   set -e
   starts=$(wc -l < "$run_directory/starts")
   case "$scenario" in
+    s1-failure)
+      if test "$result" -ne 7 || test "$starts" -ne 1; then
+        printf 'FAIL %s: exit=%s starts=%s; worker failure was not propagated\n' "$scenario" "$result" "$starts"
+        failures=$((failures + 1))
+      else
+        printf 'PASS %s: worker failure status is preserved\n' "$scenario"
+      fi
+      ;;
+    s1-pass)
+      if test "$result" -ne 0 || test "$starts" -ne 1; then
+        printf 'FAIL %s: exit=%s starts=%s\n' "$scenario" "$result" "$starts"
+        failures=$((failures + 1))
+      else
+        printf 'PASS %s: completed worker succeeds\n' "$scenario"
+      fi
+      ;;
     *-pass)
       if test "$result" -ne 0 || test "$starts" -lt 2; then
         printf 'FAIL %s: exit=%s starts=%s\n' "$scenario" "$result" "$starts"
