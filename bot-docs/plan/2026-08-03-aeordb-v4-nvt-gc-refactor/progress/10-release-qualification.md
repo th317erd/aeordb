@@ -629,3 +629,38 @@ Pinned driver PID 3719078 started at 22:13:57 UTC. At 22:19:59, nine passes
 had completed and pass ten was active; Data/home remained above both floors.
 This ledger checkpoint records completed build/live/resource/media gates and
 the resolved executable-selection issue, not completion of pending long tests.
+
+### Pinned crash and short-soak closure; long stages active
+
+The exact-release-worker rerun passed all 100 suites at 23:17:59 UTC, with
+3,828 seconds of loop execution, 2,300 process-interruption windows, and 100
+explicit unmount self-skips. All sealed normal-release executable and copied
+test-executable checksums still match. Log SHA-256:
+`0904bd4603e9416d63a29cdd39156454ffbc8fe05afb4332c9ff20d9e1ab1b98`.
+
+All short stages passed on the pinned normal-release binaries:
+
+| Stage | Workload result | Terminal receipt UTC | Log SHA-256 |
+| --- | --- | --- | --- |
+| S1, 36 seconds | 339 writes, 136 reads, 53 deletes; strict verification and before/after database byte/stat checks pass | 23:18:59 | `1e533f773184ba3108d2aa28268de52246d3fd70686f04ee1043244bb760e4d6` |
+| S2, 90-second loop window | Eight interruption/copy/reopen/verification cycles, no issue cycle | 23:21:00 | `e0f16bc2ffc76357aef4f5503480e02bb39b1e37eae9fc312fb55b9fdffb3af7` |
+| S3, 90-second loop window | 13 interruption/copy/reopen/verification/checkpoint cycles, no issue cycle | 23:23:00 | `0a5d4478681ca04a60eeaa74f5d12aa5ac465af8599a6c23c6278f9eab9443fc` |
+
+Closed short database sizes are 14,547,533 / 14,246,961 / 3,348,415 bytes;
+all three complete-file checksum manifests were independently rechecked.
+
+The same driver began `s1-12h-pinned` at 23:23:00 UTC, worker PID 3757938.
+S2/S3 12-hour stages remain sequentially queued. Long-stage completion includes
+review of terminal verification/checkpoints and retained resource metrics;
+worker exit alone is not a claim that the memory-growth summary passed.
+At 23:23, Data/home had 308.01/129.99 GB free. Owner-requested ten-minute model
+monitoring and continuous host-side capacity/deadline guards remain in effect.
+No test database cleanup or step 4 operation has occurred.
+
+Closed prerequisite evidence was sealed and rechecked at 23:26:26 UTC:
+`evidence/pinned-prerequisites.sha256`, 60 artifacts, SHA-256
+`acf03564995858c99ff5274af3790e3e8a0504deaee736291bf2d98609b38ae5`.
+The seal contains logs, receipts, metrics, checkpoint files and database checksum
+records, not raw database payloads. Raw short database hashes were separately
+verified at sealing. This distinction permits later explicit test-data retirement
+without pretending the deleted database payloads remain available for checking.
