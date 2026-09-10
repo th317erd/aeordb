@@ -11,7 +11,7 @@ The owner explicitly authorized the next three items, then required a stop and
 discussion before item 4. This ledger supplements Children 07/08 and the frozen
 parent; it does not rewrite historical results or authorize production work.
 
-- [ ] 1. Capacity admission and exact native Linux/macOS/Windows release builds.
+- [x] 1. Capacity admission and exact native Linux/macOS/Windows release builds.
 - [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
@@ -400,3 +400,232 @@ Next: commit this proven correction, prepare fresh exact-commit native release
 campaigns, and renew live/resource/media/crash/duration gates. Baseline 3b48de7e
 release receipts are historical only. Items 1–3 and the requested final test-data
 cleanup remain open; step 4 remains an explicit stop-and-discuss boundary.
+
+## Renewed exact release candidate — 33420bad
+
+The qualified correction was committed and pushed as
+`33420bad5b9b50a6478e871e34bb8de999c30b80`. All three hosts now have fresh detached
+sources and fresh native-only release targets under `p9-release-33420bad-20260910`.
+Linux is under `/media/Data/AeorDB/Tests/`; Mac/Windows are under
+`~/.cache/codex/aeordb-tests/`. The final 15-file source manifest matches on every
+host, with the unchanged frozen lock and 53-file portal archive. No target tree
+was transferred and no original working clone was reset or switched.
+
+Builds started at 19:29:36 UTC (Linux, jobs2), 19:30:14 (macOS, jobs1), and
+19:30:19 (Windows MSVC, jobs1). Actual release profiles are preserved. Each has
+a three-hour deadline, host free-space floor, log, guard and terminal receipt.
+Build success is pending; the baseline binaries have not been relabeled.
+
+Linux `continue-release-linux.sh` (initial PID 3615163) is queued behind the successful build receipt.
+It seals all three Linux binaries, keeps same-host artifact copies, then runs
+live HTTP/reopen/readback and the 120-second resource overlap before invoking
+the media/crash/duration sequence. Its terminal receipt is
+`evidence/release-continuation.exit`; the nested sequence records
+`evidence/linux-sequence.exit` and per-stage receipts. The live runner now also
+checks the served read-only verification documentation and byte/stat preservation
+around its terminal offline check. Ports 20385/20386 were unoccupied at admission.
+
+### Renewed build/live/resource results
+
+- Linux release passed in 8m02s, receipt 19:38:07 UTC. Binary SHA-256:
+  `27645c1c4a3d942ee2c2af5ed5a5263aff807cb3bef9956b32b395aa13ea1218`.
+  Soak worker: `2e1d1731fd0e4d19d91cdb4526d0f4e188e80f8a109e42200da91c7c53206b05`;
+  crash worker: `481ce790e46e3f338bcc492581cc95cc74341f0f03de4a579c2a9b5abc546be6`.
+  Same-host artifact copies match; no installation occurred.
+- Live HTTP/docs/readback/restart/delete/missing checks passed, including exact
+  database checksum/stat preservation around final read-only verification.
+  Receipt 19:39:01 UTC; both `aeordb-p9-33420bad-live-{a,b}.service` units are
+  clean/inactive with successful results.
+- The 120-second resource overlap passed at 19:41:32 UTC: 2,374,877,184-byte
+  memory peak, zero swap, three completed KV expansions, no functional failures.
+  Health p50/p95/p99/max: 0.565/10.132/90.645/409.039 ms; 4,918 samples.
+  Workload: 1,328 writes, 3,054 reads, 1,117 blob commits, 355 searches,
+  45 reindexes, 47 dry GC requests, 60 cancellation attempts. The test unit
+  `aeordb-p4-8e-32359-3618958.service` is clean/inactive. Detailed evidence is
+  `/home/wyatt/.cache/codex/p9-release-33420bad-20260910/resource-release/`.
+- Native macOS release passed in 11m29s, receipt 19:41:48 UTC; binary SHA-256
+  `a67dd11832c2b44a90a88d09675633b276afa885aff8f6b571a584ef8716ae5d`.
+  Same-host artifact copy matches; native evidence is mirrored to desktop
+  candidate `evidence/macos/` and the laptop durable release cache.
+- Windows native release remains in progress. Media migration preparation
+  started on Linux at 19:41:32 UTC; it has not yet passed. No crash/duration
+  success is claimed for this candidate yet.
+
+### Native release closure and capacity-qualified media retry
+
+Windows MSVC release passed at 19:55:35 UTC in 25m14s; binary SHA-256
+`088ebc655069730f8f936709eff794d0be163581640805039c22b6464e9be70a`.
+The same-host artifact copy matches. Final C: free space was 19,301,474,304 bytes,
+above its 8 GB floor. Native evidence is mirrored into desktop candidate
+`evidence/windows/`. All three native release candidates now pass on exact
+33420bad; none was installed or published.
+
+The large source's strict verification passed exit 0 and preserved SHA-256
+`2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74`.
+The first migration attempt then correctly refused `CapacityInsufficient` before
+creating a destination or private workspace. Both old sequence/continuation
+drivers exited 1 at 19:59:36 UTC; this is retained failed setup evidence, not a
+migration pass or corruption event.
+
+Cause: the harness omitted the previous rehearsal's explicit 1 GiB capture
+limit. The registered defaults derive from the source's 6 TB volume and requested
+64 GiB capture + 4 GiB root map + 128 GiB reserve on the separate `/home` workspace
+volume: 210,453,397,504 bytes required versus 130,359,328,768 available.
+Data still had 324,261,818,368 free bytes. The prior successful media manifest
+explicitly used 1 GiB capture/1 GiB reserve; its bounds were not the defaults.
+
+The new operational runner restores the tighter 1 GiB capture cap and keeps a
+64 GiB home reserve (more conservative than that prior rehearsal), with the
+unchanged 4 GiB root-map cap. The 250 GB Data floor is unchanged. A new versioned
+guard, `run-unix-renewed.sh`, monitors both Data and the 64 GiB home reserve and
+checks both at exit. No source-code change, new release build, or deletion is
+needed. The unchanged source copy is freshly checksummed before reuse, avoiding
+another 11.65 GB copy; all original/failed evidence remains intact.
+
+Active queue is now `run-linux-renewed-sequence.sh`, initial PID 3637526. It writes
+`evidence/linux-renewed-sequence.{launch.log,tsv,exit}`, begins with
+`media-capacity-retry`, then runs the still-unexecuted CLI/crash/short/long stages.
+New destination: `media-capacity-retry/shadow-v4.aeordb`; new private workspace:
+`/home/wyatt/.cache/codex/p9-release-33420bad-20260910/media-capacity-retry-workspace`.
+Per-migration proof is `evidence/media-capacity-retry/`. Every invocation, including
+resume/retry, carries the same explicit captured configuration. The original
+failed runner files/receipts are not overwritten, and both old owned PIDs were
+confirmed absent before this retry. Step 4 remains closed.
+
+### Renewed large-media qualification passed
+
+`media-capacity-retry` passed at 20:56:23 UTC. Its planned interruption exited 137
+at 20:21:07. The supervisor had observed `base_successor_published`; the last
+milestone before the signal was already `destination_verification_running`.
+This is a real interruption during destination verification after publication,
+not proof that execution stopped exactly at the earlier base-only boundary.
+The synthetic restart suite separately exercises the individual durable stages.
+
+Resume and the completed-state retry both returned full verified completion:
+15,354,506,282 copied/verified reachable content bytes, 50,151 distinct verified
+entities, one verified root, and distinct source/destination physical identities.
+Their versioned receipts are byte-identical. Source and destination SHA-256,
+size, inode, mode and modification time are unchanged across the completed retry.
+
+- Source: 11,654,356,141 bytes, SHA-256
+  `2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74`.
+- Destination: 11,447,013,668 bytes, SHA-256
+  `40cca2aa2c13149a77e5afb2540b280a3480de127cf690116184b500e8e3528e`.
+- Resume: 828.76 seconds, 71,596 KiB maximum RSS, zero swaps.
+- Completed retry: 822.13 seconds, 71,728 KiB maximum RSS, zero swaps.
+- The sealed original's full checksum and stat remain unchanged; stat is
+  `2081:2599017:11654356141:1788493099:777`.
+- Data/home free at exit: 312,813,277,184 / 130,288,603,136 bytes.
+- Closed media evidence was sealed and rechecked as
+  `evidence/media-capacity-retry.sha256`, manifest SHA-256
+  `cd094d966645c165962abd2f34e408eaf8c51f8b4ed0770245c4f684c0187cde`.
+
+The same renewed sequence began release-mode CLI tests at 20:56:23 UTC. The
+100-pass restart matrix and short/12-hour soaks remain queued, not yet passed.
+
+Release-mode CLI qualification passed at 21:01:54 UTC: 221 tests across 21
+targets, zero failures, seven existing intentional ignores. The same queue then
+started `crash-100`, which requests **100 complete suite passes**, not 100
+individual cases. Its force-unmount branch remains unconfigured/self-skipping;
+no mount or forced-unmount operation is authorized or enabled. Short and long
+soaks remain queued. Data/home free space was approximately 308.75/130.29 GB.
+
+### Completion-packet review while duration qualification runs
+
+The current canonical report/DoD/JSON still describe historical 535004f1.
+Replace their current-facing claims only after the remaining gates close, while
+preserving that older snapshot as explicitly historical evidence. Update the
+parent's mutable execution banner, not its ratification-time header. In
+particular, the final packet must distinguish these boundaries:
+
+- Ordinary service opens, reads, writes, queries and GC still use the v3
+  compatibility runtime. The v4 substrate is implemented and tested; the public
+  `migrate-v4` command creates/verifies an offline shadow. A production-serving
+  v4 activation/cutover command is not available. This is an implementation
+  boundary, not merely a deployment permission waiting to be granted.
+- The production-scale repair was deliberately retired, not successfully
+  migrated; the retained immutable source is outside this task's cleanup scope.
+- The renewed Linux full suite is 7,505 top-level tests plus three nested checks;
+  the 349 macOS / 344 Windows results are affected native matrices, not fresh
+  full native workspaces. Native release builds use exact 33420bad.
+- Each crash-suite pass runs 23 planned process-interruption windows (10 writes,
+  five mixed, four GC, four stress), plus bit-flip and truncation cases. Seven
+  test functions report success, but one is the explicitly self-skipping
+  force-unmount branch. Count complete suite passes rather than claiming 100
+  individual interruption cases or a tested unmount operation.
+- The current S1 wrapper performs terminal read-only verification and then
+  hashes the database. It does not itself compare before/after verification
+  hashes; byte invariance is separately proven by the CLI/library regressions,
+  live release gate, and large-media gate. Do not overstate this wrapper's proof.
+- Cleanup removes only selected inactive disposable database files, retaining
+  checkpoint/metrics/logs and useful failure artifacts. Seal evidence before
+  deletion, then record explicitly retired database manifest entries; an old
+  manifest containing deleted databases cannot afterward be reported as fully
+  reverified. The shallow inventory is not a deletion allowlist.
+
+At 21:17:46 UTC the renewed driver was alive, 24 crash passes had completed and
+pass 25 was active. No failure or capacity refusal; Data/home free space was
+308.25/130.29 GB. No database cleanup, publication, installation, or production
+operation has occurred.
+
+### Exact executable identity correction before duration tests
+
+The first `crash-100` completed all 100 suite passes at 22:05:26 UTC: 2,300
+process-interruption windows, 100 bit-flip cases, 100 truncation cases, and
+100 explicit unmount self-skips. Its elapsed loop time was 3,799 seconds.
+The next S1 admission checksum correctly stopped the renewed sequence at
+22:05:57 UTC, before creating a soak database.
+
+Cause: `cargo test --release -p aeordb-cli --all-targets` unified the CLI's
+Tokio `test-util` dev-dependency feature and replaced the top-level Cargo output
+executables. The initial normal-release artifacts remained intact in the
+separate `artifacts/` directory. Both Tokio fingerprints and both worker
+fingerprints are preserved in `evidence/binary-identity-drift/`; source, lock,
+release profile and qualified normal-release hashes are unchanged. Cargo's
+later build/no-run invocations did not make the final top-level test-worker
+path an exact match to the normal-release artifact.
+
+The first 100 passes are retained as successful **test-feature-build** evidence,
+not normal-release-worker qualification. Their worker SHA-256 is
+`dae237a18bd1b0ae5ac2fd3a4b88f4a238de2110103331cb52a49d32914ce8a0`;
+the pinned normal-release worker remains
+`481ce790e46e3f338bcc492581cc95cc74341f0f03de4a579c2a9b5abc546be6`.
+The 221-test release-profile CLI matrix remains valid source/test-build proof;
+the existing live and media gates separately used the normal-release executable.
+
+New same-host orchestration leaves source and Cargo output untouched:
+
+- `run-crash-pinned.sh` invokes the existing integration-test executable directly
+  from an isolated mirror whose adjacent worker resolves to the sealed release
+  artifact. It repeats 100 complete passes without invoking Cargo. The test
+  executable still has its normal test dependency graph; the child worker is
+  now exactly the qualified normal-release executable.
+- `soak-pinned.sh` changes only repository/binary path binding and replaces the
+  build preamble with checksum admission. Workload, diagnostic-copy, recovery,
+  verification, checkpoint and failure-stop logic match tracked 33420bad.
+- All 16 existing shell scenario fixtures pass against the pinned variant;
+  four additional admission cases reject missing manifest, missing binary,
+  altered binary, and absent explicit directory before worker/database creation.
+  Log hashes: `2dec3655567f6641c55861ed1e9c2b1639e6ac8febe27aded0783879d058663b`
+  and `47079361b5c1ce165fcf518671407ae8e335ecd3f0abdf1cbe8f990558b6ec3c`.
+  Pinned harness SHA-256:
+  `b7ca2b8735bb039e5aa7cd2d4f3a52bbaae57eae193609377a4482a334f479f1`.
+- `run-soak-pinned-stage.sh` pins every executable and additionally compares
+  S1's complete database checksum and nanosecond stat around terminal read-only
+  verification. Stage logs use `*-pinned`; data directories retain their original
+  names because the failed admission created none.
+- Preparation passed at 22:12:57 UTC. All source/artifact and copied test
+  executable identities matched. Data/home free: 308,052,602,880 /
+  130,103,095,296 bytes. The retained original failed sequence is not restarted.
+
+The new `run-linux-pinned-sequence.sh` owns `evidence/linux-pinned-sequence.*`
+and queues `crash-100-pinned`, the three short stages, then three sequential
+12-hour stages. The unchanged two-volume guard and all original deadlines
+remain active. No database deletion, installation, production access, or step 4
+operation occurred. This is an executable-selection correction, not a Rust fix
+or grounds to rebuild the already-qualified native releases.
+
+Pinned driver PID 3719078 started at 22:13:57 UTC. At 22:19:59, nine passes
+had completed and pass ten was active; Data/home remained above both floors.
+This ledger checkpoint records completed build/live/resource/media gates and
+the resolved executable-selection issue, not completion of pending long tests.
