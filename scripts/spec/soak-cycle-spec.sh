@@ -69,3 +69,4 @@ wait "$worker_pid" 2>/dev/null || true
 worker_pid=""
 
 printf 'soak-cycle spec: PASS\n'
+bash "$repo_root/scripts/spec/soak-failure-spec.sh"

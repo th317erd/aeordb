@@ -326,14 +326,12 @@ case "$MODE" in
 missing_kv=${missing_kv:-?} missing_children=${missing_children:-?} dangling=${dangling_records:-?} btree=${btree_issues:-?} \
 unlisted=${unlisted_files:-?} broken_snapshots=${broken_snapshots:-?} invalid_offsets=${invalid_offsets:-?} \
 invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} stale_dir_keys=${stale_dir_keys:-?}"
-        echo "  (continuing soak; collect failures at the end)"
+        echo "  (stopping soak; preserve the failed database for diagnosis)"
         cycle_failed=1
       fi
       if [ "$cycle_failed" != "0" ]; then
         SOAK_FAILURES=$((SOAK_FAILURES + 1))
-      fi
-      if [ "$worker_window_ok" != "1" ]; then
-        echo "[$(date +%T)] iteration $iteration: stopping after preserving the early-exit diagnostics"
+        echo "[$(date +%T)] iteration $iteration: stopping before another worker can change the failed database"
         break
       fi
     done
@@ -458,9 +456,7 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
       else
         echo "[$(date +%T)] iteration $iteration: preserved diagnostic copies in $diag_dir"
         SOAK_FAILURES=$((SOAK_FAILURES + 1))
-      fi
-      if [ "$worker_window_ok" != "1" ]; then
-        echo "[$(date +%T)] iteration $iteration: stopping after preserving the early-exit diagnostics"
+        echo "[$(date +%T)] iteration $iteration: stopping before another worker can change the failed database"
         break
       fi
     done
