@@ -7,17 +7,18 @@ Original release entry: `3b48de7e42c2d2b6db895774eb8b046eff6d6fa7` on
 `development`, matching origin after fetch. Production code is unchanged from
 `0b20792b`; the successor fixes a native Windows test fixture and records proof.
 
-Current follow-up (September 11): source 33420bad plus the recorded S1
-reconstruction correction; documentation entry HEAD 2a5c74ed. Final-source
-broad, native and static checks pass. New exact releases and duration soaks are
-still required; earlier build/qualification passes below are predecessor evidence.
+Current follow-up (September 11): correction committed/pushed as
+`48baeefe0144e2a84458c6589aa0345afc223ff8`; documentation entry HEAD 2a5c74ed.
+Final-source broad, native and static checks and all three exact native release
+builds pass. Media/crash/duration qualification remains pending; earlier
+build/qualification passes below are predecessor evidence.
 
 The owner explicitly authorized the next three items, then required a stop and
 discussion before item 4. This ledger supplements Children 07/08 and the frozen
 parent; it does not rewrite historical results or authorize production work.
 
-- [ ] 1. Capacity admission and exact native Linux/macOS/Windows release builds
-  for the corrected source (33420bad predecessor builds passed).
+- [x] 1. Capacity admission and exact native Linux/macOS/Windows release builds
+  for corrected source 48baeefe.
 - [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
@@ -873,3 +874,61 @@ attempts. `closed-followup-evidence.sha256` rechecks completely and has SHA-256
 This is the green correction landing boundary; it is not the successor release
 or duration-soak evidence. Review confirms the only serialized change is the
 private disposable rebuild-run version, not a public/frozen database contract.
+
+### Successor release qualification — 48baeefe
+
+The correction is committed/pushed as `48baeefe0144e2a84458c6589aa0345afc223ff8`
+(nine scoped files; unrelated user work retained). Fresh detached sources on
+all three hosts share that commit, the frozen lockfile and 53-file portal archive.
+Desktop campaign: `/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911/`;
+native campaigns: `~/.cache/codex/aeordb-tests/p9-release-48baeefe-20260911/`.
+Only inactive same-host predecessor Cargo targets are reused; no target artifacts
+cross hosts. Normal release builds started at approximately 13:25 UTC.
+
+The Linux sequence runs under a 200,000-second outer deadline (launcher 90873),
+with per-stage deadlines, 30-second two-volume guards and durable terminal
+receipts. `monitor-candidate.sh` reads the owned driver PID and current stage.
+Its runner manifest SHA is
+`c5433e20018b1abdf380128d4cd36df8e26d7d0d74cfcb8d031c40c6190b873d`.
+Native builds have independent deadlines and capacity guards; their results
+are recorded below. Duration soaks and cleanup remain pending.
+
+Linux normal release passes at 13:29:01 UTC (3m56s, two jobs, optimized plus
+debug information). Pinned hashes: CLI
+`3f378464a60ce66014b7ec8c50a76cb64953878356c3ccc434e9e1de81c536a2`,
+soak worker `32ae84ad9e06ec535409c868b486cd8469b0d26c39a68813b8746fa8e806d707`,
+crash worker `f87491e9dbfe36041d3fc8984871ad545785659bb272826f9ef1230dcd48e64b`.
+macOS arm64 normal release passes at 13:28:47 UTC (3m17s, one job), SHA
+`005757daafe0b77e6f92dc9738eacf581605fe20913645126c91e19949bd66a2`.
+
+The exact Linux release passes `copied-s1-release` at 13:29:41 UTC: the same
+closed 631 MB failure copy now strictly verifies with zero missing entries and
+zero other issues, while SHA and nanosecond stat stay unchanged. Verification
+takes 17.23 seconds, maximum RSS 62,708 KiB, zero swap. No repair or normal open
+is used, and this is not a controlled performance comparison. Both pinned
+harness fixture gates pass, followed by live HTTP/docs/binary readback, clean
+shutdown/restart, delete/missing cases and read-only terminal verification at
+13:31:12 UTC.
+
+Windows native MSVC Rust 1.96.0 release passes at 13:36:46 UTC (11m38s build, 698.75-second
+controller elapsed, one job). Pinned executable SHA
+`7fabb0a9bced42f4f9206f381f58315e039325dff94289ebc7665104e2f57def`;
+minimum/final C: free space 18,749,120,512 / 18,900,402,176 bytes. All three
+native release builds therefore pass for 48baeefe; no binary is installed or
+published, and no production service is changed.
+
+The 120-second resource overlap passes at 13:33:43 UTC: 2,190,843,904-byte
+memory peak, zero swap, three completed KV expansions, no functional failures.
+Health p50/p95/p99/maximum is 0.561/9.708/98.872/676.777 ms (4,900 samples).
+The workload completed 1,124 writes, 2,961 reads, 961 blob commits, 304 searches,
+43 reindex tasks, 45 dry-run GC operations and 60 cancellation probes.
+The owned service exits cleanly. Media migration is running, with Data/home
+free space 285,452,193,792 / 75,599,044,608 bytes at 13:39:44 UTC.
+
+Capacity follow-up: S2 creates one recovery copy in private home scratch per
+cycle (S3 creates two smaller copies). Home has about 6.9 GB above its 64 GiB
+reserve, while historical S2 reached about 7.8 GB. An asynchronous owner question
+requests permission to relocate only the completed 1.9 GB synthetic resource
+database from home to the Data test area, retaining contents and logs. No file
+has been moved or deleted; the question does not block current migration or S1.
+Do not lower the reserve or inspect unrelated home data.
