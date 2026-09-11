@@ -15,7 +15,9 @@ use crate::engine::path_utils::normalize_path;
 use crate::engine::symlink_record::symlink_path_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"AEORKVR1";
-const RUN_VERSION: u16 = 1;
+// Private, disposable external-sort runs; never a database format or resumable
+// migration artifact. Version 2 distinguishes void-covered value incarnations.
+const RUN_VERSION: u16 = 2;
 const RUN_HEADER_LENGTH: usize = 32;
 const RUN_RECORD_FIXED_LENGTH: usize = 28;
 const RUN_RECORD_CRC_LENGTH: usize = 4;
@@ -61,13 +63,26 @@ impl ResolvedKvRecord {
 enum WorkspaceAction {
   Value = 0,
   Delete = 1,
+  VoidCoveredValue = 2,
 }
 
 impl WorkspaceAction {
+  fn sort_rank(self) -> u8 {
+    // Resolve the retirement cutoff before choosing among surviving values.
+    // This keeps legacy directory preference within a live generation without
+    // buffering an unbounded history for one key.
+    match self {
+      Self::VoidCoveredValue => 0,
+      Self::Value => 1,
+      Self::Delete => 2,
+    }
+  }
+
   fn from_u8(value: u8) -> EngineResult<Self> {
     match value {
       0 => Ok(Self::Value),
       1 => Ok(Self::Delete),
+      2 => Ok(Self::VoidCoveredValue),
       _ => Err(scratch_corruption(format!("unknown rebuild action {value}"))),
     }
   }
@@ -91,7 +106,9 @@ impl WorkspaceRecord {
   }
 
   fn deletion(hash: &[u8], order: RebuildOrder) -> EngineResult<Self> {
-    Self::new(WorkspaceAction::Delete, 0, hash, 0, 0, 0, order)
+    // The scratch codec shares the physical offset with the chronology tie
+    // breaker. Zeroing it loses same-timestamp deletions after a run is read.
+    Self::new(WorkspaceAction::Delete, 0, hash, order.offset, 0, 0, order)
   }
 
   fn new(
@@ -119,7 +136,7 @@ impl WorkspaceRecord {
     self
       .hash()
       .cmp(other.hash())
-      .then_with(|| (self.action as u8).cmp(&(other.action as u8)))
+      .then_with(|| self.action.sort_rank().cmp(&other.action.sort_rank()))
       .then_with(|| self.order.timestamp.cmp(&other.order.timestamp))
       .then_with(|| self.order.offset.cmp(&other.order.offset))
       .then_with(|| self.type_flags.cmp(&other.type_flags))
@@ -305,6 +322,23 @@ impl KvRebuildWorkspace {
       self.push_record(WorkspaceRecord::deletion(&hash, order)?)?;
     }
     Ok(())
+  }
+
+  /// A verified incarnation covered by the selected void snapshot establishes
+  /// a retirement cutoff. Dropping it before resolution would make an older
+  /// physical copy of the same key appear live again. Later writes may survive.
+  pub(crate) fn push_voided_value(
+    &mut self,
+    type_flags: u8,
+    hash: &[u8],
+    offset: u64,
+    value_length: u32,
+    total_length: u32,
+    order: RebuildOrder,
+  ) -> EngineResult<()> {
+    let mut record = WorkspaceRecord::value(type_flags, hash, offset, value_length, total_length, order)?;
+    record.action = WorkspaceAction::VoidCoveredValue;
+    self.push_record(record)
   }
 
   fn push_record(&mut self, record: WorkspaceRecord) -> EngineResult<()> {
@@ -598,12 +632,15 @@ impl ResolvedRecordCursor {
       let group_hash = first.hash().to_vec();
       let mut selected = None;
       let mut latest_deletion = None;
-      update_resolved_group(first, &mut selected, &mut latest_deletion);
+      let mut latest_retirement = None;
+      update_resolved_group(first, &mut selected, &mut latest_deletion, &mut latest_retirement);
 
       loop {
         self.check_cancelled()?;
         match self.reader.next_record()? {
-          Some(record) if record.hash() == group_hash => update_resolved_group(record, &mut selected, &mut latest_deletion),
+          Some(record) if record.hash() == group_hash => {
+            update_resolved_group(record, &mut selected, &mut latest_deletion, &mut latest_retirement);
+          }
           Some(record) => {
             self.pending = Some(record);
             break;
@@ -626,9 +663,22 @@ impl ResolvedRecordCursor {
   }
 }
 
-fn update_resolved_group(record: WorkspaceRecord, selected: &mut Option<WorkspaceRecord>, latest_deletion: &mut Option<RebuildOrder>) {
+fn update_resolved_group(
+  record: WorkspaceRecord,
+  selected: &mut Option<WorkspaceRecord>,
+  latest_deletion: &mut Option<RebuildOrder>,
+  latest_retirement: &mut Option<RebuildOrder>,
+) {
   match record.action {
+    WorkspaceAction::VoidCoveredValue => {
+      if latest_retirement.is_none_or(|existing| record.order.is_after(existing)) {
+        *latest_retirement = Some(record.order);
+      }
+    }
     WorkspaceAction::Value => {
+      if latest_retirement.is_some_and(|retired| !record.order.is_after(retired)) {
+        return;
+      }
       if selected.as_ref().map(|existing| should_replace_value(existing, &record)).unwrap_or(true) {
         *selected = Some(record);
       }
@@ -640,6 +690,10 @@ fn update_resolved_group(record: WorkspaceRecord, selected: &mut Option<Workspac
     }
   }
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/kv_rebuild_voided_internal_spec.rs"]
+mod voided_incarnation_specs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeapRecord {

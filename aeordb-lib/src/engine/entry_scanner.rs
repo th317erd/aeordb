@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use crate::engine::entry_header::EntryHeader;
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
+use crate::engine::void_manager::VoidManager;
 use crate::engine::memory_coordinator::{
   AdmissionClass, CriticalMemoryPurpose, MemoryCoordinator, MemoryCoordinatorError, MemoryOwner, MemoryReservation,
 };
@@ -30,6 +31,7 @@ pub(crate) struct ScannedRebuildEntry {
   pub header: EntryHeader,
   pub key: Vec<u8>,
   pub value: Option<Vec<u8>>,
+  pub payload_verified: bool,
   pub(crate) _retained_value_memory: Option<MemoryReservation>,
 }
 
@@ -383,11 +385,16 @@ impl EntryScanner {
 
   /// Scan one entry for KV rebuild. Chunk and void payloads are skipped
   /// because rebuild only needs the key/header metadata for those large
-  /// records. Mutable metadata records are still read and hash-verified.
-  pub(crate) fn next_rebuild_entry(&mut self) -> Option<Result<ScannedRebuildEntry, RebuildScanError>> {
+  /// records. Mutable metadata records are still read and hash-verified. A
+  /// void-covered chunk must also be verified before its key/chronology can
+  /// suppress an older incarnation; arbitrary discarded bytes are not proof.
+  pub(crate) fn next_rebuild_entry(
+    &mut self,
+    current_voids: Option<&VoidManager>,
+  ) -> Option<Result<ScannedRebuildEntry, RebuildScanError>> {
     let entry_offset = self.current_offset;
     let verify_recovery_tail = self.is_recovery_tail_offset(entry_offset);
-    self.next_bounded_entry(verify_recovery_tail).map(|result| {
+    self.next_bounded_entry(verify_recovery_tail, current_voids).map(|result| {
       result.map_err(|error| {
         if matches!(error, EngineError::CorruptEntry { .. }) {
           if verify_recovery_tail {
@@ -406,10 +413,14 @@ impl EntryScanner {
   /// payload is hash-verified through a fixed-size buffer; only the bounded
   /// deletion-record value is retained because KV resolution needs its path.
   pub(crate) fn next_verify_entry(&mut self) -> Option<EngineResult<ScannedRebuildEntry>> {
-    self.next_bounded_entry(true)
+    self.next_bounded_entry(true, None)
   }
 
-  fn next_bounded_entry(&mut self, verify_large_payloads: bool) -> Option<EngineResult<ScannedRebuildEntry>> {
+  fn next_bounded_entry(
+    &mut self,
+    verify_large_payloads: bool,
+    current_voids: Option<&VoidManager>,
+  ) -> Option<EngineResult<ScannedRebuildEntry>> {
     loop {
       if let Err(error) = self.check_cancelled() {
         return Some(Err(error));
@@ -511,13 +522,22 @@ impl EntryScanner {
         continue;
       }
 
-      let should_verify = verify_large_payloads || !matches!(header.entry_type, EntryType::Chunk | EntryType::Void);
+      let void_covered_chunk =
+        header.entry_type == EntryType::Chunk && current_voids.is_some_and(|voids| voids.overlaps_range(entry_offset, header.total_length));
+      let should_verify = verify_large_payloads || void_covered_chunk || !matches!(header.entry_type, EntryType::Chunk | EntryType::Void);
       if !should_verify {
         if let Err(error) = self.file.seek(SeekFrom::Start(entry_end)) {
           return Some(Err(error.into()));
         }
         self.current_offset = entry_end;
-        return Some(Ok(ScannedRebuildEntry { offset: entry_offset, header, key, value: None, _retained_value_memory: None }));
+        return Some(Ok(ScannedRebuildEntry {
+          offset: entry_offset,
+          header,
+          key,
+          value: None,
+          payload_verified: false,
+          _retained_value_memory: None,
+        }));
       }
 
       let recovery_authority_candidate = self.retain_recovery_authority_values
@@ -624,6 +644,7 @@ impl EntryScanner {
         header,
         key,
         value: retained,
+        payload_verified: true,
         _retained_value_memory: retained_value_memory,
       }));
     }
@@ -826,7 +847,7 @@ mod tests {
     let writer = AppendWriter::open(&path).unwrap();
     let mut scanner = writer.scan_entries_dirty_namespace_rollback(Arc::clone(&coordinator)).unwrap();
     let mut saw_refusal = false;
-    while let Some(result) = scanner.next_rebuild_entry() {
+    while let Some(result) = scanner.next_rebuild_entry(None) {
       match result {
         Err(RebuildScanError::Fatal(EngineError::ResourceExhausted(message))) => {
           assert!(message.contains("dirty-recovery authority memory admission failed"));
@@ -849,7 +870,7 @@ mod tests {
     let writer = AppendWriter::open(&path).unwrap();
     let mut scanner = writer.scan_entries_dirty_namespace_rollback(Arc::clone(&coordinator)).unwrap();
     let retained = loop {
-      let scanned = scanner.next_rebuild_entry().expect("scanner reached the uncommitted authority").expect("authority scan succeeds");
+      let scanned = scanner.next_rebuild_entry(None).expect("scanner reached the uncommitted authority").expect("authority scan succeeds");
       if scanned.offset == selected_frontier {
         break scanned;
       }

@@ -711,10 +711,21 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport, progress: &Ma
           EntryType::Void => {}
         }
 
-        if engine.entry_overlaps_current_void(scanned.offset, scanned.header.total_length)? {
+        let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
+        if scanned.header.entry_type == EntryType::Void {
           continue;
         }
-        let order = RebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
+        if engine.entry_overlaps_current_void(scanned.offset, scanned.header.total_length)? {
+          expected.push_voided_value(
+            scanned.header.entry_type.to_kv_type(),
+            &scanned.key,
+            scanned.offset,
+            scanned.header.value_length,
+            scanned.header.total_length,
+            order,
+          )?;
+          continue;
+        }
         if scanned.header.entry_type == EntryType::DeletionRecord {
           let value = scanned.value.as_deref().ok_or_else(|| EngineError::CorruptEntry {
             offset: scanned.offset,
@@ -723,16 +734,14 @@ fn scan_entries(engine: &StorageEngine, report: &mut VerifyReport, progress: &Ma
           let deletion = crate::engine::deletion_record::DeletionRecord::deserialize(value, scanned.header.entry_version)?;
           expected.push_deletion_path(&deletion.path, order)?;
         }
-        if scanned.header.entry_type != EntryType::Void {
-          expected.push_value(
-            scanned.header.entry_type.to_kv_type(),
-            &scanned.key,
-            scanned.offset,
-            scanned.header.value_length,
-            scanned.header.total_length,
-            order,
-          )?;
-        }
+        expected.push_value(
+          scanned.header.entry_type.to_kv_type(),
+          &scanned.key,
+          scanned.offset,
+          scanned.header.value_length,
+          scanned.header.total_length,
+          order,
+        )?;
       }
       Err(EngineError::CorruptEntry { reason, .. }) => {
         report.total_entries = report.total_entries.saturating_add(1);

@@ -3,15 +3,21 @@
 ## Authorization and entry gate
 
 Owner: Codex, direct implementation under the `implement` workflow.
-Entry/last-green source: `3b48de7e42c2d2b6db895774eb8b046eff6d6fa7` on
+Original release entry: `3b48de7e42c2d2b6db895774eb8b046eff6d6fa7` on
 `development`, matching origin after fetch. Production code is unchanged from
 `0b20792b`; the successor fixes a native Windows test fixture and records proof.
+
+Current follow-up (September 11): source 33420bad plus the recorded S1
+reconstruction correction; documentation entry HEAD 2a5c74ed. Final-source
+broad, native and static checks pass. New exact releases and duration soaks are
+still required; earlier build/qualification passes below are predecessor evidence.
 
 The owner explicitly authorized the next three items, then required a stop and
 discussion before item 4. This ledger supplements Children 07/08 and the frozen
 parent; it does not rewrite historical results or authorize production work.
 
-- [x] 1. Capacity admission and exact native Linux/macOS/Windows release builds.
+- [ ] 1. Capacity admission and exact native Linux/macOS/Windows release builds
+  for the corrected source (33420bad predecessor builds passed).
 - [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
@@ -664,3 +670,206 @@ The seal contains logs, receipts, metrics, checkpoint files and database checksu
 records, not raw database payloads. Raw short database hashes were separately
 verified at sealing. This distinction permits later explicit test-data retirement
 without pretending the deleted database payloads remain available for checking.
+
+S1's post-warmup throughput drops substantially after the first periodic GC;
+the retained same-corpus historical run shows the same pattern, so this is not
+established as a new regression. At 1,800/3,600 seconds, historical 9a71d4ce had
+18,376/18,776 writes and current 33420bad had 19,486/19,899. First-GC void bytes
+were 353,416,023 / 358,744,998 respectively. The current 3,600-second memory
+baseline is 535,672 KiB RSS / 534,264 KiB VmData, with 13 open descriptors.
+Do not equate a passing stability soak with sustained warmup-level throughput;
+retain this characterization for later real-client operational discussion.
+
+During S1, unrelated desktop home-volume activity reduced available space from
+about 130 GB to 77.7 GB. The owned worker's open regular files were all on Data;
+its private home scratch remained empty. A read-only I/O sample identified a
+separate rsync writer. No private arguments/destination contents were inspected
+and no unrelated process was changed. At 2026-09-11T10:28Z both observed rsync
+PIDs had exited and home free space had stabilized. The 250 GB Data and 64 GiB
+home guards never required relaxation; current S1 remains active, not passed.
+
+### S1 terminal integrity failure — 2026-09-11
+
+The worker completed 12 hours cleanly (27,281 writes / 13,851 reads / 4,536
+deletes), but terminal read-only verification exited 2 with 20 missing KV
+entries. All 20 reported physical headers are DirectoryIndex records. Corrupt
+hash/header, stale KV, missing children, dangling records, B-tree issues,
+unlisted files, invalid offsets/voids and broken snapshots were all zero.
+The pinned sequence stopped at 11:23:47 UTC; S2/S3 did not start. This is a
+failed integrity gate, not a capacity/deadline stop or a successful S1 result.
+
+The 631,174,559-byte database remains preserved at `long/s1-12h/soak.aeordb`,
+SHA-256 `74e1103abd16299fec96b9ee94c0941347453d0c14f0a8e8689fca5b9f9a9a65`.
+Its checksum and nanosecond stat still match the pre-verification records.
+No normal reopen, repair or cleanup has been performed on this failure artifact.
+The separate resource summary passes: 721 rows, 12.00 hours logged, RSS growth
+14.4%, VmData growth 17.3%, and maximum 14 descriptors. Final Data/home free
+space was 307,382,878,208 / 77,735,796,736 bytes.
+
+Current landing unit: investigate/reproduce the directory-key discrepancy,
+then correct the proven cause and qualify the affected perimeter. Source entry
+is 33420bad (documentation HEAD 2a5c74ed); fetched origin matches HEAD. Direct
+owner is Codex. Owned territory is the GC/WAL/verification/rebuild interaction
+and its regression evidence; production, frozen formats, activation, unrelated
+user files and original failed database bytes remain forbidden. Two narrow GC
+tests now target repeated physical directory records: clean verification after
+sweep and no resurrection during KV rebuild. They are unrun target tests, not
+proof of cause yet. Next command is the filtered desktop `gc_spec` baseline;
+do not restart the duration sequence or relax verification to make it pass.
+
+### S1 causal reproduction and bounded correction in progress
+
+Follow-up evidence lives at desktop
+`/media/Data/AeorDB/Tests/p9-s1-kv-followup-20260911/`. A separately copied
+failed S1 stage is sealed by `frozen-s1-evidence.sha256` (17 files, manifest
+SHA `2194d157ed80475998637f2a0257cbda8be452dcc47da41aa6ec9af4cf004904`).
+The original and frozen copy are not repair or normal-open targets.
+
+Independent read-only structural inspection proves all 20 missing keys have an
+older unvoided record and a later void-covered record. One later timestamp is
+at a lower physical offset, so chronology must retain `(timestamp, offset)`.
+The shared verification/rebuild resolver previously excluded void-covered
+records before chronology resolution, thereby selecting obsolete duplicates.
+Rebuild can actually resurrect those keys; this is not only a report mismatch.
+
+`duplicate-directory-red` was a compile error, not behavioral proof.
+`duplicate-directory-red2` fails both targeted GC regressions on 33420bad;
+`duplicate-directory-green` passes both with the initial correction.
+`shared-resolution-green` passes 14 workspace and 8 scanner tests. Review then
+found the initial correction could eclipse a legitimate empty rewrite after
+retirement: `post-retirement-empty-red` fails the two added edge cases (4 pass,
+2 fail, exit 101 at 12:05:28 UTC). All receipts are retained.
+
+The next correction resolves the latest verified retirement cutoff first,
+then applies the existing directory preference only to newer surviving values.
+This is bounded external sorting with constant per-key resolution state, not a
+KV placement redesign, GC activation, or frozen database-format change. Only
+the disposable, non-resumable private rebuild-run version changes. Void-covered
+chunk records are streamed/hash-checked before supplying retirement evidence;
+ordinary historical chunks retain the existing metadata-only rebuild scan.
+Strict verification still checks all payloads and does not suppress stale KV.
+
+Remaining proof: new edge-case green, affected regressions, byte-identical S1
+copy baseline/new read-only verification, accelerated GC exercise, broad/static/
+native gates, new exact releases and release qualification. No S1 integrity
+pass, S2/S3 run, test-database cleanup, deployment or step-4 action is claimed.
+
+At 12:10:05 UTC, `retirement-resolution-green` passed the original edge cases
+but failed the new independent exhaustive history model (18 pass / 1 fail).
+The first mismatch was history 100: values at `(10,300)` and `(20,100)`, then
+deletion at `(20,200)`. The preexisting private scratch codec wrote deletion
+offset zero, losing its chronology tie-breaker on readback. The correction keeps
+the deletion's physical offset in its private run record; no database layout
+changes. The model enumerates 3,000 histories across directory/file types,
+two chronology patterns, both hash widths, and three spill capacities, using a
+separate complete-history oracle instead of the production resolver.
+
+`retirement-resolution-green2` passed at 12:15:29 UTC: 20 workspace tests
+(including all modeled histories and a named same-timestamp deletion/recreation
+regression), 8 scanner tests and both original GC tests. Latest additional GC
+tests require genuinely missing unretired keys and corrupt void-covered chunk
+records to remain visible failures, with no partial KV publication.
+`run-s1-diagnostic-sequence.sh` now runs affected storage tests, diagnostic-only
+binaries, byte-identical copied-S1 baseline/corrected verification, a three-minute
+accelerated GC/snapshot exercise, prospective audit inventory refresh and the
+failed-S1 resource summary. Each stage has a deadline, two-volume guard and
+terminal receipt; any failure stops subsequent stages. Release soaks stay stopped.
+
+### Real failed-image proof and affected storage checks
+
+`affected-storage` passed 281 tests across seven targets (12:18:03 UTC), including
+the two added strict-failure guards. Diagnostic dev-profile artifacts are pinned
+under `diagnostic-artifacts/`: CLI SHA
+`162040949318d707826ef5a0b3350bd43b5e17861b98ef1f4d3749f7aaf0ff04`, worker SHA
+`2bb86b6c6f990f7f4c9885c8aff81aa6a6cfa01b5b6b28f52b06e35ae1c9a441`.
+
+`copied-s1-read-only` passed at 12:21:05 UTC on a fresh byte-identical 631 MB
+copy, without repair or normal startup. Baseline release verification exited 2
+with 20 missing keys; corrected diagnostic verification exited 0 with zero
+integrity issues. SHA and nanosecond stat remain unchanged across both passes;
+the original frozen evidence manifest rechecks. Baseline took 14.71 seconds /
+62,352 KiB maximum RSS; corrected dev build took 56.66 seconds / 88,812 KiB.
+Different build profiles mean these are not a performance comparison.
+
+`accelerated-gc` passed at 12:24:36 UTC: 181.67 seconds, 958 writes / 484 reads /
+160 deletes, configured snapshots every 5 seconds and GC every 10 seconds.
+Terminal read-only verification reports 45 snapshots, 1,288 voids and no issues;
+database SHA/stat remain unchanged around verification. Maximum worker RSS was
+25,532 KiB. This is a short diagnostic stress exercise, not a replacement for
+the required release-duration soaks.
+
+The original failed S1's one-second memory log has 43,020 rows; peak RSS,
+maximum current RSS and maximum high-water mark are all 612,544 KiB. Its resource
+pass remains separate from the failed integrity result.
+
+Native macOS initial checks passed 661 library and 281 affected-storage tests
+by 12:24:38 UTC; Windows checks are underway. A Windows wrapper generation error
+failed parsing before tests started; the failed wrapper is retained and the
+corrected wrapper now receives an explicit parser admission check.
+
+`audit-refresh` and `audit-pre-refresh-check` correctly refused a new syntactic
+default-on-error occurrence (1503 to 1504, at `update_resolved_group`). This was
+an `Option` predicate, not a swallowed engine error. It is now expressed with
+`is_none_or`, preserving behavior without increasing the reviewed ceiling.
+`audit-refresh2` checks a prospective inventory before any source adoption.
+Initial diagnostic/native evidence predates that one-expression normalization;
+final-source broad/native/release qualification remains required. No failing
+receipt was overwritten and the original sequence stops at the audit refusal.
+
+### Final-source ordinary qualification
+
+The adopted inventory has exactly 1,503 entries with unchanged identities,
+reviews and ceiling; only 30 line locations changed. `audit-refresh2` passes
+(12:28:33 UTC). Final eight-file input manifest SHA is
+`a311381db8a78562d55e42af4a8a19a2d0f7415154ab808d971e58e3523a93dd`;
+native input archive SHA is
+`3c865c61a7f9ffabedaa5b5edc78081d80efedc476989dc6f5c3938db8fd6f6b`.
+Both include the new separate workspace spec and the updated audit inventory.
+
+Linux `final-narrow` passes 20 reconstruction tests and 29 audit/architecture
+tests at 12:35:10 UTC. Fresh one-job same-host WASM prerequisites pass at
+12:37:10 UTC; `final-workspace` passes at 13:14:44 UTC: 7,521 top-level tests
+across 347 targets, zero failures, seven existing ignores, plus three separately
+counted nested index-store checks. It used two Cargo jobs, two test threads,
+debug information disabled and incremental compilation disabled. Guard floors
+remain 250 GB Data and 64 GiB home; no source changes occur during a gate.
+
+Native macOS final-source qualification passes 1,192 tests: 661 library, 310
+affected storage/audit across eight targets, and 221 CLI across 21 targets with
+seven existing ignores. Last receipt is 12:38:43 UTC, 82,125,180,928 bytes free.
+This is the relevant native matrix, not the full native workspace suite.
+Native Windows final-source qualification passes 1,185 tests: 658 library,
+309 affected storage/audit across eight targets, and 218 CLI across 21 targets
+with seven existing ignores. Last receipt is 12:50:19 UTC; final C: free space
+is 19,007,410,176 bytes. The platform-specific count difference is preserved,
+not rounded to the macOS matrix. Its preexisting conditional-test unused-import
+warning remains recorded; this is not a claim of native strict Clippy.
+No new release candidate or successful duration-soak result is claimed yet.
+
+The successor release harness is prepared under local durable cache
+`aeordb-release-qualification-20260910/s1-release-templates/`. Its 16 pinned-soak
+fixtures and four admission refusals pass; Bash and native PowerShell syntax
+checks pass. Rendering refuses dirty source before creating a candidate.
+The next build reuses only each host's inactive predecessor Cargo cache, not
+transferred target artifacts, and pins normal-release executables before CLI
+test-feature unification. Media capture is explicitly 1 GiB with a 64 GiB home
+reserve. The duration sequence includes a mandatory S1 resource-summary gate.
+No production operation is present in that sequence.
+
+Final Linux static/architecture closure passes: strict workspace/all-target
+Clippy at 13:17:15 UTC; contracts at 13:17:46 (454 independent fixtures,
+95 routes, 39 documents, debt 8 reviewed entries/164 retained matches);
+mdBook at 13:18:16; debt self-tests at 13:18:47; soak helper/16 scenario fixtures
+at 13:19:18. The failed predecessor S1 resource summary is durably captured at
+13:19:48 and still does not convert its failed integrity result into a pass.
+The complete final-source sequence exits 0 at 13:19:48, with Data/home free
+space 305,000,923,136 / 77,577,195,520 bytes. Formatting and diff checks pass.
+
+The closed diagnostic/native evidence seal contains 236 files under the
+follow-up campaign, including the frozen failure, the separate read-only proof
+copy, diagnostic binaries, final Linux receipts, both native matrices and failed
+attempts. `closed-followup-evidence.sha256` rechecks completely and has SHA-256
+`2fb99032ebba73b85904a37ad594b4e2f31a4cf1887b020a0080749e838aca3e`.
+This is the green correction landing boundary; it is not the successor release
+or duration-soak evidence. Review confirms the only serialized change is the
+private disposable rebuild-run version, not a public/frozen database contract.

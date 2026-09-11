@@ -4096,7 +4096,7 @@
     {
       "id": "esq-v1-d9a3175d124234001f67-00",
       "file": "aeordb-lib/src/engine/entry_scanner.rs",
-      "line": 225,
+      "line": 227,
       "column": 25,
       "enclosing_item": "impl EntryScanner::scan_for_next_magic",
       "kind": "error_conversion",
@@ -4106,7 +4106,7 @@
     {
       "id": "esq-v1-df823cb3095784df9264-00",
       "file": "aeordb-lib/src/engine/entry_scanner.rs",
-      "line": 252,
+      "line": 254,
       "column": 18,
       "enclosing_item": "impl EntryScanner::scan_for_next_magic",
       "kind": "result_status_probe",
@@ -4116,7 +4116,7 @@
     {
       "id": "esq-v1-f9399b70ed1ab422e83a-00",
       "file": "aeordb-lib/src/engine/entry_scanner.rs",
-      "line": 257,
+      "line": 259,
       "column": 13,
       "enclosing_item": "impl EntryScanner::scan_for_next_magic",
       "kind": "broad_err_pattern",
@@ -4126,7 +4126,7 @@
     {
       "id": "esq-v1-f288030c513bcee20e85-00",
       "file": "aeordb-lib/src/engine/entry_scanner.rs",
-      "line": 327,
+      "line": 329,
       "column": 5,
       "enclosing_item": "impl EntryScanner::scan_boundary_for_offset",
       "kind": "default_on_error",
@@ -5256,7 +5256,7 @@
     {
       "id": "esq-v1-17c4375faf05a75fd07f-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 250,
+      "line": 267,
       "column": 18,
       "enclosing_item": "impl KvRebuildWorkspace::new_with_limits_for_purpose",
       "kind": "default_on_error",
@@ -5266,7 +5266,7 @@
     {
       "id": "esq-v1-afd48f48d8a74463cfb9-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 447,
+      "line": 481,
       "column": 7,
       "enclosing_item": "impl KvRebuildWorkspace::write_run",
       "kind": "error_conversion",
@@ -5276,7 +5276,7 @@
     {
       "id": "esq-v1-faa72de1a06bc0e974bd-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 463,
+      "line": 497,
       "column": 17,
       "enclosing_item": "impl KvRebuildWorkspace::merge_runs",
       "kind": "panic_method",
@@ -5286,7 +5286,7 @@
     {
       "id": "esq-v1-9eb753d06906f627ce71-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 632,
+      "line": 682,
       "column": 10,
       "enclosing_item": "update_resolved_group",
       "kind": "default_on_error",
@@ -5296,7 +5296,7 @@
     {
       "id": "esq-v1-8422986661632fd5b463-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 637,
+      "line": 687,
       "column": 10,
       "enclosing_item": "update_resolved_group",
       "kind": "default_on_error",
@@ -5306,7 +5306,7 @@
     {
       "id": "esq-v1-83781b8133eed91608a9-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 747,
+      "line": 801,
       "column": 46,
       "enclosing_item": "impl RunReader::next_record",
       "kind": "panic_method",
@@ -5316,7 +5316,7 @@
     {
       "id": "esq-v1-e70e97084295d93ef27a-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 757,
+      "line": 811,
       "column": 37,
       "enclosing_item": "impl RunReader::next_record",
       "kind": "panic_method",
@@ -5326,7 +5326,7 @@
     {
       "id": "esq-v1-397a1be6c4ae50ee7eac-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 758,
+      "line": 812,
       "column": 34,
       "enclosing_item": "impl RunReader::next_record",
       "kind": "panic_method",
@@ -5336,7 +5336,7 @@
     {
       "id": "esq-v1-6e3395606997dc2d8947-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 760,
+      "line": 814,
       "column": 43,
       "enclosing_item": "impl RunReader::next_record",
       "kind": "panic_method",
@@ -5346,7 +5346,7 @@
     {
       "id": "esq-v1-a63f684020006236ebb4-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 761,
+      "line": 815,
       "column": 43,
       "enclosing_item": "impl RunReader::next_record",
       "kind": "panic_method",
@@ -5356,7 +5356,7 @@
     {
       "id": "esq-v1-beacd90453cfea1d5e48-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 806,
+      "line": 860,
       "column": 21,
       "enclosing_item": "encode_run_header",
       "kind": "error_conversion",
@@ -5366,7 +5366,7 @@
     {
       "id": "esq-v1-8d4876ea6e63c4b7eb47-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 808,
+      "line": 862,
       "column": 5,
       "enclosing_item": "encode_run_header",
       "kind": "error_conversion",
@@ -5376,7 +5376,7 @@
     {
       "id": "esq-v1-befd7a1ebaf732cc75e9-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 827,
+      "line": 881,
       "column": 44,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -5386,7 +5386,7 @@
     {
       "id": "esq-v1-d1a4d45d82736e847dc8-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 831,
+      "line": 885,
       "column": 36,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -5396,7 +5396,7 @@
     {
       "id": "esq-v1-5d3d49994f3b468b744b-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 832,
+      "line": 886,
       "column": 40,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -5406,7 +5406,7 @@
     {
       "id": "esq-v1-bd40088b8fcd968a153e-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 833,
+      "line": 887,
       "column": 47,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -5416,7 +5416,7 @@
     {
       "id": "esq-v1-7dac67fe3e14e2b3f6b4-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 834,
+      "line": 888,
       "column": 49,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -5426,7 +5426,7 @@
     {
       "id": "esq-v1-969c2b79f8abe557e358-00",
       "file": "aeordb-lib/src/engine/kv_rebuild_workspace.rs",
-      "line": 843,
+      "line": 897,
       "column": 25,
       "enclosing_item": "decode_run_header",
       "kind": "panic_method",
@@ -7716,7 +7716,7 @@
     {
       "id": "esq-v1-3f19eed582d420132975-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6382,
+      "line": 6393,
       "column": 11,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "logged_error_continues",
@@ -7726,7 +7726,7 @@
     {
       "id": "esq-v1-07f15be9c45dd606364e-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 6506,
+      "line": 6517,
       "column": 34,
       "enclosing_item": "impl StorageEngine::rebuild_kv_with_progress_boundary",
       "kind": "error_conversion",
@@ -7736,7 +7736,7 @@
     {
       "id": "esq-v1-2af65679620f5cebffc7-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 7216,
+      "line": 7227,
       "column": 16,
       "enclosing_item": "impl StorageEngine::drop",
       "kind": "default_on_error",
@@ -7746,7 +7746,7 @@
     {
       "id": "esq-v1-dcc1cf6dbecfd924b40f-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 7221,
+      "line": 7232,
       "column": 5,
       "enclosing_item": "impl StorageEngine::drop",
       "kind": "logged_error_continues",
@@ -7756,7 +7756,7 @@
     {
       "id": "esq-v1-a5d82e88e5f0f57c2ff1-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 8526,
+      "line": 8538,
       "column": 7,
       "enclosing_item": "impl DurabilityRepairAuthorityGuard < '_ >::drop",
       "kind": "broad_err_pattern",
@@ -7766,7 +7766,7 @@
     {
       "id": "esq-v1-2de4ce252f7b55e676bf-00",
       "file": "aeordb-lib/src/engine/storage_engine.rs",
-      "line": 8685,
+      "line": 8697,
       "column": 5,
       "enclosing_item": "impl TransactionGuard < 'a >::drop",
       "kind": "logged_error_continues",
@@ -11976,7 +11976,7 @@
     {
       "id": "esq-v1-c303030dbde447ed8fc4-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 916,
+      "line": 925,
       "column": 25,
       "enclosing_item": "check_hot_tail_voids",
       "kind": "default_on_error",
@@ -11986,7 +11986,7 @@
     {
       "id": "esq-v1-640887f76ff46c2abfb2-00",
       "file": "aeordb-lib/src/engine/verify.rs",
-      "line": 1053,
+      "line": 1062,
       "column": 77,
       "enclosing_item": "format_btree_directory_issue",
       "kind": "default_on_error",

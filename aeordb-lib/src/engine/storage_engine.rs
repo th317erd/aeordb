@@ -1094,7 +1094,7 @@ impl StorageEngine {
       let selected_frontier = writer.file_header().hot_tail_offset;
       let scan_result = (|| -> EngineResult<()> {
         let mut scanner = writer.scan_entries_dirty_namespace_rollback(self.memory_coordinator())?;
-        while let Some(result) = scanner.next_rebuild_entry() {
+        while let Some(result) = scanner.next_rebuild_entry(None) {
           match result {
             Ok(scanned) => {
               if scanned.offset >= selected_frontier && Self::dirty_recovery_entry_is_rollback_authority(&scanned)? {
@@ -6327,7 +6327,7 @@ impl StorageEngine {
         },
       );
       let mut skipped_payload_bytes = 0u64;
-      while let Some(result) = scanner.next_rebuild_entry() {
+      while let Some(result) = scanner.next_rebuild_entry(Some(&voids)) {
         match result {
           Ok(scanned) => {
             let order = WorkspaceRebuildOrder { timestamp: scanned.header.timestamp, offset: scanned.offset };
@@ -6339,7 +6339,7 @@ impl StorageEngine {
               reason: "KV rebuild entry end overflows u64".to_string(),
             })?;
             dirty_max_end = dirty_max_end.max(entry_end);
-            if matches!(scanned.header.entry_type, EntryType::Chunk | EntryType::Void) {
+            if !scanned.payload_verified {
               skipped_payload_bytes = skipped_payload_bytes.saturating_add(scanned.header.value_length as u64);
             }
             if matches!(scan_boundary, KvRebuildScanBoundary::DirtyRecovery | KvRebuildScanBoundary::PhysicalEof)
@@ -6351,7 +6351,18 @@ impl StorageEngine {
                 .ok_or_else(|| EngineError::ResourceExhausted("dirty namespace rollback entry count overflow".to_string()))?;
               continue;
             }
-            if scanned.header.entry_type == EntryType::Void || voids.overlaps_range(scanned.offset, scanned.header.total_length) {
+            if scanned.header.entry_type == EntryType::Void {
+              continue;
+            }
+            if voids.overlaps_range(scanned.offset, scanned.header.total_length) {
+              rebuild_workspace.push_voided_value(
+                scanned.header.entry_type.to_kv_type(),
+                &scanned.key,
+                scanned.offset,
+                scanned.header.value_length,
+                scanned.header.total_length,
+                order,
+              )?;
               continue;
             }
             if scanned.header.entry_type == EntryType::DeletionRecord {
@@ -7277,6 +7288,7 @@ mod tests {
       },
       key,
       value,
+      payload_verified: true,
       _retained_value_memory: None,
     }
   }

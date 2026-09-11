@@ -10,7 +10,7 @@ use aeordb::engine::config_resolver::ConfigurationFamily;
 use aeordb::engine::file_record::FileRecord;
 use aeordb::engine::gc::{gc_mark, gc_sweep, run_gc, run_gc_with_cancellation, run_gc_with_post_start_hook, GcResult};
 use aeordb::engine::memory_coordinator::{AdmissionClass, HostMemorySample, MemoryOwner};
-use aeordb::engine::storage_engine::WriteBatch;
+use aeordb::engine::storage_engine::{TransactionGuard, WriteBatch};
 use aeordb::engine::tree_walker::walk_version_tree;
 use aeordb::engine::version_manager::SnapshotInfo;
 use aeordb::engine::engine_event::{EngineEvent, EVENT_GC_COMPLETED, EVENT_GC_STARTED, EVENT_GC_STATUS};
@@ -639,6 +639,101 @@ fn test_gc_mark_fails_closed_when_live_btree_child_is_missing() {
 }
 
 // ─── Sweep phase ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_gc_duplicate_directory_records_remain_verifiable_after_sweep() {
+  let (engine, temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/keep.txt", b"keep me", None).unwrap();
+  let key = engine.compute_hash(b"gc-duplicate-directory-record").unwrap();
+  // An empty flat directory has a four-byte zero child count, not a tombstone.
+  let value = [0u8; 4];
+  let transaction = TransactionGuard::new(&engine).unwrap();
+  let first = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  let second = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  assert_ne!(first, second, "the fixture needs two physical records for one key");
+  transaction.commit().unwrap();
+  let database_path = temporary.path().join("test.aeordb");
+  let path = database_path.to_str().unwrap();
+  assert!(!aeordb::engine::verify::verify_checked(&engine, path).unwrap().has_issues());
+
+  let live = gc_mark(&engine).unwrap();
+  gc_sweep(&engine, &live, false).unwrap();
+  assert!(engine.get_kv_entry(&key).unwrap().is_none());
+  let report = aeordb::engine::verify::verify_checked(&engine, path).unwrap();
+  assert_eq!(report.missing_kv_entries, 0, "sweep must not leave an older incarnation looking live: {:?}", report.missing_kv_details);
+  assert!(!report.has_issues());
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/keep.txt").unwrap(), b"keep me");
+}
+
+#[test]
+fn test_gc_duplicate_directory_records_do_not_return_during_rebuild() {
+  let (engine, _temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/keep.txt", b"keep me", None).unwrap();
+  let key = engine.compute_hash(b"gc-duplicate-directory-rebuild").unwrap();
+  let value = [0u8; 4];
+  let transaction = TransactionGuard::new(&engine).unwrap();
+  let first = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  let second = engine.store_entry(EntryType::DirectoryIndex, &key, &value).unwrap();
+  assert_ne!(first, second);
+  transaction.commit().unwrap();
+
+  let live = gc_mark(&engine).unwrap();
+  gc_sweep(&engine, &live, false).unwrap();
+  assert!(engine.get_kv_entry(&key).unwrap().is_none());
+  engine.rebuild_kv().unwrap();
+  assert!(engine.get_kv_entry(&key).unwrap().is_none(), "rebuild must not resurrect an older incarnation after GC retires the key");
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/keep.txt").unwrap(), b"keep me");
+}
+
+#[test]
+fn test_directory_verification_still_reports_a_missing_unretired_key() {
+  let (engine, temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/keep.txt", b"keep me", None).unwrap();
+  let key = engine.compute_hash(b"missing-unretired-directory").unwrap();
+  let transaction = TransactionGuard::new(&engine).unwrap();
+  engine.store_entry(EntryType::DirectoryIndex, &key, &[0u8; 4]).unwrap();
+  transaction.commit().unwrap();
+  engine.remove_kv_entry(&key).unwrap();
+  let database_path = temporary.path().join("test.aeordb");
+  let report = aeordb::engine::verify::verify_checked(&engine, database_path.to_str().unwrap()).unwrap();
+  assert_eq!(report.missing_kv_entries, 1, "key absence alone must not supply retirement evidence");
+  assert!(report.has_issues());
+}
+
+#[test]
+fn test_rebuild_refuses_corrupt_void_covered_chunk_retirement_evidence() {
+  use std::io::{Seek, SeekFrom, Write};
+
+  let (engine, temporary) = create_temp_engine_for_tests();
+  let context = RequestContext::system();
+  DirectoryOps::new(&engine).store_file_buffered(&context, "/keep.txt", b"keep me", None).unwrap();
+  let key = engine.compute_hash(b"retired-chunk-record").unwrap();
+  let transaction = TransactionGuard::new(&engine).unwrap();
+  engine.store_entry(EntryType::Chunk, &key, &[0x55; 128 * 1024]).unwrap();
+  let latest = engine.store_entry(EntryType::Chunk, &key, &[0x55; 128 * 1024]).unwrap();
+  transaction.commit().unwrap();
+  let live = gc_mark(&engine).unwrap();
+  gc_sweep(&engine, &live, false).unwrap();
+  assert!(engine.get_kv_entry(&key).unwrap().is_none());
+  let header = engine.read_entry_header_at(latest).unwrap();
+  let database_path = temporary.path().join("test.aeordb");
+  let mut file = std::fs::OpenOptions::new().write(true).open(&database_path).unwrap();
+  file.seek(SeekFrom::Start(latest + u64::from(header.total_length) - 1)).unwrap();
+  file.write_all(&[0x31]).unwrap();
+  file.sync_all().unwrap();
+  drop(file);
+  let before = std::fs::read(&database_path).unwrap();
+  assert!(matches!(engine.rebuild_kv(), Err(aeordb::engine::EngineError::CorruptEntry { offset, .. }) if offset == latest));
+  assert_eq!(std::fs::read(&database_path).unwrap(), before, "failed rebuild must not publish a partial KV generation");
+  assert!(engine.get_kv_entry(&key).unwrap().is_none());
+  assert_eq!(DirectoryOps::new(&engine).read_file_buffered("/keep.txt").unwrap(), b"keep me");
+  let report = aeordb::engine::verify::verify_checked(&engine, database_path.to_str().unwrap()).unwrap();
+  assert_eq!(report.corrupt_hash, 1, "strict verification must still report corruption inside a void");
+  assert!(report.has_issues());
+}
 
 #[test]
 fn test_gc_sweep_removes_garbage() {
