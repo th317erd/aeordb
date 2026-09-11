@@ -1,142 +1,318 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "landing_unit": "P9 exact-candidate final qualification",
-  "captured_at": "2026-09-03T15:01:56Z",
-  "status": "repository_only_complete",
+  "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
+  "captured_at": "2026-09-11T17:47:45Z",
+  "status": "qualification_in_progress",
+  "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
     "branch": "development",
-    "implementation_commit": "535004f166ad4cfaf8e7ab740458f2ef4733d2bc",
-    "archive_sha256": "1f534f95840121689b6ccb36dd13eeca7dc0c0aef7f8332ef036078b73b50f05",
+    "implementation_commit": "a804732755b187b3e2bcdd109da37a2895dc9a80",
+    "git_tree": "11734d533452466b75e207cbf3e7f43e75fd6c13",
     "cargo_lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
-    "origin_matched_before_qualification": true
-  },
-  "source_equivalence": {
-    "status": "passed",
-    "engine_tree_and_long_run_scripts_match_9a71d4ce": true,
-    "restart_worker_and_reader_sources_match_4f72579e": true,
-    "artifact_manifest_sha256": "fe5b5d673bffeba1002dab137e4b11689775ec077000e75e7687a56258bbcd52",
-    "rejected_attempt_manifest_sha256": "8e01d8de7f81fd70dfdba97c71b19460cebb7b1170220e5158dcc87a7dbc1221",
-    "rejected_attempt_reason": "verification output changed report.txt after the first manifest was written"
-  },
-  "evidence_audit": {
-    "status": "passed",
-    "started_utc": "2026-09-03T14:59:06Z",
-    "finished_utc": "2026-09-03T14:59:12Z",
-    "verified_manifests": 29,
-    "known_invalid_manifests": 1,
-    "result_sha256": "ed87c06ca35b6fdbc1839d2c2560805b54a6091cadb797edd5e047755eb002b4",
-    "artifact_manifest_sha256": "3a0ca376d724ecbb2c88abe3c5210ab232cfa25cbb81b54e97cd960a2212fdab",
-    "centralized_index": {
-      "rows": 31,
-      "sha256": "f4f6048be6286492bf106bddc96bf417068c7ed133e008e52f9b57b1c2c3a72b",
-      "path": "/media/Data/AeorDB/Tests/p9-exact-535004f1/evidence/final-evidence-index.tsv"
+    "portal_archive_sha256": "2c91a4dc3a6f3de6f4d03472886ff2b699d2dfdbee4d48ce04b58d36a51cab7b",
+    "release_source_method": "clean detached Git worktree on each native host",
+    "cargo_target_transfer_between_hosts": false,
+    "profile": {
+      "name": "release",
+      "debug": 1,
+      "strip": "none"
+    },
+    "ordinary_test_source": {
+      "base_commit": "48baeefe0144e2a84458c6589aa0345afc223ff8",
+      "final_seven_input_manifest_sha256": "b488f0a21705e06952cbe9583fb1c2010de4589ddce5b00fa2dcf913e8cb7326",
+      "input_archive_sha256": "97c217e0399cbcfef53d989179cebe6124f1b3bef9514d09e7b554fa86ab6075",
+      "same_inputs_landed_as_candidate": true,
+      "native_manifests_match": true,
+      "qualification_preceded_commit": true
     }
   },
-  "platforms": {
+  "runtime_boundary": {
+    "ordinary_service_runtime": "v3_compatibility",
+    "v4_repository_substrate": "implemented_and_tested",
+    "public_migrate_v4": "offline_shadow_creation_and_verification_only",
+    "public_v4_service_activation_available": false,
+    "public_cutover_or_acceptance_command_available": false,
+    "ordinary_startup_accepts_first_v4_write": false,
+    "limitation_kind": "implementation_surface_and_separate_operational_authority",
+    "operator_contract": "../../../../docs/src/operations/migration.md"
+  },
+  "historical_packet": {
+    "implementation_commit": "535004f166ad4cfaf8e7ab740458f2ef4733d2bc",
+    "preserved_in_git_commit": "6a4006846cc2aa5fc2e4f460dedf726b3193e53f",
+    "path_at_that_commit": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/p9-final-qualification.json",
+    "progress_ledger": "../progress/08-evidence.md",
+    "current_release_or_soak_proof": false
+  },
+  "ordinary_qualification": {
+    "status": "passed",
+    "root": "/media/Data/AeorDB/Tests/p9-s3-checkpoint-followup-20260911",
     "linux": {
-      "status": "passed",
-      "result_sha256": "87d80d19ba3cabd178f9f747f8c1a20cfbd271f3bf2dceaf061c1914ac418984",
-      "release_binary_sha256": "775f56f1bba3d73f97d0339b77e2bc3a3bc3726465b57abe8fa0e5d91a32fdbe",
-      "workspace_passed": 7403,
+      "command": "cargo test --locked -j2 --workspace --all-targets --no-fail-fast -- --skip test_create_at_stage_clamps_to_max --skip test_resize_at_max_stage_returns_error",
+      "complete_unique_top_level_passed": 7530,
+      "cargo_targets": 347,
+      "remaining_workspace_passed": 7528,
+      "separately_executed_unchanged_tests": [
+        "test_create_at_stage_clamps_to_max",
+        "test_resize_at_max_stage_returns_error"
+      ],
+      "separate_test_backing_volume": "/media/Data",
+      "separate_test_threads": 1,
+      "remaining_workspace_test_threads": 2,
       "failed": 0,
       "intentionally_ignored": 7,
-      "artifact_manifest_sha256": "c7dbb076bcb03a9c0de4ca7f89686db58ab40b6790a07e41a0ef6fda66b43fc1"
+      "nested_subprocess_checks_passed": 3,
+      "tests_waived": 0,
+      "workspace_finished_utc": "2026-09-11T17:01:11Z",
+      "sequence_finished_utc": "2026-09-11T17:06:14Z",
+      "terminal_receipt": "evidence/capacity-linux-sequence.exit"
+    },
+    "macos": {
+      "scope": "complete CLI plus affected architecture/harness",
+      "cli_passed": 230,
+      "affected_architecture_passed": 38,
+      "failed": 0,
+      "intentionally_ignored": 7,
+      "full_native_workspace_repeated": false,
+      "cli_receipt": "native-evidence/macos/cli-portable.exit",
+      "architecture_receipt": "native-evidence/macos/architecture-portable.exit"
     },
     "windows": {
-      "status": "passed",
-      "architecture": "x86_64-msvc",
-      "result_sha256": "88e387a3c392e4a9afd8748d93dfa024eb5e762abd73fdfc91968ee8bc6c81cc",
-      "release_binary_sha256": "167a64b97e830e9aea8231df9734036f349c2ca57810310322c503e042e75cf3",
-      "passed": 990,
+      "scope": "complete CLI plus affected architecture/harness",
+      "cli_passed": 227,
+      "affected_architecture_passed": 38,
       "failed": 0,
       "intentionally_ignored": 7,
-      "artifact_manifest_sha256": "708d34aebbd70d7578298a5e2fa7f87b33263197b7648d7dca2b4e0497aa5928"
+      "full_native_workspace_repeated": false,
+      "cli_receipt": "native-evidence/windows/cli-portable.result.json",
+      "architecture_receipt": "native-evidence/windows/affected-portable.result.json"
+    },
+    "prior_engine_correction": {
+      "source_commit": "48baeefe0144e2a84458c6589aa0345afc223ff8",
+      "macos_affected_passed": 1192,
+      "windows_affected_passed": 1185,
+      "overlapping_reruns_not_added_to_unique_totals": true,
+      "root": "/media/Data/AeorDB/Tests/p9-s1-kv-followup-20260911",
+      "closed_manifest_sha256": "2fb99032ebba73b85904a37ad594b4e2f31a4cf1887b020a0080749e838aca3e"
+    },
+    "static": {
+      "strict_workspace_all_target_clippy": "passed",
+      "contract_fixtures": 454,
+      "routes": 95,
+      "documentation_pages": 39,
+      "suppression_inventory_entries": 1503,
+      "suppression_architecture_tests": 29,
+      "qualification_harness_architecture_tests": 9,
+      "debt_reviewed_entries": 8,
+      "debt_retained_matches": 164,
+      "mdbook": "passed",
+      "debt_selftests": "passed",
+      "soak_scenarios": 16,
+      "formatting_and_diff_checks": "passed"
+    },
+    "closed_evidence": {
+      "files": 209,
+      "manifest": "closed-followup-evidence.sha256",
+      "manifest_sha256": "6e25641e4d70228a8e622fed6e748742f7b44e8c96f766204d4d63641bc908a2",
+      "all_listed_contents_rechecked": true,
+      "covers_later_release_crash_and_duration_runs": false
+    }
+  },
+  "native_releases": {
+    "linux": {
+      "status": "passed",
+      "jobs": 2,
+      "finished_utc": "2026-09-11T17:16:59Z",
+      "receipt": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/evidence/release-build.exit",
+      "cli_sha256": "aef7b082c3b693838a8b8659ff2280d98589ac5cb917376e5ad43e9d2aff5fec",
+      "soak_worker_sha256": "061d0561b30b3a919c0cb7f8aa5b7dcdc813739bb9857ad7a543ef60ec330520",
+      "crash_worker_sha256": "59f6b286fe7f8043a74afe251397671f912c90136c1368a0dadbd7a636baa602"
     },
     "macos": {
       "status": "passed",
-      "host": "Wyatts-MacBook-Air.local",
       "architecture": "arm64",
-      "product_version": "26.5.2",
-      "build_version": "25F84",
-      "rustc": "1.95.0",
-      "cargo": "1.95.0",
-      "mdbook": "0.5.2",
-      "started_utc": "2026-09-03T14:30:32Z",
-      "finished_utc": "2026-09-03T14:49:13Z",
-      "passed": 994,
-      "failed": 0,
-      "intentionally_ignored": 7,
-      "release_binary_sha256": "d43cf494f797f57e038c8c67de379cef40df55c96fad8b950ece104ad80a857c",
-      "result_sha256": "f3fe3b5177291c5abd1bf82993c4d4937f14a5ae9f66bdcf37f8dd55909b0809",
-      "preparation_manifest_sha256": "0e1d4f186a9fb9800c3d7a718abab62cac36ea601a7a929d83d11220aa55b9e8",
-      "artifact_manifest_sha256": "09f9144c6a2d193f4e9db4575bc5807d949bc25c7faf3f48b5ff3e7bff3e61dd"
+      "jobs": 1,
+      "finished_utc": "2026-09-11T17:15:40Z",
+      "receipt": "/Users/wyatt/.cache/codex/aeordb-tests/p9-release-a8047327-20260911/evidence/release-build.exit",
+      "cli_sha256": "3837136f5f62a9d637866415d5c4328012829939a7b9da901d3a03cafc350b14"
+    },
+    "windows": {
+      "status": "passed",
+      "architecture": "x86_64-pc-windows-msvc",
+      "rustc": "1.96.0",
+      "jobs": 1,
+      "finished_utc": "2026-09-11T17:25:44Z",
+      "receipt": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\p9-release-a8047327-20260911\\evidence\\release-build.result.json",
+      "cli_sha256": "ccadd817214083a04f4cf61f0fa3c7294587002ea03908f09e8a53b932791d5d",
+      "final_free_bytes": 18724057088
     }
   },
-  "real_world_and_resource": {
+  "release_qualification": {
+    "root": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911",
+    "runners_manifest_sha256": "0f60aa1bbc9cc5c521bfbb36c43db12b3707ef15f9289659d2842848083d6457",
+    "pinned_crash_manifest_sha256": "aac9bf5743e1ab4f1bf302748815748034d2b40e4293e8d381624ee3f2008460",
+    "copied_failure_read_only_verify": {
+      "status": "passed",
+      "receipt": "evidence/copied-s1-release.exit",
+      "finished_utc": "2026-09-11T17:17:41Z"
+    },
     "live_release": {
       "status": "passed",
-      "result_sha256": "d5be2aa00b2bed936dd2a9f5dd933a6b8fb082e43d632f70b47065cce8552d85"
+      "receipt": "evidence/live-release.exit",
+      "finished_utc": "2026-09-11T17:19:13Z"
+    },
+    "cli": {
+      "status": "passed",
+      "passed": 230,
+      "targets": 21,
+      "failed": 0,
+      "intentionally_ignored": 7,
+      "receipt": "evidence/release-cli-tests.exit",
+      "finished_utc": "2026-09-11T17:33:15Z"
+    },
+    "crash": {
+      "status": "running_at_last_observation",
+      "last_observed_utc": "2026-09-11T17:47:44Z",
+      "required_complete_suites": 100,
+      "functions_per_suite": 7,
+      "unit_is_complete_suite_not_individual_case": true,
+      "forced_unmount_enabled": false,
+      "forced_unmount_self_skips_must_be_reported": true,
+      "terminal_receipt": "evidence/crash-100-pinned.exit"
+    },
+    "duration": {
+      "s1": {
+        "status": "pending",
+        "required_seconds": 43200,
+        "terminal_receipt": "evidence/s1-12h-pinned.exit"
+      },
+      "s2": {
+        "status": "pending",
+        "required_seconds": 43200,
+        "terminal_receipt": "evidence/s2-12h-pinned.exit"
+      },
+      "s3": {
+        "status": "pending",
+        "required_seconds": 43200,
+        "terminal_receipt": "evidence/s3-12h-pinned.exit"
+      }
+    },
+    "short_soaks": {
+      "status": "pending",
+      "stages": [
+        "s1-short-pinned",
+        "s2-short-pinned",
+        "s3-short-pinned"
+      ]
+    },
+    "cycle_seed": 20260911,
+    "worker_randomness": "wall_clock_seeded_with_checkpoint_trace_retained",
+    "final_evidence_audit": {
+      "status": "pending"
+    }
+  },
+  "carried_forward_engine_evidence": {
+    "source_commit": "48baeefe0144e2a84458c6589aa0345afc223ff8",
+    "qualification_commit": "a804732755b187b3e2bcdd109da37a2895dc9a80",
+    "full_migration_repeated_on_candidate": false,
+    "resource_overlap_repeated_on_candidate": false,
+    "unchanged_engine_migration_runtime_inputs_proven": true,
+    "source_equivalence_and_media_recheck_receipt": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/evidence/unchanged-runtime-media-proof.exit",
+    "finished_utc": "2026-09-11T17:28:15Z",
+    "full_media_migration": {
+      "status": "passed_on_predecessor",
+      "root": "/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911",
+      "receipt": "evidence/media/retry.receipt.json",
+      "destination_full_verified": true,
+      "verified_content_bytes": 15354506282,
+      "verified_entity_count": 50151,
+      "distinct_source_destination_physical_identities": true,
+      "planned_interruption": "observed_base_successor_publication_not_exact_base_only_window",
+      "resume_and_completed_retry_receipts_identical": true,
+      "source_sha256": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "destination_sha256": "f6728854a5cd0a29816b8502720616a3e4c851632c88ff7489ed09cae18daa93"
+    },
+    "candidate_read_only_media_verify": {
+      "status": "passed",
+      "source_checksum_and_stat_unchanged": true,
+      "elapsed_seconds": 313.42,
+      "maximum_rss_kib": 58576,
+      "swaps": 0
     },
     "resource": {
-      "status": "passed",
-      "limit_bytes": 8589934592,
-      "peak_bytes": 1611886592,
+      "status": "passed_on_predecessor",
+      "duration_seconds": 120,
+      "memory_limit_bytes": 8589934592,
+      "memory_peak_bytes": 2190843904,
       "swap_peak_bytes": 0,
-      "health_p99_ms": 81.017506,
-      "health_max_ms": 771.855813,
-      "result_sha256": "54bc98f0061273a1d37faa3b20655b2d5993d6bce3631c7a659d12ba00350899"
+      "completed_kv_expansions": 3,
+      "functional_failures": 0,
+      "health_p99_ms": 98.872,
+      "health_maximum_ms": 676.777
+    },
+    "controlled_performance_comparison": false
+  },
+  "retained_failures": {
+    "progress_ledger": "../progress/10-release-qualification.md",
+    "events": [
+      "plain verification mutated the test source before the read-only correction",
+      "33420bad S1 exposed retired KV chronology",
+      "48baeefe short S3 exposed incomplete checkpoint restart concatenation",
+      "initial Windows checkpoint correction lacked write access for truncation",
+      "Linux full-suite home-capacity guard stopped an 8 GiB fixture"
+    ],
+    "counted_as_passes": false,
+    "capacity_fixture": {
+      "raw_bytes": 8589933656,
+      "raw_sha256": "7f6c040f4b26f1dfe71fdccad87441fa306e6c2856a51c92f3aa75ea5bc35699",
+      "retained_archive": "/media/Data/AeorDB/Tests/p9-s3-checkpoint-followup-20260911/capacity-stop/maximum-stage-kv.aeordb.zst",
+      "archive_bytes": 269332,
+      "archive_sha256": "8cdb189af9df965338c2f7134639a8c04f074bdea180187a7e00797db0799377",
+      "lossless_reconstruction_verified": true,
+      "only_redundant_raw_copies_removed": true
     }
   },
-  "long_duration": {
-    "s1": {
-      "status": "passed",
-      "started_utc": "2026-09-01T20:12:03Z",
-      "finished_utc": "2026-09-02T08:12:11Z",
-      "writes": 25632,
-      "reads": 12808,
-      "deletes": 4125,
-      "database_bytes": 638494791,
-      "rss_kib": 624328,
-      "artifact_manifest_sha256": "fbb043f84000308db76155ebc1eaa94bae48736f280e4cf6b9ef79baa2f53309"
-    },
-    "s2": {
-      "status": "passed",
-      "started_utc": "2026-09-02T08:12:11Z",
-      "finished_utc": "2026-09-02T20:16:24Z",
-      "planned_cycles": 61,
-      "issue_cycles": 0,
-      "database_bytes": 7771453198,
-      "artifact_manifest_sha256": "fb364ad795a8e335b52ab21ad9c61d801cd67486a36e9ff0636bb3f67e47bf99"
-    },
-    "s3": {
-      "status": "passed",
-      "started_utc": "2026-09-02T20:16:24Z",
-      "finished_utc": "2026-09-03T08:16:35Z",
-      "checkpoint_records": 69194,
-      "database_bytes": 151156262,
-      "artifact_manifest_sha256": "c96290dfd87064495349fcb2cfbd203dd53ab25a5a312e2f75d3dcb93dff0008"
-    },
-    "restart_resilience": {
-      "status": "passed",
-      "planned_cases": 100,
-      "passed_cases": 100,
-      "failed_cases": 0,
-      "final_source_commit": "535004f166ad4cfaf8e7ab740458f2ef4733d2bc",
-      "result_sha256": "c4230b0c2f854167575cbefe3383e1d5de25858a46b3a7fcd04c3acf9f08ce08",
-      "release_worker_sha256": "ca1c71c702ac5686ca8e9bb7cad03ff1912fea03d2b337573750d4192ce27f16",
-      "artifact_manifest_sha256": "fa64f09dd2d7a0d39f8bdbd67368cf25d41e80272e248801de3617a9a75b8fb2",
-      "earlier_attempts_preserved": true
-    }
+  "resource_guards": {
+    "data_minimum_free_bytes": 250000000000,
+    "home_minimum_free_bytes": 68719476736,
+    "host_sample_seconds": 30,
+    "long_run_model_check_seconds": 600,
+    "per_stage_deadlines_enforced": true,
+    "large_diagnostic_copies_on_data": true,
+    "private_internal_workspaces_on_home": true
+  },
+  "test_database_cleanup": {
+    "status": "pending_after_qualification",
+    "authorized_root": "wyatt-desktop:/media/Data/AeorDB/",
+    "exact_targets_and_no_openers_required": true,
+    "preserve_logs_sources_and_useful_failure_evidence": true,
+    "removed_paths_and_recoverability_receipt": null
+  },
+  "retained_production_database": {
+    "host": "FS-Server1",
+    "path": "/mnt/storage/aeordb/files.taraani.org.aeordb",
+    "bytes": 4771941773716,
+    "repair_status": "retired_not_successfully_migrated",
+    "last_recorded_state": "offline_immutable_mode_0444",
+    "state_evidence": "../handoff-2026-09-09-gpt-6-astra.md",
+    "freshly_inspected_during_renewed_release_qualification": false,
+    "recovery_or_migration_success_claimed": false,
+    "reuse_or_deletion_authorized": false
   },
   "authorization_boundary": {
-    "repository_only": true,
-    "production_derived_rehearsal": false,
-    "canary": false,
-    "installation_or_deployment": false,
+    "authorized_steps": [
+      "release_builds",
+      "disposable_qualification",
+      "truthful_completion_packet",
+      "scoped_disposable_test_database_cleanup"
+    ],
+    "stop_before_step_4": true,
+    "deployment_or_installation": false,
+    "public_download_publication": false,
+    "canary_or_production_service_change": false,
     "operational_cutover_or_acceptance": false,
     "first_v4_write": false,
-    "production_monitoring": false,
-    "destructive_gc": false
+    "destructive_operational_gc": false,
+    "retained_production_database_reuse_or_deletion": false
   }
 }

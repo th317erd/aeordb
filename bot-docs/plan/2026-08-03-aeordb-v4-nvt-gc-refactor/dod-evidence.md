@@ -1,145 +1,172 @@
-# AeorDB v4 Repository-Only Definition-of-Done Evidence
+# AeorDB v4 Definition-of-Done Evidence
 
-> These receipts qualify historical candidate `535004f1`. Later migration
-> development and retirement of the production repair are described in the
-> [2026-09-09 handoff](handoff-2026-09-09-gpt-6-astra.md); the current
-> [cache/progress follow-up](progress/09-repair-cache-followup.md) records its own
-> source identity, qualification and remaining gates. Preserve these older
-> receipts as history, not as all-platform release/soak proof for a newer commit.
+## Current boundary
 
-## Boundary And Candidate
+Candidate: `a804732755b187b3e2bcdd109da37a2895dc9a80`, development branch.
+Integration/review owner: Codex, direct execution under the owner-authorized
+release-qualification plan. Current status: **qualification in progress**.
+[Ledger 10](progress/10-release-qualification.md) is the sole active checklist.
 
-- Campaign: `aeordb-v4-nvt-gc-2026-08-03`.
-- Exact implementation candidate: `535004f166ad4cfaf8e7ab740458f2ef4733d2bc` (`refresh checkpoint audit inventory`).
-- Candidate archive SHA-256: `1f534f95840121689b6ccb36dd13eeca7dc0c0aef7f8332ef036078b73b50f05`.
-- Candidate root `Cargo.lock` SHA-256: `06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec`.
-- Reviewer/integration owner: Codex, with owner-authorized repository execution and no authorization for production/canary/destructive operations.
-- Status: the repository-only implementation, documentation, and qualification boundary is complete. Operational gates listed below remain separately gated and unexecuted.
+Ordinary/native/static and exact-release gates pass. The current 100-complete-suite
+crash run, short/three 12-hour stages, final packet audit and requested cleanup
+are not yet complete. Stop and discuss with the owner before step 4.
 
-## Parent Definition Of Done
+Ordinary service authority remains v3-compatible. Public `migrate-v4` is
+offline shadow creation/verification, not activation. Public v4 service
+activation/cutover/acceptance is unavailable, not merely waiting for a deployment
+permission. No production or retained-database action is implied by this packet.
 
-| Parent obligation | Repository state | Command/report proof |
-| --- | --- | --- |
-| P0 contract registry and both hash widths pass on Linux, native macOS, and native Windows | Passed | `p0b-contract-registry-report.json`, `p0c-machine-contract-report.json`, `check-v4-contracts.sh`, and the three native rows in `p9-final-qualification.json` |
-| Every persisted producer/consumer and route has one owner | Passed | `persisted-producer-consumer-inventory.json`, `route-root-contract-manifest.json`, contract gate |
-| No v4 writer precedes capability and reader gates | Passed | Child 01 reader/writer/fixture ledgers and architecture targets |
-| Acknowledged writes use one durability/authority path | Passed | `durability-operation-inventory.json`, Child 02 coordinator evidence, strict architecture gates |
-| Namespace producers use one mutation/root/event path | Passed | Child 03 progress ledger and namespace architecture matrix |
-| V4 formats and state machines satisfy exact fixtures and modeled interruption paths | Passed through the authorized non-destructive boundary | 454-fixture contract gate, `p8-cutover-crash-state-report.json`, Children 01/03/04/05/07 ledgers |
-| No v1 index operation materializes a whole index | Passed | Child 05 bounded-page/resource targets and `p9-debt-gate-report.json` |
-| Missing or invalid NVT cannot change query results | Passed | Child 05 reference/corruption-fallback targets and Child 06 query matrix |
-| Historical authorization and selector concealment pass | Passed | Child 06 route/auth/root/reference and live matrices |
-| User acknowledgement excludes derived parser/index/NVT work | Passed | Child 06 acknowledgement/worker proof and live timing evidence |
-| RSS and scratch remain inside the ratified envelope | Passed | 8 GiB/no-swap result `54bc98f0061273a1d37faa3b20655b2d5993d6bce3631c7a659d12ba00350899` |
-| Copied-production migration and dirty restart | Separately gated; not executed | Child 07 P8-1b authorization boundary |
-| Canary and operator acceptance precede production cutover | Separately gated; not executed | Child 07 P8-2b/P8 authorization boundary |
-| V3 backup and rollback boundary are explicit | Repository contract passed; operational acceptance remains gated | Child 07 reports and `docs/src/operations/migration.md`, `backup.md`, and `deployment-safety.md` |
-| Documentation, CLI, API, SDK, Dashboard, SSE, and bot behavior agree | Passed at the repository candidate | `p9-documentation-report.json`, contract/docs gates, live documentation routes |
-| Error-handling and duplicate-path debt are bounded | Passed | 1,505 reviewed entries, 35 policies, 29 architecture tests, `p9-debt-gate-report.json` |
-| Canonical DoD and completion reports contain command proof | Passed | This document, [completion-report.md](completion-report.md), and [p9-final-qualification.json](evidence/p9-final-qualification.json) |
+The earlier 535004f1 packet remains in Git at
+`6a4006846cc2aa5fc2e4f460dedf726b3193e53f`; historical receipts are in
+[ledger 08](progress/08-evidence.md). The
+[retirement handoff](handoff-2026-09-09-gpt-6-astra.md) and
+[ledger 09](progress/09-repair-cache-followup.md) describe subsequent development.
+Do not turn their older test counts or duration passes into current evidence.
 
-The two operational parent items remain unchecked in the frozen parent plan because repository implementation does not waive their explicit authorization. They are not silently converted into passing production evidence.
+## Parent obligation map
 
-## Child Completion Map
-
-| Child | Repository completion | Primary durable proof |
-| --- | --- | --- |
-| 01 — formats, capabilities, fixtures | Complete | `progress/01-format.md`; exact fixture/contract/native rows |
-| 02 — durability, configuration, memory | Complete | `progress/02-runtime.md`; durability inventory; live/resource evidence |
-| 03 — namespace, semantic roots, system families | Complete | `progress/03-namespace.md`; root/mutation/authorization gates |
-| 04 — lifecycle, physical inventory, GC, Void | Complete through P4-8; destructive P4-9 activation remains separately gated | `progress/04-gc.md`; model/fault/resource gates |
-| 05 — index definitions, pages, sparse NVT | Complete | `progress/05-index.md`; independent reference, corruption fallback, bounded-resource evidence |
-| 06 — async coverage, query, APOS, locators | Complete | `progress/06-query.md`; route/auth/reference/live evidence |
-| 07 — side-by-side migration and cutover substrate | Complete through synthetic/native repository gates; copied-production/canary/cutover remain separately gated | `progress/07-migration.md`; P8 state/native reports |
-| 08 — verification, operations, docs, debt | Complete for the repository-only boundary | `progress/08-evidence.md`; this packet; final integrity audit/index |
-
-## Child 08 Definition Of Done
-
-| Obligation | State | Proof |
-| --- | --- | --- |
-| Baseline, noise floor, inventories, divergence ledger | Passed | Tracked baseline/inventory/divergence reports and P0 ledger |
-| Independent phase oracles and one-command red/green targets | Passed | Child ledgers and named campaign targets |
-| Every recent fix has a guard | Passed | `recent-fix-ledger.json`: seven guarded fixes, zero open gaps |
-| Error-squelch inventory is complete and shrinking | Passed | Exact 1,505 entries across 35 policies; scanner validation and architecture targets |
-| Duplicate/bypass architecture gates cover named classes | Passed | 29 error-handling architecture tests plus contract/debt gates |
-| Significant phases have real reopen/verify evidence | Passed | Live release/reopen and per-phase file-backed evidence |
-| Linux, native macOS, native Windows qualification | Passed | Exact platform evidence below |
-| S1/S2/S3/restart/resource/copy | Passed except separately authorized copied-production | Long/resource evidence below; P8-1b remains closed |
-| Docs/API/SDK/UI/SSE/SKILL schemas agree | Passed | P9 documentation report, contract gate, mdBook, live routes |
-| Superseded plans cannot be mistaken for authority | Passed | Parent execution banner, supersession markers, reconciled Child 01–07 pointers |
-| Transitional debt is deleted or explicitly retained | Passed | `v4-debt-policy.json`, `p9-debt-gate-report.json`, compatibility inventory |
-| Canonical reports are complete and reviewable | Passed | This document, completion report, machine qualification record |
-| No evidence database, secret, or transient build output is committed | Passed | Tracked-path and staged-diff audit |
-
-## Exact Commands And Results
-
-### Linux
-
-The exact-source runner under `/media/Data/AeorDB/Tests/p9-exact-535004f1/` executed:
-
-```text
-cargo fmt --all -- --check
-cargo test --locked -p aeordb --all-targets
-cargo test --locked -p aeordb-cli --all-targets
-cargo test --locked --workspace --all-targets
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo run --locked -p aeordb-error-squelch-audit -- check
-cargo test --locked -p aeordb --test error_squelch_architecture_spec
-./scripts/plan/check-v4-contracts.sh
-./scripts/plan/check-v4-debt.sh
-mdbook build docs
-cargo build --locked --release -p aeordb-cli --bin aeordb
-```
-
-Every long-running stage had a hard deadline. Results: AeorDB 7,080 passed; CLI 202 passed with seven intentional ignores; workspace 7,403 passed with seven intentional ignores; zero failures; strict workspace Clippy, inventory, all 29 architecture tests, contracts, debt, docs, and release builds passed. Result SHA-256 `87d80d19ba3cabd178f9f747f8c1a20cfbd271f3bf2dceaf061c1914ac418984`; artifact manifest `c7dbb076bcb03a9c0de4ca7f89686db58ab40b6790a07e41a0ef6fda66b43fc1`.
-
-### Native macOS arm64
-
-Fresh source was extracted under `/Users/wyatt/.cache/codex/aeordb-p9-535004f1` from the exact archive; no `target` directory was transferred. Archive, lock, portal, and runner hashes were verified before execution. The controller ran:
-
-```text
-python3 deadline.py 21600 bash qualify-macos.sh
-```
-
-The runner executed formatting, the exact native storage matrix, exact native CLI matrix, and release build with one Cargo job and separate 300/10,800/5,400/5,400-second stage deadlines. It ran from `2026-09-03T14:30:32Z` through `2026-09-03T14:49:13Z` on macOS 26.5.2 build 25F84 with Rust/Cargo 1.95.0. Results: 994 passed, zero failed, seven intentionally ignored. Release binary SHA-256 `d43cf494f797f57e038c8c67de379cef40df55c96fad8b950ece104ad80a857c`; result `f3fe3b5177291c5abd1bf82993c4d4937f14a5ae9f66bdcf37f8dd55909b0809`; preparation manifest `0e1d4f186a9fb9800c3d7a718abab62cac36ea601a7a929d83d11220aa55b9e8`; final manifest `09f9144c6a2d193f4e9db4575bc5807d949bc25c7faf3f48b5ff3e7bff3e61dd`.
-
-### Native Windows x86_64 MSVC
-
-Fresh exact-source preparation and the one-job native storage/CLI/release runner passed 990 tests, zero failed, and seven intentionally ignored. Result SHA-256 `88e387a3c392e4a9afd8748d93dfa024eb5e762abd73fdfc91968ee8bc6c81cc`; release binary `167a64b97e830e9aea8231df9734036f349c2ca57810310322c503e042e75cf3`; preparation manifest `411f495b6a35e8c6623e0f1200542084a3770edf2a6390322531ead5f8ac05e5`; final manifest `708d34aebbd70d7578298a5e2fa7f87b33263197b7648d7dca2b4e0497aa5928`.
-
-### Live, resource, duration, and restart
-
-| Gate | Result |
+| Obligation | Current evidence/boundary |
 | --- | --- |
-| Live release/reopen/docs/API/offline verify | Passed; result `d5be2aa00b2bed936dd2a9f5dd933a6b8fb082e43d632f70b47065cce8552d85` |
-| 8 GiB/no-swap overlap | Passed; peak 1,611,886,592 bytes; swap zero; p99 81.018 ms; result `54bc98f0061273a1d37faa3b20655b2d5993d6bce3631c7a659d12ba00350899` |
-| S1 12-hour | Passed; 25,632 writes, 12,808 reads, 4,125 deletes; manifest `fbb043f84000308db76155ebc1eaa94bae48736f280e4cf6b9ef79baa2f53309` |
-| S2 12-hour | Passed; 61 planned cycles, zero issue cycles; manifest `fb364ad795a8e335b52ab21ad9c61d801cd67486a36e9ff0636bb3f67e47bf99` |
-| S3 12-hour | Passed; 69,194 checkpoint records; manifest `c96290dfd87064495349fcb2cfbd203dd53ab25a5a312e2f75d3dcb93dff0008` |
-| Exact successor restart-resilience | 100/100 passed; result `c4230b0c2f854167575cbefe3383e1d5de25858a46b3a7fcd04c3acf9f08ce08`; manifest `fa64f09dd2d7a0d39f8bdbd67368cf25d41e80272e248801de3617a9a75b8fb2` |
+| Frozen formats, both hash widths, native capability/durability behavior | Child 01 fixtures/native history; current full Linux contracts and affected native regressions |
+| Single producer/consumer and route ownership | Persisted/route inventories, Child 03/06 ledgers, current contract/architecture gates |
+| Readers/capabilities precede v4 writers | Child 01 reader/writer fixtures; ordinary service remains v3 |
+| Shared acknowledged durability/authority path | Child 02 evidence and current full regression suite; no operational v4-write claim |
+| Shared namespace/root/event ownership | Child 03/06 architecture and behavioral targets |
+| V4 formats, roots, controls, lifecycle, GC, indexes and modeled crash states | Implemented substrate with independent fixtures/state-machine tests; not public service activation |
+| Bounded v1 indexes; NVT never authoritative | Child 05/06 reference, fallback and bounded-resource targets included in full Linux suite |
+| Historical authorization, root selectors and concealment | Child 06 route/reference targets and current full suite |
+| User acknowledgement excludes synchronous derived work | Child 06 producer/worker evidence and current regressions |
+| Bounded resident memory and scratch | 48baeefe 8 GiB/no-swap overlap carried with explicit source-equivalence proof; unchanged disk floors |
+| Current crash/soak proof | Pending; historical successful durations do not clear this row |
+| Production-derived migration and dirty restart | Not proven. Large damaged-file repair retired; disposable clean-media migration is separate evidence |
+| Canary before cutover and explicit acceptance | Not performed; requires discussion/authorization and available implementation surfaces |
+| V3 backup/rollback boundary | Defined in migration contract; operational first-write boundary never crossed |
+| Documentation/API/SDK/bot agreement | Current contracts/mdBook/live docs pass; this canonical packet is being reconciled |
+| Error handling/debt | 1,503 reviewed inventory entries; 29 architecture tests; eight debt entries/164 retained matches |
+| Command-level final packet and requested cleanup | In progress; final seal and cleanup receipt still required |
 
-Long-duration evidence is carried forward only because Git-object proof establishes that the complete engine tree and long-run scripts are byte-identical from `9a71d4ce` through `535004f1`. The rebuilt final worker was not assumed equivalent: all 100 restart-resilience cases were rerun on `535004f1`.
+This map does not mark the entire frozen parent complete. Its production,
+activation and current qualification obligations remain visible.
 
-### Whole-packet integrity
+## Child and regression sources
 
-After every evidence writer exited, the final verifier ran on `wyatt-desktop` with a 1,800-second deadline. It checked every referenced manifest and every listed artifact, separately asserted that the known invalid first source-equivalence seal remains invalid/rejected, and returned:
+| Child | Proven repository territory | Durable source |
+| --- | --- | --- |
+| 01 | Formats, capabilities, bounded readers/writers and fixtures | [format ledger](progress/01-format.md) |
+| 02 | Durability, strict configuration, bounded ownership and observability | [runtime ledger](progress/02-runtime.md), [post-repair follow-up](progress/09-repair-cache-followup.md) |
+| 03 | Namespace, semantic-root and SystemFamily contracts | [namespace ledger](progress/03-namespace.md) |
+| 04 | Lifecycle, physical inventory, GC/Void models and internal execution | [GC ledger](progress/04-gc.md); destructive operational activation remains gated |
+| 05 | Page-addressable index and sparse NVT/reference behavior | [index ledger](progress/05-index.md) |
+| 06 | Coverage/query/APOS/locator/API behavior | [query ledger](progress/06-query.md) |
+| 07 | Offline shadow migration and internal/rehearsal cutover machinery | [migration ledger](progress/07-migration.md); no public v4 activation |
+| 08 | Continuous evidence/debt/native/resource qualification | [historical ledger](progress/08-evidence.md), [current ledger](progress/10-release-qualification.md) |
+
+The original recent-fix ledger is historical input, not a claim that only seven
+fixes exist. Ledgers 09/10 add the cache, checked-reader, read-only verification,
+retired-KV chronology and checkpoint-restart red/green regressions, including
+native failures and their corrected reruns.
+
+## Exact current ordinary proof
+
+Full ordinary tests ran on base commit
+`48baeefe0144e2a84458c6589aa0345afc223ff8` plus the final seven reviewed
+source/test/script inputs; those identical inputs then landed as a8047327.
+Final overlay manifest SHA-256:
+`b488f0a21705e06952cbe9583fb1c2010de4589ddce5b00fa2dcf913e8cb7326`.
+Both native manifests match. The release builds subsequently used clean
+detached a8047327 Git worktrees and the frozen lockfile.
+
+Desktop ordinary-proof root:
+`/media/Data/AeorDB/Tests/p9-s3-checkpoint-followup-20260911/`.
+
+The two space-heavy cases use the executable pinned from the interrupted
+full-workspace command's actual Cargo output:
 
 ```text
-verified_manifests=29 known_rejected_manifests=1
+env TMPDIR=<campaign>/large-kv-tests/temporary <pinned-test> test_create_at_stage_clamps_to_max --exact --test-threads=1
+env TMPDIR=<campaign>/large-kv-tests/temporary <pinned-test> test_resize_at_max_stage_returns_error --exact --test-threads=1
+cargo test --locked -j2 --workspace --all-targets --no-fail-fast -- --skip test_create_at_stage_clamps_to_max --skip test_resize_at_max_stage_returns_error
+cargo clippy --locked -j2 --workspace --all-targets -- -D warnings
+bash scripts/plan/check-v4-contracts.sh
+mdbook build docs
+bash scripts/spec/check-v4-debt-spec.sh
+bash scripts/spec/soak-cycle-spec.sh
 ```
 
-Audit result SHA-256 `ed87c06ca35b6fdbc1839d2c2560805b54a6091cadb797edd5e047755eb002b4`; audit manifest `3a0ca376d724ecbb2c88abe3c5210ab232cfa25cbb81b54e97cd960a2212fdab`. The final 31-row centralized index was then independently resolved back to every manifest/reconstruction path and hashed as `f4f6048be6286492bf106bddc96bf417068c7ed133e008e52f9b57b1c2c3a72b`.
+These are receipt descriptions, not copy-and-paste commands with resolved
+placeholders. The exact paths, commands, environment and deadlines are in
+`evidence/*.guard.log` and `run-s3-capacity-linux-sequence.sh`.
 
-## Truthful Rejected Evidence
+Results: two separate passes, then 7,528 remaining top-level passes across
+347 Cargo targets; seven existing ignores and three separately counted nested
+checks. Combined unique total: **7,530**, no waived case. Full suite passes
+17:01:11 UTC; strict Clippy 17:04:12; contracts 17:04:42; docs 17:05:13;
+debt self-tests 17:05:43; shell helper/16 scenarios 17:06:13.
+`evidence/capacity-linux-sequence.exit` records exit 0 at 17:06:14.
 
-Failed, interrupted, setup-only, and coverage-incomplete attempts remain preserved. They are indexed as evidence but never counted as passing gates. In particular, the first source-equivalence manifest `8e01d8de7f81fd70dfdba97c71b19460cebb7b1170220e5158dcc87a7dbc1221` is known invalid because output changed a sealed file after manifest creation; the immutable rerun manifest `fe5b5d673bffeba1002dab137e4b11689775ec077000e75e7687a56258bbcd52` is the accepted proof.
+Current native affected commands use one job/test thread: complete CLI
+`--all-targets`, plus `error_squelch_architecture_spec` and
+`gc_v4_qualification_harness_spec`. macOS passes 230 CLI +38 architecture/harness
+tests; Windows passes 227 +38; each retains seven existing CLI ignores.
+These are affected matrices, **not fresh full native workspace runs**.
+Earlier engine-correction matrices (macOS 1,192/Windows 1,185) stay separately
+attributed to their final 48baeefe production inputs; overlapping reruns are not
+added to invent a larger unique count.
 
-## Operational Gates Not Executed
+The closed ordinary-proof manifest has 209 files and SHA-256
+`6e25641e4d70228a8e622fed6e748742f7b44e8c96f766204d4d63641bc908a2`.
+It includes failed attempts, frozen S3 evidence, final Linux/native receipts and
+the lossless capacity archive. It does not seal the later active release run.
 
-- Production-derived copied-database rehearsal and read-only verification window.
-- Canary operation under real clients/load and operator acceptance.
-- Local installation or production deployment.
-- Operational cutover, first acknowledged v4 write, and post-cutover monitoring.
-- Destructive GC activation and real reclaim/reuse on operational data.
+## Exact release and real-workload proof
 
-These require new explicit authorization. Their frozen parent/child checklist items remain visibly open; repository completion does not imply operational completion.
+Desktop release root:
+`/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/`.
+Native roots use the same basename under `~/.cache/codex/aeordb-tests/`.
+Artifact hashes are in [the completion report](completion-report.md) and the
+[machine record](evidence/p9-final-qualification.json).
+
+| Gate / exact receipt | Result |
+| --- | --- |
+| Linux `release-build.exit` | Pass 17:16:59 UTC, normal release, two jobs |
+| macOS `release-build.exit` | Pass 17:15:40 UTC, normal release, one job |
+| Windows `release-build.result.json` | Pass 17:25:44 UTC, native MSVC, one job |
+| `copied-s1-release.exit` | Pass 17:17:41; strict new-CLI verify, unchanged copied failure bytes/stat |
+| `pinned-soak-fixtures.exit` / `pinned-admission-fixtures.exit` | 16 scenarios/four admission cases pass |
+| `live-release.exit` | Pass 17:19:13; real HTTP/docs/payload, clean restart, delete/missing, offline verify |
+| `unchanged-runtime-media-proof.exit` | Pass 17:28:15; explicit predecessor attribution and new byte-preserving media-source verify |
+| `release-cli-tests.exit` | Pass 17:33:15; 230 tests/21 targets, seven existing ignores |
+| `pin-crash-test.exit` | Pass 17:33:46; actual Cargo JSON artifact pinned beside normal worker |
+| `crash-100-pinned.exit` | Pending; require 100 complete seven-function suites, not 100 individual cases |
+| `s1/s2/s3-short-pinned.exit` | Pending |
+| `s1/s2/s3-12h-pinned.exit` | Pending; require three complete 12-hour stages and terminal integrity/resource proof |
+
+The pinned crash manifest SHA is
+`aac9bf5743e1ab4f1bf302748815748034d2b40e4293e8d381624ee3f2008460`.
+Forced-unmount testing is explicitly self-skipped, not claimed covered.
+Seeds control shell cycle scheduling; worker randomness is wall-clock-based.
+
+Full media migration and the 120-second 8 GiB/no-swap overlap passed on 48baeefe.
+The current gate proves all non-qualification tracked inputs unchanged and
+rechecks predecessor binaries, complete receipts and media hashes. It does not
+claim a new full migration or rebind an earlier binary-pinned resume manifest.
+The new CLI separately verifies the retained test source with unchanged SHA/stat.
+Production-scale repair/recovery and controlled performance parity remain
+unproven; the corrupt multi-terabyte file is not an active qualification target.
+
+## Final audit and cleanup — still open
+
+After current gates finish, collect their terminal receipts, native identity,
+runner/binary manifests, database hash/size summaries and resource results.
+Seal only closed evidence. Retain truthful failed attempts and do not append
+output to a file after including it in a seal.
+
+Then remove only individually classified, inactive, unneeded test databases
+under desktop `/media/Data/AeorDB/`. Preserve useful corruption specimens,
+source inputs and logs; record exact removed paths/bytes/recoverability.
+Any old seal whose disposable payload is deliberately retired must retain an
+explicit cleanup record, not be silently reported as fully reverified afterward.
+
+The retained FS-Server1 database, service, v4 activation, installation/downloads,
+canary/cutover/acceptance and destructive operational GC remain outside this
+authority. Stop for the owner's step-4 discussion after the authorized work.

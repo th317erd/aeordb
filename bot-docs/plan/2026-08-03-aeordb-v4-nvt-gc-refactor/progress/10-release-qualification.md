@@ -1214,3 +1214,32 @@ performance comparison. Full migration/resource results remain attributed to
 48baeefe, not relabeled as a8047327 execution. Closed media-attribution evidence
 is mirrored locally. Final Data/home free bytes at this gate are
 279,670,247,424 / 75,187,335,168. Release CLI tests are now running.
+
+Release CLI passes at 17:33:15 UTC: 230 tests/21 targets, zero failures and seven
+existing ignores. Crash executable pinning passes at 17:33:46, manifest SHA
+`aac9bf5743e1ab4f1bf302748815748034d2b40e4293e8d381624ee3f2008460`.
+The complete-suite crash loop is active at 17:47:44; no current duration pass is
+claimed. Model checks now use approximately ten-minute intervals. Exact normal
+release/media evidence is committed/pushed in documentation checkpoint
+`6a4006846cc2aa5fc2e4f460dedf726b3193e53f`; product candidate remains a8047327.
+
+Packet reconciliation has started while the guarded run continues. The canonical
+completion/DoD/machine reports now describe a8047327 and mark unfinished gates
+pending. Original 535004f1 reports remain recoverable from Git at 6a400684; their
+receipts/history are not rewritten. The mutable parent execution banner and
+historical ledger-08 notice point to this active ledger. The packet explicitly
+distinguishes a v3-compatible service and tested offline v4 shadow substrate
+from unavailable public v4 activation/cutover; the remaining limitation is not
+merely an ungranted deployment permission. Reports are still provisional until
+all current gates, final audit and requested cleanup have terminal evidence.
+
+The provisional packet passes JSON parsing, Markdown file-link resolution,
+source-diff hygiene and the unchanged debt gate. A task-local checker compares
+native binary identities to closed receipts, verifies test-count arithmetic and
+predecessor attribution, and rejects false completion, wrong binary identity,
+nested-count inflation, migration reattribution, unavailable activation claims,
+unapproved step-4 authority and duration passes without elapsed evidence.
+Checker and results are in the durable qualification cache as
+`validate-release-packet.mjs` and `validate-release-packet-in-progress-final.log`.
+No runtime/source/test/Cargo/embedded-doc bytes differ from a8047327. This is a
+truthful in-progress documentation checkpoint, not the final audit/cleanup seal.

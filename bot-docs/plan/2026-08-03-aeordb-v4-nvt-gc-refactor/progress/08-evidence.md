@@ -1,5 +1,12 @@
 # Child 08 Progress: Evidence
 
+> **Historical ledger:** the closure entries below describe candidate 535004f1
+> and retain their original wording/counts. Subsequent repair retirement and
+> corrections are in the [September 9 handoff](../handoff-2026-09-09-gpt-6-astra.md)
+> and [ledger 09](09-repair-cache-followup.md). The sole active release checklist
+> is [ledger 10](10-release-qualification.md). Current canonical reports must not
+> reattribute these older native/soak receipts to the successor candidate.
+
 ## Landing State
 
 - **Status:** The authorized repository-only campaign boundary is complete. P0 through the safe P8 native candidate gates and P9 repository debt, operator/documentation closure, strict Clippy, exact Linux/macOS/Windows, live/resource, long-duration, final 100-case qualification, and whole-packet evidence audit are green. Copied-production, canary, install/deploy, cutover/acceptance, monitoring, and destructive GC remain separately gated and unexecuted.

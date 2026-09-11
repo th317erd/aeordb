@@ -9,13 +9,18 @@
 **Supersedes:** `2026-07-16-nvt-field-index-refactor-and-migration.md` in full
 **Formalization review:** [PASS](2026-08-03-aeordb-v4-nvt-gc-refactor/formalization-review.md)
 
-> **Execution status (2026-09-03):** The header above preserves the plan's
-> ratification-time state. Current mutable execution status lives in the
-> [Child 08 progress ledger](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md).
-> The safe repository implementation, exact-candidate native qualification,
-> and canonical P9 evidence packet are complete. Copied-production, canary,
-> installation/deployment, operational cutover/acceptance, first v4 write,
-> monitoring, and destructive GC remain separately gated and unexecuted.
+> **Execution status (2026-09-11):** The header above preserves the plan's
+> ratification-time state. Current execution status is in
+> [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md).
+> Candidate a8047327 passes ordinary, affected-native and exact-release gates;
+> renewed crash/duration qualification, final evidence audit and test-database
+> cleanup remain in progress. The earlier 535004f1 closure in
+> [ledger 08](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md) is historical.
+> The large corrupt-database repair was retired, not successfully migrated.
+> Ordinary service remains v3-compatible; public migration builds an offline v4
+> shadow only, and public v4 activation/cutover is not implemented. Stop for the
+> owner's step-4 discussion before deployment, canary, retained-database reuse,
+> service changes, acceptance/first v4 write, or destructive operational GC.
 
 The ratified decision source is a required tracked campaign artifact. Before P0
 starts, it must be committed alongside this plan and treated as append-only
