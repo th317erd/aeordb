@@ -12,8 +12,8 @@
 > **Execution status (2026-09-11):** The header above preserves the plan's
 > ratification-time state. Current execution status is in
 > [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md).
-> Candidate a8047327 passes ordinary, affected-native and exact-release gates;
-> renewed crash/duration qualification, final evidence audit and test-database
+> Candidate a8047327 passes ordinary, affected-native, exact-release, crash and
+> short-soak gates; renewed duration qualification, final audit and test-database
 > cleanup remain in progress. The earlier 535004f1 closure in
 > [ledger 08](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md) is historical.
 > The large corrupt-database repair was retired, not successfully migrated.

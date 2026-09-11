@@ -2,7 +2,7 @@
   "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
-  "captured_at": "2026-09-11T17:47:45Z",
+  "captured_at": "2026-09-11T18:48:01Z",
   "status": "qualification_in_progress",
   "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
@@ -171,8 +171,12 @@
       "finished_utc": "2026-09-11T17:33:15Z"
     },
     "crash": {
-      "status": "running_at_last_observation",
-      "last_observed_utc": "2026-09-11T17:47:44Z",
+      "status": "passed",
+      "finished_utc": "2026-09-11T18:37:48Z",
+      "complete_suites_passed": 100,
+      "interruption_windows": 2300,
+      "forced_unmount_self_skips": 100,
+      "log_sha256": "4c51e815329f44a652ce5701301f366b8f3cca747d0d872a01d1fa5134b5b42a",
       "required_complete_suites": 100,
       "functions_per_suite": 7,
       "unit_is_complete_suite_not_individual_case": true,
@@ -182,7 +186,9 @@
     },
     "duration": {
       "s1": {
-        "status": "pending",
+        "status": "running_at_last_observation",
+        "started_utc": "2026-09-11T18:42:49Z",
+        "last_observed_utc": "2026-09-11T18:48:01Z",
         "required_seconds": 43200,
         "terminal_receipt": "evidence/s1-12h-pinned.exit"
       },
@@ -198,7 +204,9 @@
       }
     },
     "short_soaks": {
-      "status": "pending",
+      "status": "passed",
+      "finished_utc": "2026-09-11T18:42:49Z",
+      "s3_verified_checkpoint_cycles": 12,
       "stages": [
         "s1-short-pinned",
         "s2-short-pinned",

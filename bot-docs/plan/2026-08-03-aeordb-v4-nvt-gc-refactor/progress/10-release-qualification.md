@@ -10,8 +10,9 @@ Original release entry: `3b48de7e42c2d2b6db895774eb8b046eff6d6fa7` on
 Current follow-up (September 11): the checkpoint restart correction is qualified
 against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentation
 entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
-native and static checks pass. The next gate is a committed exact native release
-and renewed crash/soak qualification. At 48baeefe, media/live/resource/release-CLI
+native and static checks pass. The committed exact a8047327 native releases,
+100 complete crash suites and all short soaks now pass; its first 12-hour stage
+is active. At 48baeefe, media/live/resource/release-CLI
 and 100 complete crash suites passed, but short S3 stopped on a malformed
 checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
 passes below remain explicitly attributed predecessor evidence.
@@ -1243,3 +1244,21 @@ Checker and results are in the durable qualification cache as
 `validate-release-packet.mjs` and `validate-release-packet-in-progress-final.log`.
 No runtime/source/test/Cargo/embedded-doc bytes differ from a8047327. This is a
 truthful in-progress documentation checkpoint, not the final audit/cleanup seal.
+
+### Exact crash and short gates complete; first duration stage active
+
+The a8047327 crash loop passes at 18:37:48 UTC: 100 complete seven-function
+suites, 2,300 interruption windows and 100 explicit forced-unmount self-skips.
+Forced unmount is not tested. Loop time is 3,830 seconds (3,842-second guarded
+stage); terminal status is zero with no guard termination. Log SHA-256:
+`4c51e815329f44a652ce5701301f366b8f3cca747d0d872a01d1fa5134b5b42a`.
+Pinned normal/crash artifact hashes still match after the loop.
+
+Short S1 passes 18:38:48, S2 18:40:49 and S3 18:42:49 UTC. S3 completes 12
+cycles with successful verification and checkpoint comparison, including worker
+restarts through the corrected append preparation. The S1 12-hour stage starts
+at 18:42:49. At 18:48:01 its live sample records 300 elapsed seconds, 3,089
+writes and 1,468 reads. Driver PID 296913 and the capacity guard remain active;
+Data/home free bytes are 279,143,149,568 / 74,953,822,208, guard age 11 seconds.
+No current 12-hour pass is claimed. All three durations, final audit and scoped
+test-database cleanup remain required before the owner's step-4 discussion.

@@ -7,9 +7,9 @@ Integration/review owner: Codex, direct execution under the owner-authorized
 release-qualification plan. Current status: **qualification in progress**.
 [Ledger 10](progress/10-release-qualification.md) is the sole active checklist.
 
-Ordinary/native/static and exact-release gates pass. The current 100-complete-suite
-crash run, short/three 12-hour stages, final packet audit and requested cleanup
-are not yet complete. Stop and discuss with the owner before step 4.
+Ordinary/native/static, exact-release, 100-complete-suite crash and short-soak
+gates pass. The first 12-hour stage is running; all three duration gates, final
+packet audit and requested cleanup remain open. Stop before step 4.
 
 Ordinary service authority remains v3-compatible. Public `migrate-v4` is
 offline shadow creation/verification, not activation. Public v4 service
@@ -37,7 +37,7 @@ Do not turn their older test counts or duration passes into current evidence.
 | Historical authorization, root selectors and concealment | Child 06 route/reference targets and current full suite |
 | User acknowledgement excludes synchronous derived work | Child 06 producer/worker evidence and current regressions |
 | Bounded resident memory and scratch | 48baeefe 8 GiB/no-swap overlap carried with explicit source-equivalence proof; unchanged disk floors |
-| Current crash/soak proof | Pending; historical successful durations do not clear this row |
+| Current crash/soak proof | 100 complete suites and all short soaks pass; current three-duration gates still open |
 | Production-derived migration and dirty restart | Not proven. Large damaged-file repair retired; disposable clean-media migration is separate evidence |
 | Canary before cutover and explicit acceptance | Not performed; requires discussion/authorization and available implementation surfaces |
 | V3 backup/rollback boundary | Defined in migration contract; operational first-write boundary never crossed |
@@ -137,9 +137,9 @@ Artifact hashes are in [the completion report](completion-report.md) and the
 | `unchanged-runtime-media-proof.exit` | Pass 17:28:15; explicit predecessor attribution and new byte-preserving media-source verify |
 | `release-cli-tests.exit` | Pass 17:33:15; 230 tests/21 targets, seven existing ignores |
 | `pin-crash-test.exit` | Pass 17:33:46; actual Cargo JSON artifact pinned beside normal worker |
-| `crash-100-pinned.exit` | Pending; require 100 complete seven-function suites, not 100 individual cases |
-| `s1/s2/s3-short-pinned.exit` | Pending |
-| `s1/s2/s3-12h-pinned.exit` | Pending; require three complete 12-hour stages and terminal integrity/resource proof |
+| `crash-100-pinned.exit` | Pass 18:37:48 UTC; 100 complete seven-function suites/2,300 interruption windows; 100 forced-unmount self-skips |
+| `s1/s2/s3-short-pinned.exit` | All pass by 18:42:49 UTC; S3 completes 12 verified checkpoint cycles |
+| `s1/s2/s3-12h-pinned.exit` | S1 starts 18:42:49 UTC; require three complete 12-hour stages and terminal integrity/resource proof |
 
 The pinned crash manifest SHA is
 `aac9bf5743e1ab4f1bf302748815748034d2b40e4293e8d381624ee3f2008460`.
