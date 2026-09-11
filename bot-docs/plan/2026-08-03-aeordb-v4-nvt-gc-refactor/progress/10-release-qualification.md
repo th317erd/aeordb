@@ -7,18 +7,21 @@ Original release entry: `3b48de7e42c2d2b6db895774eb8b046eff6d6fa7` on
 `development`, matching origin after fetch. Production code is unchanged from
 `0b20792b`; the successor fixes a native Windows test fixture and records proof.
 
-Current follow-up (September 11): correction committed/pushed as
-`48baeefe0144e2a84458c6589aa0345afc223ff8`; documentation entry HEAD 2a5c74ed.
-Final-source broad, native and static checks and all three exact native release
-builds pass. Media/crash/duration qualification remains pending; earlier
-build/qualification passes below are predecessor evidence.
+Current follow-up (September 11): the checkpoint restart correction is qualified
+against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentation
+entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
+native and static checks pass. The next gate is a committed exact native release
+and renewed crash/soak qualification. At 48baeefe, media/live/resource/release-CLI
+and 100 complete crash suites passed, but short S3 stopped on a malformed
+checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
+passes below remain explicitly attributed predecessor evidence.
 
 The owner explicitly authorized the next three items, then required a stop and
 discussion before item 4. This ledger supplements Children 07/08 and the frozen
 parent; it does not rewrite historical results or authorize production work.
 
-- [x] 1. Capacity admission and exact native Linux/macOS/Windows release builds
-  for corrected source 48baeefe.
+- [ ] 1. Renew capacity admission and exact native Linux/macOS/Windows release
+  builds for the checkpoint-corrected source (predecessor 48baeefe builds passed).
 - [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
@@ -932,3 +935,224 @@ requests permission to relocate only the completed 1.9 GB synthetic resource
 database from home to the Data test area, retaining contents and logs. No file
 has been moved or deleted; the question does not block current migration or S1.
 Do not lower the reserve or inspect unrelated home data.
+
+Media migration passes at 13:50:18 UTC. The planned first-run interruption
+returns 137 at 13:41:07 after observing base-successor publication (not a claim
+of an exact base-only interruption window). Resume and completed retry both
+report full destination verification of 15,354,506,282 content bytes and 50,151
+entities, distinct source/destination physical identities, and identical final
+receipts. Source/original checksums and stats are unchanged; completed retry
+also preserves destination checksum/stat.
+
+Current media source SHA is
+`2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74`;
+destination SHA is
+`f6728854a5cd0a29816b8502720616a3e4c851632c88ff7489ed09cae18daa93`.
+Resume takes 314.53 seconds / 129,048 KiB maximum RSS; completed retry takes
+39.98 seconds / 73,160 KiB, both zero swap. These timings are not a controlled
+performance comparison. Capture remains 1 GiB, home reserve
+64 GiB; final Data/home free space is 281,223,258,112 / 75,597,398,016 bytes.
+Release CLI qualification is now running; crash100 and all duration gates remain
+pending, as does the unanswered home-artifact relocation question.
+
+Release CLI qualification passes at 13:55:19 UTC: 221 tests across 21 targets,
+zero failures, seven existing ignores. `pin-crash-test` passes at 13:55:49,
+discovering the test executable from Cargo's JSON artifact messages and copying
+it beside the exact normal-release worker. Pinned crash manifest SHA is
+`6d5c34d1db5239f4758eba1ebbde5558098b43049fee1174198a2a864fe78d5c`.
+The 100-complete-suite crash loop is running (pass 10 active at approximately
+14:01 UTC), with unmount tests explicitly self-skipped. Later short and duration
+stages have not yet run. Model checks now use ten-minute intervals; host guards
+remain at 30 seconds.
+
+### September 11: short S3 checkpoint restart failure
+
+The 100 complete seven-function crash suites pass at 14:59:51 UTC (3,826 seconds,
+2,300 interruption windows, 100 explicit unmount self-skips). Log SHA:
+`cb5d582811adfc64a2d451586f634612f13e35239f8f5e9fa0fdd980d7762cc2`.
+Short S1 and S2 pass at 15:00:52 and 15:02:52. Short S3 stops after cycle 8;
+driver 90874 terminates at 15:04:23, exit 1, no capacity/deadline refusal.
+No 12-hour stage started on 48baeefe.
+
+The probe reports **malformed checkpoint**, not an established missing database
+record. Line 1930 concatenates an interrupted prior path with the next worker's
+startup comment: `/stress/batch-merge/doc-028.json# worker up mode=stress`.
+The crash worker opens its checkpoint in append mode without removing the
+nonterminated tail that read-only comparison correctly ignored during cycle 7.
+The ordinary soak worker already truncates such a tail during checkpoint load.
+The independently recovered verification copy reports Status OK/zero issues.
+
+Preserve the original `long/s3-short/` under the current desktop release campaign
+and `/home/wyatt/.cache/codex/p9-release-48baeefe-20260911/long/s3-short/diagnostics.RtcNg5/`.
+Original DB SHA `537763019a5b58dda15dbc11a4ea0ae33b8dd0671abf9ac1a09a389a76fb320d`
+(3,022,673 bytes); checkpoint SHA
+`13aae8c8f19c187b58e51549e9dafc04514c742f1f0965265bb545b7cd890b5e`.
+Do not alter or restart against these files.
+
+Current bounded landing unit: preserve/hash failure closure; reproduce worker
+restart against a deliberately incomplete checkpoint; cover malformed completed
+records, truncation boundaries and failure handling; correct worker checkpoint
+admission without weakening the read-only oracle; qualify narrow/broad/native,
+then renew affected release/crash/soak proof. Owned hotspots are CLI checkpoint
+reader, crash worker and their specs. Storage formats/engine, retained evidence,
+production and step 4 remain outside this correction's scope. The `implement`
+workflow requires failing-first proof and retains the failed gate as evidence.
+
+The new desktop follow-up is
+`/media/Data/AeorDB/Tests/p9-s3-checkpoint-followup-20260911/`, detached 48baeefe
+plus the seven scoped source/test/script inputs. Failure preservation completes
+at 15:25:53 UTC: the copied 21-file closure is checked under
+`frozen-s3-evidence.sha256`, SHA
+`a6d57beb4def31f2866373ef3724dde4cbc26506a5f0cd99c42c3f9d86d821ae`.
+Original source bytes remain unchanged and no opener was present.
+
+`checkpoint-restart-red` fails both independently authored worker restart tests
+at 15:28:59: interrupted-line concatenation and continued writes after a malformed
+completed record. Initial correction passes 22 tests at 15:30:51 (seven existing
+crash ignores). Expanded `checkpoint-perimeter` passes at 15:35:51, including
+exclusive database ownership refusal, every byte-cut boundary across all record
+kinds/CRLF/multibyte text, idempotent admission, bounded oversized-record refusal,
+read/truncate errors and injected barrier failure. The worker removes only the
+incomplete tail, syncs truncation before its next append, and never changes the
+complete prefix or a malformed completed checkpoint. The report-only reader
+remains non-mutating. No engine/database format or ordinary soak-worker behavior
+changes.
+
+An adjacent shell-message regression fails on the old claim that any probe error
+is data loss (`soak-message-red.log`, SHA
+`9e2e3a73840aee8b193f0e742ab0cd7fb1f01d85e990d13b0475c63542ee86f2`).
+The runner now says checkpoint comparison failed; it still stops and retains all
+failure evidence. Combined shell helper/16 scenarios pass at 15:36:22. The audit
+refresh at 15:36:52 reports the same 1,503 entries; the only generated-file
+difference is its terminal newline, so no allowlist change is adopted.
+
+Seven-input source manifest SHA:
+`92e73c5aa85f444e80ff717285a2fe8aa808033a229c34347556da4b95a7e1e0`.
+Native archive SHA:
+`0b803cc0d95d2b2d81e5ebf14c8d14869e9f986489f396a4096f7ece3da44ac8`.
+Native sources/evidence are under `~/.cache/codex/aeordb-tests/` with the same
+follow-up basename. macOS CLI all-targets passes at 15:38:39; Windows CLI remains
+running. Fresh full Linux/static and exact release/crash/soak gates are pending;
+this correction is not yet committed or fully qualified.
+
+Native Windows catches a portability defect in the initial correction: CLI
+library test `append_admission_propagates_a_failed_barrier_after_truncation`
+fails before reaching its injected barrier (23 pass/1 fail, 15:40:44 UTC).
+A separate std-only handle probe confirms Windows returns access denied/code 5
+for `set_len` on a read/append handle, preserving length 15; a read/write handle
+successfully truncates it to 7. This is not waived as a fixture-only failure.
+The worker now opens read/write with `truncate(false)`, and successful admission
+explicitly seeks to EOF. The exclusive database ownership requirement protects
+that single-writer append protocol. The same byte-boundary tests verify that no
+prefix is overwritten; native results are rerun on the portable correction.
+
+Final seven-input manifest SHA:
+`b488f0a21705e06952cbe9583fb1c2010de4589ddce5b00fa2dcf913e8cb7326`;
+final archive SHA:
+`97c217e0399cbcfef53d989179cebe6124f1b3bef9514d09e7b554fa86ab6075`.
+Linux portable perimeter passes at 15:45:05; fresh full/static sequence and
+native portable CLI/architecture matrices are running. Initial native receipts
+remain preserved. Fresh guest prerequisites passed at 15:42:43 using unchanged
+guest/engine inputs, before the final CLI-only transfer.
+
+Qualification scope for this checkpoint-only correction: rerun complete Linux,
+affected native/CLI/static and exact release/crash/soak gates. Carry forward the
+successful 48baeefe interrupted full-media migration, live and resource results
+as explicitly attributed evidence of unchanged storage/migration/runtime code;
+do not claim these were executed by a successor binary. Confirm the production
+source delta mechanically and recheck the retained media evidence/input hashes
+before final packet closure. This avoids an unnecessary extra 23 GB media copy.
+All three 12-hour soaks still need to pass on the corrected checkpoint tooling.
+
+Portable native qualification now passes: macOS CLI 230 tests/21 targets/seven
+existing ignores at 15:45:34 and architecture 38 at 15:46:04; Windows CLI 227
+tests/21 targets/seven existing ignores at 15:47:01 and architecture 38 at
+15:49:24. Both native sequences are complete and their evidence is mirrored to
+the laptop durable cache. The full Linux suite/static sequence remains running.
+
+The prepared successor harness places large S2/S3 diagnostic database copies on
+Data alongside their disposable test databases, while keeping private internal
+workspaces in the guarded home TMPDIR. This avoids moving the completed resource
+fixture; no answer to the earlier relocation question is needed for that path.
+No resource file has been moved. Both volume floors remain unchanged. The
+successor's 16 shell scenarios and four pinned-input admission cases pass. Its
+media carry-forward gate checks source equivalence, prior receipts/artifact
+hashes and a fresh successor CLI read-only verify against the already separate
+clean test source, preserving source bytes/stat and explicit binary attribution.
+It does not attempt cross-binary resume of a manifest pinned to the earlier
+executable, and does not create another full media source/destination pair.
+
+### September 11: full-suite capacity interruption
+
+The portable Linux full run stops at 15:59:06 UTC with exit 124 and
+`termination_reason=disk_floor`, not an assertion failure. Data remains
+280,398,594,048 bytes free; home falls to 66,821,873,664 bytes, below its
+68,719,476,736-byte floor. Inspection identifies an owned 8 GiB temporary KV
+fixture, not an unrelated home writer. `disk_kv_store_spec` has two tests that
+create a maximum-stage (8 GiB) block; available home headroom is only about
+6.7 GB. The stopped run and fixture are preserved, not counted as a full pass.
+
+Capacity correction does not change Rust source, assertions, or floors:
+preserve/checksum the inactive large fixture on Data, verify it, remove only
+its redundant home copy, then run both maximum-stage cases individually with
+Data TMPDIR. The full workspace rerun excludes precisely those two already-run
+cases, with combined evidence covering every original test. All remaining
+tests retain private home TMPDIR. The two names are unique across the workspace;
+the large-case executable is pinned from the stopped full run's actual logged
+test binary. No test is waived, and aggregate counts must include those two
+separate passes without double-counting them. New runner:
+`run-s3-capacity-linux-sequence.sh`; old receipts remain untouched.
+
+Relocation and lossless archival complete at 16:15:20 UTC. The original
+8,589,933,656-byte fixture is retained as
+`capacity-stop/maximum-stage-kv.aeordb.zst` (269,332 bytes), compressed SHA
+`8cdb189af9df965338c2f7134639a8c04f074bdea180187a7e00797db0799377`.
+Decompression reproduces raw SHA
+`7f6c040f4b26f1dfe71fdccad87441fa306e6c2856a51c92f3aa75ea5bc35699`.
+Only the verified redundant raw home/Data copies were removed; contents are
+fully recoverable. Data/home free bytes are 280,398,249,984 / 75,409,653,760.
+The split full-suite sequence has started; its terminal receipt remains pending.
+The broader owner-requested test-database cleanup is still scheduled after
+qualification, not complete.
+
+Both unchanged maximum-stage cases pass on Data: clamp at 16:24:09 UTC
+(246.39 seconds) and resize rejection at 16:28:40 (249.44 seconds). Each
+reports one pass/62 sibling filters from the pinned 63-test target. Their
+temporary databases are removed by normal test teardown. The remaining full
+workspace run starts at 16:28:40 with only these two exact names excluded.
+Its summary helper recognizes the legitimate two-filter parent result, while
+counting the three index-store subprocess checks separately; six helper
+regressions cover historical/split counts and refusal of unexplained filters,
+failed results, truncated targets and missing child results.
+
+### Checkpoint correction: final ordinary qualification
+
+The full remaining workspace suite passes at 17:01:11 UTC: 7,528 top-level
+tests across 347 Cargo targets, seven existing ignores, and three separately
+counted nested index-store checks. Together with the two unchanged maximum-stage
+passes on Data, this is **7,530 distinct top-level tests**, not a skipped-test
+waiver. The prior capacity-stopped run remains failed historical evidence.
+
+Strict workspace/all-target Clippy (`-D warnings`) passes at 17:04:12;
+contracts at 17:04:42 (454 independent fixtures, 95 routes, 39 docs, debt
+8 reviewed entries/164 retained matches); mdBook at 17:05:13; debt self-tests
+at 17:05:43; soak helper/16 scenarios at 17:06:13. The complete sequence exits
+0 at 17:06:14 with Data/home free bytes 280,368,791,552 / 75,457,970,176.
+Fresh formatting, diff checks and the seven-input source manifest pass locally.
+Native macOS/Windows source manifests match the same final seven-input digest;
+their closed results and runners are collected in the follow-up evidence.
+
+Review confirms the correction changes only qualification checkpoint handling
+and diagnostic wording: no storage engine, public command, Cargo/dependency,
+database-format or embedded-documentation input changes. Completed malformed
+records still fail without mutation; only the incomplete tail is durably
+removed under exclusive database ownership before the next worker append.
+
+The closed follow-up seal contains 209 files, including frozen S3 failure
+evidence, failed attempts, the lossless capacity archive, final Linux receipts,
+both native matrices and exact native input manifests/runners. Its SHA-256 is
+`6e25641e4d70228a8e622fed6e748742f7b44e8c96f766204d4d63641bc908a2`
+(`closed-followup-evidence.sha256`); every listed digest rechecks successfully.
+This closes the ordinary correction landing unit, not the new exact-release
+or three 12-hour qualification gates. All step-4 operational boundaries remain
+closed, and broad disposable-test-database cleanup is still pending.

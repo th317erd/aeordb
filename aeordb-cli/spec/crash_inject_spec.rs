@@ -88,6 +88,87 @@ fn crash_worker_reports_checkpoint_open_failure_without_panicking() {
   assert!(!database.exists(), "checkpoint admission must fail before the worker creates or opens the database");
 }
 
+#[test]
+fn crash_worker_restart_discards_only_the_incomplete_checkpoint_tail() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database = temporary.path().join("checkpoint-restart.aeordb");
+  let checkpoint = temporary.path().join("checkpoint.tsv");
+  // Independently authored prefix reproduces the short S3 cycle-7 boundary:
+  // the process stopped after writing the path but before its tab/body/newline.
+  let prefix = b"/previous.json\t{}\n!\t/stress/batch-merge/doc-028.json\n";
+  let mut interrupted = prefix.to_vec();
+  interrupted.extend_from_slice(b"/stress/batch-merge/doc-028.json");
+  std::fs::write(&checkpoint, interrupted).unwrap();
+
+  let mut worker = Command::new(env!("CARGO_BIN_EXE_crash-soak-worker"))
+    .args(["--database", database.to_str().unwrap(), "--checkpoint", checkpoint.to_str().unwrap(), "--mode", "writes"])
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  let restarted =
+    wait_for_checkpoint_path_record_count(checkpoint.to_str().unwrap(), "/data/file-00000000.txt", 1, Duration::from_secs(10));
+  sigkill(&mut worker);
+
+  let bytes = std::fs::read(&checkpoint).unwrap();
+  assert!(bytes.starts_with(prefix), "the complete committed and pending-intent prefix must be preserved byte-for-byte");
+  assert!(
+    bytes[prefix.len()..].starts_with(b"# worker up mode=writes\n"),
+    "the next startup marker must not complete or concatenate the previous interrupted record"
+  );
+  assert!(restarted, "worker failed to append a complete new commit within the test deadline");
+  assert!(read_checkpoint(checkpoint.to_str().unwrap()).is_ok(), "restarted checkpoint must remain parseable");
+}
+
+#[test]
+fn crash_worker_restart_rejects_completed_malformed_checkpoint_without_appending() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database = temporary.path().join("checkpoint-malformed.aeordb");
+  let checkpoint = temporary.path().join("checkpoint.tsv");
+  let malformed = b"/previous.json\t{}\nmalformed\n/incomplete";
+  std::fs::write(&checkpoint, malformed).unwrap();
+  let mut worker = Command::new(env!("CARGO_BIN_EXE_crash-soak-worker"))
+    .args(["--database", database.to_str().unwrap(), "--checkpoint", checkpoint.to_str().unwrap(), "--mode", "writes"])
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  let started = std::time::Instant::now();
+  let status = loop {
+    if let Some(status) = worker.try_wait().unwrap() {
+      break Some(status);
+    }
+    if started.elapsed() >= Duration::from_secs(5) {
+      sigkill(&mut worker);
+      break None;
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  };
+  let output = worker.wait_with_output().unwrap();
+  assert_eq!(status.and_then(|status| status.code()), Some(4), "{}", String::from_utf8_lossy(&output.stderr));
+  assert!(String::from_utf8_lossy(&output.stderr).contains("malformed checkpoint"));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), malformed, "malformed completed evidence must not be truncated or appended");
+}
+
+#[test]
+fn crash_worker_restart_does_not_trim_a_checkpoint_when_database_ownership_is_refused() {
+  let temporary = tempfile::tempdir().unwrap();
+  let database = temporary.path().join("owned.aeordb");
+  let checkpoint = temporary.path().join("checkpoint.tsv");
+  let engine = StorageEngine::create(database.to_str().unwrap()).unwrap();
+  let original = b"/prior.json\t{}\n/incomplete";
+  std::fs::write(&checkpoint, original).unwrap();
+
+  let output = Command::new(env!("CARGO_BIN_EXE_crash-soak-worker"))
+    .args(["--database", database.to_str().unwrap(), "--checkpoint", checkpoint.to_str().unwrap(), "--mode", "writes"])
+    .output()
+    .unwrap();
+  assert_eq!(output.status.code(), Some(3), "{}", String::from_utf8_lossy(&output.stderr));
+  assert!(String::from_utf8_lossy(&output.stderr).contains("open failed"));
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+  engine.shutdown().unwrap();
+}
+
 /// Terminate the child without graceful shutdown. `Child::kill` maps to
 /// SIGKILL on Unix and the equivalent forced process termination on Windows.
 fn sigkill(child: &mut Child) {

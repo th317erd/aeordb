@@ -72,6 +72,13 @@ for scenario in s1-failure s1-pass s2-copy s2-reopen s2-verify s2-malformed s2-e
       ;;
   esac
   case "$scenario" in
+    s3-checkpoint)
+      if ! grep -q 'checkpoint comparison failed' "$run_directory/result.log" \
+        || grep -q 'checkpoint diff reported loss' "$run_directory/result.log"; then
+        printf 'FAIL %s: a diagnostic error must not be labeled as proven data loss\n' "$scenario"
+        failures=$((failures + 1))
+      fi
+      ;;
     *-copy*)
       if test -e "$run_directory/operations"; then
         printf 'FAIL %s: incomplete diagnostic copies reached the CLI\n' "$scenario"

@@ -1,4 +1,100 @@
 use aeordb_cli::soak_checkpoint::{SOAK_CHECKPOINT_RECORD_MAXIMUM_BYTES, SoakCheckpointRecord, visit_soak_checkpoint_records};
+use std::fs::OpenOptions;
+use std::io::Write;
+
+#[test]
+fn checkpoint_append_admission_preserves_every_complete_prefix_at_every_byte_boundary() {
+  use aeordb_cli::soak_checkpoint::prepare_soak_checkpoint_append;
+
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("restart.tsv");
+  // This independent byte oracle includes both newline styles, all operations,
+  // tabs in a body and a multibyte character that can be interrupted mid-codepoint.
+  let records = "# worker up mode=stress\r\n/old.json\t{}\n!\t/old.json\n+\t/new.json\t雪\tdata\n?\t/new.json\n-\t/new.json\n".as_bytes();
+  for boundary in 0..=records.len() {
+    let interrupted = &records[..boundary];
+    let complete_end = interrupted.iter().rposition(|byte| *byte == b'\n').map_or(0, |position| position + 1);
+    std::fs::write(&checkpoint, interrupted).unwrap();
+    let mut writer = OpenOptions::new().read(true).write(true).open(&checkpoint).unwrap();
+    prepare_soak_checkpoint_append(&mut writer, &checkpoint).unwrap();
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), &interrupted[..complete_end], "boundary {boundary}");
+    // Repeated admission, including after a previous scan reached EOF, must be idempotent.
+    prepare_soak_checkpoint_append(&mut writer, &checkpoint).unwrap();
+    writer.write_all(b"# worker up mode=stress\n/after.json\t{}\n").unwrap();
+    drop(writer);
+    let mut expected = interrupted[..complete_end].to_vec();
+    expected.extend_from_slice(b"# worker up mode=stress\n/after.json\t{}\n");
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), expected, "boundary {boundary}");
+    let summary = visit_soak_checkpoint_records(&checkpoint, |_line, _record| Ok(())).unwrap();
+    assert!(!summary.ignored_incomplete_tail, "boundary {boundary}");
+  }
+}
+
+#[test]
+fn checkpoint_append_admission_rejects_completed_damage_without_changing_any_bytes() {
+  use aeordb_cli::soak_checkpoint::prepare_soak_checkpoint_append;
+
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("damage.tsv");
+  for damage in [b"malformed\n".as_slice(), b"!\t\n", b"/bad.json\t\xff\n", b"?\t/a\textra\n"] {
+    let mut original = b"/prior.json\t{}\n".to_vec();
+    original.extend_from_slice(damage);
+    original.extend_from_slice(b"/incomplete");
+    std::fs::write(&checkpoint, &original).unwrap();
+    let mut writer = OpenOptions::new().read(true).write(true).open(&checkpoint).unwrap();
+    let error = prepare_soak_checkpoint_append(&mut writer, &checkpoint).unwrap_err();
+    assert!(error.contains("line 2"), "{error}");
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+  }
+}
+
+#[test]
+fn checkpoint_append_admission_preserves_oversized_records_and_accepts_the_exact_limit() {
+  use aeordb_cli::soak_checkpoint::prepare_soak_checkpoint_append;
+
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("limit.tsv");
+  for terminated in [false, true] {
+    let mut original = vec![b'x'; SOAK_CHECKPOINT_RECORD_MAXIMUM_BYTES + 1];
+    original[0] = b'#';
+    if terminated {
+      original.push(b'\n');
+    }
+    std::fs::write(&checkpoint, &original).unwrap();
+    let mut writer = OpenOptions::new().read(true).write(true).open(&checkpoint).unwrap();
+    let error = prepare_soak_checkpoint_append(&mut writer, &checkpoint).unwrap_err();
+    assert!(error.contains("record limit"), "{error}");
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+  }
+  let mut original = vec![b'x'; SOAK_CHECKPOINT_RECORD_MAXIMUM_BYTES];
+  original[0] = b'#';
+  original[SOAK_CHECKPOINT_RECORD_MAXIMUM_BYTES - 1] = b'\n';
+  std::fs::write(&checkpoint, &original).unwrap();
+  let mut writer = OpenOptions::new().read(true).write(true).open(&checkpoint).unwrap();
+  prepare_soak_checkpoint_append(&mut writer, &checkpoint).unwrap();
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+}
+
+#[test]
+fn checkpoint_append_admission_propagates_read_and_truncation_failures() {
+  use aeordb_cli::soak_checkpoint::prepare_soak_checkpoint_append;
+
+  let temporary = tempfile::tempdir().unwrap();
+  let checkpoint = temporary.path().join("io-failure.tsv");
+  let original = b"/prior.json\t{}\n/incomplete";
+  std::fs::write(&checkpoint, original).unwrap();
+  {
+    let mut unreadable = OpenOptions::new().write(true).open(&checkpoint).unwrap();
+    let error = prepare_soak_checkpoint_append(&mut unreadable, &checkpoint).unwrap_err();
+    assert!(error.contains("read checkpoint"), "{error}");
+  }
+  {
+    let mut readonly = std::fs::File::open(&checkpoint).unwrap();
+    let error = prepare_soak_checkpoint_append(&mut readonly, &checkpoint).unwrap_err();
+    assert!(error.contains("truncate incomplete checkpoint tail"), "{error}");
+  }
+  assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+}
 
 #[test]
 fn checkpoint_parser_visits_every_complete_record_kind_and_accepts_crlf() {

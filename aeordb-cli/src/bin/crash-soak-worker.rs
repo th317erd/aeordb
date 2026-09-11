@@ -67,7 +67,7 @@ fn main() {
       process::exit(2);
     }
   };
-  let mut checkpoint_file = match OpenOptions::new().create(true).append(true).open(&checkpoint) {
+  let mut checkpoint_file = match OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&checkpoint) {
     Ok(file) => file,
     Err(error) => {
       eprintln!("open checkpoint {checkpoint}: {error}");
@@ -92,6 +92,14 @@ fn main() {
       }
     }
   };
+
+  // Acquire the database's exclusive ownership before truncating a checkpoint
+  // fragment. Otherwise a competing worker could alter the current writer's
+  // checkpoint before discovering that the database is already in use.
+  if let Err(error) = aeordb_cli::soak_checkpoint::prepare_soak_checkpoint_append(&mut checkpoint_file, Path::new(&checkpoint)) {
+    eprintln!("{error}");
+    process::exit(4);
+  }
 
   let ops = DirectoryOps::new(&engine);
   let ctx = RequestContext::system();

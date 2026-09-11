@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Bounds memory used for any checkpoint record produced by the qualification
@@ -21,16 +21,54 @@ pub struct SoakCheckpointReadSummary {
   pub ignored_incomplete_tail: bool,
 }
 
-pub fn visit_soak_checkpoint_records<F>(path: &Path, mut visit: F) -> Result<SoakCheckpointReadSummary, String>
+pub fn visit_soak_checkpoint_records<F>(path: &Path, visit: F) -> Result<SoakCheckpointReadSummary, String>
 where
   F: for<'record> FnMut(usize, SoakCheckpointRecord<'record>) -> Result<(), String>,
 {
   let file = File::open(path).map_err(|error| format!("open checkpoint {}: {error}", path.display()))?;
+  let (summary, _complete_byte_frontier) = visit_checkpoint_reader(file, path, visit)?;
+  Ok(summary)
+}
+
+/// Admit a worker-owned, read/write checkpoint before writing its next record.
+/// Readers ignore an unterminated final record, but an appending worker must
+/// durably remove that fragment so a later newline cannot turn it into a record.
+/// Completed malformed or oversized records remain fatal and are never changed.
+/// The caller must exclusively own this checkpoint (and its database) throughout
+/// admission and subsequent writes. Report-only readers must not call this.
+/// Open with write access, not only append access: Windows requires it for
+/// truncation. On success the handle is positioned at the complete-prefix end.
+pub fn prepare_soak_checkpoint_append(file: &mut File, path: &Path) -> Result<(), String> {
+  prepare_checkpoint_append_with_barrier(file, path, aeordb::engine::native_durability::sync_file_data_native)
+}
+
+fn prepare_checkpoint_append_with_barrier(
+  file: &mut File,
+  path: &Path,
+  barrier: impl FnOnce(&File) -> aeordb::engine::native_durability::NativeDurabilityResult<()>,
+) -> Result<(), String> {
+  file.seek(SeekFrom::Start(0)).map_err(|error| format!("seek checkpoint {}: {error}", path.display()))?;
+  let (summary, complete_byte_frontier) = visit_checkpoint_reader(&mut *file, path, |_line, _record| Ok(()))?;
+  if summary.ignored_incomplete_tail {
+    file
+      .set_len(complete_byte_frontier)
+      .map_err(|error| format!("truncate incomplete checkpoint tail {} at byte {complete_byte_frontier}: {error}", path.display()))?;
+    barrier(file).map_err(|error| format!("checkpoint tail truncation durability barrier failed for {}: {error}", path.display()))?;
+  }
+  file.seek(SeekFrom::End(0)).map_err(|error| format!("seek checkpoint append frontier {}: {error}", path.display()))?;
+  Ok(())
+}
+
+fn visit_checkpoint_reader<R: Read, F>(file: R, path: &Path, mut visit: F) -> Result<(SoakCheckpointReadSummary, u64), String>
+where
+  F: for<'record> FnMut(usize, SoakCheckpointRecord<'record>) -> Result<(), String>,
+{
   let mut reader = BufReader::new(file);
   let mut line_bytes = Vec::new();
   let mut complete_lines = 0u64;
   let mut line_number = 0usize;
   let mut ignored_incomplete_tail = false;
+  let mut complete_byte_frontier = 0u64;
 
   loop {
     line_bytes.clear();
@@ -63,10 +101,13 @@ where
     let record =
       parse_soak_checkpoint_record(line).map_err(|error| format!("malformed checkpoint {} line {line_number}: {error}", path.display()))?;
     visit(line_number, record).map_err(|error| format!("checkpoint {} line {line_number} rejected: {error}", path.display()))?;
+    complete_byte_frontier = complete_byte_frontier
+      .checked_add(bytes_read as u64)
+      .ok_or_else(|| format!("checkpoint {} byte frontier overflow at line {line_number}", path.display()))?;
     complete_lines += 1;
   }
 
-  Ok(SoakCheckpointReadSummary { complete_lines, ignored_incomplete_tail })
+  Ok((SoakCheckpointReadSummary { complete_lines, ignored_incomplete_tail }, complete_byte_frontier))
 }
 
 fn parse_soak_checkpoint_record(line: &str) -> Result<SoakCheckpointRecord<'_>, &'static str> {
@@ -114,3 +155,7 @@ fn require_checkpoint_operation_path(path: &str) -> Result<(), &'static str> {
   }
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "../spec/soak_checkpoint_internal_spec.rs"]
+mod soak_checkpoint_internal_spec;

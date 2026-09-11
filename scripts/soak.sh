@@ -473,7 +473,7 @@ invalid_voids=${invalid_voids:-?} verification_errors=${verification_errors:-?} 
       if ./target/release/aeordb probe -D "$probe_db" --diff-checkpoint "$checkpoint_copy" > "$probe_log" 2>&1; then
         echo "[$(date +%T)] iteration $iteration: checkpoint diff OK"
       else
-        echo "[$(date +%T)] iteration $iteration: checkpoint diff reported loss — see $probe_log"
+        echo "[$(date +%T)] iteration $iteration: checkpoint comparison failed — see $probe_log"
         diag_ok=0
       fi
 
