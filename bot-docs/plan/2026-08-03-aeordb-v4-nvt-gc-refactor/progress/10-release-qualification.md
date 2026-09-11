@@ -20,8 +20,8 @@ The owner explicitly authorized the next three items, then required a stop and
 discussion before item 4. This ledger supplements Children 07/08 and the frozen
 parent; it does not rewrite historical results or authorize production work.
 
-- [ ] 1. Renew capacity admission and exact native Linux/macOS/Windows release
-  builds for the checkpoint-corrected source (predecessor 48baeefe builds passed).
+- [x] 1. Renew capacity admission and exact native Linux/macOS/Windows release
+  builds for checkpoint-corrected source a8047327.
 - [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
@@ -1156,3 +1156,61 @@ both native matrices and exact native input manifests/runners. Its SHA-256 is
 This closes the ordinary correction landing unit, not the new exact-release
 or three 12-hour qualification gates. All step-4 operational boundaries remain
 closed, and broad disposable-test-database cleanup is still pending.
+
+### Renewed exact release — a8047327
+
+The checkpoint correction is committed/pushed as
+`a804732755b187b3e2bcdd109da37a2895dc9a80`. Clean detached sources and the same
+frozen lockfile/portal inputs are prepared on all three hosts. Native builds
+start around 17:12 UTC; Windows records Cargo PID 11036 and native MSVC Rust
+1.96.0. No Cargo target files cross hosts; each host reuses only its inactive
+predecessor release cache and pins normal binaries before any test-feature build.
+
+Desktop campaign is `/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/`;
+native campaigns use the same basename under `~/.cache/codex/aeordb-tests/`.
+Linux launcher 296910 starts at 17:12:28 with a 200,000-second outer deadline,
+per-stage deadlines, 30-second capacity guards and durable terminal receipts.
+Runner manifest SHA:
+`0f60aa1bbc9cc5c521bfbb36c43db12b3707ef15f9289659d2842848083d6457`.
+
+Sequence: exact release/pinning, byte-preserving copied-S1 verification, pinned
+harness fixtures, current live HTTP/restart/readback, explicitly attributed
+unchanged-runtime media/resource evidence with new-CLI read-only media verify,
+release CLI, 100 complete crash suites, short S1/S2/S3, then three sequential
+12-hour stages. Large diagnostic database copies now stay on Data; private
+internal workspace TMPDIR and both capacity floors remain unchanged. No extra
+full media database pair is created. New release and duration results remain
+pending; completion packet and scoped cleanup follow them, then STOP at item 4.
+
+Linux normal release passes at 17:16:59 UTC (4m24s, two jobs). Pinned hashes:
+CLI `aef7b082c3b693838a8b8659ff2280d98589ac5cb917376e5ad43e9d2aff5fec`,
+soak worker `061d0561b30b3a919c0cb7f8aa5b7dcdc813739bb9857ad7a543ef60ec330520`,
+crash worker `59f6b286fe7f8043a74afe251397671f912c90136c1368a0dadbd7a636baa602`.
+macOS normal release passes at 17:15:40 (3m04s, one job), pinned CLI
+`3837136f5f62a9d637866415d5c4328012829939a7b9da901d3a03cafc350b14`.
+Both retain the ordinary optimized/debug-information release profile. macOS
+evidence is mirrored to the laptop cache; Windows remains building with C:
+above 18.9 GB free at 17:19 UTC. The new Linux live scenario reports success
+at 17:18:45 after HTTP/docs/binary payload, clean restart, deletion/missing and
+offline verification; its owned units are disposable qualification services.
+
+Windows native MSVC release passes at 17:25:44 UTC (13m29s build, 809.80-second
+controller, one job), pinned SHA
+`ccadd817214083a04f4cf61f0fa3c7294587002ea03908f09e8a53b932791d5d`.
+Minimum sampled/final C: free bytes: 18,761,973,760 / 18,724,057,088. This clears
+all three exact native builds for a8047327, without installation or publication.
+The Linux unchanged-runtime/media gate is running; later release CLI, crash and
+duration stages remain pending. The independent Linux driver is PID 296913.
+
+The new Linux live gate has terminal success at 17:19:13 UTC. The
+`unchanged-runtime-media-proof` gate passes at 17:28:15: the mechanical diff
+contains only the reviewed qualification correction/progress entry, all prior
+normal-release artifact hashes match, the source/destination media hashes match,
+and prior full-migration receipts retain identical completion/parity evidence.
+The a8047327 CLI strictly verifies the existing separate test source with
+Status OK and unchanged checksum/nanosecond stat. Its verification takes
+313.42 seconds, maximum RSS 58,576 KiB and zero swap; this is not a controlled
+performance comparison. Full migration/resource results remain attributed to
+48baeefe, not relabeled as a8047327 execution. Closed media-attribution evidence
+is mirrored locally. Final Data/home free bytes at this gate are
+279,670,247,424 / 75,187,335,168. Release CLI tests are now running.
