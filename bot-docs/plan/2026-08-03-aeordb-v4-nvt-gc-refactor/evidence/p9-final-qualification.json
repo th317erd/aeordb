@@ -2,7 +2,7 @@
   "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
-  "captured_at": "2026-09-11T18:48:01Z",
+  "captured_at": "2026-09-12T06:44:41Z",
   "status": "qualification_in_progress",
   "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
@@ -186,14 +186,35 @@
     },
     "duration": {
       "s1": {
-        "status": "running_at_last_observation",
+        "status": "passed",
         "started_utc": "2026-09-11T18:42:49Z",
-        "last_observed_utc": "2026-09-11T18:48:01Z",
+        "finished_utc": "2026-09-12T06:43:37Z",
+        "observed_seconds": 43200,
         "required_seconds": 43200,
+        "final_worker_writes": 27155,
+        "final_metric_writes": 27154,
+        "reads": 13457,
+        "deletes": 4511,
+        "terminal_verify": "Status: OK",
+        "snapshots_checked": 632,
+        "verification_preserved_checksum_and_stat": true,
+        "database_bytes_after_shutdown": 621590063,
+        "database_sha256": "caece69410f1f85fec852d6f4cddc0f07b8470845c4e4938fbb36d5a56f1cfd8",
+        "resource_summary": {
+          "status": "passed",
+          "finished_utc": "2026-09-12T06:44:08Z",
+          "metric_rows": 721,
+          "rss_growth_after_first_hour_percent": 12.8,
+          "vm_data_growth_after_first_hour_percent": 15.8,
+          "maximum_file_descriptors": 13,
+          "receipt": "evidence/s1-resource-summary.exit"
+        },
         "terminal_receipt": "evidence/s1-12h-pinned.exit"
       },
       "s2": {
-        "status": "pending",
+        "status": "running_at_last_observation",
+        "started_utc": "2026-09-12T06:44:08Z",
+        "last_observed_utc": "2026-09-12T06:44:41Z",
         "required_seconds": 43200,
         "terminal_receipt": "evidence/s2-12h-pinned.exit"
       },

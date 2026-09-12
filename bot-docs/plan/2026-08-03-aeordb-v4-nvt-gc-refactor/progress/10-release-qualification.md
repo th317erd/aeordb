@@ -11,8 +11,8 @@ Current follow-up (September 11): the checkpoint restart correction is qualified
 against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentation
 entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
 native and static checks pass. The committed exact a8047327 native releases,
-100 complete crash suites and all short soaks now pass; its first 12-hour stage
-is active. At 48baeefe, media/live/resource/release-CLI
+100 complete crash suites, all short soaks and full 12-hour S1 now pass; S2
+is active as of September 12. At 48baeefe, media/live/resource/release-CLI
 and 100 complete crash suites passed, but short S3 stopped on a malformed
 checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
 passes below remain explicitly attributed predecessor evidence.
@@ -1262,3 +1262,34 @@ writes and 1,468 reads. Driver PID 296913 and the capacity guard remain active;
 Data/home free bytes are 279,143,149,568 / 74,953,822,208, guard age 11 seconds.
 No current 12-hour pass is claimed. All three durations, final audit and scoped
 test-database cleanup remain required before the owner's step-4 discussion.
+
+### First 12-hour integrity/resource gate passes — September 12
+
+S1 completes cleanly with terminal gate exit 0 at 06:43:37 UTC. The 721 metrics
+rows include a 43,200-second sample. Final worker counters are 27,155 writes,
+13,457 reads and 4,511 deletes; the final periodic sample has 27,154 writes
+because one more write completed before shutdown. These are distinct receipt
+observations, not a count mismatch to hide.
+
+Strict read-only terminal verification reports 473,650 valid WAL entries, zero
+header/hash/directory/KV/Void issues, and 632 intact snapshots. Post-shutdown
+size is 621,590,063 bytes; SHA-256 is
+`caece69410f1f85fec852d6f4cddc0f07b8470845c4e4938fbb36d5a56f1cfd8`.
+Before/after verification SHA and nanosecond stat match. No repair was requested.
+The prior failed 33420bad S1 specimen remains untouched and is not replaced by
+this independent successful run.
+
+Resource summary passes at 06:44:08: first-hour-to-end RSS growth 12.8%, VmData
+growth 15.8%, and maximum 13 descriptors, all within the existing gates. The
+substantial post-first-GC throughput slowdown remains consistent with historical
+same-corpus characterization; this stability pass is not a claim of sustained
+warmup throughput or controlled performance parity.
+
+Closed S1 logs/metrics/stat/hash records are mirrored locally under rendered
+`linux-closed-s1-{evidence,runtime}/`, excluding the raw database. These captures
+are not an attempt to seal the still-active overall sequence. At the S1 terminal
+guard, Data/home free bytes are 278,603,653,120 / 75,855,097,856.
+
+S2 starts at 06:44:08 UTC. Driver 296913 and the 30-second guards remain active;
+the first worker's scheduled interval is 906 seconds. S2/S3 durations, final
+audit and scoped cleanup remain open; no step-4 boundary has been crossed.

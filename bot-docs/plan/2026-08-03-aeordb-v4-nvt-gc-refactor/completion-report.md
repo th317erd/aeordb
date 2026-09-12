@@ -1,13 +1,13 @@
 # AeorDB v4 Qualification and Completion Report
 
-## Current result — September 11, 2026
+## Current result — September 12, 2026
 
 **Qualification remains in progress.** Candidate `a804732755b187b3e2bcdd109da37a2895dc9a80`
 has passed full Linux coverage, affected native tests, all three normal native
 release builds, live HTTP/restart/readback, and byte-preserving media verification.
-All 100 complete crash suites and all three short soaks pass. The first of three
-sequential 12-hour soaks is running; final evidence audit and requested
-test-database cleanup remain pending.
+All 100 complete crash suites, all three short soaks and the full 12-hour S1
+integrity/resource gate pass. S2 is running; S3, final evidence audit and
+requested test-database cleanup remain pending.
 
 The owner authorized release-qualification steps 1–3 and cleanup, then required
 a **stop and discussion before step 4**. No installation, publication, deployment,
@@ -113,7 +113,9 @@ was pinned before test-feature builds could replace its build-cache path.
 | Resource overlap | Explicitly carried from `48baeefe`: 120 seconds, 8 GiB/no-swap, peak 2,190,843,904 bytes, three KV expansions, no functional failures, health p99 98.872 ms/maximum 676.777 ms |
 | Crash qualification | 100 complete seven-function suites pass at 18:37:48 UTC; 2,300 interruption windows; 100 explicit forced-unmount self-skips |
 | Short S1/S2/S3 | All pass by 18:42:49 UTC; S3 verifies and compares checkpoints through 12 cycles |
-| 12-hour S1/S2/S3 | S1 starts 18:42:49 UTC; no current duration pass yet |
+| 12-hour S1 | Pass September 12 at 06:43:37 UTC; strict read-only verification reports zero issues/632 intact snapshots; database bytes/stat unchanged |
+| S1 resource summary | Pass 06:44:08 UTC; 721 samples/43,200 seconds; RSS growth 12.8%, VmData growth 15.8%, maximum 13 file descriptors |
+| 12-hour S2/S3 | S2 starts September 12 at 06:44:08 UTC; S3 pending |
 | Final audit and test-DB cleanup | Pending |
 
 The full-media operation was **not rerun or relabeled** as a8047327 execution.
@@ -151,7 +153,7 @@ recoverability; it does not authorize deletion of the FS-Server1 database.
 
 ## Remaining boundary
 
-Completion requires the current three-duration gates, a reconciled
+Completion requires the remaining S2/S3 duration gates, a reconciled
 sealed packet and scoped cleanup. Then stop for the owner's step-4 discussion.
 
 A future operational proposal must distinguish a v3-compatible deployment from
