@@ -11,7 +11,7 @@ Current follow-up (September 11): the checkpoint restart correction is qualified
 against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentation
 entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
 native and static checks pass. The committed exact a8047327 native releases,
-100 complete crash suites, all short soaks and full 12-hour S1 now pass; S2
+100 complete crash suites, all short soaks and full 12-hour S1/S2 now pass; S3
 is active as of September 12. At 48baeefe, media/live/resource/release-CLI
 and 100 complete crash suites passed, but short S3 stopped on a malformed
 checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
@@ -1293,3 +1293,28 @@ guard, Data/home free bytes are 278,603,653,120 / 75,855,097,856.
 S2 starts at 06:44:08 UTC. Driver 296913 and the 30-second guards remain active;
 the first worker's scheduled interval is 906 seconds. S2/S3 durations, final
 audit and scoped cleanup remain open; no step-4 boundary has been crossed.
+
+### Second 12-hour restart gate passes — September 12
+
+S2 completes at 18:45:01 UTC, exit 0 and no guard termination. All 65 planned
+restart cycles have successful verification receipts (status 0, no corrupt
+headers). The first worker starts at 06:44:10 UTC and the final scheduled
+interruption occurs at 18:44:10: a complete 43,200-second cycle window, including
+verification/restart intervals. The guarded stage lasts 43,253 seconds.
+
+Each cycle normally reopens a separate diagnostic copy and then verifies it
+read-only. Successful diagnostic copies are removed by the established harness;
+the final original crash image remains unchanged by those checks. Its size is
+540,173,616 bytes, SHA-256
+`bde7c822bc06b3eb214ac85abf1a9b93bea426ed3a59364e936970f0dee2c4ac`.
+This is not a claim that the original final-interruption image was gracefully
+closed or repaired. Terminal log SHA-256 is
+`bba52b92e2ecd6a08e8b541c2f74d5787cc1aee253e3ca3bfcf37775a26fbb74`.
+Pinned normal release hashes still match. Closed logs/metadata are mirrored
+under rendered `linux-closed-s2-{evidence,runtime}/`, excluding the raw database.
+
+S3 starts at 18:45:01 UTC, same driver 296913 and unchanged guards. By 18:51:21,
+18 cycles pass both verification and checkpoint comparison; cycle 19 is active.
+Data/home free bytes are 278,011,830,272 / 74,323,701,760 (guard age 19 seconds).
+S3 duration, final evidence audit and scoped test-database cleanup remain open.
+The owner-required stop before step 4 remains unchanged.

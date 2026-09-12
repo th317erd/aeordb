@@ -2,7 +2,7 @@
   "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
-  "captured_at": "2026-09-12T06:44:41Z",
+  "captured_at": "2026-09-12T18:51:21Z",
   "status": "qualification_in_progress",
   "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
@@ -212,14 +212,26 @@
         "terminal_receipt": "evidence/s1-12h-pinned.exit"
       },
       "s2": {
-        "status": "running_at_last_observation",
+        "status": "passed",
         "started_utc": "2026-09-12T06:44:08Z",
-        "last_observed_utc": "2026-09-12T06:44:41Z",
+        "finished_utc": "2026-09-12T18:45:01Z",
+        "observed_seconds": 43200,
+        "observed_duration_basis": "first worker start to final scheduled interruption; includes verification and restart intervals",
+        "guarded_stage_elapsed_seconds": 43253,
         "required_seconds": 43200,
+        "restart_cycles": 65,
+        "successful_cycle_verifications": 65,
+        "cycle_verification_basis": "normal reopen of separate diagnostic copy followed by read-only verification",
+        "database_bytes": 540173616,
+        "database_sha256": "bde7c822bc06b3eb214ac85abf1a9b93bea426ed3a59364e936970f0dee2c4ac",
+        "database_state": "original final-interruption image; normal-reopen integrity verified on a separate copy",
+        "log_sha256": "bba52b92e2ecd6a08e8b541c2f74d5787cc1aee253e3ca3bfcf37775a26fbb74",
         "terminal_receipt": "evidence/s2-12h-pinned.exit"
       },
       "s3": {
-        "status": "pending",
+        "status": "running_at_last_observation",
+        "started_utc": "2026-09-12T18:45:01Z",
+        "last_observed_utc": "2026-09-12T18:51:21Z",
         "required_seconds": 43200,
         "terminal_receipt": "evidence/s3-12h-pinned.exit"
       }

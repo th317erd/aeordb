@@ -13,7 +13,7 @@
 > ratification-time state. Current execution status is in
 > [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md).
 > Candidate a8047327 passes ordinary, affected-native, exact-release, crash and
-> short-soak gates plus full 12-hour S1; S2/S3 qualification, audit and test-database
+> short-soak gates plus full 12-hour S1/S2; S3 qualification, audit and test-database
 > cleanup remain in progress. The earlier 535004f1 closure in
 > [ledger 08](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md) is historical.
 > The large corrupt-database repair was retired, not successfully migrated.
