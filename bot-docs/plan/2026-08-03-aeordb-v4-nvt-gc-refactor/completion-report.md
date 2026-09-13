@@ -1,13 +1,13 @@
 # AeorDB v4 Qualification and Completion Report
 
-## Current result — September 12, 2026
+## Current result — September 13, 2026
 
 **Qualification remains in progress.** Candidate `a804732755b187b3e2bcdd109da37a2895dc9a80`
 has passed full Linux coverage, affected native tests, all three normal native
 release builds, live HTTP/restart/readback, and byte-preserving media verification.
-All 100 complete crash suites, all three short soaks, the full 12-hour S1
-integrity/resource gate and 12-hour S2 restart gate pass. S3 is running; final
-evidence audit and requested test-database cleanup remain pending.
+All 100 complete crash suites, all three short soaks and all three full 12-hour
+S1/S2/S3 stages pass. The driver exited successfully at 06:45:28 UTC on September
+13. Final evidence sealing and requested test-database cleanup remain active.
 
 The owner authorized release-qualification steps 1–3 and cleanup, then required
 a **stop and discussion before step 4**. No installation, publication, deployment,
@@ -116,7 +116,7 @@ was pinned before test-feature builds could replace its build-cache path.
 | 12-hour S1 | Pass September 12 at 06:43:37 UTC; strict read-only verification reports zero issues/632 intact snapshots; database bytes/stat unchanged |
 | S1 resource summary | Pass 06:44:08 UTC; 721 samples/43,200 seconds; RSS growth 12.8%, VmData growth 15.8%, maximum 13 file descriptors |
 | 12-hour S2 | Pass September 12 at 18:45:01 UTC; all 65 restart cycles pass normal-reopen/copy verification |
-| 12-hour S3 | Starts September 12 at 18:45:01 UTC; duration gate still open |
+| 12-hour S3 | Pass September 13 at 06:45:28 UTC; 1,510/1,510 copied verifications and checkpoint comparisons; configured 43,200-second window, 43,227-second guarded stage |
 | Final audit and test-DB cleanup | Pending |
 
 The full-media operation was **not rerun or relabeled** as a8047327 execution.
@@ -154,8 +154,8 @@ recoverability; it does not authorize deletion of the FS-Server1 database.
 
 ## Remaining boundary
 
-Completion requires the remaining S3 duration gate, a reconciled
-sealed packet and scoped cleanup. Then stop for the owner's step-4 discussion.
+Completion requires the reconciled sealed packet and scoped cleanup. Then stop
+for the owner's step-4 discussion.
 
 A future operational proposal must distinguish a v3-compatible deployment from
 additional v4 service activation work. It must not invent a cutover command or

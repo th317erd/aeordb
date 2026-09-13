@@ -8,8 +8,8 @@ release-qualification plan. Current status: **qualification in progress**.
 [Ledger 10](progress/10-release-qualification.md) is the sole active checklist.
 
 Ordinary/native/static, exact-release, 100-complete-suite crash and short-soak
-gates pass, as do the full 12-hour S1 integrity/resource and S2 restart gates.
-S3 is running; final packet audit and requested cleanup remain open. Stop before step 4.
+gates pass, as do all three full 12-hour S1/S2/S3 stages. The driver has exited.
+Final packet sealing and requested cleanup remain open. Stop before step 4.
 
 Ordinary service authority remains v3-compatible. Public `migrate-v4` is
 offline shadow creation/verification, not activation. Public v4 service
@@ -37,7 +37,7 @@ Do not turn their older test counts or duration passes into current evidence.
 | Historical authorization, root selectors and concealment | Child 06 route/reference targets and current full suite |
 | User acknowledgement excludes synchronous derived work | Child 06 producer/worker evidence and current regressions |
 | Bounded resident memory and scratch | 48baeefe 8 GiB/no-swap overlap carried with explicit source-equivalence proof; unchanged disk floors |
-| Current crash/soak proof | 100 complete suites, all short soaks, 12-hour S1 integrity/resource and S2 restart pass; S3 still open |
+| Current crash/soak proof | 100 complete suites, all short soaks and all three full 12-hour S1/S2/S3 stages pass |
 | Production-derived migration and dirty restart | Not proven. Large damaged-file repair retired; disposable clean-media migration is separate evidence |
 | Canary before cutover and explicit acceptance | Not performed; requires discussion/authorization and available implementation surfaces |
 | V3 backup/rollback boundary | Defined in migration contract; operational first-write boundary never crossed |
@@ -116,7 +116,7 @@ added to invent a larger unique count.
 The closed ordinary-proof manifest has 209 files and SHA-256
 `6e25641e4d70228a8e622fed6e748742f7b44e8c96f766204d4d63641bc908a2`.
 It includes failed attempts, frozen S3 evidence, final Linux/native receipts and
-the lossless capacity archive. It does not seal the later active release run.
+the lossless capacity archive. It does not seal the subsequent release run.
 
 ## Exact release and real-workload proof
 
@@ -142,7 +142,7 @@ Artifact hashes are in [the completion report](completion-report.md) and the
 | `s1-12h-pinned.exit` | Pass September 12 at 06:43:37 UTC; 43,200-second metric sample; zero terminal verifier issues/632 intact snapshots; checksum/stat unchanged |
 | `s1-resource-summary.exit` | Pass 06:44:08 UTC; 721 rows, RSS growth 12.8%, VmData growth 15.8%, maximum 13 descriptors |
 | `s2-12h-pinned.exit` | Pass September 12 at 18:45:01 UTC; 65/65 normal-reopen/copy verifications; 12-hour cycle window, 43,253-second guarded stage |
-| `s3-12h-pinned.exit` | Starts September 12 at 18:45:01 UTC; complete duration/verification/checkpoint proof still required |
+| `s3-12h-pinned.exit` | Pass September 13 at 06:45:28 UTC; 1,510/1,510 copied verification/checkpoint successes; configured 43,200-second window, 43,227-second guarded stage |
 
 The pinned crash manifest SHA is
 `aac9bf5743e1ab4f1bf302748815748034d2b40e4293e8d381624ee3f2008460`.

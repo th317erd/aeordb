@@ -2,7 +2,7 @@
   "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
-  "captured_at": "2026-09-12T18:51:21Z",
+  "captured_at": "2026-09-13T06:45:28Z",
   "status": "qualification_in_progress",
   "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
@@ -229,10 +229,20 @@
         "terminal_receipt": "evidence/s2-12h-pinned.exit"
       },
       "s3": {
-        "status": "running_at_last_observation",
+        "status": "passed",
         "started_utc": "2026-09-12T18:45:01Z",
-        "last_observed_utc": "2026-09-12T18:51:21Z",
+        "finished_utc": "2026-09-13T06:45:28Z",
+        "observed_seconds": 43227,
+        "observed_duration_basis": "guarded stage elapsed; configured 43200-second stress window completed normally; first spawn to last kill is 43198 seconds because window starts before first spawn",
+        "guarded_stage_elapsed_seconds": 43227,
         "required_seconds": 43200,
+        "restart_cycles": 1510,
+        "successful_cycle_verifications": 1510,
+        "successful_checkpoint_comparisons": 1510,
+        "database_bytes": 142162844,
+        "database_sha256": "69201a89e56177454107b87766fa8247796c61e96313c0103e70e734efc0f366",
+        "database_state": "original final-interruption image; normal-reopen integrity and checkpoint comparison verified on separate diagnostic copies",
+        "log_sha256": "1f25b5e53b4bdbbc932aae59a4c2ed975059a615109c0e94be112f3037407185",
         "terminal_receipt": "evidence/s3-12h-pinned.exit"
       }
     },

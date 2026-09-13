@@ -9,12 +9,12 @@
 **Supersedes:** `2026-07-16-nvt-field-index-refactor-and-migration.md` in full
 **Formalization review:** [PASS](2026-08-03-aeordb-v4-nvt-gc-refactor/formalization-review.md)
 
-> **Execution status (2026-09-12):** The header above preserves the plan's
+> **Execution status (2026-09-13):** The header above preserves the plan's
 > ratification-time state. Current execution status is in
 > [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md).
 > Candidate a8047327 passes ordinary, affected-native, exact-release, crash and
-> short-soak gates plus full 12-hour S1/S2; S3 qualification, audit and test-database
-> cleanup remain in progress. The earlier 535004f1 closure in
+> short-soak gates plus all three full 12-hour S1/S2/S3 stages; final sealing and
+> test-database cleanup remain in progress. The earlier 535004f1 closure in
 > [ledger 08](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md) is historical.
 > The large corrupt-database repair was retired, not successfully migrated.
 > Ordinary service remains v3-compatible; public migration builds an offline v4

@@ -11,8 +11,8 @@ Current follow-up (September 11): the checkpoint restart correction is qualified
 against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentation
 entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
 native and static checks pass. The committed exact a8047327 native releases,
-100 complete crash suites, all short soaks and full 12-hour S1/S2 now pass; S3
-is active as of September 12. At 48baeefe, media/live/resource/release-CLI
+100 complete crash suites, all short soaks and all three full 12-hour stages now
+pass as of September 13. Final audit and scoped cleanup are active. At 48baeefe, media/live/resource/release-CLI
 and 100 complete crash suites passed, but short S3 stopped on a malformed
 checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
 passes below remain explicitly attributed predecessor evidence.
@@ -23,7 +23,7 @@ parent; it does not rewrite historical results or authorize production work.
 
 - [x] 1. Renew capacity admission and exact native Linux/macOS/Windows release
   builds for checkpoint-corrected source a8047327.
-- [ ] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
+- [x] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
 - [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
   historical qualification clearly labeled, remaining operational gates explicit.
@@ -1318,3 +1318,46 @@ S3 starts at 18:45:01 UTC, same driver 296913 and unchanged guards. By 18:51:21,
 Data/home free bytes are 278,011,830,272 / 74,323,701,760 (guard age 19 seconds).
 S3 duration, final evidence audit and scoped test-database cleanup remain open.
 The owner-required stop before step 4 remains unchanged.
+
+### Third 12-hour stress gate passes — September 13
+
+S3 and the complete Linux driver finish at 06:45:28 UTC, exit 0 and no guard
+termination. All 1,510 planned cycles pass both copied normal-reopen verification
+(status 0, no corrupt headers) and checkpoint comparison. The configured stress
+window is 43,200 seconds; the guarded stage lasts 43,227 seconds. First spawn to
+last interruption is 43,198 seconds because the loop clock starts before the
+first spawn. Do not relabel that narrower interval as a measured 43,200 seconds.
+
+Final original-interruption image: 142,162,844 bytes, SHA-256
+`69201a89e56177454107b87766fa8247796c61e96313c0103e70e734efc0f366`.
+Terminal log SHA-256:
+`1f25b5e53b4bdbbc932aae59a4c2ed975059a615109c0e94be112f3037407185`.
+Normal-reopen and checkpoint checks operate on separate diagnostic copies; the
+final original is not claimed gracefully closed or repaired. Final Data/home
+free bytes are 277,908,434,944 / 74,183,491,584. Driver PID 296913 has exited;
+there is no continuing test monitor or worker to babysit.
+
+The closed-evidence audit confirms all 15 unique sequence stages exit 0 with no
+guard termination. The 236-file S1-followup and 209-file S3-followup manifests
+and listed contents reverify intact. Current Linux runner/normal/crash binaries
+match their pinned manifests; exact source and lockfile match; fresh macOS and
+Windows artifact hashes match their closed native release receipts. Both owned
+current live-test units are inactive. No production host was contacted.
+
+Long-stage guard sample minima (Data/home free bytes): S1
+278,603,685,888 / 74,406,371,328; S2 277,507,260,416 / 72,375,451,648; S3
+277,605,236,736 / 73,916,014,592. All existing floors remain unchanged. The audit
+recomputes the full Linux split total as 7,528 + 2 = 7,530 unique tests, with
+three nested subprocess checks separately counted. Negative audit checks reject
+failed or duplicate stages, either breached disk floor, and missing samples.
+
+Closeout evidence is being assembled separately at
+`/media/Data/AeorDB/Tests/p9-release-closeout-20260913/`, leaving earlier seals
+untouched. A reviewed list of 20 successful/redundant test databases is undergoing
+fresh identity/hash/no-opener admission; this is not a recursive directory purge.
+Cleanup-helper tests cover exact deletion with a durable tombstone, malformed
+paths, symlinks, hardlinks, checksum mismatch, missing/duplicate targets,
+open files, post-admission change, and retained-reference conflicts. All ten pass
+locally and on the desktop. Two preflight mistakes (unsupported fuser `--` and
+an overstrict root-length check) failed closed before test-database deletion;
+their outputs remain retained. Final seal and cleanup receipt remain pending.
