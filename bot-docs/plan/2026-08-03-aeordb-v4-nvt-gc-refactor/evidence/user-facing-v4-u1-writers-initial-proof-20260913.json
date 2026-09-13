@@ -1,0 +1,447 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-13T22:00:09.058Z",
+  "sourceBase": "94eb8f32b702f868bba98ad3d42196b5d06615bc",
+  "scope": "Initial U1 four-writer snapshot: baseline before late MIME name-initial correction",
+  "unitComplete": false,
+  "requiredBeforeLanding": "Fix inherited RFC 6838 type/subtype first-character validation across parser-plan writer/reader, native runtime and independent reference; qualify the final corrected source",
+  "semanticProductionU1Complete": false,
+  "fullV4ProductionReady": false,
+  "ordinaryDefaultGate": "Still red: ordinary CLI creates version 3, not 4",
+  "distinctWorkspaceTests": 7564,
+  "existingWorkspaceIgnores": 7,
+  "nestedSubprocessTestsSeparate": 3,
+  "newWriterTests": 27,
+  "nativeScope": "Fourteen affected targets and complete standalone reference tests/fixtures; not the whole native workspace",
+  "resourceScope": "16 GiB/no-swap build guard and host disk floors; not final 8 GiB production-shaped runtime qualification",
+  "retainedPriorFailures": [
+    "Scope first admission: missing ignored root lock, stopped before Cargo",
+    "Scope and invocation policy: failing-first missing APIs",
+    "Initial affected run: four shifted audit line positions; downstream tests did not execute",
+    "Selector first red: absent APIs plus integer inference error; corrected red rerun failed only on missing APIs",
+    "Parser-plan red: missing encoder API"
+  ],
+  "inputs": [
+    {
+      "path": "aeordb-lib/Cargo.toml",
+      "sha256": "06b3d9e8c24681f50eafd465bd2d22ca5d82cb1e8f3886d8037a49f94174e62f"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/parser_plan_writer_spec.rs",
+      "sha256": "14469daf141d97aa6a5067c10a7a16486623380f09f13f63e5176ef88837c263"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/parser_plan.rs",
+      "sha256": "70ba8685b40751ddc38b84ccea9ce780699ccc4bad9586510f110001ace43a67"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/source_selector_writer_spec.rs",
+      "sha256": "6300217c9d98a95a5357d5453e9b0282d6919f939ca16db29e6c1a19d4abfca6"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+      "sha256": "8fe8105d6875a792a4ba10e430b122f030214fd6961a1172eb564ba1cc7f35c9"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/invocation_policy_writer_spec.rs",
+      "sha256": "6dd7857824bfa43d3206e0283e977654ede9b6d2b0978faa05e85a95124aa173"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/dependency.rs",
+      "sha256": "3414223a1418e71cdc1a40926e94ac07deb58265aff8a9795146b5bef9b851f4"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/scope_definition_writer_spec.rs",
+      "sha256": "43acf4bb909d9b6214ebba35a547a15195e23f4fa83faa534b634dff25e60234"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/scope.rs",
+      "sha256": "a74ddcafc4990eed3ece7efb53a68c2ad237682f2a55376f73094e6b7f7fbe7a"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/error-squelch-allowlist-v1.json",
+      "sha256": "2f4ea38917ff28a5d23f6e2667611ab2a379e3a549b9b5083403ddaed738b566"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    }
+  ],
+  "gates": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-affected.guard.log",
+      "sha256": "7569bfcc290777cfb59c1e322dc18a768cc20671e144183fc62f0c0a8a572ff4",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --no-fail-fast --test parser_plan_writer_spec --test invocation_policy_writer_spec --test scope_definition_writer_spec --test source_selector_writer_spec --test v4_format_fixture_spec --test v4_reader_hardening_spec --test index_native_parser_spec --test index_native_parser_resource_spec --test index_native_source_spec --test index_native_semantic_source_spec --test index_semantic_source_spec --test semantic_catalog_reader_spec --test v4_root_migration_spec --test error_squelch_architecture_spec ",
+      "diskSamples": 3
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-clippy.guard.log",
+      "sha256": "98e3f26f27ac44647b06b3cd0e34ed61467c55ab875ac9bb121cd6648030b74d",
+      "command": "cargo clippy --offline --locked -j 2 -p aeordb --all-targets -- -D warnings ",
+      "diskSamples": 5
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace.guard.log",
+      "sha256": "c7e6cd0e5b67c01523e25996b8a97aa108e4956f741bc45cfd228acf3d6d57b8",
+      "command": "env RUST_TEST_THREADS=2 cargo test --offline --locked -j 2 --workspace --all-targets --no-fail-fast -- --skip test_create_at_stage_clamps_to_max --skip test_resize_at_max_stage_returns_error ",
+      "diskSamples": 72
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-clamp.guard.log",
+      "sha256": "4f39e9decd39bb37fdf629fee3ec25c55e64e586d74cfe635a5051a6c141465f",
+      "command": "env TMPDIR=/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-large-kv-temporary cargo test --offline --locked -j 2 -p aeordb --test disk_kv_store_spec test_create_at_stage_clamps_to_max -- --exact ",
+      "diskSamples": 9
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-resize.guard.log",
+      "sha256": "17edcfd36740875ae590e7d2629d63a83eb47bcda5e8886d90432c5653a9b3ea",
+      "command": "env TMPDIR=/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-large-kv-temporary cargo test --offline --locked -j 2 -p aeordb --test disk_kv_store_spec test_resize_at_max_stage_returns_error -- --exact ",
+      "diskSamples": 9
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace-clippy.guard.log",
+      "sha256": "f84bcbefec0057830692c2fed2e8978e83c7bd14f62499f5b59242fdb7735031",
+      "command": "cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference.guard.log",
+      "sha256": "79a708c1c75e458970c9a20145c2c2a641f41604141f41976851fb36e296b928",
+      "command": "cargo test --offline --locked --release -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "diskSamples": 2
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference-verify.guard.log",
+      "sha256": "69f164a1a9876f46e967a1454004b791485c02f5f37bb99691101dd81c29a8fd",
+      "command": "cargo run --offline --locked --release -j 2 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4 ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-contracts.guard.log",
+      "sha256": "39a74177c14945c90caf89dcd8b4b850d41e510270786a0526639c419dc1bc66",
+      "command": "env CARGO_NET_OFFLINE=true bash scripts/plan/check-v4-contracts.sh ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-debt-selftest.guard.log",
+      "sha256": "eccdc28a6a34b99689eb9d5b65a09a219e68b67ba507fec29989fb8eb0db3d1a",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-affected.log",
+      "sha256": "b77e2e7ad383bb2c03a0b678341ecbc95cebd36301492d7b75b1acfadc459c62",
+      "passed": 222,
+      "targets": 14,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference.log",
+      "sha256": "ea7e63d41897724972e702973dcd11fc1d24180af310f2a2dfe96a84ac7db778",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference-verify.log",
+      "sha256": "1ac6831e02acf849a638ebdc21d242ce60fead661664afa83e9c0cd86749c080",
+      "independentFixtures": 454
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace.log",
+      "sha256": "d77cdcd46c37d9a0140229215b654c2e27aedf085bf5745479905343cf57ef0d",
+      "summary": "top_level_targets=351 passed=7562 failed=0 ignored=7 filtered=2\nnested_targets=3 passed=3 failed=0"
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-clamp.log",
+      "sha256": "40c8ccf9e8f9eb88f1dbe8c24c0ae46ff3f7903b8aac101a474f63aec7c0d0a0",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-resize.log",
+      "sha256": "4a31da1556a928e8439f22a0a92bdc680ca00fd2241d3f807db82184275f2299",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-clippy.log",
+      "sha256": "127df1e26ab8cf06aa4cd8e331b85cd924ba3abc657c9744cf30828abf94af96",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace-clippy.log",
+      "sha256": "5dd5288c9059ac3b962a9a254266e6a8283842255c41ec0b8a62720ee869ef6b",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-contracts.log",
+      "sha256": "79ce73569b5fc32116d7d116633cc760b205e57a7c8a32438fc475dc7c0aef86",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-debt-selftest.log",
+      "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/final-source-check.log",
+      "sha256": "9ad3c271b02946de137ffb8932073b060a426f7979d1391280f5395021a29316",
+      "sourceInputsChecked": 12
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/affected.log",
+      "sha256": "c9740c82a569ebb535b285161f34e2bb669d353ba81ab924e3c8a08b2b483416",
+      "passed": 222,
+      "targets": 14,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/reference.log",
+      "sha256": "8929bc0ed63a0f6879964bd410419f9a2527b7510e592d66fb242b9b7078e730",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/reference-verify.log",
+      "sha256": "cc4612fc3db0d3ca5f31d79661b23bba62fe08b5f3d57293ab2e458b9407e108",
+      "independentFixtures": 454
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/final-source-check.log",
+      "sha256": "94f8a371cfd91d2e13a9c95fdf528b52a2773f060f251b0c85aa368b08236573",
+      "sourceInputsChecked": 12
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/affected.stdout.log",
+      "sha256": "1152866db2f1cb5f3b31224b6dda0256df9420a81d12e6983a63fd48a9b3057c",
+      "passed": 222,
+      "targets": 14,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/reference.stdout.log",
+      "sha256": "2e1b6e096f340ab8c6656aac4dcfe68f740c3d878a46d0892e54ed83246f2bb8",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/reference-verify.stdout.log",
+      "sha256": "304870741108a654f5f08daebc4dd4bc0c8817d9ed5cc0f74fb5508c27986055",
+      "independentFixtures": 454
+    }
+  ],
+  "receipts": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-affected.exit",
+      "sha256": "5ef318b5d9e7ed2cf47ef22638ae45b257630ffb6afff76c38f022b736637a35",
+      "result": {
+        "finished_utc": "2026-09-13T21:03:26Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340493099008",
+        "home_free": "73453232128"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-four-writers-clippy.exit",
+      "sha256": "e995d6d1e1898594d0f192e1b4a176701ecac750d3bd8aa95583d8ff5fcaa4ff",
+      "result": {
+        "finished_utc": "2026-09-13T21:09:31Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340492963840",
+        "home_free": "73453441024"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace.exit",
+      "sha256": "b5dc4fe7f2e3c74c2bd246d40695a3fe324d3c7315478d189e7056e0b3d9e2d4",
+      "result": {
+        "finished_utc": "2026-09-13T21:47:53Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340491935744",
+        "home_free": "73324806144"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-clamp.exit",
+      "sha256": "6662350b5afb7be4724399f7ba6430b149be61ceca3ac6af566941c43ef683fb",
+      "result": {
+        "finished_utc": "2026-09-13T21:52:24Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340491894784",
+        "home_free": "73315205120"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-maximum-stage-resize.exit",
+      "sha256": "b974b76c35bc11adb3e48a1acc1944683898e839583a013a83add7b714874ddb",
+      "result": {
+        "finished_utc": "2026-09-13T21:56:54Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340491857920",
+        "home_free": "73314856960"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-workspace-clippy.exit",
+      "sha256": "9f7e7c84a32e6d8409de6eadf8e43e2e6b0e0d69ecc595a7572291f7c5c3be82",
+      "result": {
+        "finished_utc": "2026-09-13T21:57:24Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340491821056",
+        "home_free": "73314832384"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference.exit",
+      "sha256": "303e7449ffea38aa500a67cc036bc62e6603fd17009a4b284c6ec0f71b76366a",
+      "result": {
+        "finished_utc": "2026-09-13T21:58:24Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340398522368",
+        "home_free": "73314660352"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-reference-verify.exit",
+      "sha256": "11446a599c93213e33f515e065770653390238b35fa37c939f370b745e8cc294",
+      "result": {
+        "finished_utc": "2026-09-13T21:58:54Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340393910272",
+        "home_free": "73314623488"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-contracts.exit",
+      "sha256": "e14715c4ce0c9e513c2368eb1d4dd9cb8f1a497633940ab15c8491cfdc36e026",
+      "result": {
+        "finished_utc": "2026-09-13T21:59:24Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340393861120",
+        "home_free": "73314623488"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-debt-selftest.exit",
+      "sha256": "788fc66157768ef8ae7be5952a6b877676ef7204cfd8f97bfd872069c0ed5e6e",
+      "result": {
+        "finished_utc": "2026-09-13T21:59:54Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340393828352",
+        "home_free": "73314529280"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-evidence/u1-writers-gates.exit",
+      "sha256": "9a1c4511a67824fc6a4e625324663cf665c5a66b2aac7a68544bd87d6d5c2092",
+      "result": {
+        "exit_status": "0",
+        "last_stage": "complete",
+        "finished_utc": "2026-09-13T21:59:54Z"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/affected.exit",
+      "sha256": "12fa8315322d09316f1e7b371a0860027452b79d58417b480b7c80d9ba5cf230",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T21:18:22Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68104904704",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/reference.exit",
+      "sha256": "364657d24f87fa65311085c5c37a3efc2941501401ad9169ddcbf7c51050ea17",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T21:18:55Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68103442432",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-macos-evidence/reference-verify.exit",
+      "sha256": "1f8d8d233da7f7e168e37605d4b423e0deb810d8c9a308b9959dd0a6c8e61e1e",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T21:19:25Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68102377472",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/affected.result.json",
+      "sha256": "81f72ed5d16379f34fc587a5f9eb8efe8a0559e4f59481889053ea7b6e2b8dbe",
+      "result": {
+        "source_commit": "94eb8f32b702f868bba98ad3d42196b5d06615bc",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 -p aeordb --no-fail-fast --test parser_plan_writer_spec --test invocation_policy_writer_spec --test scope_definition_writer_spec --test source_selector_writer_spec --test v4_format_fixture_spec --test v4_reader_hardening_spec --test index_native_parser_spec --test index_native_parser_resource_spec --test index_native_source_spec --test index_native_semantic_source_spec --test index_semantic_source_spec --test semantic_catalog_reader_spec --test v4_root_migration_spec --test error_squelch_architecture_spec",
+        "cargo_pid": 8640,
+        "started_utc": "2026-09-13T21:17:20.5529116Z",
+        "completed_utc": "2026-09-13T21:20:56.6598299Z",
+        "elapsed_seconds": 215.9634046,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19175731200,
+        "final_free_bytes": 19175677952
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/reference.result.json",
+      "sha256": "27d5f825ecdad51e62f7a22db8334643df1b66bd698a244fda67b8e2abebbc84",
+      "result": {
+        "source_commit": "94eb8f32b702f868bba98ad3d42196b5d06615bc",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml",
+        "cargo_pid": 4424,
+        "started_utc": "2026-09-13T21:20:57.3037297Z",
+        "completed_utc": "2026-09-13T21:21:19.3497662Z",
+        "elapsed_seconds": 21.9268203,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19175645184,
+        "final_free_bytes": 19175600128
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-windows-evidence/reference-verify.result.json",
+      "sha256": "761b5832daaf5ec0e1261786454cc9c0b87a043d9d7354124ac4e55b56cf5028",
+      "result": {
+        "source_commit": "94eb8f32b702f868bba98ad3d42196b5d06615bc",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo run --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4",
+        "cargo_pid": 9000,
+        "started_utc": "2026-09-13T21:21:19.9162294Z",
+        "completed_utc": "2026-09-13T21:21:31.6457736Z",
+        "elapsed_seconds": 11.5842326,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19175571456,
+        "final_free_bytes": 19175534592
+      }
+    }
+  ]
+}

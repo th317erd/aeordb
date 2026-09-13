@@ -96,9 +96,30 @@ pub fn decode_parser_resolution_plan(value: &[u8]) -> FormatResult<ParserResolut
     ));
   }
 
-  let kind = match u16_at(value, 16)? {
+  let kind = validate_plan_context(
+    u16_at(value, 16)?,
+    value.len(),
+    resolution_semantics,
+    mime_semantics,
+    no_match_semantics,
+    mime_dependency_ordinal,
+    &candidates,
+  )?;
+  Ok(ParserResolutionPlanV1 { kind, resolution_semantics, mime_semantics, no_match_semantics, mime_dependency_ordinal, candidates })
+}
+
+fn validate_plan_context(
+  kind: u16,
+  total_length: usize,
+  resolution_semantics: u16,
+  mime_semantics: u16,
+  no_match_semantics: u16,
+  mime_dependency_ordinal: u32,
+  candidates: &[ParserCandidateV1<'_>],
+) -> FormatResult<ParserPlanKind> {
+  let kind = match kind {
     1 => {
-      if value.len() != PLAN_HEADER_LENGTH
+      if total_length != PLAN_HEADER_LENGTH
         || resolution_semantics != 0
         || mime_semantics != 0
         || no_match_semantics != 0
@@ -126,7 +147,7 @@ pub fn decode_parser_resolution_plan(value: &[u8]) -> FormatResult<ParserResolut
       ParserPlanKind::ExplicitPlugin
     }
     3 => {
-      validate_automatic_plan(resolution_semantics, mime_semantics, no_match_semantics, mime_dependency_ordinal, &candidates)?;
+      validate_automatic_plan(resolution_semantics, mime_semantics, no_match_semantics, mime_dependency_ordinal, candidates)?;
       ParserPlanKind::Automatic
     }
     kind => {
@@ -134,7 +155,7 @@ pub fn decode_parser_resolution_plan(value: &[u8]) -> FormatResult<ParserResolut
     }
   };
 
-  Ok(ParserResolutionPlanV1 { kind, resolution_semantics, mime_semantics, no_match_semantics, mime_dependency_ordinal, candidates })
+  Ok(kind)
 }
 
 fn decode_candidate(value: &[u8], start: usize) -> FormatResult<(ParserCandidateV1<'_>, usize)> {
@@ -176,7 +197,17 @@ fn decode_candidate(value: &[u8], start: usize) -> FormatResult<(ParserCandidate
   let match_bytes = &value[header_end..match_end];
   let policy = decode_invocation_policy(&value[match_end..end])?;
   let match_semantics = u16_at(value, start + 6)?;
-  let kind = match u16_at(value, start + 4)? {
+  let kind = validate_candidate_context(u16_at(value, start + 4)?, match_semantics, match_bytes, &policy)?;
+  Ok((ParserCandidateV1 { kind, match_semantics, dependency_ordinal, match_bytes, policy }, end))
+}
+
+fn validate_candidate_context(
+  kind: u16,
+  match_semantics: u16,
+  match_bytes: &[u8],
+  policy: &InvocationPolicyV1,
+) -> FormatResult<ParserCandidateKind> {
+  let kind = match kind {
     1 if match_semantics == 0
       && match_bytes.is_empty()
       && matches!(policy.kind, InvocationPolicyKind::PureWasm | InvocationPolicyKind::LegacyWasm) =>
@@ -224,7 +255,7 @@ fn decode_candidate(value: &[u8], start: usize) -> FormatResult<(ParserCandidate
       return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "parser_candidate_kind", format!("unknown kind {kind}")));
     }
   };
-  Ok((ParserCandidateV1 { kind, match_semantics, dependency_ordinal, match_bytes, policy }, end))
+  Ok(kind)
 }
 
 fn validate_automatic_plan(
@@ -292,7 +323,7 @@ fn validate_automatic_plan(
   Ok(())
 }
 
-fn is_canonical_mime_essence(value: &[u8]) -> bool {
+pub(crate) fn is_canonical_mime_essence(value: &[u8]) -> bool {
   if value.len() > MAX_CORRECTED_MIME_LENGTH || value.iter().any(u8::is_ascii_uppercase) {
     return false;
   }
@@ -300,6 +331,10 @@ fn is_canonical_mime_essence(value: &[u8]) -> bool {
     return false;
   };
   if slash == 0 || slash > 127 || slash + 1 == value.len() || value.len() - slash - 1 > 127 || value[slash + 1..].contains(&b'/') {
+    return false;
+  }
+  // RFC 6838 restricted-name-first is ALPHA / DIGIT, unlike later bytes.
+  if !value[0].is_ascii_alphanumeric() || !value[slash + 1].is_ascii_alphanumeric() {
     return false;
   }
   value.iter().enumerate().all(|(index, byte)| {
@@ -328,4 +363,101 @@ fn length_error(context: impl Into<String>) -> FormatError {
 
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
+}
+
+/// Encode a materialized canonical parser program. The owning compiler resolves
+/// aliases and sorts the registry tier; this codec never rewrites that program.
+pub fn encode_parser_resolution_plan(plan: &ParserResolutionPlanV1<'_>) -> FormatResult<Vec<u8>> {
+  if plan.candidates.len() > MAX_CANDIDATES {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "parser_candidate_count",
+      format!("{} candidates exceeds {MAX_CANDIDATES}", plan.candidates.len()),
+    ));
+  }
+  let total_length = plan.candidates.iter().try_fold(PLAN_HEADER_LENGTH, |length, candidate| {
+    length
+      .checked_add(CANDIDATE_HEADER_LENGTH + POLICY_LENGTH)
+      .and_then(|length| length.checked_add(candidate.match_bytes.len()))
+      .ok_or_else(|| length_error("parser writer total length overflow"))
+  })?;
+  if total_length > PLAN_MAX_LENGTH {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "parser_plan_exceeds_cap",
+      format!("{total_length} bytes exceeds {PLAN_MAX_LENGTH}"),
+    ));
+  }
+  let kind: u16 = match plan.kind {
+    ParserPlanKind::None => 1,
+    ParserPlanKind::ExplicitPlugin => 2,
+    ParserPlanKind::Automatic => 3,
+  };
+  validate_plan_context(
+    kind,
+    total_length,
+    plan.resolution_semantics,
+    plan.mime_semantics,
+    plan.no_match_semantics,
+    plan.mime_dependency_ordinal,
+    &plan.candidates,
+  )?;
+  for candidate in &plan.candidates {
+    if candidate.dependency_ordinal == 0 {
+      return Err(error(
+        MalformedInputClass::CrossRecordClosureMismatch,
+        "parser_candidate_dependency",
+        "candidate dependency ordinal is zero",
+      ));
+    }
+    validate_candidate_context(candidate_kind_id(candidate.kind), candidate.match_semantics, candidate.match_bytes, &candidate.policy)?;
+    super::dependency::encode_invocation_policy(&candidate.policy)?;
+  }
+
+  // Counts, lengths, program context and policies are valid before allocation.
+  // The complete 128 KiB cap proves every persisted length and slice below.
+  let mut value = Vec::new();
+  value.try_reserve_exact(total_length).map_err(|source| {
+    error(
+      MalformedInputClass::AllocationAmplification,
+      "parser_writer_allocation",
+      format!("cannot reserve {total_length} bytes: {source}"),
+    )
+  })?;
+  value.resize(total_length, 0);
+  value[..4].copy_from_slice(b"APRP");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(PLAN_HEADER_LENGTH as u16).to_le_bytes());
+  value[8..12].copy_from_slice(&(total_length as u32).to_le_bytes());
+  for (offset, field) in [(16, kind), (18, plan.resolution_semantics), (20, plan.mime_semantics), (22, plan.no_match_semantics)] {
+    value[offset..offset + 2].copy_from_slice(&field.to_le_bytes());
+  }
+  value[24..28].copy_from_slice(&(plan.candidates.len() as u32).to_le_bytes());
+  value[28..32].copy_from_slice(&plan.mime_dependency_ordinal.to_le_bytes());
+  let mut cursor = PLAN_HEADER_LENGTH;
+  for candidate in &plan.candidates {
+    let candidate_length = CANDIDATE_HEADER_LENGTH + candidate.match_bytes.len() + POLICY_LENGTH;
+    let match_start = cursor + CANDIDATE_HEADER_LENGTH;
+    let match_end = match_start + candidate.match_bytes.len();
+    let end = cursor + candidate_length;
+    value[cursor..cursor + 4].copy_from_slice(&(candidate_length as u32).to_le_bytes());
+    value[cursor + 4..cursor + 6].copy_from_slice(&candidate_kind_id(candidate.kind).to_le_bytes());
+    value[cursor + 6..cursor + 8].copy_from_slice(&candidate.match_semantics.to_le_bytes());
+    value[cursor + 8..cursor + 12].copy_from_slice(&candidate.dependency_ordinal.to_le_bytes());
+    value[cursor + 12..cursor + 16].copy_from_slice(&(POLICY_LENGTH as u32).to_le_bytes());
+    value[cursor + 16..cursor + 20].copy_from_slice(&(candidate.match_bytes.len() as u32).to_le_bytes());
+    value[match_start..match_end].copy_from_slice(candidate.match_bytes);
+    value[match_end..end].copy_from_slice(&super::dependency::encode_invocation_policy(&candidate.policy)?);
+    cursor = end;
+  }
+  Ok(value)
+}
+
+fn candidate_kind_id(kind: ParserCandidateKind) -> u16 {
+  match kind {
+    ParserCandidateKind::Explicit => 1,
+    ParserCandidateKind::Registry => 2,
+    ParserCandidateKind::RawJson => 3,
+    ParserCandidateKind::NativeSuite => 4,
+  }
 }

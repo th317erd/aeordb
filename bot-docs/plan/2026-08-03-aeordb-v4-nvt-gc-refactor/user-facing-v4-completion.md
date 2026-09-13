@@ -231,6 +231,19 @@ U1 inventory remain safe to continue; no production database is involved.
 
 ### U1 native-execution availability perimeter
 
+Additional September 13 reader audit: Round 9 expressly permits a known
+dependency kind with an unknown ABI/executor profile to remain structurally
+retainable but unavailable for execution. `dependency.rs::validate_dependency_record`
+currently rejects profiles outside its known role/ABI tuples;
+`value_store.rs::require_native_role` / `require_wasm_role` also enforce exact
+known profiles during definition decoding. The independent dependency reader
+has the same restricted tuples. Before completing dependency production,
+add failing-first unknown-profile retention versus execution tests and reconcile
+these consumers against the frozen separation. Unknown kinds, zero/invalid
+fields, known cross-role conflicts and malformed artifact framing must still
+fail closed. This requirement is separate from, and does not approve, the
+pending catalog-key clarification.
+
 Source review also confirms a required regression beyond generating four
 manifest hashes. `ValueStoreRuntimeV1::from_definition` compiles Regex segments
 directly; its `extract` path does not check the selected native selector
@@ -254,3 +267,44 @@ archive parsing. They are affected regressions, not the missing checked-in
 four-component conformance manifests. The explicit/registry WASM refusal is
 also an existing disconnected runtime boundary to complete during U4; an
 encoder or default-native-only demonstration cannot qualify plugin execution.
+
+The shared evaluator's constructor maps every runtime-construction failure to
+`InvalidConfiguration`, and the producer collector labels every evaluator
+construction failure `INVALID_CONFIGURATION`. Do not introduce an unavailable
+executor error there and silently reclassify it as malformed configuration.
+More importantly, `IndexDefinitionRuntimeV1` constructs the same ValueStore
+runtime for query planning and completed canonical-value/posting rechecks
+(`query_planner`, `query_native_source`, `query_executor`). Making that shared
+constructor require executor availability would violate Round 9's retained
+closure guarantee. Preserve structural definition construction and completed
+value use; gate actual source evaluation before parser/selector work. Unknown
+selectors must not compile/execute the current implementation as a substitute.
+The evaluator's existing execution-error mapping preserves typed unavailability.
+
+A six-test next-slice draft under the durable task cache covers ADPT and AVST
+unknown profiles, retained malformed-input guards, direct selector execution
+refusal/cancellation, both shared memory policies with no parser work, and
+completed canonical-value rechecks without the original selector. The draft
+was refined after finding the query-runtime consumer; it has not been run or
+included in the frozen four-writer candidate. Actual producer/query route
+regressions and native conformance remain required beyond these draft tests.
+
+The native-suite conformance audit also found a concrete corrected-output gap
+before fingerprint freezing: DOCX/XLSX and ODT/ODS output builders replace
+`metadata.content_type` with their detected canonical format. The corrected
+entry passes the stored MIME only to generic families, not those archive
+builders. Round 9 requires original stored MIME metadata, including generic
+extension fallback. A separate two-test draft covers all four formats and
+protects legacy detected-MIME behavior. Reproduce then correct this in the
+native-conformance slice; do not ratify current incorrect output as a golden
+fixture. This is not part of the frozen canonical-writer landing and has not
+been run or implemented yet.
+
+Two further native-suite boundary risks require failing-first checks before
+freezing its conformance identity. `image.rs::parse_gif` admits ten bytes and
+then reads byte 10; `audio.rs::parse_wav` multiplies an untrusted `u32` byte
+rate by eight without widening. These are source-review findings, not executed
+reproductions yet. The draft corpus includes every prefix of its tiny format
+seeds and a maximum-byte-rate WAV case. Test debug and release behavior, extend
+the adjacent framing/arithmetic perimeter, and preserve valid legacy outputs.
+Do not freeze a panic or wrapped numeric result as intended v1 semantics.

@@ -311,3 +311,170 @@ fn length_error(context: impl Into<String>) -> FormatError {
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
 }
+
+/// Canonical selector inputs. Configuration aliases, omitted arguments and
+/// corrected-versus-migration admission belong to the owning compiler.
+#[derive(Debug, Clone, Copy)]
+pub enum SourceSelectorWriteV1<'a> {
+  Metadata {
+    metadata_id: u16,
+  },
+  JsonPath {
+    segments: &'a [JsonPathSegmentV1<'a>],
+  },
+  PluginMapper {
+    dependency_ordinal: u32,
+    mapper_contract: u16,
+    arguments: &'a [u8],
+    policy: &'a InvocationPolicyV1,
+  },
+  /// This frozen representation may only be selected by the migration compiler.
+  AlwaysMissingV0,
+}
+
+pub fn encode_source_selector(request: SourceSelectorWriteV1<'_>) -> FormatResult<Vec<u8>> {
+  // Bound the whole value before argument traversal, regex compilation or any
+  // output allocation. Child limits never grant extra parent space.
+  let total_length = selector_write_length(request)?;
+  let policy_bytes = match request {
+    SourceSelectorWriteV1::Metadata { metadata_id } => {
+      if metadata_source_registry_entry(metadata_id).is_none() {
+        return Err(error(
+          MalformedInputClass::UnknownTypeKindOrEnum,
+          "selector_metadata_id",
+          format!("unknown metadata ID {metadata_id}"),
+        ));
+      }
+      [0u8; POLICY_LENGTH]
+    }
+    SourceSelectorWriteV1::JsonPath { segments } => {
+      for segment in segments {
+        match segment {
+          JsonPathSegmentV1::ObjectKey("") => {
+            return Err(error(MalformedInputClass::CrossRecordClosureMismatch, "selector_segment_context", "object key is empty"));
+          }
+          JsonPathSegmentV1::Regex { pattern, case_insensitive } => compile_regex(pattern, *case_insensitive)?,
+          JsonPathSegmentV1::ObjectKey(_) | JsonPathSegmentV1::NumericIndex(_) | JsonPathSegmentV1::FanOut => {}
+        }
+      }
+      [0u8; POLICY_LENGTH]
+    }
+    SourceSelectorWriteV1::PluginMapper { dependency_ordinal, mapper_contract, arguments, policy } => {
+      if dependency_ordinal == 0 {
+        return Err(error(MalformedInputClass::CrossRecordClosureMismatch, "selector_mapper_contract", "mapper dependency is zero"));
+      }
+      if !matches!((mapper_contract, policy.kind), (1, InvocationPolicyKind::LegacyWasm) | (2, InvocationPolicyKind::PureWasm)) {
+        return Err(error(
+          MalformedInputClass::CrossRecordClosureMismatch,
+          "selector_mapper_policy_context",
+          "mapper contract and invocation host profile disagree",
+        ));
+      }
+      validate_canonical_value(arguments, CanonicalValueBounds::CONFIG)?;
+      super::dependency::encode_invocation_policy(policy)?
+    }
+    SourceSelectorWriteV1::AlwaysMissingV0 => [0u8; POLICY_LENGTH],
+  };
+
+  let mut value = Vec::new();
+  value.try_reserve_exact(total_length).map_err(|source| {
+    error(
+      MalformedInputClass::AllocationAmplification,
+      "selector_writer_allocation",
+      format!("cannot reserve {total_length} bytes: {source}"),
+    )
+  })?;
+  value.resize(total_length, 0);
+  value[..2].copy_from_slice(&1u16.to_le_bytes());
+  value[4..8].copy_from_slice(&(total_length as u32).to_le_bytes());
+  match request {
+    SourceSelectorWriteV1::Metadata { metadata_id } => {
+      value[2..4].copy_from_slice(&1u16.to_le_bytes());
+      value[32..34].copy_from_slice(&metadata_id.to_le_bytes());
+    }
+    SourceSelectorWriteV1::JsonPath { segments } => {
+      value[2..4].copy_from_slice(&2u16.to_le_bytes());
+      value[12..16].copy_from_slice(&(segments.len() as u32).to_le_bytes());
+      value[16..18].copy_from_slice(&1u16.to_le_bytes());
+      let mut cursor = SELECTOR_HEADER_LENGTH;
+      for segment in segments {
+        let payload_length = segment_write_payload_length(segment);
+        let payload_start = cursor + SEGMENT_HEADER_LENGTH;
+        let end = payload_start + payload_length;
+        value[cursor + 4..payload_start].copy_from_slice(&(payload_length as u32).to_le_bytes());
+        match segment {
+          JsonPathSegmentV1::ObjectKey(key) => {
+            value[cursor] = 1;
+            value[payload_start..end].copy_from_slice(key.as_bytes());
+          }
+          JsonPathSegmentV1::NumericIndex(index) => {
+            value[cursor] = 2;
+            value[payload_start..end].copy_from_slice(&index.to_le_bytes());
+          }
+          JsonPathSegmentV1::FanOut => value[cursor] = 3,
+          JsonPathSegmentV1::Regex { pattern, case_insensitive } => {
+            value[cursor] = 4;
+            value[cursor + 1] = u8::from(*case_insensitive);
+            value[payload_start..end].copy_from_slice(pattern.as_bytes());
+          }
+        }
+        cursor = end;
+      }
+    }
+    SourceSelectorWriteV1::PluginMapper { dependency_ordinal, mapper_contract, arguments, .. } => {
+      value[2..4].copy_from_slice(&3u16.to_le_bytes());
+      value[18..20].copy_from_slice(&mapper_contract.to_le_bytes());
+      value[32..36].copy_from_slice(&dependency_ordinal.to_le_bytes());
+      value[36..40].copy_from_slice(&(arguments.len() as u32).to_le_bytes());
+      value[40..44].copy_from_slice(&(POLICY_LENGTH as u32).to_le_bytes());
+      let arguments_end = SELECTOR_HEADER_LENGTH + MAPPER_HEADER_LENGTH + arguments.len();
+      value[48..arguments_end].copy_from_slice(arguments);
+      value[arguments_end..].copy_from_slice(&policy_bytes);
+    }
+    SourceSelectorWriteV1::AlwaysMissingV0 => value[2..4].copy_from_slice(&4u16.to_le_bytes()),
+  }
+  Ok(value)
+}
+
+fn selector_write_length(request: SourceSelectorWriteV1<'_>) -> FormatResult<usize> {
+  let total_length = match request {
+    SourceSelectorWriteV1::Metadata { .. } => 40,
+    SourceSelectorWriteV1::AlwaysMissingV0 => SELECTOR_HEADER_LENGTH,
+    SourceSelectorWriteV1::PluginMapper { arguments, .. } => (SELECTOR_HEADER_LENGTH + MAPPER_HEADER_LENGTH + POLICY_LENGTH)
+      .checked_add(arguments.len())
+      .ok_or_else(|| length_error("mapper writer total length overflow"))?,
+    SourceSelectorWriteV1::JsonPath { segments } => {
+      if segments.len() > MAX_SEGMENTS {
+        return Err(error(
+          MalformedInputClass::AllocationAmplification,
+          "selector_item_count",
+          format!("{} items exceeds {MAX_SEGMENTS}", segments.len()),
+        ));
+      }
+      segments.iter().try_fold(SELECTOR_HEADER_LENGTH, |length, segment| {
+        length
+          .checked_add(SEGMENT_HEADER_LENGTH)
+          .and_then(|length| length.checked_add(segment_write_payload_length(segment)))
+          .ok_or_else(|| length_error("JSON-path writer total length overflow"))
+      })?
+    }
+  };
+  if total_length > SELECTOR_MAX_LENGTH {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "selector_exceeds_cap",
+      format!("{total_length} bytes exceeds {SELECTOR_MAX_LENGTH}"),
+    ));
+  }
+  // The 4 KiB bound proves all offsets and persisted u32 casts in the writer.
+  Ok(total_length)
+}
+
+fn segment_write_payload_length(segment: &JsonPathSegmentV1<'_>) -> usize {
+  match segment {
+    JsonPathSegmentV1::ObjectKey(key) => key.len(),
+    JsonPathSegmentV1::NumericIndex(_) => 8,
+    JsonPathSegmentV1::FanOut => 0,
+    JsonPathSegmentV1::Regex { pattern, .. } => pattern.len(),
+  }
+}

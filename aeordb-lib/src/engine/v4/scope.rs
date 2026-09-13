@@ -7,6 +7,7 @@ use super::reader::{FormatError, FormatResult, MalformedInputClass};
 const DEFINITION_HEADER_LENGTH: usize = 32;
 const SCOPE_FIXED_LENGTH: usize = 64;
 const SCOPE_MAX_LENGTH: usize = 65_536;
+const SCOPE_ID_DOMAIN: &[u8] = b"aeordb.index.scope-definition.v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeMatchingMode {
@@ -20,6 +21,19 @@ pub struct ScopeDefinitionV1<'a> {
   pub mode: ScopeMatchingMode,
   pub owner_path: &'a str,
   pub glob: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeDefinitionWriteV1<'a> {
+  pub mode: ScopeMatchingMode,
+  pub owner_path: &'a str,
+  pub glob: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedScopeDefinitionV1 {
+  pub scope_id: Vec<u8>,
+  pub value: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,8 +123,65 @@ pub fn decode_scope_definition(value: &[u8], hash_algorithm: HashAlgorithm) -> F
     Some(glob)
   };
 
-  let scope_id = digest_parts(hash_algorithm, &[b"aeordb.index.scope-definition.v1\0", value]);
+  let scope_id = digest_parts(hash_algorithm, &[SCOPE_ID_DOMAIN, value]);
   Ok(ScopeDefinitionV1 { scope_id, mode, owner_path, glob })
+}
+
+/// Encode already-canonical scope inputs under the frozen v1 byte contract.
+/// Source aliases and path/glob normalization belong to the owning compiler.
+pub fn encode_scope_definition(
+  request: ScopeDefinitionWriteV1<'_>,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<EncodedScopeDefinitionV1> {
+  let (matching_mode, glob) = match (request.mode, request.glob) {
+    (ScopeMatchingMode::DirectChildren, None) => (1u16, ""),
+    (ScopeMatchingMode::RelativePathGlob, Some(glob)) => (2u16, glob),
+    _ => {
+      return Err(error(
+        MalformedInputClass::CrossRecordClosureMismatch,
+        "scope_mode_length",
+        "direct scopes must omit a glob and relative-glob scopes must include one",
+      ));
+    }
+  };
+  let total_length = SCOPE_FIXED_LENGTH
+    .checked_add(request.owner_path.len())
+    .and_then(|length| length.checked_add(glob.len()))
+    .ok_or_else(|| length_error("scope writer total length overflow"))?;
+  if total_length > SCOPE_MAX_LENGTH {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "scope_exceeds_cap",
+      format!("{total_length} bytes exceeds {SCOPE_MAX_LENGTH}"),
+    ));
+  }
+  validate_canonical_absolute_path(request.owner_path)?;
+  if matching_mode == 2 {
+    validate_canonical_glob(glob)?;
+  }
+
+  // All variable lengths are bounded before allocation; the 64 KiB complete
+  // definition cap also proves every persisted u32 length conversion below.
+  let mut value = Vec::new();
+  value.try_reserve_exact(total_length).map_err(|source| {
+    error(MalformedInputClass::AllocationAmplification, "scope_writer_allocation", format!("cannot reserve {total_length} bytes: {source}"))
+  })?;
+  value.resize(total_length, 0);
+  value[..4].copy_from_slice(b"ASCP");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(DEFINITION_HEADER_LENGTH as u16).to_le_bytes());
+  value[8..12].copy_from_slice(&(total_length as u32).to_le_bytes());
+  value[32..36].copy_from_slice(&(request.owner_path.len() as u32).to_le_bytes());
+  value[36..40].copy_from_slice(&(glob.len() as u32).to_le_bytes());
+  value[42..44].copy_from_slice(&matching_mode.to_le_bytes());
+  for offset in [40, 44, 46, 48, 50, 52, 54] {
+    value[offset..offset + 2].copy_from_slice(&1u16.to_le_bytes());
+  }
+  let owner_end = SCOPE_FIXED_LENGTH + request.owner_path.len();
+  value[SCOPE_FIXED_LENGTH..owner_end].copy_from_slice(request.owner_path.as_bytes());
+  value[owner_end..].copy_from_slice(glob.as_bytes());
+  let scope_id = digest_parts(hash_algorithm, &[SCOPE_ID_DOMAIN, &value]);
+  Ok(EncodedScopeDefinitionV1 { scope_id, value })
 }
 
 pub fn scope_matches_path(scope: &ScopeDefinitionV1<'_>, path: &str) -> FormatResult<bool> {

@@ -407,6 +407,9 @@ fn is_canonical_mime_essence(value: &[u8]) -> bool {
   if slash == 0 || slash > 127 || slash + 1 == value.len() || value.len() - slash - 1 > 127 || value[slash + 1..].contains(&b'/') {
     return false;
   }
+  if !value[0].is_ascii_alphanumeric() || !value[slash + 1].is_ascii_alphanumeric() {
+    return false;
+  }
   value.iter().enumerate().all(|(index, byte)| {
     index == slash || byte.is_ascii_alphanumeric() || matches!(*byte, b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-')
   })

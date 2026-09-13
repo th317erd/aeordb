@@ -404,3 +404,47 @@ fn length_error(context: impl Into<String>) -> FormatError {
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
 }
+
+/// Encode a complete frozen invocation policy without a variable allocation.
+/// Executor availability and host admission are separate from persisted limits.
+pub fn encode_invocation_policy(policy: &InvocationPolicyV1) -> FormatResult<[u8; POLICY_LENGTH]> {
+  let mut value = [0u8; POLICY_LENGTH];
+  value[..4].copy_from_slice(b"AIVP");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(POLICY_LENGTH as u16).to_le_bytes());
+  value[8..12].copy_from_slice(&(POLICY_LENGTH as u32).to_le_bytes());
+  let (backend, host): (u16, u16) = match policy.kind {
+    InvocationPolicyKind::Native => (1, 0),
+    InvocationPolicyKind::PureWasm => (2, 1),
+    InvocationPolicyKind::LegacyWasm => (2, 2),
+  };
+  for (offset, field) in [(16, backend), (18, host), (20, 1), (22, 1)] {
+    value[offset..offset + 2].copy_from_slice(&field.to_le_bytes());
+  }
+  for (offset, field) in [
+    (24, policy.max_request_bytes),
+    (32, policy.max_response_bytes),
+    (40, policy.max_linear_memory_bytes),
+    (48, policy.max_fuel),
+    (56, policy.max_table_elements),
+    (64, policy.max_structure_nodes),
+    (72, policy.max_scalar_bytes),
+  ] {
+    value[offset..offset + 8].copy_from_slice(&field.to_le_bytes());
+  }
+  for (offset, field) in [
+    (80, policy.max_structure_depth),
+    (84, policy.max_container_members),
+    (88, policy.max_wasm_instances),
+    (92, policy.max_wasm_memories),
+    (96, policy.max_wasm_tables),
+    (100, policy.max_value_stack_height),
+    (104, policy.max_recursion_depth),
+  ] {
+    value[offset..offset + 4].copy_from_slice(&field.to_le_bytes());
+  }
+  // This fixed stack buffer needs no untrusted-size allocation. Reuse the
+  // reader's exact finite-limit and native/WASM context checks before release.
+  decode_invocation_policy(&value)?;
+  Ok(value)
+}

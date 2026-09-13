@@ -25,6 +25,10 @@ mod system_family;
 mod text_fold;
 mod value_store;
 
+#[cfg(test)]
+#[path = "../spec/mime_name_initial_spec.rs"]
+mod mime_name_initial_spec;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;

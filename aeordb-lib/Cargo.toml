@@ -1400,6 +1400,26 @@ path = "spec/http/root_request_adapter_spec.rs"
 name = "embedded_root_operation_spec"
 path = "spec/engine/embedded_root_operation_spec.rs"
 
+[[test]]
+name = "scope_definition_writer_spec"
+path = "spec/engine/scope_definition_writer_spec.rs"
+
+[[test]]
+name = "invocation_policy_writer_spec"
+path = "spec/engine/invocation_policy_writer_spec.rs"
+
+[[test]]
+name = "source_selector_writer_spec"
+path = "spec/engine/source_selector_writer_spec.rs"
+
+[[test]]
+name = "parser_plan_writer_spec"
+path = "spec/engine/parser_plan_writer_spec.rs"
+
+[[test]]
+name = "mime_name_initial_spec"
+path = "spec/engine/mime_name_initial_spec.rs"
+
 
 [lints]
 workspace = true

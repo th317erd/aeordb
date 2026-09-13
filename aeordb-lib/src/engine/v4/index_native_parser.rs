@@ -898,27 +898,11 @@ fn corrected_mime_essence(content_type: Option<&str>) -> Option<String> {
     }
   };
   let essence = parsed.essence_str().to_ascii_lowercase();
-  let (type_name, subtype_name) = essence.split_once('/')?;
-  if type_name == "*"
-    || subtype_name == "*"
-    || type_name.is_empty()
-    || subtype_name.is_empty()
-    || type_name.len() > 127
-    || subtype_name.len() > 127
-    || !type_name.bytes().all(restricted_name_byte)
-    || !subtype_name.bytes().all(restricted_name_byte)
-  {
-    return None;
-  }
-  Some(essence)
+  super::parser_plan::is_canonical_mime_essence(essence.as_bytes()).then_some(essence)
 }
 
 fn required_filename<'a>(request: &'a IndexParserExecutionRequestV1<'_>) -> Result<&'a str, IndexParserExecutionErrorV1> {
   file_name(request.path()).ok_or_else(|| host_failure("native_parser_request", "parser request path has no final filename segment"))
-}
-
-fn restricted_name_byte(byte: u8) -> bool {
-  byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-')
 }
 
 fn corrected_extension(filename: &str) -> Option<String> {

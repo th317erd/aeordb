@@ -62,7 +62,7 @@ cross those operational boundaries.
 - [ ] Full adversarial contract/behavior review, coherent commits/push, report
   readiness without implying production deployment occurred.
 
-## Current landing unit: U0 entry proof and empty semantic state
+## Completed landing unit: U0 entry proof and empty semantic state
 
 Owned: this ledger, execution-status banner, append-only decision context,
 `scripts/spec/v4-default-live-spec.mjs`, semantic-state codec, index semantic
@@ -79,10 +79,16 @@ Cargo ≤2 jobs (native 1), serialized heavy workloads, 8 GiB/no-swap memory gat
 Data free floor 250,000,000,000 bytes, home 68,719,476,736 bytes.
 All long commands have host-side deadlines; monitor long work sparsely.
 
-Next action: land the verified U0 correction, then begin U1 with the canonical
-scope writer's failing-first target. The dependency-key clarification is
-pending owner review and does not block that independent writer. The original
-normal-creation target remains red until actual runtime/default integration.
+Next action: U0 is committed/pushed as `94eb8f32b702f868bba98ad3d42196b5d06615bc`.
+U1's scope, invocation-policy, selector and parser-plan writers have completed
+their full Linux, affected-native and static/reference gates, including the
+late MIME correction. Land this coherent prerequisite snapshot, then continue
+the remaining U1 definitions, native conformance/availability, catalog and
+compiler. Three next-slice probes now preserve eight intended failing tests
+and three passing guards; turn those regressions green before native semantics
+are frozen. The dependency-key clarification remains pending owner
+review. The original normal-creation target remains red until actual
+runtime/default integration; this writer unit does not complete U1.
 
 ### Live baseline result
 
@@ -322,3 +328,339 @@ classify completeness without inventing a catalog edge. Nonempty/content-only
 bytes and error meanings are unchanged. No normal creation/default/backend,
 production service, installed binary, retained database, or sealed evidence was
 changed. U1 through U7 and the live normal-v4 default target remain outstanding.
+
+## Current landing unit: U1 semantic production
+
+Entry is the green U0 commit `94eb8f32`; direct owner, no delegated changes.
+The bounded first slice writes canonical `ScopeDefinitionV1` bytes and identity
+from already-canonical typed inputs. Owning config normalization remains a
+later compiler responsibility; this codec must reject noncanonical requests,
+not silently choose normalization or new scope semantics. Frozen Round 7
+bytes, maximum combined length, ID domain and resolver behavior remain intact.
+
+- [x] Prove the dedicated six-test `scope_definition_writer_spec` target red.
+- [x] Implement preflighted canonical scope encoding; prove exact independent
+  fixtures/IDs, all hash algorithms, malformed modes/paths/globs and boundaries.
+- [ ] Continue all seven definition/projection families, canonical catalog COW,
+  native conformance/availability and bounded compiler integration from the
+  execution bridge; scope encoding alone does not complete U1.
+- [ ] Run affected, reference, native, static and broad gates at the coherent
+  writer landing boundary, then commit/push. Preserve all U0 regression guards.
+
+The new test target is installed locally; production scope code is unchanged.
+Run it on a fresh isolated desktop worktree at the green entry, using source-only
+sync and the same-host debug build cache with two Cargo jobs. Preserve U0 source,
+logs, lockfiles and all sealed historical artifacts. The class-6/7 catalog-key
+question remains pending owner approval; no proposed key change is implemented.
+
+Desktop entry uses new detached `source-u1` at 94eb8f32, with the old U0 source
+untouched. Its first admission refused the absent root `Cargo.lock` before
+Cargo ran; that file is untracked, unlike the reference lock. Copied the exact
+frozen root lock (no regeneration) and verified the five U1 input hashes and
+all three same-host plugin fixtures. The real red target is now running under
+`aeordb-v4-u1-scope-red-ready-20260913`, two jobs, zero debug/incremental, normal
+disk guard and 1,800-second host deadline. No scope production change yet.
+
+Scope writer red closes at 20:28:18 UTC, exit 101: the new target cannot import
+the missing `ScopeDefinitionWriteV1` and `encode_scope_definition` symbols.
+No guard termination; source/lock inputs match. Added the bounded canonical
+encoder after this failure, preserving the frozen envelope, validation and ID
+domain. Refreshed only the three existing scope-reader audit line positions;
+no review or suppression ceiling changed. Green execution is next. Each new
+runner stage snapshots its own source-input manifest before executing, so
+later implementation cannot change an earlier run's input evidence.
+
+Scope writer green closes at 20:39:51 UTC: all six tests pass, no ignored or
+filtered cases, source hashes unchanged, no guard termination. Data/home free
+bytes: 340,515,901,440 / 73,455,755,264. This is narrow writer proof; full U1
+and actual-v4 readiness remain outstanding. Prepared a second six-test target
+for fixed-size invocation-policy writing: all six independent fixtures, each
+resource-field offset, finite/nonzero and native/WASM context matrices, and
+WASM32 memory alignment/address-space edges. Decoder, parser-plan/mapper
+consumers and format hardening are the affected perimeter. The new policy
+writer API is not implemented; run its red target next.
+
+Invocation-policy red exits 101 at 20:41:59 UTC on its missing encoder symbol.
+Implemented a fixed 128-byte stack encoder, reusing exact reader validation
+before returning bytes, with no variable output allocation. The first affected
+run exits 101 at 20:44:37: architecture 28 pass/1 fail solely because rustfmt
+collapsed an existing conditional and moved four reviewed dependency-reader
+locations by four lines. Other targets did not execute after that fail-fast
+stop. Corrected those four inventory positions only; preserve the failed run.
+
+Next independently falsifying target is `source_selector_writer_spec` (seven
+tests): all 14 frozen selector fixtures, each metadata ID, ordered typed path
+segments, malformed regex/key/mapper arguments, policy/profile/dependency
+consistency and the combined 4 KiB cap. Owning configuration normalization,
+corrected-vs-migration ingress and executor availability remain compiler/runtime
+responsibilities; the codec cannot create catalog bindings or resolve the
+pending dependency-key ruling. No selector production writer exists yet.
+
+The first selector red run exits 101 at 20:47:33 UTC on the two missing writer
+symbols plus a test integer inference error caused by the absent API type.
+Made the test's metadata ID explicitly `u16`, reran unchanged production, and
+`u1-selector-writer-red-typed` exits 101 at 20:48:52 on only the intended missing
+symbols. Both receipts are retained. Then implemented the typed canonical
+selector encoder: count/combined-length preflight precedes regex/argument
+validation and output allocation; policy bytes reuse the fixed policy writer;
+the caller's slice order, UTF-8 bytes and full u64 indices are preserved.
+
+`u1-three-writers-affected` is now running 13 targets with `--no-fail-fast`, so
+one failure cannot hide later regressions. It includes all 19 new writer
+tests, exact fixture/hardening, catalog/root/semantic consumers, native parser
+and parser-resource tests, and the corrected architecture inventory. Exact
+ten-file source/lock manifest is snapshotted per stage. Results are pending;
+no policy/selector green or U1 completion is claimed yet.
+
+Terminal result: `u1-three-writers-affected` exits 0 at 20:52:20 UTC. All
+**214 tests across 13 targets pass**, with no ignored/filtered/failing cases:
+architecture 29, native parser resources 3, native parser 12, native semantic
+source 6, native source 8, index semantic source 34, policy writer 6, scope
+writer 6, semantic catalog reader 7, selector writer 7, format fixtures 77,
+reader hardening 2, root migration 17. All ten inputs remain unchanged; no
+guard termination, final Data/home bytes 340,498,968,576 / 73,455,050,752.
+Filtered local `u1-evidence/` mirror contains logs/receipts/manifests/patches only,
+not databases or target artifacts. Full U1 and broad/native/static writer
+landing gates remain owed. Next dependency-safe slice: parser-plan encoding
+against the eight frozen APRP fixtures and exact candidate/context/size rules.
+
+Parser-plan red exits 101 at 20:59:30 UTC on only the absent
+`encode_parser_resolution_plan` symbol. Its eight tests compile from typed
+programs independent of production decoding: all eight fixtures, none/explicit
+context, candidate policies/dependencies, MIME and registry order, native/raw
+footer and family consistency, 512/513 registry entries, combined 128 KiB
+boundary, and exact legacy match bytes. Added the bounded encoder after red;
+factored the existing reader's plan/candidate checks into shared private
+validators instead of introducing another interpretation. Decoder behavior and
+wire bytes are intended unchanged. Writer preflights count/combined bytes,
+validates all policies/program context, then allocates one output buffer.
+
+`u1-four-writers-affected` now runs 14 targets (prior 13 plus parser writer)
+against 12 exact source/lock inputs. Full log, terminal receipt and guard data
+remain required before any green claim. No catalog key, native fingerprint,
+production database, installed binary or ordinary creation default changed.
+
+Parser-inclusive terminal result: `u1-four-writers-affected` exits 0 at
+21:03:26 UTC; the full-log counter verifies **14 targets, 222 passes, zero
+failures**, including all eight parser-writer cases. Input hashes unchanged;
+no guard termination; Data/home free bytes 340,493,099,008 / 73,453,232,128.
+Strict library all-target Clippy is now running on that same snapshot.
+Broad/native/reference landing proof and the rest of U1 remain incomplete.
+
+### U1 first four writers: frozen landing candidate
+
+Strict library all-target Clippy passes at 21:09:31 UTC (zero warnings under
+`-D warnings`). Fresh upstream comparison is 0/0 against `origin/development`
+at 94eb8f32. Freeze the four writers and four new specs plus manifest/inventory
+and both locks (12 checksummed inputs); no further production edits during
+these gates. This is a coherent prerequisite landing within U1, not U1 closure.
+
+Linux unit `aeordb-v4-u1-writers-gates-20260913` runs the whole workspace,
+separate exact maximum-stage clamp/resize cases on Data, workspace Clippy,
+reference tests/454 fixture verification, contracts and debt self-tests. The
+two large-KV cases are relocated, not waived. Expected count from the last
+green baseline plus 27 new tests is 7,564; only terminal receipts can establish
+the actual count. Same-host debug cache, two Cargo jobs, debug/incremental zero,
+16 GiB build guard/no swap, unchanged disk floors and host deadline remain in
+force. At 21:16:53 the workspace was compiling with Data/home free bytes
+340,492,275,712 / 73,418,354,688; no result count yet.
+
+Both native hosts have new detached `source-u1` worktrees at 94eb8f32, with all
+12 inputs verified and their existing frozen portal siblings reused. The exact
+source-only archive SHA-256 is
+`006458befb357033ae6bf0674e6310312e10c684b104c8da094f12f66f9b9245`;
+it contains no target/database artifacts. macOS and Windows now each run the
+14 affected targets, reference tests and 454 fixture verification with one
+Cargo process/job per host. Their evidence is separate `u1-writers-evidence/`;
+all U0 sources/receipts remain intact. Native and broad results are pending.
+
+Native terminal proof is complete: macOS exits 0 for affected tests at
+21:18:22 UTC, reference tests at 21:18:55 and fixtures at 21:19:25. Windows
+exits 0 at 21:20:56, 21:21:19 and 21:21:31 respectively. Mechanical full-log
+counts confirm **222 passes across 14 affected targets, 150 reference tests,
+and all 454 fixtures on each platform**, no failures/ignores/filters. All
+12 source inputs and before/after patches remain unchanged; no guard stops.
+Final free bytes: Mac 68,102,377,472; Windows 19,175,534,592. Only small
+receipt/log/patch evidence was mirrored locally. Linux full/static sequence
+remains active; the 21:28:29 observation showed heartbeat tests progressing,
+no failure summaries, Data/home free bytes 340,492,304,384 / 73,325,969,408.
+
+The full Linux workspace exits 0 at **21:47:53 UTC**: **351 top-level targets,
+7,562 passed, zero failed, seven existing ignores, two explicitly split large
+KV tests**. Three nested subprocess checks pass and are counted separately;
+the strict split-summary checker accepts the full mirrored log. No guard
+termination, source inputs unchanged, final Data/home free bytes
+340,491,935,744 / 73,324,806,144. The first exact large-KV case is now running
+on Data; its sibling and final static/reference gates remain outstanding.
+Changed-file rustfmt, diff hygiene and six count-checker regressions pass.
+The consolidated writer-proof checker correctly refuses an incomplete suite
+without creating a success report. Next-U1 drafts remain outside this frozen
+candidate, not installed or passing evidence.
+
+### Late writer-review finding: MIME name initials
+
+Do not commit the four-writer unit yet, even if its currently frozen gates all
+pass. Review found a pre-existing validator defect inherited by the new
+parser-plan writer: production `parser_plan::is_canonical_mime_essence`, the
+independent reference equivalent, and native `corrected_mime_essence` all
+permit punctuation in the initial position. Round 9 adopts RFC 6838 restricted
+names; [section 4.2](https://www.rfc-editor.org/rfc/rfc6838.html#section-4.2)
+requires an ASCII letter or digit first. Names such as `!abc/plain` or
+`text/+abc` must not be canonical corrected registry keys. Malformed stored
+MIME becomes generic for corrected extension fallback; legacy exact matching
+must remain unchanged.
+
+Preserve the running candidate and finish its remaining unchanged gates as
+baseline evidence. A separate three-test draft `mime_name_initial_spec.rs`
+under the durable task cache covers the writer, independent reader mutations
+at both widths, and actual native parser execution with legacy protection.
+After the active sequence closes, install/run that target red, add the
+independent reference regression, fix the whole three-site perimeter, and
+qualify the final corrected source before the coherent writer commit. No
+frozen fixture needs regeneration and no production database is involved.
+
+The actual workspace formatting gate (`cargo fmt --all -- --check`) also
+identified four current-unit files needing layout correction. Earlier explicit
+changed-file checks incorrectly selected Rust edition 2024; the workspace is
+edition 2021. This is not a green workspace-format result. After the frozen
+sequence closes, apply the workspace formatter, review only the current-unit
+diffs, and refresh any resulting audit line positions without changing review
+ceilings. The late MIME correction and final source qualification will include
+that layout correction. Upstream refresh still reports 0/0 at 94eb8f32.
+
+Initial sequence closes at **21:59:54 UTC**, exit 0. The second large-KV
+case passed at 21:56:54, workspace Clippy at 21:57:24, reference/fixture
+checks and contracts/debt through 21:59:54. All **7,564 distinct workspace
+tests** passed; final Data/home free bytes 340,393,828,352 / 73,314,529,280.
+The consolidated [initial proof](../evidence/user-facing-v4-u1-writers-initial-proof-20260913.json)
+passes its checker and explicitly says this unit is **not complete** until
+the late correction is qualified. Original twelve-input manifest is archived.
+
+Installed the three-test MIME target and the independent reference's separate
+one-test module without changing production. New per-stage input manifest
+contains 17 exact source/lock files. `u1-mime-library-red` is running on the
+same isolated desktop source under the normal bounded runner. Preserve this
+red evidence before correcting production; final actual workspace formatting
+and behavioral gates remain required before the writer commit.
+
+MIME red results are now preserved: the three library tests fail at 22:02:00
+UTC (writer acceptance, reader acceptance, and wrong native fallback), and the
+independent reference test fails at 22:03:15 on the same invalid-name acceptance.
+Added the ASCII-alphanumeric initial check to the parser-plan canonical validator
+and independent reader; native normalization now reuses the production validator
+instead of maintaining a third restricted-name interpretation. Legacy exact
+matching and stored metadata bytes remain unchanged. No fixtures regenerated.
+
+Actual edition-2021 workspace formatting was applied to the four current-unit
+files only, restoring the original four dependency inventory line positions.
+Both `cargo fmt --all -- --check` and standalone reference formatting now pass.
+The final affected sequence closes at 22:09:43: **225 passes in 15 library
+targets**, **151 reference tests**, **454 independent fixtures**, strict release
+reference Clippy; no failures or guard stops. Seventeen exact inputs remain
+unchanged. Original red and initial-snapshot receipts are retained separately.
+
+Final frozen qualification starts around 22:13 UTC: Linux unit
+`aeordb-v4-u1-final-gates-20260913` runs the whole workspace, both exact Data
+large-KV cases, workspace Clippy, reference/fixture and contracts/debt gates.
+Native Mac/Windows each run the 15 affected targets and reference tests/fixtures
+in separate `u1-final-evidence/` directories. The seventeen-file manifest SHA-256
+is `27771c9b13a3caead7a1f1e27a59751169f33c7c6b81ea1e5a3d7a256ec0c055`;
+source-only archive SHA-256 is
+`f2ead71b5c9069c45df48d7f675c09c5f4d8fc5783930cb611b7181b7b46c54c`.
+No source changes during qualification. Expected workspace total is 7,567
+distinct passes, but final terminal/count verification is still owed. No writer
+commit, U1 closure, default switch, deployment or production readiness claim yet.
+
+Final native receipts now close green. Mac affected/reference/fixtures finish
+at 22:15:03 / 22:15:34 / 22:16:06 UTC; Windows at 22:17:41 / 22:18:04 /
+22:18:15. Full-log counters verify **225 passes/15 targets, 151 reference
+tests, 454 fixtures on each host**, all seventeen source hashes checked again
+afterward, unchanged before/after patches and no guard termination. Final free
+bytes Mac 68,072,730,624 and Windows 19,144,691,712. Only evidence files were
+mirrored. Linux full/static gates remain active; this is not unit completion.
+
+Full current-unit source/test review after the MIME fix found no further
+writer-layout or bounds issue. Next-slice draft review caught a vacuous direct
+selector test: `parsed_value: None` already yields dependency-unavailable in the
+old implementation. The draft now supplies a valid parsed map, so only the
+missing fingerprint gate can explain the intended failure. Still not installed
+or executed; no unearned red/green claim.
+
+Final Linux main-suite receipt closes at **22:49:27 UTC**, exit 0, with
+**352 top-level targets / 7,565 passes**, seven existing ignores, two separately
+scheduled large-KV cases and three nested checks counted separately. The strict
+full-log counter accepts these totals. The large-KV/static sequence remains
+live under unit `aeordb-v4-u1-final-gates-20260913`; do not commit until all
+terminal receipts pass. Data/home free bytes at main-suite exit are
+340,346,564,608 / 73,325,395,968.
+
+### Next-U1 failing-first proof without changing the frozen source
+
+The idle Mac's exact already-qualified debug library was used for two
+standalone `rustc --test` probes. Its SHA-256 is
+`7f4ee6421538b2aff48e5c325ce0fbed814d80b59791936458cf5c24ab842716`;
+dependency metadata identifies `source-u1`, and all seventeen source inputs
+and before/after patches remain unchanged. Compilation has a 120-second
+deadline; each tiny test run has a 30-second deadline. No additional Cargo
+process, production edit, target transfer or database artifact transfer occurs.
+
+- `native-public-boundary-red`, **22:49:07 UTC**, exit 101: three tests fail
+  at the intended boundaries. The public native parser panics for a ten-byte
+  GIF and for the first overflowing WAV byte rate. Exhaustive prefixes of
+  eleven tiny media seeds find only `tiny.gif/10` in that prefix corpus.
+  Test source SHA-256:
+  `2d5428aafc0922ba3d595a8a828db9a10cb0e408d8bde59a5eaf8bcf4bd997df`.
+- `dependency-availability-red`, **22:50:45 UTC**, exit 101: four target
+  tests fail as intended (ADPT/AVST unknown-profile rejection, direct selector
+  wrongly returning Missing, and shared evaluation doing parser work before
+  refusing an unavailable selector). Two guards pass: known malformed records
+  remain rejected and completed canonical values remain queryable.
+  Test source SHA-256:
+  `ab08dae687e440008275bc6a0f31c7bbca4e958066acfefa0250129dea317fc9`.
+
+These are real red regressions for the next semantic-runtime slice, not fixes
+or broad/native qualification of that slice. Their small logs, input hashes,
+exit receipts and unchanged-source proofs are mirrored in same-named folders
+under the local durable campaign cache. Test sources remain outside the frozen
+writer candidate until its coherent landing. The corrected archive-MIME test
+and all four native conformance bundles still require execution. The pending
+dependency-catalog key ruling is not changed or implied by these results.
+
+The third standalone Mac probe, `native-archive-mime-red`, closes at
+**22:55:33 UTC**, exit 101: corrected output fails on
+`docx/application/octet-stream` versus its detected canonical MIME; the legacy
+four-format guard passes. Source SHA-256 is
+`1ee68667ebfa010e1c4b962735a9c5f5273b337daaabf9a9f23c3194fcaae58b`.
+It used the same unchanged qualified library with the existing local ZIP and
+temporary-directory dependencies, and isolated temporary databases under the
+Mac campaign cache. Source checks and unchanged-patch proof pass; only small
+evidence was mirrored. The corrected test stops on its first reproduced
+failure, so this red run does not claim all corrected format branches were
+reached. All four native conformance bundles remain unqualified drafts.
+
+### Canonical-writer landing proof complete
+
+The final Linux sequence closes **23:02:58 UTC**, exit 0, last stage
+`complete`; unified session 4769 is terminal. Both exact large-KV tests pass
+(clamp 22:53:57, resize 22:58:27), workspace Clippy passes at 23:00:58,
+reference tests/fixtures at 23:01:28 / 23:01:58, contracts at 23:02:28 and
+debt self-tests at 23:02:58. Combined proof is **7,567 distinct workspace
+passes**, seven existing ignores and three nested checks separately counted;
+**151 reference tests / 454 fixtures**, **95 routes / 39 docs**, reviewed debt
+**8 entries / 164 retained matches**. No source drift or guard termination.
+Final Data/home free bytes: 340,346,249,216 / 73,324,855,296.
+
+The final [writer proof](../evidence/user-facing-v4-u1-writers-proof-20260913.json)
+was generated only after its fail-closed checker verified all required exit
+receipts, strict whole-log counts, both exact relocated cases, native source
+identity, formatting, unchanged seventeen-file inputs and disk guards. Native
+disk logs were additionally checked across all six stages (thirteen samples,
+all above their host floors). The Linux systemd process completed in 49m31.633s
+with a reported 16.0 GiB rounded peak and zero swap. This is the **16 GiB build
+guard**, not evidence for the final 8 GiB production-shaped runtime budget.
+
+Full source/test diff review and actual edition-2021 formatting pass. Upstream
+refresh remains 0/0 at 94eb8f32. This completes only the four-writer landing
+unit; U1 semantic production, the default-v4 live target, native execution
+corrections, service/cutover integration and the full readiness goal remain
+open. The proof explicitly retains those limitations and original failures.
