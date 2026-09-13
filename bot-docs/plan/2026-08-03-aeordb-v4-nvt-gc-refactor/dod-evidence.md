@@ -4,12 +4,12 @@
 
 Candidate: `a804732755b187b3e2bcdd109da37a2895dc9a80`, development branch.
 Integration/review owner: Codex, direct execution under the owner-authorized
-release-qualification plan. Current status: **qualification in progress**.
+release-qualification plan. Current status: **qualification complete before step 4**.
 [Ledger 10](progress/10-release-qualification.md) is the sole active checklist.
 
 Ordinary/native/static, exact-release, 100-complete-suite crash and short-soak
 gates pass, as do all three full 12-hour S1/S2/S3 stages. The driver has exited.
-Final packet sealing and requested cleanup remain open. Stop before step 4.
+Final packet sealing and requested cleanup are complete. Stop before step 4.
 
 Ordinary service authority remains v3-compatible. Public `migrate-v4` is
 offline shadow creation/verification, not activation. Public v4 service
@@ -41,12 +41,12 @@ Do not turn their older test counts or duration passes into current evidence.
 | Production-derived migration and dirty restart | Not proven. Large damaged-file repair retired; disposable clean-media migration is separate evidence |
 | Canary before cutover and explicit acceptance | Not performed; requires discussion/authorization and available implementation surfaces |
 | V3 backup/rollback boundary | Defined in migration contract; operational first-write boundary never crossed |
-| Documentation/API/SDK/bot agreement | Current contracts/mdBook/live docs pass; this canonical packet is being reconciled |
+| Documentation/API/SDK/bot agreement | Current contracts/mdBook/live docs pass; canonical packet reconciled with explicit runtime/authorization limits |
 | Error handling/debt | 1,503 reviewed inventory entries; 29 architecture tests; eight debt entries/164 retained matches |
-| Command-level final packet and requested cleanup | In progress; final seal and cleanup receipt still required |
+| Command-level final packet and requested cleanup | Complete: 278-file closeout seal and exact 20-file cleanup receipt |
 
 This map does not mark the entire frozen parent complete. Its production,
-activation and current qualification obligations remain visible.
+activation and production-derived migration obligations remain visible.
 
 ## Child and regression sources
 
@@ -157,18 +157,25 @@ The new CLI separately verifies the retained test source with unchanged SHA/stat
 Production-scale repair/recovery and controlled performance parity remain
 unproven; the corrupt multi-terabyte file is not an active qualification target.
 
-## Final audit and cleanup — still open
+## Final audit and cleanup — complete September 13
 
-After current gates finish, collect their terminal receipts, native identity,
-runner/binary manifests, database hash/size summaries and resource results.
-Seal only closed evidence. Retain truthful failed attempts and do not append
-output to a file after including it in a seal.
+All 15 current sequence stages have terminal status 0/no guard termination.
+Closed native identities, runner/binary manifests, database hash/size records,
+logs/checkpoints and resources are sealed in the separate 278-file
+[closeout manifest](evidence/p9-release-closeout-20260913.sha256), SHA-256
+`91740b6c41ad46c5a8f497e7f6dda1e9883981d2a427cd655b56b18ddee4287b`.
+Every listed file reverified on the desktop and its laptop cache mirror. Earlier
+236/209-file failure-followup seals also reverified intact. No sealed file was
+subsequently appended or rewritten.
 
-Then remove only individually classified, inactive, unneeded test databases
-under desktop `/media/Data/AeorDB/`. Preserve useful corruption specimens,
-source inputs and logs; record exact removed paths/bytes/recoverability.
-Any old seal whose disposable payload is deliberately retired must retain an
-explicit cleanup record, not be silently reported as fully reverified afterward.
+The [cleanup report](test-database-cleanup-20260913.md) and
+[machine receipt](evidence/p9-test-database-cleanup-20260913.json) record 20 exact
+removals, fresh identity/SHA/no-opener checks, 79.26 GB reclaimed and 357.15 GB
+remaining free. Useful failure specimens, source inputs, corpus and logs remain;
+retained fixture stats match. Three redundant inputs can be restored from retained
+references; 14 soak images and three shadows have no raw-byte backup. The new
+seal excludes retired raw payloads, and explicit tombstones preserve the
+availability limits of older manifests that name those files.
 
 The retained FS-Server1 database, service, v4 activation, installation/downloads,
 canary/cutover/acceptance and destructive operational GC remain outside this

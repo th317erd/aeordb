@@ -1,0 +1,432 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "host": "wyatt-desktop",
+  "authorized_root": "/media/Data/AeorDB/",
+  "finished_utc": "2026-09-13T07:27:53.353Z",
+  "removed_files": 20,
+  "removed_logical_bytes": 79259487871,
+  "removed_allocated_bytes": 79259533312,
+  "free_bytes_before": 277887242240,
+  "free_bytes_after": 357146759168,
+  "retained_fixture_stat_unchanged": true,
+  "raw_soak_and_shadow_byte_recovery_available": false,
+  "duplicate_input_byte_recovery_available": true,
+  "privileged_process_visibility_claimed": false,
+  "receipt_root": "/media/Data/AeorDB/Tests/p9-release-closeout-20260913/cleanup",
+  "removed": [
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:40.157Z",
+      "path": "/media/Data/AeorDB/Tests/p9-exact-9a71d4ce/long/s1/soak.aeordb",
+      "sha256": "9c8210387c48de028623bdc7e60e7cfc2a7fb8ac5aabd73cd8e7035c75e8c218",
+      "reason": "Historical S1 result.txt exit_code=0; fresh closeout hash (not a historical sealed hash).",
+      "identity": {
+        "dev": "2081",
+        "ino": "2479407",
+        "size": "638775378",
+        "blocks": "1247616",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788336730799166400",
+        "ctimeNs": "1788336730799166400"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:41.980Z",
+      "path": "/media/Data/AeorDB/Tests/p9-exact-9a71d4ce/long/s2/soak.aeordb",
+      "sha256": "2deb39502f4c4741116846df51dcc570bb926941ac14d8eade39637671add9f4",
+      "reason": "Historical S2 result.txt exit_code=0 and s2-artifacts.sha256.",
+      "identity": {
+        "dev": "2081",
+        "ino": "9004",
+        "size": "7772085386",
+        "blocks": "15179856",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788380184426629200",
+        "ctimeNs": "1788380184426629200"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:42.525Z",
+      "path": "/media/Data/AeorDB/Tests/p9-exact-9a71d4ce/long/s3/soak.aeordb",
+      "sha256": "db8f93dedeb6a112fda9cfa4d1f6c1cf78a8c287b2cc55cc4f347f9b479a96bf",
+      "reason": "Historical S3 result.txt exit_code=0 and s3-artifacts.sha256.",
+      "identity": {
+        "dev": "2081",
+        "ino": "192858",
+        "size": "151156262",
+        "blocks": "295232",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788423386496014000",
+        "ctimeNs": "1788423386496014000"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:43.121Z",
+      "path": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/target/shadow-08025b80-dirty-resume.aeordb",
+      "sha256": "dc01bf031f042f436f2c7bf835d1c4292de50d6cc79c4785539a4ff5a05829cd",
+      "reason": "Successful P8 shadow; full parity recorded in p8-large-v3-media-rehearsal.json.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2517744",
+        "size": "11447013668",
+        "blocks": "22357456",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788498600902352900",
+        "ctimeNs": "1788498600902352900"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:43.737Z",
+      "path": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/migration-copy-v3.aeordb",
+      "sha256": "fe54e1ae6582b192434f3aff606bd0041a713128fdedaf8a249524a63a36ecfe",
+      "reason": "Redundant unchanged copy of retained P8 original.",
+      "retained_reference": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/source-v3.aeordb",
+      "identity": {
+        "dev": "2081",
+        "ino": "2503853",
+        "size": "11654356123",
+        "blocks": "22762416",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788454262172145500",
+        "ctimeNs": "1788454842238668900"
+      },
+      "reference_identity": {
+        "dev": "2081",
+        "ino": "2501531",
+        "size": "11654356123",
+        "blocks": "22762416",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788454262172145500",
+        "ctimeNs": "1788454262172145500"
+      }
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:44.303Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-33420bad-20260910/media/source-v3.aeordb",
+      "sha256": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "reason": "Successful migration input identical to retained clean reference.",
+      "retained_reference": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/migration-clean-copy-v3.aeordb",
+      "identity": {
+        "dev": "2081",
+        "ino": "2661552",
+        "size": "11654356141",
+        "blocks": "22762416",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788493099343106500",
+        "ctimeNs": "1789069534548923000"
+      },
+      "reference_identity": {
+        "dev": "2081",
+        "ino": "2599017",
+        "size": "11654356141",
+        "blocks": "22758648",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788493099343106500",
+        "ctimeNs": "1788493099343106500"
+      }
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:45.099Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-33420bad-20260910/media-capacity-retry/shadow-v4.aeordb",
+      "sha256": "40cca2aa2c13149a77e5afb2540b280a3480de127cf690116184b500e8e3528e",
+      "reason": "Successful media-capacity-retry.exit=0; completed retry preserves full parity.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2661609",
+        "size": "11447013668",
+        "blocks": "22357456",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789072572680118800",
+        "ctimeNs": "1789072572680118800"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:46.113Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911/media/source-v3.aeordb",
+      "sha256": "2be26ba43beb289bee0573355936b0ccd303540e39b13f815f1fedeeb504db74",
+      "reason": "Successful current carried-forward migration input; identical retained clean reference.",
+      "retained_reference": "/media/Data/AeorDB/Tests/p8-media-rehearsal-20260903/migration-clean-copy-v3.aeordb",
+      "identity": {
+        "dev": "2081",
+        "ino": "2669029",
+        "size": "11654356141",
+        "blocks": "22762416",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788493099343106500",
+        "ctimeNs": "1789133808415282900"
+      },
+      "reference_identity": {
+        "dev": "2081",
+        "ino": "2599017",
+        "size": "11654356141",
+        "blocks": "22758648",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1788493099343106500",
+        "ctimeNs": "1788493099343106500"
+      }
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:47.417Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911/media/shadow-v4.aeordb",
+      "sha256": "f6728854a5cd0a29816b8502720616a3e4c851632c88ff7489ed09cae18daa93",
+      "reason": "Successful 48 full media parity, resume/retry and a804 source-equivalence recheck.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2669048",
+        "size": "11447013668",
+        "blocks": "22357456",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789134389346607200",
+        "ctimeNs": "1789134389346607200"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:47.969Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s1-short/soak.aeordb",
+      "sha256": "0af50d20f0d551c82adbf8cc5047a4c4a79748987ce91c07396870fc5c5314e1",
+      "reason": "Current closed S1 short pass.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2661827",
+        "size": "13332832",
+        "blocks": "26048",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789151907254781600",
+        "ctimeNs": "1789151907254781600"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:48.511Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s2-short/soak.aeordb",
+      "sha256": "b19a0191ca9bfea09585317aa1624149aa49f65376b2591b4b61ba2ac5744a53",
+      "reason": "Current closed S2 short pass; copy verification.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2675793",
+        "size": "17607033",
+        "blocks": "34392",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789152020402197500",
+        "ctimeNs": "1789152020402197500"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:49.053Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s3-short/soak.aeordb",
+      "sha256": "a2c6d7e1b4fefd3d4931cd19744391d3d02f953e4b704064f9c289ec37258526",
+      "reason": "Current closed S3 short pass; copied verification/checkpoint comparison.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2675810",
+        "size": "3702318",
+        "blocks": "7232",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789152140452559000",
+        "ctimeNs": "1789152140452559000"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:49.662Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s1-12h/soak.aeordb",
+      "sha256": "caece69410f1f85fec852d6f4cddc0f07b8470845c4e4938fbb36d5a56f1cfd8",
+      "reason": "Current full S1 zero-issue readonly terminal verification, resource pass.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2675815",
+        "size": "621590063",
+        "blocks": "1214048",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789195381441337200",
+        "ctimeNs": "1789195381441337200"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:50.245Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s2-12h/soak.aeordb",
+      "sha256": "bde7c822bc06b3eb214ac85abf1a9b93bea426ed3a59364e936970f0dee2c4ac",
+      "reason": "Current full S2 65 successful copied normal-reopen verifications.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2675834",
+        "size": "540173616",
+        "blocks": "1055032",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789238650710646100",
+        "ctimeNs": "1789238650710646100"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:50.775Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/long/s3-12h/soak.aeordb",
+      "sha256": "69201a89e56177454107b87766fa8247796c61e96313c0103e70e734efc0f366",
+      "reason": "Current full S3 1510 successful copied verifications/checkpoint comparisons.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2675867",
+        "size": "142162844",
+        "blocks": "277664",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789281901338871100",
+        "ctimeNs": "1789281901338871100"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:51.286Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-33420bad-20260910/long/s1-short/soak.aeordb",
+      "sha256": "85959126c41aa031ae4db1277c303586218353472d00a02e1961589e0d51fa38",
+      "reason": "Successful s1-short-pinned.exit=0; NOT failed long S1.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2662025",
+        "size": "14547533",
+        "blocks": "28416",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789082319181331000",
+        "ctimeNs": "1789082319181331000"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:51.788Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-33420bad-20260910/long/s2-short/soak.aeordb",
+      "sha256": "b51a30fef16c814bbfab5a60cb7a27f8f74c872e775c327cd1ceeb925d734b8b",
+      "reason": "Successful s2-short-pinned.exit=0.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2662036",
+        "size": "14246961",
+        "blocks": "27832",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789082431129155100",
+        "ctimeNs": "1789082431129155100"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:52.303Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-33420bad-20260910/long/s3-short/soak.aeordb",
+      "sha256": "8cb6a3aa9f144f8f56f9fd7d8108cea6b25b9f308d5f98aa252314b2af7e7ee2",
+      "reason": "Successful s3-short-pinned.exit=0.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2662052",
+        "size": "3348415",
+        "blocks": "6544",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789082550851846400",
+        "ctimeNs": "1789082550851846400"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:52.811Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911/long/s1-short/soak.aeordb",
+      "sha256": "7169ec115b796ed30dfa7b81d01ea804c979412d13c712c1bfe835bf150bd5e7",
+      "reason": "Successful s1-short-pinned.exit=0.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2669076",
+        "size": "8831304",
+        "blocks": "17256",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789138831647704200",
+        "ctimeNs": "1789138831647704200"
+      },
+      "reference_identity": null
+    },
+    {
+      "event": "removed",
+      "utc": "2026-09-13T07:27:53.353Z",
+      "path": "/media/Data/AeorDB/Tests/p9-release-48baeefe-20260911/long/s2-short/soak.aeordb",
+      "sha256": "c6d59bf95095e89c04696273386f493eaaa3dd8b07ca8103789eb422ecdb4199",
+      "reason": "Successful s2-short-pinned.exit=0; failed S3 retained.",
+      "identity": {
+        "dev": "2081",
+        "ino": "2669118",
+        "size": "13818517",
+        "blocks": "26992",
+        "mode": "33279",
+        "uid": "1000",
+        "nlink": "1",
+        "mtimeNs": "1789138943992805500",
+        "ctimeNs": "1789138943992805500"
+      },
+      "reference_identity": null
+    }
+  ]
+}

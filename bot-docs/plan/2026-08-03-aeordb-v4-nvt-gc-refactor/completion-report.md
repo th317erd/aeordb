@@ -2,12 +2,15 @@
 
 ## Current result — September 13, 2026
 
-**Qualification remains in progress.** Candidate `a804732755b187b3e2bcdd109da37a2895dc9a80`
+**Authorized qualification steps 1–3 and cleanup are complete.** Candidate `a804732755b187b3e2bcdd109da37a2895dc9a80`
 has passed full Linux coverage, affected native tests, all three normal native
 release builds, live HTTP/restart/readback, and byte-preserving media verification.
 All 100 complete crash suites, all three short soaks and all three full 12-hour
 S1/S2/S3 stages pass. The driver exited successfully at 06:45:28 UTC on September
-13. Final evidence sealing and requested test-database cleanup remain active.
+13. The closed 278-file evidence packet is sealed and reverified. Twenty disposable
+test databases were removed, reclaiming 79.26 GB; Data now has about 357.15 GB free.
+We are at the owner-required stop before step 4, not declaring the full frozen
+parent campaign or public v4 service activation complete.
 
 The owner authorized release-qualification steps 1–3 and cleanup, then required
 a **stop and discussion before step 4**. No installation, publication, deployment,
@@ -117,7 +120,7 @@ was pinned before test-feature builds could replace its build-cache path.
 | S1 resource summary | Pass 06:44:08 UTC; 721 samples/43,200 seconds; RSS growth 12.8%, VmData growth 15.8%, maximum 13 file descriptors |
 | 12-hour S2 | Pass September 12 at 18:45:01 UTC; all 65 restart cycles pass normal-reopen/copy verification |
 | 12-hour S3 | Pass September 13 at 06:45:28 UTC; 1,510/1,510 copied verifications and checkpoint comparisons; configured 43,200-second window, 43,227-second guarded stage |
-| Final audit and test-DB cleanup | Pending |
+| Final audit and test-DB cleanup | Pass September 13: 278 closed evidence files sealed/reverified; 20 exact disposable databases removed, 79.26 GB reclaimed |
 
 The full-media operation was **not rerun or relabeled** as a8047327 execution.
 A mechanical source-delta gate permits only the checkpoint/test/harness/progress
@@ -131,7 +134,13 @@ The current desktop campaign is
 Native receipts use the same basename under `~/.cache/codex/aeordb-tests/`.
 The closed ordinary-correction evidence seal covers 209 files, SHA-256
 `6e25641e4d70228a8e622fed6e748742f7b44e8c96f766204d4d63641bc908a2`.
-The current crash and duration gates are not covered by that earlier seal.
+The current crash and duration gates are covered by the separate 278-file
+[release-closeout manifest](evidence/p9-release-closeout-20260913.sha256), SHA-256
+`91740b6c41ad46c5a8f497e7f6dda1e9883981d2a427cd655b56b18ddee4287b`.
+Its root is `/media/Data/AeorDB/Tests/p9-release-closeout-20260913/`; every listed
+file reverified on the desktop and in a laptop cache mirror. This new seal retains
+closed metadata, logs, checkpoints, identities and cleanup tombstones, not retired
+raw disposable database payloads.
 
 ## Retained failures and resource limits
 
@@ -147,15 +156,19 @@ Model checks use approximately ten-minute intervals for crash/soak workloads.
 Cycle scheduling is seeded; workers are wall-clock-seeded, not fully
 deterministic. Forced-unmount testing is explicitly disabled/self-skipped.
 
-The owner-requested cleanup covers unneeded, inactive disposable test databases
-under desktop `/media/Data/AeorDB/`. Logs, useful failure specimens and source
-inputs must be retained. Cleanup must record exact paths, reclaimed bytes and
-recoverability; it does not authorize deletion of the FS-Server1 database.
+The [cleanup report](test-database-cleanup-20260913.md) records the 20 exact
+removals: 14 successful soak images, three successful shadows and three redundant
+input copies. The duplicate inputs remain byte-recoverable from two retained,
+freshly checksummed originals; the retired soak/shadow images do not have raw-byte
+backups. Logs, checkpoints, useful failure specimens and source inputs remain.
+Retained fixture stats match before/after cleanup. Historical manifests naming
+deleted payloads retain explicit tombstones; those entries are not claimed to
+reverify after deletion. The FS-Server1 database was not touched.
 
 ## Remaining boundary
 
-Completion requires the reconciled sealed packet and scoped cleanup. Then stop
-for the owner's step-4 discussion.
+The authorized qualification packet and cleanup are complete. Stop here for the
+owner's step-4 discussion; no test worker or driver remains active.
 
 A future operational proposal must distinguish a v3-compatible deployment from
 additional v4 service activation work. It must not invent a cutover command or

@@ -2,8 +2,8 @@
   "schema_version": 2,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "landing_unit": "P9 renewed release qualification, before owner step-4 discussion",
-  "captured_at": "2026-09-13T06:45:28Z",
-  "status": "qualification_in_progress",
+  "captured_at": "2026-09-13T07:30:00Z",
+  "status": "qualification_complete_pre_step_4",
   "progress_ledger": "../progress/10-release-qualification.md",
   "source": {
     "branch": "development",
@@ -259,7 +259,19 @@
     "cycle_seed": 20260911,
     "worker_randomness": "wall_clock_seeded_with_checkpoint_trace_retained",
     "final_evidence_audit": {
-      "status": "pending"
+      "status": "passed",
+      "finished_utc": "2026-09-13T07:30:00Z",
+      "root": "/media/Data/AeorDB/Tests/p9-release-closeout-20260913",
+      "files": 278,
+      "manifest": "closed-release-evidence.sha256",
+      "tracked_manifest_copy": "p9-release-closeout-20260913.sha256",
+      "manifest_sha256": "91740b6c41ad46c5a8f497e7f6dda1e9883981d2a427cd655b56b18ddee4287b",
+      "all_listed_contents_reverified_on_desktop_and_laptop_mirror": true,
+      "raw_disposable_database_payloads_included": false,
+      "earlier_236_and_209_file_followup_seals_reverified_intact": true,
+      "unique_current_sequence_stages_passed": 15,
+      "sequence_finished_utc": "2026-09-13T06:45:28Z",
+      "owned_test_driver_and_live_units_closed": true
     }
   },
   "carried_forward_engine_evidence": {
@@ -333,11 +345,22 @@
     "private_internal_workspaces_on_home": true
   },
   "test_database_cleanup": {
-    "status": "pending_after_qualification",
+    "status": "complete",
+    "finished_utc": "2026-09-13T07:27:53.353Z",
     "authorized_root": "wyatt-desktop:/media/Data/AeorDB/",
     "exact_targets_and_no_openers_required": true,
     "preserve_logs_sources_and_useful_failure_evidence": true,
-    "removed_paths_and_recoverability_receipt": null
+    "removed_paths_and_recoverability_receipt": "p9-test-database-cleanup-20260913.json",
+    "report": "../test-database-cleanup-20260913.md",
+    "removed_files": 20,
+    "removed_logical_bytes": 79259487871,
+    "removed_allocated_bytes": 79259533312,
+    "free_bytes_before": 277887242240,
+    "free_bytes_after": 357146759168,
+    "retained_source_and_failure_fixture_stat_unchanged": true,
+    "duplicate_inputs_byte_recoverable_from_retained_references": true,
+    "retired_soak_and_shadow_raw_bytes_backed_up": false,
+    "historical_payload_availability_tombstones_recorded": true
   },
   "retained_production_database": {
     "host": "FS-Server1",

@@ -12,7 +12,8 @@ against engine baseline `48baeefe0144e2a84458c6589aa0345afc223ff8`, documentatio
 entry `11fca469d59ff63e688bbeb65364dbf637adaac6`. Final-source full Linux, affected
 native and static checks pass. The committed exact a8047327 native releases,
 100 complete crash suites, all short soaks and all three full 12-hour stages now
-pass as of September 13. Final audit and scoped cleanup are active. At 48baeefe, media/live/resource/release-CLI
+pass as of September 13. Final audit, sealing and scoped cleanup are complete;
+stop for the owner's step-4 discussion. At 48baeefe, media/live/resource/release-CLI
 and 100 complete crash suites passed, but short S3 stopped on a malformed
 checkpoint after cycle 8; no 12-hour stage started. Earlier build/qualification
 passes below remain explicitly attributed predecessor evidence.
@@ -25,9 +26,9 @@ parent; it does not rewrite historical results or authorize production work.
   builds for checkpoint-corrected source a8047327.
 - [x] 2. Current-candidate disposable media migration, live HTTP/reopen/readback,
   bounded resource overlap, restart/crash matrix, and S1/S2/S3 12-hour stages.
-- [ ] 3. Reconcile and seal the completion/DoD packet with current evidence,
+- [x] 3. Reconcile and seal the completion/DoD packet with current evidence,
   historical qualification clearly labeled, remaining operational gates explicit.
-- [ ] 3a. Owner-requested cleanup after qualification: inventory the test databases
+- [x] 3a. Owner-requested cleanup after qualification: inventory the test databases
   under desktop `/media/Data/AeorDB/`, confirm exact disposable targets and no
   active openers, then remove unneeded test database files. Retain logs/source
   and still-needed failure evidence; record what was removed and bytes reclaimed.
@@ -1361,3 +1362,49 @@ open files, post-admission change, and retained-reference conflicts. All ten pas
 locally and on the desktop. Two preflight mistakes (unsupported fuser `--` and
 an overstrict root-length check) failed closed before test-database deletion;
 their outputs remain retained. Final seal and cleanup receipt remain pending.
+
+### Closeout and owner-requested cleanup complete — September 13
+
+After successful admission, exactly 20 literal database paths were unlinked at
+07:27:53.353 UTC: fourteen successful soak images, three successful migration
+shadows and three redundant media inputs. Removed logical/allocated totals:
+79,259,487,871 / 79,259,533,312 bytes. Data available bytes rose from
+277,887,242,240 to 357,146,759,168. Filesystem free-space deltas may also reflect
+bookkeeping or concurrent activity. See the exact
+[cleanup report](../test-database-cleanup-20260913.md) and
+[machine receipt](../evidence/p9-test-database-cleanup-20260913.json).
+
+All 20 fresh checksums matched; the duplicate references were also freshly
+checksummed. Every target had stable physical/timestamp identity, one hardlink,
+current-user ownership and no symlink ancestry. No-opener checks and identities
+were repeated before unlink, and before/after events plus directory changes were
+flushed durably. These were current-user `fuser` checks, not privileged visibility
+into every system process. Before/after stats of the retained source/failure
+fixtures match. Three duplicate inputs are byte-recoverable from two retained P8
+originals; the other seventeen images have no raw-byte backup. Their logs,
+checkpoints and regeneration inputs remain. Unknown/failed specimens and the
+production-derived database were not deletion targets.
+
+At 07:30:00 UTC, the separate closeout seal passes with 278 closed files:
+`91740b6c41ad46c5a8f497e7f6dda1e9883981d2a427cd655b56b18ddee4287b`.
+Every listed file reverified on the desktop and a laptop cache mirror. The
+[tracked manifest](../evidence/p9-release-closeout-20260913.sha256) is relative to
+`/media/Data/AeorDB/Tests/p9-release-closeout-20260913/`. Raw retired database
+payloads are excluded; tombstones explicitly retire old payload availability
+claims without rewriting historical hashes or outcomes. Earlier 236/209-file
+failure-followup seals remain intact. No closed file was modified after sealing.
+
+The canonical packet now records `qualification_complete_pre_step_4`. The final
+task-local validator passes 23 checks/messages, including rejection of inflated
+cleanup counts/bytes and wrong closeout manifest identity/count, alongside native
+identity, actual crash/duration counts and runtime/authorization boundaries.
+Actual source/test/Cargo/embedded-doc inputs remain identical to a8047327;
+debt and diff checks pass. This is documentation/evidence closeout, not another
+runtime change or a claim of a fresh full Rust-suite rerun.
+
+**Authorized steps 1–3 and cleanup are complete. Stop for the owner's step-4
+discussion.** No current qualification driver, worker or owned live-test unit is
+active. No installation, public release, canary, service change, v4 activation,
+first v4 write, destructive operational GC or retained production-database
+operation occurred. Public v4 service activation remains an implementation
+limitation; the full frozen parent is not marked complete.
