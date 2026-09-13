@@ -5,7 +5,7 @@ use aeordb::engine::v4::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM};
 use aeordb::engine::v4::namespace::{
   EncodedNamespaceRootV1, EncodedSemanticObjectV1, NamespaceRootWriteV1, NamespaceTreeEdgeV0, NamespaceTreeLayoutV0,
   SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, decode_namespace_tree_root_v0, encode_namespace_root,
-  encode_semantic_state_object,
+  encode_semantic_state_object, decode_semantic_object,
 };
 use aeordb::engine::v4::root_authority::{
   ImmutableNamespaceAuthorityInputV1, RootAdmissionCommitV1, RootAuthorityKindV1, RootAuthorityReferenceRoleV1, RootPublicationPrepareV1,
@@ -44,6 +44,98 @@ struct IndependentEntityWrite<'a> {
   write_sequence: u64,
   key: &'a [u8],
   stored_value: &'a [u8],
+}
+
+// Round 10 permits complete-empty semantics: known compiler/registry, no
+// catalog object, and all counts zero. Derive these bytes from the independent
+// nonempty fixture, never from the production encoder under test.
+fn complete_empty_semantic_fixture(algorithm: HashAlgorithm) -> Vec<u8> {
+  let mut bytes = fixture(&format!("semantic-object-v1/asem-{}-state-complete.bin", algorithm_fixture_name(algorithm)));
+  bytes[20..28].fill(0);
+  bytes[32 + 44] = 0;
+  let catalog_offset = 32 + 48 + 2 * algorithm.hash_length();
+  let checksum_offset = bytes.len() - 4;
+  bytes[catalog_offset..checksum_offset].fill(0);
+  let checksum = crc32fast::hash(&bytes[..checksum_offset]);
+  bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+  bytes
+}
+
+#[test]
+fn complete_empty_semantic_state_reader_preserves_known_semantics_without_a_zero_graph_edge() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let bytes = complete_empty_semantic_fixture(algorithm);
+    let decoded = decode_semantic_object(&bytes, algorithm).expect("the ratified complete-empty representation is valid");
+    assert!(decoded.graph_edges.is_empty(), "the zero catalog slot must never become a graph edge");
+    assert!(matches!(
+      decoded.semantic_state.unwrap().availability,
+      SemanticAvailabilityV1::Complete { catalog_record_count: 0, catalog_node_count: 0, definition_count: 0, dependency_count: 0, .. }
+    ));
+    assert_eq!(decoded.object_id, independent_digest(algorithm, &[b"aeordb.semantic-object.immutable.v1\0", &1u16.to_le_bytes(), &bytes]));
+  }
+}
+
+#[test]
+fn complete_empty_semantic_state_writer_matches_independent_bytes_at_both_hash_widths() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let bytes = complete_empty_semantic_fixture(algorithm);
+    let width = algorithm.hash_length();
+    let request = SemanticStateWriteV1 {
+      required_capabilities: bytes[36..68].try_into().unwrap(),
+      availability: SemanticAvailabilityV1::Complete {
+        compiler_fingerprint: bytes[80..80 + width].to_vec(),
+        semantic_registry_fingerprint: bytes[80 + width..80 + 2 * width].to_vec(),
+        catalog_root: vec![0; width],
+        catalog_record_count: 0,
+        catalog_node_count: 0,
+        definition_count: 0,
+        dependency_count: 0,
+      },
+    };
+    let encoded = encode_semantic_state_object(&request, algorithm).expect("complete-empty is not content-only legacy state");
+    assert_eq!(encoded.value, bytes);
+    assert_eq!(encoded.object_id, independent_digest(algorithm, &[b"aeordb.semantic-object.immutable.v1\0", &1u16.to_le_bytes(), &bytes]));
+    for invalid_count in 0..4 {
+      let mut invalid = request.clone();
+      if let SemanticAvailabilityV1::Complete { catalog_record_count, catalog_node_count, definition_count, dependency_count, .. } =
+        &mut invalid.availability
+      {
+        let counters = [catalog_record_count, catalog_node_count, definition_count, dependency_count];
+        *counters.into_iter().nth(invalid_count).unwrap() = 1;
+      }
+      assert!(encode_semantic_state_object(&invalid, algorithm).is_err(), "absent catalog with nonzero count {invalid_count}");
+    }
+  }
+}
+
+#[test]
+fn complete_empty_semantic_state_rejects_every_noncanonical_presence_and_count_combination() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let width = algorithm.hash_length();
+    for bits in 0u8..64 {
+      let mut bytes = complete_empty_semantic_fixture(algorithm);
+      let presence = bits & 1 != 0;
+      let root = bits & 2 != 0;
+      let counts = [bits & 4 != 0, bits & 8 != 0, bits & 16 != 0, bits & 32 != 0];
+      bytes[76] = u8::from(presence);
+      bytes[80 + 2 * width..80 + 3 * width].fill(u8::from(root));
+      bytes[20..28].copy_from_slice(&u64::from(counts[0]).to_le_bytes());
+      for (index, nonzero) in counts.into_iter().enumerate() {
+        let offset = 80 + 3 * width + 8 * index;
+        bytes[offset..offset + 8].copy_from_slice(&u64::from(nonzero).to_le_bytes());
+      }
+      let checksum_offset = bytes.len() - 4;
+      let checksum = crc32fast::hash(&bytes[..checksum_offset]);
+      bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+      let canonical_empty = bits == 0;
+      let existing_nonempty = presence && root && counts[0] && counts[1];
+      assert_eq!(
+        decode_semantic_object(&bytes, algorithm).is_ok(),
+        canonical_empty || existing_nonempty,
+        "profile {algorithm:?}, bits {bits:06b}"
+      );
+    }
+  }
 }
 
 #[test]

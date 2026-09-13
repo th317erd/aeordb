@@ -645,6 +645,134 @@ fn content_only_state_is_resolved_without_catalog_or_ordinal_access() {
   assert_eq!(read.resolution(), &IndexSemanticScopeResolutionV1::ContentOnly { semantic_state_root: state.object_id });
 }
 
+fn complete_empty_objects() -> (Objects, Vec<u8>) {
+  let mut bytes = fixture("state-complete");
+  bytes[20..28].fill(0);
+  bytes[76] = 0;
+  let checksum_offset = bytes.len() - 4;
+  bytes[144..checksum_offset].fill(0);
+  let checksum = crc32fast::hash(&bytes[..checksum_offset]);
+  bytes[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+  let root = digest_parts(ALGORITHM, &[b"aeordb.semantic-object.immutable.v1\0", &1u16.to_le_bytes(), &bytes]);
+  let mut objects = Objects::default();
+  objects.values.insert((1, root.clone()), bytes);
+  (objects, root)
+}
+
+#[test]
+fn complete_empty_catalog_resolves_without_catalog_reads_or_ordinal_claims() {
+  let (objects, root) = complete_empty_objects();
+  let task_memory = memory(16 * 1_024 * 1_024);
+  let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, task_memory.clone(), &objects, &UnexpectedOrdinals);
+  let transition = transition();
+  let read = source
+    .resolve_scopes(IndexSemanticScopeReadRequestV1 {
+      operation_id: [9; 16],
+      source_publication_sequence: 7,
+      semantic_state_root: &root,
+      transition: &transition,
+      limits: limits(),
+      is_cancelled: &|| false,
+    })
+    .unwrap();
+  assert_eq!(read.resolution(), &IndexSemanticScopeResolutionV1::Complete { semantic_state_root: root, scope_work: Vec::new() });
+  assert_eq!(objects.loads.load(Ordering::SeqCst), 1);
+  assert!(task_reserved_bytes(&task_memory) > 0);
+  drop(read);
+  assert_eq!(task_reserved_bytes(&task_memory), 0);
+}
+
+#[test]
+fn complete_empty_catalog_compaction_is_empty_without_catalog_access_and_releases_memory() {
+  let (objects, root) = complete_empty_objects();
+  let task_memory = memory(16 * 1_024 * 1_024);
+  let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, task_memory.clone(), &objects, &UnexpectedOrdinals);
+  let inventory = source
+    .resolve_compaction_inventory(IndexCompactionSemanticInventoryRequestV1 {
+      semantic_state_root: &root,
+      maintenance_scope: "/",
+      limits: limits(),
+      is_cancelled: &|| false,
+    })
+    .unwrap();
+  assert_eq!(inventory.semantic_state_root(), root);
+  assert!(inventory.scopes().is_empty());
+  assert_eq!(objects.loads.load(Ordering::SeqCst), 1);
+  assert!(task_reserved_bytes(&task_memory) > 0);
+  drop(inventory);
+  assert_eq!(task_reserved_bytes(&task_memory), 0);
+}
+
+#[test]
+fn complete_empty_catalog_still_observes_cancellation_after_state_read() {
+  for compaction in [false, true] {
+    let (objects, root) = complete_empty_objects();
+    let task_memory = memory(16 * 1_024 * 1_024);
+    let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, task_memory.clone(), &objects, &UnexpectedOrdinals);
+    let cancelled = || objects.loads.load(Ordering::SeqCst) > 0;
+    let error = if compaction {
+      source
+        .resolve_compaction_inventory(IndexCompactionSemanticInventoryRequestV1 {
+          semantic_state_root: &root,
+          maintenance_scope: "/",
+          limits: limits(),
+          is_cancelled: &cancelled,
+        })
+        .unwrap_err()
+    } else {
+      source
+        .resolve_scopes(IndexSemanticScopeReadRequestV1 {
+          operation_id: [9; 16],
+          source_publication_sequence: 7,
+          semantic_state_root: &root,
+          transition: &transition(),
+          limits: limits(),
+          is_cancelled: &cancelled,
+        })
+        .unwrap_err()
+    };
+    assert_eq!(error.class(), IndexSemanticScopeReadErrorClassV1::Cancelled);
+    assert_eq!(objects.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(task_reserved_bytes(&task_memory), 0);
+  }
+}
+
+#[test]
+fn complete_empty_catalog_does_not_bypass_memory_or_pre_read_cancellation_admission() {
+  for compaction in [false, true] {
+    for cancelled in [false, true] {
+      let (objects, root) = complete_empty_objects();
+      let task_memory = memory(4 * 1_024 * 1_024);
+      let source = CatalogIndexSemanticScopeSourceV1::new(ALGORITHM, task_memory.clone(), &objects, &UnexpectedOrdinals);
+      let error = if compaction {
+        source
+          .resolve_compaction_inventory(IndexCompactionSemanticInventoryRequestV1 {
+            semantic_state_root: &root,
+            maintenance_scope: "/",
+            limits: limits(),
+            is_cancelled: &|| cancelled,
+          })
+          .unwrap_err()
+      } else {
+        source
+          .resolve_scopes(IndexSemanticScopeReadRequestV1 {
+            operation_id: [9; 16],
+            source_publication_sequence: 7,
+            semantic_state_root: &root,
+            transition: &transition(),
+            limits: limits(),
+            is_cancelled: &|| cancelled,
+          })
+          .unwrap_err()
+      };
+      let expected = if cancelled { IndexSemanticScopeReadErrorClassV1::Cancelled } else { IndexSemanticScopeReadErrorClassV1::Retryable };
+      assert_eq!(error.class(), expected);
+      assert_eq!(objects.loads.load(Ordering::SeqCst), 0);
+      assert_eq!(task_reserved_bytes(&task_memory), 0);
+    }
+  }
+}
+
 #[test]
 fn compaction_inventory_reads_complete_owner_relationships_without_claiming_ordinals() {
   let graph = complete_graph();

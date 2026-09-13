@@ -11,7 +11,11 @@
 
 > **Execution status (2026-09-13):** The header above preserves the plan's
 > ratification-time state. Current execution status is in
-> [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md).
+> [user-facing v4 ledger 11](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/11-user-facing-v4.md).
+> The active goal is complete user-facing v4 readiness, including v4-default
+> creation and supported migration into a running v4 service. The following
+> [release ledger 10](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/10-release-qualification.md)
+> results are closed historical v3-compatible qualification, not that goal's completion.
 > Candidate a8047327 passes ordinary, affected-native, exact-release, crash and
 > short-soak gates plus all three full 12-hour S1/S2/S3 stages. Authorized steps
 > 1–3 and test-database cleanup are complete, with a 278-file closeout seal.
@@ -19,9 +23,11 @@
 > [ledger 08](2026-08-03-aeordb-v4-nvt-gc-refactor/progress/08-evidence.md) is historical.
 > The large corrupt-database repair was retired, not successfully migrated.
 > Ordinary service remains v3-compatible; public migration builds an offline v4
-> shadow only, and public v4 activation/cutover is not implemented. Stop for the
-> owner's step-4 discussion before deployment, canary, retained-database reuse,
-> service changes, acceptance/first v4 write, or destructive operational GC.
+> shadow only, and public v4 activation/cutover is not implemented. The owner
+> has requested full user-facing completion and disposable qualification.
+> Deployment, canary, retained-database reuse, real service changes,
+> production acceptance/first v4 write and destructive operational GC remain
+> separate owner-authorized operational gates.
 
 The ratified decision source is a required tracked campaign artifact. Before P0
 starts, it must be committed alongside this plan and treated as append-only

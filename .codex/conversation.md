@@ -15872,3 +15872,53 @@ The ratified implementation direction is:
 10. bind the exact selected control payload hash into AMPR only in the following
     destination-verification slice, after restart/cancel/commit-unknown,
     resource, both-hash-width, shadow-only, and source-byte-invariance proofs.
+
+---
+
+# 2026-09-13 User-Facing V4 Completion Direction
+
+Owner, verbatim:
+
+> Well, I would like v4 to be the default for new databases... and we DO still have some databases we need to migrate. Are we fully through the refactor, and fully ready to use this new refactored db binary?
+
+Active thread goal:
+
+> Fully complete the full user-facing v4 refactor and have it ready for prime-time for use in production databases
+
+Source audit at `9d04c76dc643f2de94fd389aac5c6a87889532fe` answered no:
+normal creation/service still use v3-compatible storage, while the public
+`migrate-v4` command only builds/verifies an offline shadow. Native v4 substrate
+tests and the prior v3-compatible service qualification do not prove a complete
+user-facing v4 runtime. Calling the remaining work only operational was wrong.
+
+DECIDED (execution): complete the existing ratified campaign, including normal
+v4 creation, shared runtime authority, every publisher/reader family, supported
+migration-to-service acceptance, and final actual-v4 qualification. Reuse the
+existing native v4 owners. Do not re-ratify frozen persistent bytes, silently
+change legacy layouts, or substitute a smaller shadow-only outcome.
+
+This implementation goal permits disposable development tests, not installation,
+publication, real production service changes, migration of user databases, or
+mutation/reuse of the retained corrupt FS-Server1 database. Those operational
+decisions remain separate. Current work is tracked in progress ledger 11; ledger
+10 and its sealed evidence remain historical and untouched.
+
+## September 13 implementation clarification — dependency catalog keys
+
+PENDING OWNER RULING, not a new decision: Round 9 fixes raw-artifact/native
+fingerprints at 32 bytes and explicitly permits one module to support parser
+and mapper roles. Those roles produce distinct canonical dependency records.
+Round 10 uses the dependency fingerprint as the catalog owner key, so both
+records would have the same kind-6 key. The existing namespace reader instead
+requires H-wide owner keys, which also conflicts with 32-byte fingerprints in
+a 64-byte-hash database. No grouping or alternate role-key rule was found.
+
+Question sent verbatim:
+
+> May I clarify the v4 dependency catalog contract to key each binding by its complete dependency-definition ID (including role and runtime profile), while keeping the module fingerprint unchanged for locating its bytes? This prevents parser/mapper bindings for the same module from colliding.
+
+Recommended clarification reuses the existing Round 10 domain-separated
+ExecutableDependencyDefinitionId / NativeDependencyDefinitionId. Do not change
+the raw artifact digest, regenerate existing fixtures, or implement the proposed
+catalog-key clarification without the owner's reply. U0 empty-state correction
+and its running regressions are independent of this question.

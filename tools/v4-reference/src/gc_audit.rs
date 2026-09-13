@@ -326,7 +326,7 @@ fn decode_detail(profile: HashProfile, bytes: &[u8]) -> Result<DetailRecord, &'s
     || read_u32(bytes, h + 48)? != 0
     || payload_bytes.is_empty()
     || config::validate_audit_value(payload_bytes).is_err()
-    || (matches!(event_kind, 6..=11) != !all_zero(&batch_id))
+    || (matches!(event_kind, 6..=11) == all_zero(&batch_id))
   {
     return Err("audit_detail_fields");
   }
@@ -957,11 +957,11 @@ fn decode_corrupt_evidence(profile: HashProfile, bytes: &[u8]) -> Result<String,
     && presence(flags, 2) == (physical_length != 0)
     && (!presence(flags, 2) || physical_offset.checked_add(u64::from(physical_length)).is_some())
     && presence(flags, 3) == (write_sequence != 0)
-    && presence(flags, 4) == !all_zero(expected_hash)
-    && presence(flags, 5) == !all_zero(observed_hash)
-    && presence(flags, 6) == !all_zero(run_id)
+    && presence(flags, 4) != all_zero(expected_hash)
+    && presence(flags, 5) != all_zero(observed_hash)
+    && presence(flags, 6) != all_zero(run_id)
     && presence(flags, 7) == (control_kind != 0)
-    && presence(flags, 7) == !all_zero(control_digest)
+    && presence(flags, 7) != all_zero(control_digest)
     && (!presence(flags, 7) || GcKind::from_id(control_kind).is_some_and(GcKind::is_control));
   if read_i64(body, 0)? <= 0
     || !(1..=10).contains(&read_u16(body, 8)?)

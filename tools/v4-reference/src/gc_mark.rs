@@ -620,8 +620,8 @@ fn validate_workspace_record(profile: HashProfile, kind: WorkspaceObjectKind, re
         || read_u16(record, 10)? != 0
         || (record_kind == 3) != (family != 0)
         || all_zero(&record[12..12 + h])
-        || (flags & 1 != 0) != !all_zero(&record[12 + h..12 + 2 * h])
-        || (flags & 2 != 0) != !all_zero(&record[12 + 2 * h..])
+        || (flags & 1 != 0) == all_zero(&record[12 + h..12 + 2 * h])
+        || (flags & 2 != 0) == all_zero(&record[12 + 2 * h..])
       {
         return Err("workspace_frontier_fields");
       }

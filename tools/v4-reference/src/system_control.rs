@@ -1071,8 +1071,8 @@ fn validate_root_map_control(profile: HashProfile, body: &[u8]) -> Result<Vec<u8
     || read_u32(body, 84)? != 0
     || read_u64(body, 88)? == 0
     || (page_count == 0) != (record_count == 0)
-    || presence_u32(page_count) != !all_zero(&body[104..104 + h])
-    || presence_u32(page_count) != !all_zero(&body[104 + h..104 + 2 * h])
+    || presence_u32(page_count) == all_zero(&body[104..104 + h])
+    || presence_u32(page_count) == all_zero(&body[104 + h..104 + 2 * h])
     || (record_count > 0 && all_zero(&body[104 + 2 * h..104 + 3 * h]))
   {
     return Err("legacy_root_map_control_fields");
@@ -1289,7 +1289,7 @@ fn validate_spill_catalog(profile: HashProfile, body: &[u8]) -> Result<Vec<u8>, 
     || read_i64(body, 24)? < 0
     || !(1..=4).contains(&state)
     || read_u16(body, 34)? != 0
-    || (state == 3) != !all_zero(receipt)
+    || (state == 3) == all_zero(receipt)
     || body.len() != fixed.checked_add(rows_length).ok_or("spill_catalog_overflow")?
   {
     return Err("spill_catalog_fields");

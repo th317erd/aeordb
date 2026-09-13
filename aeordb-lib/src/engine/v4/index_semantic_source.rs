@@ -403,6 +403,14 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     catalog_root: &[u8],
     expected: CatalogExpectedCountsV1,
   ) -> Result<IndexSemanticScopeReadV1, IndexSemanticScopeReadErrorV1> {
+    // The decoded complete state already proves canonical absent root/counts.
+    // No catalog object or scope ordinal exists in this case.
+    if expected.records == 0 {
+      return IndexSemanticScopeReadV1::new(
+        IndexSemanticScopeResolutionV1::Complete { semantic_state_root: request.semantic_state_root.to_vec(), scope_work: Vec::new() },
+        reservation,
+      );
+    }
     if expected.definitions == 0 || expected.definitions > expected.records || expected.dependencies > expected.definitions {
       return Err(IndexSemanticScopeReadErrorV1::corrupt(
         "semantic_state_counts",
@@ -582,6 +590,12 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
     let state = object.semantic_state.ok_or_else(|| {
       IndexSemanticScopeReadErrorV1::corrupt("semantic_state_fields", "semantic-state object has no decoded state fields")
     })?;
+    if (request.is_cancelled)() {
+      return Err(IndexSemanticScopeReadErrorV1::cancelled(
+        "semantic_cancelled",
+        "compaction semantic inventory was cancelled after state read",
+      ));
+    }
     let semantic_state_root = request.semantic_state_root.to_vec();
     let SemanticAvailabilityV1::Complete {
       catalog_root, catalog_record_count, catalog_node_count, definition_count, dependency_count, ..
@@ -595,6 +609,9 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
       definitions: definition_count,
       dependencies: dependency_count,
     };
+    if expected.records == 0 {
+      return Ok(IndexCompactionSemanticInventoryV1 { semantic_state_root, scopes: Vec::new(), _reservation: reservation });
+    }
     if expected.definitions == 0 || expected.definitions > expected.records || expected.dependencies > expected.definitions {
       return Err(IndexSemanticScopeReadErrorV1::corrupt(
         "semantic_state_counts",

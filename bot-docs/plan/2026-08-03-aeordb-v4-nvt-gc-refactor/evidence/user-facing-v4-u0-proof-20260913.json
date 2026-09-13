@@ -1,0 +1,377 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-13T20:20:54.258Z",
+  "sourceBase": "9d04c76dc643f2de94fd389aac5c6a87889532fe",
+  "scope": "U0 canonical complete-empty semantic state correction only",
+  "fullV4ProductionReady": false,
+  "ordinaryDefaultGate": "Still red: ordinary CLI creates version 3, not 4",
+  "distinctWorkspaceTests": 7537,
+  "existingWorkspaceIgnores": 7,
+  "nestedSubprocessTestsSeparate": 3,
+  "referenceOnlyLintCorrection": "Ten algebraically equivalent boolean rewrites in three standalone reference-tool files; all reference tests and fixtures rerun on all three platforms. Main workspace source unchanged.",
+  "retainedPriorFailures": [
+    "u0-workspace: interrupted wrong debug profile",
+    "u0-final-workspace: missing plugin fixtures and five stale audit locations",
+    "u0-reference-clippy: ten pre-existing boolean lints",
+    "Windows reference: uncached locked dependency"
+  ],
+  "inputs": [
+    {
+      "path": "aeordb-lib/src/engine/v4/namespace.rs",
+      "sha256": "8a9d7dde65482eaea3bcc507be177be741e4e323b3fbc10d253402114309a6b3"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+      "sha256": "2a1c08ed47b413e1db5a7d11784c5303a3ccf8c7e4b82770b1a7cd48984e93b1"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/v4_root_migration_spec.rs",
+      "sha256": "be27518948d21ae550ba2a605b346af7f4a5709f5dd3e49c4bf2518c9cbe6c14"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_semantic_source_spec.rs",
+      "sha256": "354e7478e4602bc426a16defca7fb6caed13073fccede479f3fe8b7ffa20894b"
+    },
+    {
+      "path": "tools/v4-reference/src/core.rs",
+      "sha256": "9fc9ed6ab3f020ea45060db5dc444cc3b5f6790c9a5a7f334e6643a1b22def3c"
+    },
+    {
+      "path": "tools/v4-reference/spec/core_empty_semantics_spec.rs",
+      "sha256": "bdaa1de6097477a936a0df1c799a046f80dfafa1ce36d2f7c08b21845abda836"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/error-squelch-allowlist-v1.json",
+      "sha256": "3c60b8590a5efaf82976602f28c99986e870c251b425ceca9ff99e6f8b383e5f"
+    },
+    {
+      "path": "tools/v4-reference/src/gc_audit.rs",
+      "sha256": "6a8bc45fdee681b59a31036ee713cdffaac63017d3e0d17b59b359636fabd7a7"
+    },
+    {
+      "path": "tools/v4-reference/src/gc_mark.rs",
+      "sha256": "0f2a22a7e7550b6e223d1767b1c068f68f38c1563348c6f0429a150f1f55b5b6"
+    },
+    {
+      "path": "tools/v4-reference/src/system_control.rs",
+      "sha256": "dfa506834274ac8e82ccbc38e5d8747eafcf3e8f2787f77731d1faff37df18bc"
+    }
+  ],
+  "gates": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/empty-semantic-green.log",
+      "sha256": "27e80040f0476e543d268d347cc0aca7e27d00ec3a9185777ed56285e75b6766",
+      "passed": 224,
+      "targets": 6,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-reference-lint-tests.log",
+      "sha256": "1468495be57593d9af5771aadef098ee4d01d304753ff6c0274c0f72cb2cf0a0",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-reference-lint-verify.log",
+      "sha256": "c2049e0c9942f08648ed3edbb981c7c10204aa1973a8303388c0c92e299e669a",
+      "independentFixtures": 454
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-prerequisite-regressions.log",
+      "sha256": "7cc08970e8f2b645e4621346719d3f76de4ed73067bdee5e79d5c58db1c54445",
+      "passed": 65,
+      "targets": 3,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-corrected-workspace.log",
+      "sha256": "cc74ee092a797f3ffbc7c99103a23c8e831f45bf68151d048da48a9ad6958bf8",
+      "summary": "top_level_targets=347 passed=7535 failed=0 ignored=7 filtered=2\nnested_targets=3 passed=3 failed=0"
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-maximum-stage-clamp.log",
+      "sha256": "bde4761fb9dd7b9df207c7db28ac350efcca4809c897c438106a6b47ce0033fc",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-maximum-stage-resize.log",
+      "sha256": "957e1db82401d30919582bc8fda0557e28846b85e4a04bd27c89a571628cbc4f",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/affected.log",
+      "sha256": "10175bf1a873db678fdf63668f7104b2518e2dd8270dddd5debad53e01155c7d",
+      "passed": 224,
+      "targets": 6,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/reference-lint.log",
+      "sha256": "2811635185d31b7c0da7076d68e82f30690ab24097731e06b3e3d9e334a1e488",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/reference-verify-lint.log",
+      "sha256": "0803b94f3806ff09331772a891fc0d24b90e70543688f32c07ffe8a146c89a59",
+      "independentFixtures": 454
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/affected.stdout.log",
+      "sha256": "30e2b24f4765d9dba044c5d4c27954098445926162542178b5fc0de61feb95fc",
+      "passed": 224,
+      "targets": 6,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/reference-lint.stdout.log",
+      "sha256": "4d77dc2c8145cf4eccb024cebadbbbea9beeb19169315c395b7f3710fdb4145f",
+      "passed": 150,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/reference-verify-lint.stdout.log",
+      "sha256": "304870741108a654f5f08daebc4dd4bc0c8817d9ed5cc0f74fb5508c27986055",
+      "independentFixtures": 454
+    }
+  ],
+  "receipts": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/empty-semantic-green.exit",
+      "sha256": "0af8eafcb265868dfbb2f87f74d59fae776bc3c7e621b9c904d9e20c7f4b7170",
+      "result": {
+        "finished_utc": "2026-09-13T18:34:53Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "355208835072",
+        "home_free": "73618620416"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-reference-lint-tests.exit",
+      "sha256": "117eb5d52ba5981eb3c0cbf41cf7fc936c2fe75b0b95fb7aca7eab578775e567",
+      "result": {
+        "finished_utc": "2026-09-13T20:17:07Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340522229760",
+        "home_free": "73504579584"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-reference-lint-verify.exit",
+      "sha256": "4f524624d074f44db598acb6d58d9519622db159b5bf35d863a7df0d0ce1ac2b",
+      "result": {
+        "finished_utc": "2026-09-13T20:17:37Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340522205184",
+        "home_free": "73512505344"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-prerequisite-regressions.exit",
+      "sha256": "48aa9ffd3900ed24c6b655fd6b322575c8bcd103db04523c381e357416c3a3dc",
+      "result": {
+        "finished_utc": "2026-09-13T19:28:33Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340543209472",
+        "home_free": "73508986880"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-corrected-workspace.exit",
+      "sha256": "f17e04d0a160d497f37b3c0917db0e0c7847ca04d5260abd77dae0925ba9e211",
+      "result": {
+        "finished_utc": "2026-09-13T19:58:34Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340542570496",
+        "home_free": "73508519936"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-maximum-stage-clamp.exit",
+      "sha256": "c4c9b1d4485dee67081220112c312b4a3e6c1d33df024632f4d7da96f93d9ae3",
+      "result": {
+        "finished_utc": "2026-09-13T20:03:04Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340542541824",
+        "home_free": "73513025536"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-maximum-stage-resize.exit",
+      "sha256": "ccb299aa6250df225f248e0f2e8cd9e8cb749be77da17666e3047fbc32168bde",
+      "result": {
+        "finished_utc": "2026-09-13T20:07:35Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340542517248",
+        "home_free": "73512689664"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-clippy.exit",
+      "sha256": "bfc6e3e28d00eb420e39862c3669e26eee24a27ffcb969a33841a2a1dba8ea56",
+      "result": {
+        "finished_utc": "2026-09-13T20:10:05Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340542480384",
+        "home_free": "73512501248"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-reference-lint-clippy.exit",
+      "sha256": "d8bcbe59524297756cbc277ec5cc6dc31dd429abcb7b8bba3a8f1d06cab4dabf",
+      "result": {
+        "finished_utc": "2026-09-13T20:18:07Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340522196992",
+        "home_free": "73512497152"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-contracts.exit",
+      "sha256": "33b60ab02f65fa4962aedd5eca0739cb3b3a8e3f562e1c69fda24e2137e3787b",
+      "result": {
+        "finished_utc": "2026-09-13T20:19:43Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340522151936",
+        "home_free": "73512083456"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-debt-selftest.exit",
+      "sha256": "930e9cf8e57ce7b682fe048d90a38ccfb026c6d2ec884ac82e175c0cc95bbf16",
+      "result": {
+        "finished_utc": "2026-09-13T20:20:13Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "340522127360",
+        "home_free": "73511997440"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/u0-static-final.exit",
+      "sha256": "4d66e5da82296d1eee245a19b8f350c49447b11b42b230ec9b3893c8faa22ed4",
+      "result": {
+        "exit_status": "0",
+        "last_stage": "complete",
+        "finished_utc": "2026-09-13T20:20:14Z"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/affected.exit",
+      "sha256": "ebeb5c4d423fd772222b3c13070e32156a98c376b369f6a215cee792ff46c2a6",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T18:53:32Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68370206720",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/reference-lint.exit",
+      "sha256": "52b43fe0db0e1ba64addd823fe919f1fd99f86d79fdfd152bf52aec7305e5453",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T20:17:11Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68268351488",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/macos-evidence/reference-verify-lint.exit",
+      "sha256": "4ef2ed18f35a57369bf87daebfb27c8821ab32bed14956735e33f153872b42a4",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-13T20:17:43Z",
+        "termination_reason": "none",
+        "final_free_bytes": "68268244992",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/affected.result.json",
+      "sha256": "52c4e262fb87505f651d55f2aa8a3d7f76d3d888352b2a401048b0ff9cddb7fd",
+      "result": {
+        "source_commit": "9d04c76dc643f2de94fd389aac5c6a87889532fe",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 -p aeordb --test v4_root_migration_spec --test index_semantic_source_spec --test semantic_catalog_reader_spec --test v4_read_view_native_spec --test v4_first_authority_spec --test v4_format_fixture_spec",
+        "cargo_pid": 7328,
+        "started_utc": "2026-09-13T18:52:33.9312027Z",
+        "completed_utc": "2026-09-13T18:57:51.3938294Z",
+        "elapsed_seconds": 317.34596799999997,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19547877376,
+        "final_free_bytes": 19548041216
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/reference-lint.result.json",
+      "sha256": "af7801ae978f337a87b3184280f92223aa2b1169b6368236ac7dbf9121ce47d8",
+      "result": {
+        "source_commit": "9d04c76dc643f2de94fd389aac5c6a87889532fe",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml",
+        "cargo_pid": 8324,
+        "started_utc": "2026-09-13T20:16:38.4460114Z",
+        "completed_utc": "2026-09-13T20:17:00.9150703Z",
+        "elapsed_seconds": 22.3435958,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19395723264,
+        "final_free_bytes": 19395567616
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/windows-evidence/reference-verify-lint.result.json",
+      "sha256": "1cce23104b3efcb4afe970bac6e13836fce3d6ca85b3c49bd2f44b3b37e7c764",
+      "result": {
+        "source_commit": "9d04c76dc643f2de94fd389aac5c6a87889532fe",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo run --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4",
+        "cargo_pid": 6896,
+        "started_utc": "2026-09-13T20:17:01.4385155Z",
+        "completed_utc": "2026-09-13T20:17:10.4720555Z",
+        "elapsed_seconds": 8.9045542,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19395534848,
+        "final_free_bytes": 19395379200
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/evidence/default-baseline.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "result": {
+        "exit_status": 1,
+        "expectedTargetFailure": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "binary": "/media/Data/AeorDB/Tests/p9-release-a8047327-20260911/artifacts/aeordb",
+  "binarySHA256": "aef7b082c3b693838a8b8659ff2280d98589ac5cb917376e5ad43e9d2aff5fec",
+  "database": "/home/wyatt/.cache/codex/v4-service-completion-20260913/v4-default-Bky6YH/new.aeordb",
+  "prefixHex": "41454f5203",
+  "observedVersion": 3,
+  "expectedVersion": 4,
+  "statuses": [
+    {
+      "method": "PUT",
+      "path": "/files/v4-default/payload.bin",
+      "expectedStatus": 201,
+      "actualStatus": 201
+    },
+    {
+      "method": "GET",
+      "path": "/files/v4-default/payload.bin",
+      "expectedStatus": 200,
+      "actualStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/files/v4-default/payload.bin",
+      "expectedStatus": 200,
+      "actualStatus": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/files/v4-default/payload.bin",
+      "expectedStatus": 200,
+      "actualStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/files/v4-default/payload.bin",
+      "expectedStatus": 404,
+      "actualStatus": 404
+    },
+    {
+      "method": "GET",
+      "path": "/files/v4-default/never-existed.bin",
+      "expectedStatus": 404,
+      "actualStatus": 404
+    }
+  ]
+}

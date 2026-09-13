@@ -1,5 +1,9 @@
 use sha2::{Digest, Sha512};
 
+#[cfg(test)]
+#[path = "../spec/core_empty_semantics_spec.rs"]
+mod core_empty_semantics_spec;
+
 const ENTITY_MAGIC: u32 = 0x0ae0_12db;
 const MAX_ENTITY_VERSION: u8 = 1;
 const DIRECTORY_ENTRY_TYPE: u8 = 0x03;
@@ -547,12 +551,13 @@ fn decode_semantic_state(profile: HashProfile, body: &[u8], item_count: u64) -> 
     read_u64(body, 72 + 3 * profile.width())?,
   ];
   if flags == 0 {
+    let catalog_hash = &hashes[2 * profile.width()..];
+    let absent_catalog = body[44] == 0 && catalog_hash.iter().all(|byte| *byte == 0) && counts.iter().all(|count| *count == 0);
+    let present_catalog = body[44] == 1 && catalog_hash.iter().any(|byte| *byte != 0) && counts[0] > 0 && counts[1] > 0;
     if reason != 0
-      || body[44] != 1
-      || hashes.chunks(profile.width()).any(|hash| hash.iter().all(|byte| *byte == 0))
+      || !(absent_catalog || present_catalog)
+      || hashes[..2 * profile.width()].chunks(profile.width()).any(|hash| hash.iter().all(|byte| *byte == 0))
       || counts[0] != item_count
-      || counts[0] == 0
-      || counts[1] == 0
     {
       return Err("semantic_state_complete_invariant");
     }

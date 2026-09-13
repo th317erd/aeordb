@@ -378,15 +378,20 @@ pub fn encode_semantic_state_object(
     } => {
       require_nonzero_hash(compiler_fingerprint, hash_width, "semantic compiler fingerprint", "semantic_state_hash_width")?;
       require_nonzero_hash(semantic_registry_fingerprint, hash_width, "semantic registry fingerprint", "semantic_state_hash_width")?;
-      require_nonzero_hash(catalog_root, hash_width, "semantic catalog root", "semantic_state_hash_width")?;
-      if *catalog_record_count == 0 || *catalog_node_count == 0 {
+      let empty_catalog = catalog_root.len() == hash_width
+        && all_zero(catalog_root)
+        && [*catalog_record_count, *catalog_node_count, *definition_count, *dependency_count].iter().all(|count| *count == 0);
+      if !empty_catalog {
+        require_nonzero_hash(catalog_root, hash_width, "semantic catalog root", "semantic_state_hash_width")?;
+      }
+      if !empty_catalog && (*catalog_record_count == 0 || *catalog_node_count == 0) {
         return Err(error(
           MalformedInputClass::CrossRecordClosureMismatch,
           "semantic_state_complete_invariant",
           "complete semantic state requires nonzero catalog record and node counts",
         ));
       }
-      body[44] = 1;
+      body[44] = u8::from(!empty_catalog);
       let hashes_offset = 48;
       body[hashes_offset..hashes_offset + hash_width].copy_from_slice(compiler_fingerprint);
       body[hashes_offset + hash_width..hashes_offset + 2 * hash_width].copy_from_slice(semantic_registry_fingerprint);
@@ -851,13 +856,16 @@ fn decode_semantic_state(
     u64_at(body, 72 + 3 * hash_width),
   ];
   if flags == 0 {
-    if reason != 0
-      || !catalog_present
-      || hashes.chunks(hash_width).any(all_zero)
-      || counts[0] != item_count
-      || counts[0] == 0
-      || counts[1] == 0
-    {
+    // A complete semantic world may contain no bindings. Its compiler and
+    // registry still identify known semantics; the absent catalog is not a
+    // content-only legacy state and must never yield an all-zero graph edge.
+    let catalog_root = &hashes[2 * hash_width..3 * hash_width];
+    let catalog_valid = if catalog_present {
+      !all_zero(catalog_root) && counts[0] != 0 && counts[1] != 0
+    } else {
+      all_zero(catalog_root) && counts.iter().all(|count| *count == 0)
+    };
+    if reason != 0 || !catalog_valid || hashes[..2 * hash_width].chunks(hash_width).any(all_zero) || counts[0] != item_count {
       return Err(error(
         MalformedInputClass::CrossRecordClosureMismatch,
         "semantic_state_complete_invariant",
@@ -878,7 +886,7 @@ fn decode_semantic_state(
         dependency_count: counts[3],
       },
       capabilities,
-      vec![catalog_root],
+      if catalog_present { vec![catalog_root] } else { Vec::new() },
     ))
   } else {
     let reason = SemanticUnavailableReasonV1::from_u16(reason)
