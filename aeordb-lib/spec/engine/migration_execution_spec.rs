@@ -893,6 +893,125 @@ fn compiled_parser_context_definitions_publish_and_reopen_without_selecting_new_
 }
 
 #[test]
+fn compiled_source_selectors_publish_complete_definition_objects_and_reopen() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::{decode_dependency_record_bytes, decode_dependency_table, encode_dependency_record};
+  use aeordb::engine::v4::parser_context_compiler::{
+    ParserContextCompilationRequestV1, ParserContextSourceV1, ParserSelectorDependencyV1, compile_parser_context_v1,
+  };
+  use aeordb::engine::v4::parser_plan::decode_parser_resolution_plan;
+  use aeordb::engine::v4::scope::{ScopeDefinitionWriteV1, ScopeMatchingMode, encode_scope_definition};
+  use aeordb::engine::v4::source_selector_compiler::{SourceSelectorCompilationRequestV1, SourceSelectorInputV1, compile_source_selector_v1};
+  use aeordb::engine::v4::value_store::{ValueStoreDefinitionWriteV1, ValueStoreSemanticFamily, encode_value_store_definition};
+
+  let fixtures = format!("{}/spec/fixtures/v4", env!("CARGO_MANIFEST_DIR"));
+  let dependency = std::fs::read(format!("{fixtures}/semantic-object-v1/asem-blake3-256-wasm-parser-definition-valid.bin")).unwrap();
+  let parser = decode_dependency_record_bytes(&dependency[80..dependency.len() - 4]).unwrap();
+  let program = std::fs::read(format!("{fixtures}/parser-resolution-plan-v1/aprp-blake3-256-explicit-plugin-valid.bin")).unwrap();
+  let mut policy = decode_parser_resolution_plan(&program).unwrap().candidates[0].policy.clone();
+  policy.max_fuel = 10_000_000;
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+    let context = compile_parser_context_v1(
+      ParserContextCompilationRequestV1 {
+        source: ParserContextSourceV1::Explicit { dependency: parser.clone(), policy: &policy },
+        selector_dependency: ParserSelectorDependencyV1::JsonPath,
+        maximum_workspace_bytes: 4 << 20,
+      },
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    let request = SourceSelectorCompilationRequestV1 {
+      field_name: "/^title$/igg",
+      source: SourceSelectorInputV1::JsonPath(None),
+      maximum_source_bytes: 1 << 20,
+      maximum_workspace_bytes: 64 << 20,
+    };
+    let selector = compile_source_selector_v1(request.clone(), &memory, &|| false).unwrap();
+    let explicit = [serde_json::Value::String(request.field_name.into())];
+    let same = compile_source_selector_v1(
+      SourceSelectorCompilationRequestV1 { source: SourceSelectorInputV1::JsonPath(Some(&explicit)), ..request.clone() },
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    assert_eq!(selector.selector(), same.selector());
+    let scope = encode_scope_definition(
+      ScopeDefinitionWriteV1 { mode: ScopeMatchingMode::DirectChildren, owner_path: "/documents", glob: None },
+      algorithm,
+    )
+    .unwrap();
+    let value = encode_value_store_definition(
+      ValueStoreDefinitionWriteV1 {
+        scope_id: &scope.scope_id,
+        field_name: selector.field_name(),
+        semantic_family: ValueStoreSemanticFamily::CorrectedV1,
+        max_source_values_per_document: 1024,
+        max_canonical_source_bytes_per_document: 8 << 20,
+        max_document_input_bytes: 64 << 20,
+        max_selector_work_items_per_document: 1_000_000,
+        max_selector_examined_bytes_per_document: 64 << 20,
+        selector: selector.selector(),
+        parser_plan: context.parser_plan(),
+        dependencies: context.dependencies(),
+      },
+      algorithm,
+    )
+    .unwrap();
+    let mut definitions = Vec::new();
+    for dependency in decode_dependency_table(context.dependencies()).unwrap().records {
+      let class = if dependency.kind == 1 { 6 } else { 7 };
+      definitions
+        .push((class, encode_semantic_definition_object(class, &encode_dependency_record(&dependency).unwrap(), algorithm).unwrap()));
+    }
+    definitions.push((3, encode_semantic_definition_object(3, &scope.value, algorithm).unwrap()));
+    definitions.push((4, encode_semantic_definition_object(4, &value.value, algorithm).unwrap()));
+    let mut objects = Vec::new();
+    for (_, definition) in &definitions {
+      objects.push(definition.object.clone());
+    }
+    for (class, definition) in &definitions {
+      objects.push(
+        encode_semantic_catalog_leaf(
+          &[SemanticCatalogRecordV1 {
+            record_kind: *class,
+            owner_key: &definition.semantic_id,
+            semantic_id: &definition.semantic_id,
+            definition_object_id: &definition.object.object_id,
+          }],
+          algorithm,
+        )
+        .unwrap(),
+      );
+    }
+    let publication = ImmutableSemanticObjectBatchPublicationRequestV1 {
+      database_id: &before.selected.header.database_id,
+      objects: &objects,
+      publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+    };
+    assert!(!publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+    let selected = publisher.observe().unwrap();
+    assert_eq!(selected.selected.header.head_hash, before.selected.header.head_hash);
+    assert!(compile_source_selector_v1(request, &memory, &|| true).is_err());
+    assert_eq!(publisher.observe().unwrap(), selected);
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    for object in &objects {
+      let kind = u16::from_le_bytes([object.value[6], object.value[7]]);
+      assert_eq!(reopened.load_semantic_object(kind, &object.object_id).unwrap().as_deref(), Some(object.value.as_slice()));
+    }
+    assert!(reopened.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+    assert_eq!(reopened.observe().unwrap(), selected);
+  }
+}
+
+#[test]
 fn immutable_entity_batch_can_mix_existing_and_new_entities_without_rewriting_the_existing_identity() {
   let algorithm = HashAlgorithm::Blake3_256;
   let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);

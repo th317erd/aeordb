@@ -3152,9 +3152,15 @@ pub(super) fn map_source_error(error: QueryExecutionSourceErrorV1) -> QueryExecu
   }
 }
 
+#[cfg(test)]
+#[path = "../../../spec/engine/query_execution_operational_error_spec.rs"]
+mod operational_error_spec;
+
 fn map_definition_error(error: super::index_definition_runtime::IndexDefinitionErrorV1) -> QueryExecutionErrorV1 {
   match error.class() {
-    IndexDefinitionErrorClassV1::ResourceLimit => QueryExecutionErrorV1::resource(error.code(), error.context()),
+    IndexDefinitionErrorClassV1::ResourceLimit | IndexDefinitionErrorClassV1::HostFailure => {
+      QueryExecutionErrorV1::resource(error.code(), error.context())
+    }
     IndexDefinitionErrorClassV1::UnsupportedDefinition => QueryExecutionErrorV1::unavailable(error.code(), error.context()),
     IndexDefinitionErrorClassV1::InvalidSourceValue => {
       QueryExecutionErrorV1::unavailable("query_execution_document_unindexable", error.to_string())
@@ -3168,7 +3174,9 @@ fn map_definition_error(error: super::index_definition_runtime::IndexDefinitionE
 fn map_semantic_error(error: super::index_converter::IndexSemanticErrorV1) -> QueryExecutionErrorV1 {
   use super::index_converter::IndexSemanticErrorClassV1;
   match error.class() {
-    IndexSemanticErrorClassV1::ResourceLimit => QueryExecutionErrorV1::resource(error.code(), error.context()),
+    IndexSemanticErrorClassV1::ResourceLimit | IndexSemanticErrorClassV1::HostFailure => {
+      QueryExecutionErrorV1::resource(error.code(), error.context())
+    }
     IndexSemanticErrorClassV1::UnsupportedDefinition => QueryExecutionErrorV1::unavailable(error.code(), error.context()),
     IndexSemanticErrorClassV1::InvalidSourceValue => {
       QueryExecutionErrorV1::unavailable("query_execution_document_unindexable", error.to_string())

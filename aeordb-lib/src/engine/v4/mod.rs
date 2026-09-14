@@ -164,6 +164,7 @@ pub mod semantic_catalog_mutation;
 pub mod semantic_store;
 pub mod source_evaluator;
 pub mod source_selector;
+pub mod source_selector_compiler;
 pub mod system_control;
 pub mod system_family;
 pub mod text_fold;

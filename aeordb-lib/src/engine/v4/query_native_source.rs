@@ -3017,9 +3017,15 @@ fn select_position_component(
   Ok(selected)
 }
 
+#[cfg(test)]
+#[path = "../../../spec/engine/query_native_operational_error_spec.rs"]
+mod operational_error_spec;
+
 fn map_index_definition_error(error: super::index_definition_runtime::IndexDefinitionErrorV1) -> QueryExecutionSourceErrorV1 {
   let class = match error.class() {
-    IndexDefinitionErrorClassV1::ResourceLimit => QueryExecutionSourceErrorClassV1::ResourceLimit,
+    IndexDefinitionErrorClassV1::ResourceLimit | IndexDefinitionErrorClassV1::HostFailure => {
+      QueryExecutionSourceErrorClassV1::ResourceLimit
+    }
     IndexDefinitionErrorClassV1::UnsupportedDefinition => QueryExecutionSourceErrorClassV1::Unavailable,
     IndexDefinitionErrorClassV1::IdentityMismatch
     | IndexDefinitionErrorClassV1::SemanticMismatch

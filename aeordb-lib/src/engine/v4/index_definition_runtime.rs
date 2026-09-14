@@ -24,6 +24,7 @@ pub enum IndexDefinitionErrorClassV1 {
   UnsupportedDefinition,
   InvalidSourceValue,
   ResourceLimit,
+  HostFailure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,10 @@ pub struct IndexDefinitionErrorV1 {
 }
 
 impl IndexDefinitionErrorV1 {
+  pub(crate) fn new(class: IndexDefinitionErrorClassV1, code: &'static str, context: impl Into<String>) -> Self {
+    Self { class, code, context: context.into() }
+  }
+
   pub fn class(&self) -> IndexDefinitionErrorClassV1 {
     self.class
   }
@@ -249,7 +254,7 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
     let mut values = Vec::new();
     values.try_reserve_exact(canonical_values.len()).map_err(|source| {
       error(
-        IndexDefinitionErrorClassV1::ResourceLimit,
+        IndexDefinitionErrorClassV1::HostFailure,
         "index_source_value_reserve",
         format!("cannot reserve bounded source-value output: {source}"),
       )
@@ -276,6 +281,7 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
           IndexSemanticErrorClassV1::UnsupportedDefinition => IndexDefinitionErrorClassV1::UnsupportedDefinition,
           IndexSemanticErrorClassV1::InvalidSourceValue => IndexDefinitionErrorClassV1::InvalidSourceValue,
           IndexSemanticErrorClassV1::ResourceLimit => IndexDefinitionErrorClassV1::ResourceLimit,
+          IndexSemanticErrorClassV1::HostFailure => IndexDefinitionErrorClassV1::HostFailure,
           IndexSemanticErrorClassV1::MalformedPostingKey => IndexDefinitionErrorClassV1::SemanticMismatch,
         };
         error(class, source.code(), source.context())
@@ -339,7 +345,7 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
 }
 
 fn error(class: IndexDefinitionErrorClassV1, code: &'static str, context: impl Into<String>) -> IndexDefinitionErrorV1 {
-  IndexDefinitionErrorV1 { class, code, context: context.into() }
+  IndexDefinitionErrorV1::new(class, code, context)
 }
 
 fn decode_definitions<'value, 'field>(

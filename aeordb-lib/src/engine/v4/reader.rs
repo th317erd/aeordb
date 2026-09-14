@@ -26,11 +26,21 @@ pub struct FormatError {
   class: MalformedInputClass,
   code: &'static str,
   context: String,
+  allocation_failed: bool,
 }
 
 impl FormatError {
   pub fn new(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> Self {
-    Self { class, code, context: context.into() }
+    Self { class, code, context: context.into(), allocation_failed: false }
+  }
+
+  pub(crate) fn allocation_failure(code: &'static str, context: impl Into<String>) -> Self {
+    Self { class: MalformedInputClass::AllocationAmplification, code, context: context.into(), allocation_failed: true }
+  }
+
+  /// A refused host allocation is operational, unlike a deterministic format size limit.
+  pub fn is_allocation_failure(&self) -> bool {
+    self.allocation_failed
   }
 
   pub fn class(&self) -> MalformedInputClass {

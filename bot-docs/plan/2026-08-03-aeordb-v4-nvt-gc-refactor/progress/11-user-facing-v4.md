@@ -26,8 +26,13 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: corrected parser-registry compilation passes all ten Linux
-qualification gates; see its [strict proof](../evidence/user-facing-v4-u1-parser-registry-proof-20260914.json).
+Current landing: corrected source-selector compilation and operational
+canonical-allocation propagation pass all ten Linux qualification gates; see
+the [strict source-selector proof](../evidence/user-facing-v4-u1-source-selector-proof-20260914.json).
+Parser-context compilation is committed/pushed as c694e64d. Full/default index
+compilation and staged activation remain outstanding; this is not v4 readiness.
+The preceding parser-registry compilation evidence remains in its
+[strict proof](../evidence/user-facing-v4-u1-parser-registry-proof-20260914.json).
 Definition wrappers and bounded catalog COW are committed and pushed as
 `7eb1a40d` and `19284eea`. Next is parser-plan/default/index compilation and
 staged integration, not a completed full semantic compiler.
@@ -2343,6 +2348,149 @@ remain; this is not U1 or campaign completion. Next is corrected source-selector
 normalization against the existing owner rules, followed by whole-definition
 compilation/integration. The 16-case cache-only draft is preparation, not executed
 evidence or production code.
+
+## U1 completed compiler unit: corrected source selectors
+
+Entry c694e64dddfbc97da1835042154188fdfd0ddb49, development/origin equal and
+tracked tree clean. Parser-context unit committed/pushed38107closed0. Existing
+346affected/681library/175reference baseline retained. Direct owner, no agents.
+Own new source-selector compiler/spec, Cargo/v4 export, shared corrected-policy
+helper visibility if required, resource/persistence extensions and ledger/proof.
+Any required canonical-value allocation correction gets its own failing-first
+proof and full existing consumer/reference coverage; no canonical byte changes.
+Forbidden: legacy resolver/config behavior, frozen native identities/fixtures,
+new physical writer, root selection, service/default activation, public schema
+invention or runtime alias lookup.
+
+Trace: legacy indexing_pipeline.extract_field_values/source_resolver establishes
+existing source-array/default/mapper shapes; Round8A owns corrected metadata,
+path order, u64 indices, literal syntax fallback, effective regexflags and
+omitted mapperargs; source_selector owns typed64KiB bytes; parser_context owns
+exact shared dependency ordinals; ValueStore checks resulting child closure;
+index_source/native consumers execute only the pinned semantics. Compiler input
+recipes are typed, following the previous parser-context boundary. The whole
+configuration source/deployment owner remains a subsequent integration step.
+
+Narrow target: cargo test --offline --locked -j 2 -p aeordb --test
+source_selector_compiler_spec. Sixteen prepared target tests will be installed
+before production code: exact metadata aliases/bytes; default/explicit path
+equivalence including regex-looking names; order/full-u64/root/fanout; malformed
+types and regex syntax versus compiled-budget rejection; UTF8/field/segment/byte
+caps; mapper null/canonical arguments/ordinal/policy/duplicate JSON behavior;
+raw-input admission, cancellation, policy revocation and retained memory.
+Extend with real ValueStore/native execution and publication/reopen, plus
+measured allocation failures before final qualification. Generic JSON node
+amplification requires explicit shared admission; raw bytes alone are not a
+retained-memory bound. No production implementation or executed proof yet.
+
+API RED captured: desktop86380closed101 at13:54:51Z, exact missing-module
+E0432 and zero executed tests. Four-input source manifest
+bf52f2d9b4add1730f10b03b7317a8cb70eeed0da92dc9e3ef161e5cf3881fe8;
+six raw files mirrored before changing the isolated worktree. The13th resource
+test now exercises refused5-byte canonical frame and8-byte container growth.
+Allocation RED2 runs separately against the unchanged encoder; process-local
+dumpability and core limits are disabled, without changing system policy.
+Five-input manifest1c10a6aba1d5360cfad927effff82197b0d29711481f50fc012b3106c9ffb663.
+Implementation remains pending that actual behavioral failure capture.
+
+Allocation RED2 completed101: actual5-byte frame refusal aborted the disposable
+test process; raw output and its one same-host executed-binary digest preserved.
+The smallest correction adds fallible reservations at both canonical frame and
+container growth; seven audit locations move, but all1503 identities/reviews
+and the ceiling remain unchanged. First compiler candidate then passes18source
+and14resource cases (98271closed0,14:13:59Z); nine-input manifest
+9b3a8ca8009663d9f36913847c81a521567da4200ba6b2d6139fa3807c5295d6.
+The extra two source cases prove dense JSON admission and actual ValueStore
+extraction with every registered hash. The resource suite proves refused field,
+segment and selector allocations return errors with no retained-memory leak.
+
+Review found a separate impossible-wire-size regex preflight gap. A new measured
+300000-byte pattern test is now running before any correction: current code
+compiles its syntax tree before the64KiB serializer rejects it. Preserve this
+behavioral RED, move the bound before compilation, then run unchanged regression
+and all ten final gates. The new physical-publication/reopen test stages complete
+dependency/scope/value objects with allfive hashes; it still may not selectHEAD.
+
+Preflight RED measured43,040,318 cumulative allocated bytes and8,388,608 maximum
+allocation before rejecting the impossible pattern. Final code checks the
+maximum possible wire fit before parsing and separately reserves conservative
+syntax workspace for the largest pattern (one compiler invocation at a time).
+The added19th selector test proves that syntax charge is not mistaken for the
+compiled-program cap. First final run passes19source+15resource and the new
+physical-persistence test, then fails the conservative architecture audit at
+Option::unwrap_or on omitted mapper arguments. Final2 changes only that absence
+case to explicitSome/None matching; all tests and audit policy are unchanged.
+First-final18raw/driver and7same-host binary digests are preserved before rerun.
+
+Required downstream correction discovered during final2 review: the newly
+recoverable encoder refusal reaches index_source's deterministic-error mapping
+and index_converter's InvalidSourceValue mapping. The producer also freezes
+generic ResourceLimit failures, including existing allocator reserve failures.
+This can turn temporary host memory pressure into durable negative index state.
+The unit must not land merely because existing broad tests pass. A new measured
+metadata-source allocation regression is installed, not yet run; expand the
+failure proof through source extraction, converter/runtime, collector and query
+boundaries. Preserve genuine semantic-limit unindexability and malformed-data
+behavior, but propagate allocator refusal as a typed operational failure with
+no frozen document-state publication. No downstream production changes yet.
+
+Consumer RED2 completed4514closed101 at14:45:41Z: both named allocation
+regressions fail exactly as predicted (metadata deterministic-unindexable;
+converter InvalidSourceValue). Six raw files and one same-host binary digest
+mirrored32156closed0 before further desktop edits. Final2's all-green ten gates
+remain an interim baseline, not unit completion. The owned perimeter now also
+includes reader allocation origin, source evaluation, corrected/migration
+converter errors, definition runtime, collector and all three query mappings.
+Runtime-only HostFailure is distinct from deterministic definition ResourceLimit;
+format classes, encoded bytes and native identities are unchanged. New coverage
+includes both semantic families, JSON output allocation origin, token workspace,
+definition output reservation, actual collector retry/no-mutations/retry-success,
+and private collector/query mapping guards. All original failing tests remain.
+Final3 has24 exact inputs,22resource/19selector cases,seven new private mapping
+tests and36 affected integration targets. Manifest
+a8cfb3f3b6e98c2f43c0a85566b7a18bfcd51e8d86a5dcb2bb1d8faac428b2c6;
+archive29d16284acd5650ee6c882fb767bb7894e8ce5fb7a75bfdba9b0bd9dd912a626.
+Eight reviewed audit locations move (priorseven plusreader); no baseline growth.
+Final proof generator remains unexecuted and must be expanded for this scope.
+
+Final3 completed76478closed0 at15:11:53Z: allten gates PASS,6m39.389s elapsed,
+7m39.819s CPU. Exact results:41narrow (22resource/19selector),1physical-persistence
+case,626affected across36targets,688library,175reference,472independent fixtures,
+reviewed1503 audit occurrences,format,strictworkspaceClippy and debt self-test.
+Kernel peak6,213,615,616 bytes under6GiB/no-swap; finalData336,065,519,616 and
+home70,044,909,568 bytes exceed their floors. Sixty raw stage files,driver and
+42same-host executable digests mirrored59330closed0 before changing remote
+source. Strict evidence verifier f2d86d PASS; the
+[complete proof](../evidence/user-facing-v4-u1-source-selector-proof-20260914.json)
+binds all24inputs,archives,commands,counts,resource samples,failed-first history,
+interim final2baseline and final3output. No source/compiler tests weakened;
+only eight audit line locations changed, with every review/identity preserved.
+The retained corrupt source,sealedrelease evidence and production services were
+not touched. This completes this landing unit, not all U1 or user-facing v4.
+
+Remaining runtime-admission inventory (not claimed by this compilation unit):
+IndexDefinitionRuntime::from_definitions still collapses ValueStore runtime
+construction failures into UnsupportedDefinition; collector setup likewise
+degrades failed AuthoritativeSourceEvaluator construction as invalid config.
+These predate the new canonical-encoding refusal and do not publish frozen
+unindexable document records, but their operational classification must be
+qualified/corrected during the upcoming runtime-admission integration. Keep
+malformed retained definitions distinct from host pressure and shared-budget
+refusal. This is an explicit remaining proof obligation before full readiness,
+not a claim of universal allocator recovery or completed query integration.
+
+Read-only next-step refinement while final qualification runs: the existing
+field_definition writer validates structural converter values/counts but does
+not enforce the public corrected1MiB input/key and4MiB total-key ceilings.
+Those additional bounds belong in corrected semantic compilation, preserving
+retained migration bytes. Round11.10 also requires actual default materialization:
+8 metadata ValueStores and13 FieldIndexes, with context-specific canonical zero
+document/traversal limits for metadata and zero JSON traversal limits for mapper
+sources. The next compiled-definition composition must use already captured
+selector/context outputs, corrected converter IDs1..12, exact scope/hash IDs,
+shared admission and existing wrappers; it must not route through permissive
+PathIndexConfig::deserialize_v0. This observation starts no new production unit
+and invents no public JSON properties or compiler-profile fingerprint.
 
 ## U2 read-only entry refinement: public append-writer guard
 

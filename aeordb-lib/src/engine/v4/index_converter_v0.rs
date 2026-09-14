@@ -11,6 +11,7 @@ use super::field_definition::ConverterDefinitionV1;
 pub enum MigrationConverterErrorClassV0 {
   InvalidSourceValue,
   ResourceLimit,
+  HostFailure,
   UnsupportedDefinition,
 }
 
@@ -69,7 +70,7 @@ pub fn compile_migration_value_v0(
   let mut postings = Vec::new();
   postings.try_reserve_exact(posting_keys.len()).map_err(|source| {
     error(
-      MigrationConverterErrorClassV0::ResourceLimit,
+      MigrationConverterErrorClassV0::HostFailure,
       "legacy_posting_reserve",
       format!("cannot reserve bounded migration posting output: {source}"),
     )
@@ -462,7 +463,7 @@ fn parameter_error() -> MigrationConverterErrorV0 {
 
 fn reserve_error(source: std::collections::TryReserveError) -> MigrationConverterErrorV0 {
   error(
-    MigrationConverterErrorClassV0::ResourceLimit,
+    MigrationConverterErrorClassV0::HostFailure,
     "legacy_token_reserve",
     format!("cannot reserve bounded migration token workspace: {source}"),
   )

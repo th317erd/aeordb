@@ -220,7 +220,7 @@ fn validate_wasm(record: &DependencyRecordV1<'_>, role: u16) -> Result<()> {
   Ok(())
 }
 
-fn validate_policy(policy: &InvocationPolicyV1, wasm: bool) -> Result<()> {
+pub(crate) fn validate_policy(policy: &InvocationPolicyV1, wasm: bool) -> Result<()> {
   let expected = if wasm { InvocationPolicyKind::PureWasm } else { InvocationPolicyKind::Native };
   if policy.kind != expected {
     return Err(invalid("invocation backend is not the corrected policy for this call site"));

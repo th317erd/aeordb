@@ -27,6 +27,7 @@ pub enum IndexSemanticErrorClassV1 {
   UnsupportedDefinition,
   InvalidSourceValue,
   ResourceLimit,
+  HostFailure,
   MalformedPostingKey,
 }
 
@@ -38,6 +39,10 @@ pub struct IndexSemanticErrorV1 {
 }
 
 impl IndexSemanticErrorV1 {
+  pub(crate) fn new(class: IndexSemanticErrorClassV1, code: &'static str, context: impl Into<String>) -> Self {
+    Self { class, code, context: context.into() }
+  }
+
   pub fn class(&self) -> IndexSemanticErrorClassV1 {
     self.class
   }
@@ -200,6 +205,7 @@ impl<'a> ConverterRuntimeV1<'a> {
         let class = match source.class() {
           MigrationConverterErrorClassV0::InvalidSourceValue => IndexSemanticErrorClassV1::InvalidSourceValue,
           MigrationConverterErrorClassV0::ResourceLimit => IndexSemanticErrorClassV1::ResourceLimit,
+          MigrationConverterErrorClassV0::HostFailure => IndexSemanticErrorClassV1::HostFailure,
           MigrationConverterErrorClassV0::UnsupportedDefinition => IndexSemanticErrorClassV1::UnsupportedDefinition,
         };
         error(class, source.code(), source.context())
@@ -207,7 +213,7 @@ impl<'a> ConverterRuntimeV1<'a> {
       let mut postings = Vec::new();
       postings.try_reserve_exact(migrated.len()).map_err(|source| {
         error(
-          IndexSemanticErrorClassV1::ResourceLimit,
+          IndexSemanticErrorClassV1::HostFailure,
           "converter_posting_reserve",
           format!("cannot reserve bounded migration posting output: {source}"),
         )
@@ -227,7 +233,7 @@ impl<'a> ConverterRuntimeV1<'a> {
       let mut postings = Vec::new();
       postings.try_reserve_exact(posting_keys.len()).map_err(|source| {
         error(
-          IndexSemanticErrorClassV1::ResourceLimit,
+          IndexSemanticErrorClassV1::HostFailure,
           "converter_posting_reserve",
           format!("cannot reserve bounded corrected token output: {source}"),
         )
@@ -515,7 +521,7 @@ fn validate_corrected_token_key(converter_id: u16, value: &[u8]) -> IndexSemanti
 
 fn token_reserve_error(source: std::collections::TryReserveError) -> IndexSemanticErrorV1 {
   error(
-    IndexSemanticErrorClassV1::ResourceLimit,
+    IndexSemanticErrorClassV1::HostFailure,
     "converter_token_reserve",
     format!("cannot reserve bounded corrected token workspace: {source}"),
   )
@@ -524,7 +530,7 @@ fn token_reserve_error(source: std::collections::TryReserveError) -> IndexSemant
 fn text_fold_error(source: super::text_fold::TextFoldErrorV1) -> IndexSemanticErrorV1 {
   let class = match source.class() {
     TextFoldErrorClassV1::MalformedTable => IndexSemanticErrorClassV1::UnsupportedDefinition,
-    TextFoldErrorClassV1::ResourceLimit => IndexSemanticErrorClassV1::ResourceLimit,
+    TextFoldErrorClassV1::ResourceLimit => IndexSemanticErrorClassV1::HostFailure,
   };
   error(class, source.code(), source.context())
 }
@@ -552,8 +558,13 @@ fn validate_typed_exact_key(value: &[u8]) -> IndexSemanticResultV1<()> {
 }
 
 fn encode_source(value: &CanonicalConfigValueV1) -> IndexSemanticResultV1<Vec<u8>> {
-  encode_canonical_value(value, CanonicalValueBounds::SOURCE_VALUE)
-    .map_err(|source| malformed_value("canonical source value", source.to_string()))
+  encode_canonical_value(value, CanonicalValueBounds::SOURCE_VALUE).map_err(|source| {
+    if source.is_allocation_failure() {
+      error(IndexSemanticErrorClassV1::HostFailure, source.code(), source.context())
+    } else {
+      malformed_value("canonical source value", source.to_string())
+    }
+  })
 }
 
 fn require_bytes(value: &CanonicalConfigValueV1) -> IndexSemanticResultV1<&[u8]> {
@@ -703,5 +714,5 @@ fn limit_context(code: &'static str, context: impl Into<String>) -> IndexSemanti
 }
 
 fn error(class: IndexSemanticErrorClassV1, code: &'static str, context: impl Into<String>) -> IndexSemanticErrorV1 {
-  IndexSemanticErrorV1 { class, code, context: context.into() }
+  IndexSemanticErrorV1::new(class, code, context)
 }

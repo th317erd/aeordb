@@ -1480,6 +1480,10 @@ path = "spec/engine/parser_registry_compiler_spec.rs"
 name = "parser_context_compiler_spec"
 path = "spec/engine/parser_context_compiler_spec.rs"
 
+[[test]]
+name = "source_selector_compiler_spec"
+path = "spec/engine/source_selector_compiler_spec.rs"
+
 
 [lints]
 workspace = true

@@ -8256,7 +8256,7 @@
     {
       "id": "esq-v1-68514af7c351dd753ffc-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 307,
+      "line": 310,
       "column": 24,
       "enclosing_item": "encode_frame",
       "kind": "error_conversion",
@@ -8266,7 +8266,7 @@
     {
       "id": "esq-v1-7325bc3c6825e9e5ae68-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 327,
+      "line": 333,
       "column": 63,
       "enclosing_item": "decode_value_at",
       "kind": "panic_method",
@@ -8276,7 +8276,7 @@
     {
       "id": "esq-v1-9721b36f51a5e3bd39c8-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 328,
+      "line": 334,
       "column": 65,
       "enclosing_item": "decode_value_at",
       "kind": "panic_method",
@@ -8286,7 +8286,7 @@
     {
       "id": "esq-v1-8fd0e70c616dd3df167d-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 329,
+      "line": 335,
       "column": 66,
       "enclosing_item": "decode_value_at",
       "kind": "panic_method",
@@ -8296,7 +8296,7 @@
     {
       "id": "esq-v1-328797bb47a8cb5c4a0d-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 330,
+      "line": 336,
       "column": 44,
       "enclosing_item": "decode_value_at",
       "kind": "panic_method",
@@ -8306,7 +8306,7 @@
     {
       "id": "esq-v1-78d2aa6a639f1a9ae7ab-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 351,
+      "line": 357,
       "column": 19,
       "enclosing_item": "decode_value_at",
       "kind": "panic_method",
@@ -8316,7 +8316,7 @@
     {
       "id": "esq-v1-f4c194ce1f09d41d7ed9-00",
       "file": "aeordb-lib/src/engine/v4/config_value.rs",
-      "line": 358,
+      "line": 364,
       "column": 10,
       "enclosing_item": "decode_value_at",
       "kind": "panic_macro",
@@ -11256,7 +11256,7 @@
     {
       "id": "esq-v1-6463864ed28922936cc9-00",
       "file": "aeordb-lib/src/engine/v4/reader.rs",
-      "line": 155,
+      "line": 165,
       "column": 20,
       "enclosing_item": "impl BoundedReader < 'a >::read_u32_length_prefixed",
       "kind": "error_conversion",

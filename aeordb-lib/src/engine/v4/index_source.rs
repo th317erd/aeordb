@@ -18,6 +18,7 @@ use super::config_value::{
 use super::dependency::DependencyRecordV1;
 use super::native_semantics::NativeSemanticComponentV1;
 use super::parser_plan::ParserCandidateV1;
+use super::reader::FormatError;
 use super::source_selector::{JsonPathSegmentV1, REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT, SourceSelectorKind};
 use super::value_store::{ValueStoreDefinitionV1, ValueStoreSemanticFamily, decode_value_store_definition};
 
@@ -122,7 +123,7 @@ enum SelectorFrameV1<'a> {
   },
 }
 
-enum RegexTextErrorV1 {
+enum SourceValueErrorV1 {
   Deterministic(SourceExtractionV1),
   Operational(SourceOperationalErrorV1),
 }
@@ -292,7 +293,7 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       ));
     }
     match self.definition.selector.kind {
-      SourceSelectorKind::Metadata => Ok(self.extract_metadata(document.file_record)),
+      SourceSelectorKind::Metadata => self.extract_metadata(document.file_record),
       SourceSelectorKind::JsonPath => {
         let parsed_value = document.parsed_value.ok_or_else(|| {
           operational_error(
@@ -308,10 +309,10 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     }
   }
 
-  fn extract_metadata(&self, record: &FileRecord) -> SourceExtractionV1 {
+  fn extract_metadata(&self, record: &FileRecord) -> SourceOperationalResultV1<SourceExtractionV1> {
     let metadata_id = match self.definition.selector.metadata_id {
       Some(metadata_id) => metadata_id,
-      None => return deterministic_unindexable("metadata_source_missing", "decoded metadata selector has no metadata ID"),
+      None => return Ok(deterministic_unindexable("metadata_source_missing", "decoded metadata selector has no metadata ID")),
     };
     let value = match (self.definition.semantic_family, metadata_id) {
       (ValueStoreSemanticFamily::CorrectedV1, 1) => CanonicalConfigValueV1::String(record.path.clone()),
@@ -326,22 +327,22 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       (ValueStoreSemanticFamily::CorrectedV1, 7) => CanonicalConfigValueV1::Signed(record.updated_at),
       (ValueStoreSemanticFamily::CorrectedV1, 8) => {
         if record.content_hash.len() != self.hash_width {
-          return deterministic_unindexable(
+          return Ok(deterministic_unindexable(
             "file_record_migration_required",
             format!("full content hash has {} bytes; this definition requires {}", record.content_hash.len(), self.hash_width),
-          );
+          ));
         }
         CanonicalConfigValueV1::Bytes(record.content_hash.clone())
       }
       (ValueStoreSemanticFamily::MigrationV0, _) => {
         return self.extract_legacy_metadata(record, metadata_id);
       }
-      (_, id) => return deterministic_unindexable("metadata_source_unknown", format!("unknown metadata ID {id}")),
+      (_, id) => return Ok(deterministic_unindexable("metadata_source_unknown", format!("unknown metadata ID {id}"))),
     };
     self.encode_values(vec![value])
   }
 
-  fn extract_legacy_metadata(&self, record: &FileRecord, metadata_id: u16) -> SourceExtractionV1 {
+  fn extract_legacy_metadata(&self, record: &FileRecord, metadata_id: u16) -> SourceOperationalResultV1<SourceExtractionV1> {
     let bytes = match metadata_id {
       1 => record.path.as_bytes().to_vec(),
       2 => file_name_or_empty(&record.path).as_bytes().to_vec(),
@@ -355,14 +356,14 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       7 => record.updated_at.to_be_bytes().to_vec(),
       8 => {
         if record.content_hash.len() != self.hash_width {
-          return deterministic_unindexable(
+          return Ok(deterministic_unindexable(
             "file_record_migration_required",
             format!("full content hash has {} bytes; this definition requires {}", record.content_hash.len(), self.hash_width),
-          );
+          ));
         }
         hex::encode(&record.content_hash).into_bytes()
       }
-      id => return deterministic_unindexable("metadata_source_unknown", format!("unknown metadata ID {id}")),
+      id => return Ok(deterministic_unindexable("metadata_source_unknown", format!("unknown metadata ID {id}"))),
     };
     self.encode_values(vec![CanonicalConfigValueV1::Bytes(bytes)])
   }
@@ -388,7 +389,8 @@ impl<'a> ValueStoreRuntimeV1<'a> {
           if segment_index == self.json_segments.len() {
             let canonical = match self.encode_selected_value(value) {
               Ok(canonical) => canonical,
-              Err(outcome) => return Ok(outcome),
+              Err(SourceValueErrorV1::Deterministic(outcome)) => return Ok(outcome),
+              Err(SourceValueErrorV1::Operational(error)) => return Err(error),
             };
             let next_count = values.len().checked_add(1).ok_or_else(|| {
               operational_error(SourceOperationalErrorClassV1::HostFailure, "source_value_count_overflow", "source value count overflow")
@@ -474,8 +476,8 @@ impl<'a> ValueStoreRuntimeV1<'a> {
             CompiledJsonPathSegmentV1::Regex(regex) => {
               let text = match canonical_regex_text(candidate, budget.remaining_examined_bytes()) {
                 Ok(text) => text,
-                Err(RegexTextErrorV1::Deterministic(outcome)) => return Ok(outcome),
-                Err(RegexTextErrorV1::Operational(error)) => return Err(error),
+                Err(SourceValueErrorV1::Deterministic(outcome)) => return Ok(outcome),
+                Err(SourceValueErrorV1::Operational(error)) => return Err(error),
               };
               if let Err(outcome) = budget.charge_examined(text.len() as u64) {
                 return Ok(outcome);
@@ -600,37 +602,43 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     SourceExtractionV1::Values(values)
   }
 
-  fn encode_values(&self, values: Vec<CanonicalConfigValueV1>) -> SourceExtractionV1 {
-    let mut encoded = Vec::with_capacity(values.len());
+  fn encode_values(&self, values: Vec<CanonicalConfigValueV1>) -> SourceOperationalResultV1<SourceExtractionV1> {
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(values.len()).map_err(|source| {
+      SourceOperationalErrorV1::host_failure("source_value_reserve", format!("cannot reserve metadata source values: {source}"))
+    })?;
     let mut total = 0u64;
     for value in values {
-      let value = match encode_canonical_value(&value, CanonicalValueBounds::SOURCE_VALUE) {
+      let value = match encode_canonical_value(&value, CanonicalValueBounds::SOURCE_VALUE)
+        .map_err(|source| source_encoding_error("source_value_encode", source))
+      {
         Ok(value) => value,
-        Err(source) => return deterministic_unindexable("source_value_encode", source.to_string()),
+        Err(SourceValueErrorV1::Deterministic(outcome)) => return Ok(outcome),
+        Err(SourceValueErrorV1::Operational(error)) => return Err(error),
       };
       total = match total.checked_add(value.len() as u64) {
         Some(total) => total,
-        None => return deterministic_unindexable("source_value_bytes_overflow", "metadata source bytes overflow"),
+        None => return Ok(deterministic_unindexable("source_value_bytes_overflow", "metadata source bytes overflow")),
       };
       if encoded.len() + 1 > self.definition.max_source_values_per_document as usize {
-        return deterministic_unindexable("source_value_count_limit", "metadata source-value count exceeds this ValueStore definition");
+        return Ok(deterministic_unindexable("source_value_count_limit", "metadata source-value count exceeds this ValueStore definition"));
       }
       if total > self.definition.max_canonical_source_bytes_per_document {
-        return deterministic_unindexable("source_value_bytes_limit", "metadata source value exceeds this ValueStore definition");
+        return Ok(deterministic_unindexable("source_value_bytes_limit", "metadata source value exceeds this ValueStore definition"));
       }
       encoded.push(value);
     }
-    SourceExtractionV1::Values(encoded)
+    Ok(SourceExtractionV1::Values(encoded))
   }
 
-  fn encode_selected_value(&self, value: &CanonicalConfigValueV1) -> Result<Vec<u8>, SourceExtractionV1> {
+  fn encode_selected_value(&self, value: &CanonicalConfigValueV1) -> Result<Vec<u8>, SourceValueErrorV1> {
     match self.definition.semantic_family {
       ValueStoreSemanticFamily::CorrectedV1 => encode_canonical_value(value, CanonicalValueBounds::SOURCE_VALUE)
-        .map_err(|source| deterministic_unindexable("source_value_encode", source.to_string())),
+        .map_err(|source| source_encoding_error("source_value_encode", source)),
       ValueStoreSemanticFamily::MigrationV0 => {
         let value = CanonicalConfigValueV1::Bytes(legacy_source_bytes(value)?);
         encode_canonical_value(&value, CanonicalValueBounds::SOURCE_VALUE)
-          .map_err(|source| deterministic_unindexable("source_value_encode", source.to_string()))
+          .map_err(|source| source_encoding_error("source_value_encode", source))
       }
     }
   }
@@ -724,26 +732,26 @@ impl SelectorBudgetV1 {
   }
 }
 
-fn canonical_regex_text(value: &CanonicalConfigValueV1, maximum_length: usize) -> Result<Cow<'_, str>, RegexTextErrorV1> {
+fn canonical_regex_text(value: &CanonicalConfigValueV1, maximum_length: usize) -> Result<Cow<'_, str>, SourceValueErrorV1> {
   if let CanonicalConfigValueV1::String(value) = value {
     if value.len() > maximum_length {
-      return Err(RegexTextErrorV1::Deterministic(deterministic_unindexable(
+      return Err(SourceValueErrorV1::Deterministic(deterministic_unindexable(
         "selector_examined_bytes_limit",
         "array regex candidate exceeds remaining examined-byte budget",
       )));
     }
     return Ok(Cow::Borrowed(value));
   }
-  let length = compact_json_length(value, maximum_length).map_err(RegexTextErrorV1::Deterministic)?;
+  let length = compact_json_length(value, maximum_length).map_err(SourceValueErrorV1::Deterministic)?;
   let mut text = String::new();
   text.try_reserve_exact(length).map_err(|source| {
-    RegexTextErrorV1::Operational(operational_error(
+    SourceValueErrorV1::Operational(operational_error(
       SourceOperationalErrorClassV1::HostFailure,
       "selector_regex_text_reserve",
       format!("cannot reserve bounded regex candidate text: {source}"),
     ))
   })?;
-  write_compact_json(value, &mut text).map_err(RegexTextErrorV1::Deterministic)?;
+  write_compact_json(value, &mut text).map_err(SourceValueErrorV1::Deterministic)?;
   debug_assert_eq!(text.len(), length);
   Ok(Cow::Owned(text))
 }
@@ -884,7 +892,7 @@ fn write_json_string(value: &str, output: &mut String) {
   output.push('"');
 }
 
-fn legacy_source_bytes(value: &CanonicalConfigValueV1) -> Result<Vec<u8>, SourceExtractionV1> {
+fn legacy_source_bytes(value: &CanonicalConfigValueV1) -> Result<Vec<u8>, SourceValueErrorV1> {
   match value {
     CanonicalConfigValueV1::Null => Ok(Vec::new()),
     CanonicalConfigValueV1::Boolean(value) => Ok(vec![u8::from(*value)]),
@@ -895,10 +903,18 @@ fn legacy_source_bytes(value: &CanonicalConfigValueV1) -> Result<Vec<u8>, Source
     CanonicalConfigValueV1::Bytes(value) => Ok(value.clone()),
     CanonicalConfigValueV1::Array(_) | CanonicalConfigValueV1::Map(_) => {
       let canonical = encode_canonical_value(value, CanonicalValueBounds::SOURCE_VALUE)
-        .map_err(|source| deterministic_unindexable("legacy_source_encode", source.to_string()))?;
+        .map_err(|source| source_encoding_error("legacy_source_encode", source))?;
       canonical_value_to_json(&canonical, CanonicalValueBounds::SOURCE_VALUE, CanonicalValueBounds::SOURCE_VALUE.maximum_value_length)
-        .map_err(|source| deterministic_unindexable("legacy_source_json", source.to_string()))
+        .map_err(|source| source_encoding_error("legacy_source_json", source))
     }
+  }
+}
+
+fn source_encoding_error(code: &'static str, source: FormatError) -> SourceValueErrorV1 {
+  if source.is_allocation_failure() {
+    SourceValueErrorV1::Operational(SourceOperationalErrorV1::host_failure(code, source.to_string()))
+  } else {
+    SourceValueErrorV1::Deterministic(deterministic_unindexable(code, source.to_string()))
   }
 }
 

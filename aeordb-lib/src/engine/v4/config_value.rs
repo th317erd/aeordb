@@ -167,9 +167,9 @@ fn append_json(output: &mut Vec<u8>, bytes: &[u8], maximum_length: usize) -> For
       format!("canonical JSON output exceeds {maximum_length} bytes"),
     ));
   }
-  output.try_reserve(bytes.len()).map_err(|source| {
-    error(MalformedInputClass::AllocationAmplification, "config_json_output_reserve", format!("cannot reserve JSON output: {source}"))
-  })?;
+  output
+    .try_reserve(bytes.len())
+    .map_err(|source| FormatError::allocation_failure("config_json_output_reserve", format!("cannot reserve JSON output: {source}")))?;
   output.extend_from_slice(bytes);
   Ok(())
 }
@@ -291,6 +291,9 @@ fn append_encoded(target: &mut Vec<u8>, bytes: &[u8], bounds: CanonicalValueBoun
       format!("canonical value exceeds {} bytes", bounds.maximum_value_length),
     ));
   }
+  target.try_reserve(bytes.len()).map_err(|source| {
+    FormatError::allocation_failure("config_container_allocation", format!("cannot grow canonical container: {source}"))
+  })?;
   target.extend_from_slice(bytes);
   Ok(())
 }
@@ -305,7 +308,10 @@ fn encode_frame(tag: u8, payload: &[u8], bounds: CanonicalValueBounds) -> Format
     ));
   }
   let payload_length = u32::try_from(payload.len()).map_err(|_| length_error("canonical config payload exceeds u32"))?;
-  let mut bytes = Vec::with_capacity(total_length);
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(total_length).map_err(|source| {
+    FormatError::allocation_failure("config_frame_allocation", format!("cannot reserve {total_length} bytes: {source}"))
+  })?;
   bytes.push(tag);
   bytes.extend_from_slice(&payload_length.to_le_bytes());
   bytes.extend_from_slice(payload);

@@ -2042,9 +2042,15 @@ fn validate_nonzero_hash(value: &[u8], width: usize, label: &'static str) -> Que
   Ok(())
 }
 
+#[cfg(test)]
+#[path = "../../../spec/engine/query_planning_operational_error_spec.rs"]
+mod operational_error_spec;
+
 fn map_definition_error(source: super::index_definition_runtime::IndexDefinitionErrorV1) -> QueryPlanningErrorV1 {
   match source.class() {
-    IndexDefinitionErrorClassV1::ResourceLimit => resource_error(source.code(), source.context()),
+    IndexDefinitionErrorClassV1::ResourceLimit | IndexDefinitionErrorClassV1::HostFailure => {
+      resource_error(source.code(), source.context())
+    }
     IndexDefinitionErrorClassV1::InvalidSourceValue => invalid_request(source.code(), source.context()),
     IndexDefinitionErrorClassV1::IdentityMismatch
     | IndexDefinitionErrorClassV1::SemanticMismatch
@@ -2054,7 +2060,7 @@ fn map_definition_error(source: super::index_definition_runtime::IndexDefinition
 
 fn map_semantic_error(source: super::index_converter::IndexSemanticErrorV1) -> QueryPlanningErrorV1 {
   match source.class() {
-    IndexSemanticErrorClassV1::ResourceLimit => resource_error(source.code(), source.context()),
+    IndexSemanticErrorClassV1::ResourceLimit | IndexSemanticErrorClassV1::HostFailure => resource_error(source.code(), source.context()),
     IndexSemanticErrorClassV1::InvalidSourceValue => invalid_request(source.code(), source.context()),
     IndexSemanticErrorClassV1::UnsupportedDefinition | IndexSemanticErrorClassV1::MalformedPostingKey => {
       corrupt_source(source.code(), source.context())

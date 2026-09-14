@@ -469,3 +469,307 @@ fn parser_context_allocations_are_fallible_and_release_shared_admission() {
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }
 }
+
+#[test]
+fn canonical_argument_encoding_returns_errors_when_frame_or_container_allocation_is_refused() {
+  use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, encode_canonical_value};
+
+  // The failing-first encoder aborts on refusal. Prevent any system core-dump
+  // service from collecting this disposable test process, even with a piped
+  // core_pattern that ignores the shell's RLIMIT_CORE. Restore after success.
+  #[cfg(target_os = "linux")]
+  let previous_dumpability = unsafe {
+    let previous = libc::prctl(libc::PR_GET_DUMPABLE, 0usize, 0usize, 0usize, 0usize);
+    assert!(matches!(previous, 0 | 1));
+    assert_eq!(libc::prctl(libc::PR_SET_DUMPABLE, 0usize, 0usize, 0usize, 0usize), 0);
+    previous
+  };
+
+  // Build caller-owned inputs before enabling the allocator hook. The first
+  // size selects a Null frame; the second selects initial container growth.
+  for (value, size) in [(CanonicalConfigValueV1::Null, 5), (CanonicalConfigValueV1::Array(vec![CanonicalConfigValueV1::Null]), 8)] {
+    let (result, allocations) = measure(size, || encode_canonical_value(&value, CanonicalValueBounds::CONFIG));
+    assert!(allocations.injected_failure, "size={size}: {allocations:?}");
+    assert_eq!(result.unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+  }
+
+  #[cfg(target_os = "linux")]
+  assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, previous_dumpability as usize, 0usize, 0usize, 0usize) }, 0);
+}
+
+#[test]
+fn source_compiler_retained_names_segments_and_selector_buffers_fail_without_leaks() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
+  use aeordb::engine::v4::source_selector::JsonPathSegmentV1;
+  use aeordb::engine::v4::source_selector_compiler::{SourceSelectorCompilationRequestV1, SourceSelectorInputV1, compile_source_selector_v1};
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+  let name = "n".repeat(313);
+  let path = [serde_json::Value::String("k".repeat(53))];
+  for metadata in [true, false] {
+    let request = SourceSelectorCompilationRequestV1 {
+      field_name: if metadata { "@path" } else { &name },
+      source: if metadata { SourceSelectorInputV1::Metadata } else { SourceSelectorInputV1::JsonPath(Some(&path)) },
+      maximum_source_bytes: 1 << 20,
+      maximum_workspace_bytes: 64 << 20,
+    };
+    let compiled = compile_source_selector_v1(request.clone(), &memory, &|| false).unwrap();
+    let mut sizes = vec![compiled.field_name().len(), compiled.selector().len()];
+    if !metadata {
+      sizes.push(std::mem::size_of::<JsonPathSegmentV1<'_>>());
+    }
+    drop(compiled);
+    for size in sizes {
+      let (result, allocations) = measure(size, || compile_source_selector_v1(request.clone(), &memory, &|| false));
+      assert!(allocations.injected_failure, "metadata={metadata} size={size}: {allocations:?}");
+      assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    }
+    let (result, allocations) = measure(0, || {
+      compile_source_selector_v1(SourceSelectorCompilationRequestV1 { maximum_workspace_bytes: 1, ..request }, &memory, &|| false)
+    });
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_preflight(allocations);
+  }
+}
+
+#[test]
+fn source_compiler_rejects_impossible_regex_wire_length_before_building_its_syntax_tree() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
+  use aeordb::engine::v4::source_selector_compiler::{SourceSelectorCompilationRequestV1, SourceSelectorInputV1, compile_source_selector_v1};
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+  let path = [serde_json::Value::String(format!("/{}/", "x".repeat(300_000)))];
+  let (result, allocations) = measure(0, || {
+    compile_source_selector_v1(
+      SourceSelectorCompilationRequestV1 {
+        field_name: "value",
+        source: SourceSelectorInputV1::JsonPath(Some(&path)),
+        maximum_source_bytes: 1 << 20,
+        maximum_workspace_bytes: 64 << 20,
+      },
+      &memory,
+      &|| false,
+    )
+  });
+  assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+  assert_preflight(allocations);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+}
+
+#[test]
+fn canonical_encoder_refusal_is_operational_at_metadata_source_consumers() {
+  use aeordb::engine::file_record::FileRecord;
+  use aeordb::engine::v4::index_source::{SourceDocumentV1, SourceOperationalErrorClassV1, ValueStoreRuntimeV1};
+  let definition = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid");
+  let runtime = ValueStoreRuntimeV1::from_encoded(&definition, ALGORITHM).unwrap();
+  let mut record = FileRecord::new("/data".into(), None, 0, Vec::new());
+  record.content_hash = vec![1; 32];
+  let (result, allocations) =
+    measure(37, || runtime.extract(SourceDocumentV1 { file_record: &record, parsed_value: None }, None, &|| false));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  assert_eq!(
+    result.expect_err("transient allocation refusal must not become a durable unindexable value").class(),
+    SourceOperationalErrorClassV1::HostFailure
+  );
+}
+
+#[test]
+fn canonical_encoder_refusal_is_operational_at_converter_and_definition_consumers() {
+  use aeordb::engine::v4::config_value::CanonicalConfigValueV1;
+  use aeordb::engine::v4::index_converter::ConverterRuntimeV1;
+  use aeordb::engine::v4::index_definition_runtime::IndexDefinitionRuntimeV1;
+  use aeordb::engine::v4::value_store::decode_value_store_definition;
+  let definition = fixture("converter-definition-v1", "acnv-blake3-256-typed_exact_blake3_v1-valid");
+  let converter = ConverterRuntimeV1::from_encoded(&definition, ALGORITHM).unwrap();
+  let (result, allocations) = measure(5, || converter.compile_source_value(&CanonicalConfigValueV1::Null));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  // Name the required runtime classification before adding its enum variant.
+  assert_eq!(format!("{:?}", result.unwrap_err().class()), "HostFailure");
+
+  let value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid");
+  let value_id = decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
+  let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid");
+  field[32..64].copy_from_slice(&value_id);
+  let runtime = IndexDefinitionRuntimeV1::from_encoded(&value, &field, ALGORITHM).unwrap();
+  let mut canonical = vec![8, 32, 0, 0, 0];
+  canonical.extend_from_slice(&[1; 32]);
+  let values = [canonical];
+  let (result, allocations) = measure(37, || runtime.compile_source_values(&values));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  assert_eq!(format!("{:?}", result.unwrap_err().class()), "HostFailure");
+}
+
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
+
+fn json_root_definition(legacy: bool) -> Vec<u8> {
+  use aeordb::engine::v4::source_selector::{SourceSelectorWriteV1, encode_source_selector};
+  use aeordb::engine::v4::value_store::decode_value_store_definition;
+  let mut bytes =
+    fixture("value-store-definition-v1", if legacy { "avst-blake3-256-json-legacy-valid" } else { "avst-blake3-256-json-corrected-valid" });
+  native_semantic_dependencies::pin_native_semantics(&mut bytes, ALGORITHM);
+  let definition = decode_value_store_definition(&bytes, ALGORITHM).unwrap();
+  let length = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+  let parser_start = 144 + length(64) + length(68);
+  let dependencies_start = parser_start + length(72);
+  let selector = encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &[] }).unwrap();
+  encode_value_store_definition(
+    ValueStoreDefinitionWriteV1 {
+      scope_id: definition.scope_id,
+      field_name: definition.field_name,
+      semantic_family: definition.semantic_family,
+      max_source_values_per_document: definition.max_source_values_per_document,
+      max_canonical_source_bytes_per_document: definition.max_canonical_source_bytes_per_document,
+      max_document_input_bytes: definition.max_document_input_bytes,
+      max_selector_work_items_per_document: definition.max_selector_work_items_per_document,
+      max_selector_examined_bytes_per_document: definition.max_selector_examined_bytes_per_document,
+      selector: &selector,
+      parser_plan: &bytes[parser_start..dependencies_start],
+      dependencies: &bytes[dependencies_start..],
+    },
+    ALGORITHM,
+  )
+  .unwrap()
+  .value
+}
+
+#[test]
+fn source_encoding_failures_preserve_operational_class_for_both_semantic_families() {
+  use aeordb::engine::file_record::FileRecord;
+  use aeordb::engine::v4::config_value::CanonicalConfigValueV1;
+  use aeordb::engine::v4::index_source::{SourceDocumentV1, SourceOperationalErrorClassV1, ValueStoreRuntimeV1};
+  let record = FileRecord::new("/data".into(), None, 0, Vec::new());
+  for legacy in [false, true] {
+    let definition = json_root_definition(legacy);
+    let runtime = ValueStoreRuntimeV1::from_encoded(&definition, ALGORITHM).unwrap();
+    for (value, size) in [(CanonicalConfigValueV1::Null, 5), (CanonicalConfigValueV1::Array(vec![]), 9)] {
+      let input = SourceDocumentV1 { file_record: &record, parsed_value: Some(&value) };
+      assert!(runtime.extract(input, None, &|| false).is_ok());
+      let (result, allocations) = measure(size, || runtime.extract(input, None, &|| false));
+      assert!(allocations.injected_failure, "legacy={legacy} size={size}: {allocations:?}");
+      assert_eq!(result.unwrap_err().class(), SourceOperationalErrorClassV1::HostFailure);
+    }
+  }
+  let definition = fixture("value-store-definition-v1", "avst-blake3-256-metadata-created-at-legacy-valid");
+  let runtime = ValueStoreRuntimeV1::from_encoded(&definition, ALGORITHM).unwrap();
+  let (result, allocations) =
+    measure(13, || runtime.extract(SourceDocumentV1 { file_record: &record, parsed_value: None }, None, &|| false));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  assert_eq!(result.unwrap_err().class(), SourceOperationalErrorClassV1::HostFailure);
+}
+
+#[test]
+fn canonical_allocation_origin_is_distinct_from_deterministic_bounds() {
+  use aeordb::engine::v4::config_value::{CanonicalConfigValueV1, CanonicalValueBounds, canonical_value_to_json, encode_canonical_value};
+  for (value, size) in [(CanonicalConfigValueV1::Null, 5), (CanonicalConfigValueV1::Array(vec![CanonicalConfigValueV1::Null]), 8)] {
+    let (result, allocations) = measure(size, || encode_canonical_value(&value, CanonicalValueBounds::CONFIG));
+    assert!(allocations.injected_failure);
+    assert!(result.unwrap_err().is_allocation_failure());
+  }
+  let null = [1, 0, 0, 0, 0];
+  let (result, allocations) = measure(8, || canonical_value_to_json(&null, CanonicalValueBounds::CONFIG, 1024));
+  assert!(allocations.injected_failure);
+  assert!(result.unwrap_err().is_allocation_failure());
+  let limit = canonical_value_to_json(&null, CanonicalValueBounds::CONFIG, 1).unwrap_err();
+  assert_eq!(limit.class(), MalformedInputClass::AllocationAmplification);
+  assert!(!limit.is_allocation_failure());
+  let value = CanonicalConfigValueV1::String("x".repeat(65537));
+  let limit = encode_canonical_value(&value, CanonicalValueBounds::CONFIG).unwrap_err();
+  assert_eq!(limit.class(), MalformedInputClass::AllocationAmplification);
+  assert!(!limit.is_allocation_failure());
+}
+
+#[test]
+fn token_workspace_refusals_are_operational_in_corrected_and_migration_converters() {
+  use aeordb::engine::v4::config_value::CanonicalConfigValueV1;
+  use aeordb::engine::v4::index_converter::{ConverterRuntimeV1, IndexSemanticErrorClassV1};
+  for (name, value) in [
+    ("acnv-blake3-256-unicode_trigram_v1-valid", CanonicalConfigValueV1::String("a".repeat(313))),
+    ("acnv-blake3-256-trigram_v0-valid", CanonicalConfigValueV1::Bytes(vec![b'a'; 313])),
+  ] {
+    let definition = fixture("converter-definition-v1", name);
+    let converter = ConverterRuntimeV1::from_encoded(&definition, ALGORITHM).unwrap();
+    converter.compile_source_value(&value).unwrap();
+    let (result, allocations) = measure(313 * std::mem::size_of::<char>(), || converter.compile_source_value(&value));
+    assert!(allocations.injected_failure, "{name}: {allocations:?}");
+    assert_eq!(result.unwrap_err().class(), IndexSemanticErrorClassV1::HostFailure);
+  }
+}
+
+#[test]
+fn definition_output_reservation_refusal_is_operational() {
+  use aeordb::engine::v4::index_definition_runtime::{CompiledDocumentValueV1, IndexDefinitionErrorClassV1, IndexDefinitionRuntimeV1};
+  use aeordb::engine::v4::value_store::decode_value_store_definition;
+  let value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid");
+  let value_id = decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
+  let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid");
+  field[32..64].copy_from_slice(&value_id);
+  let runtime = IndexDefinitionRuntimeV1::from_encoded(&value, &field, ALGORITHM).unwrap();
+  let values = [vec![1, 0, 0, 0, 0]];
+  let (result, allocations) = measure(std::mem::size_of::<CompiledDocumentValueV1>(), || runtime.compile_source_values(&values));
+  assert!(allocations.injected_failure);
+  let error = result.unwrap_err();
+  assert_eq!(error.class(), IndexDefinitionErrorClassV1::HostFailure);
+  assert_eq!(error.code(), "index_source_value_reserve");
+}
+
+#[test]
+fn collector_keeps_allocation_failure_retryable_and_succeeds_after_pressure_clears() {
+  use aeordb::engine::file_record::FileRecord;
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::field_definition::decode_field_index_definition;
+  use aeordb::engine::v4::index_producer_collector::*;
+  use aeordb::engine::v4::index_producer_coordinator::IndexProducerOwnerDispositionV1;
+  use aeordb::engine::v4::scope::decode_scope_definition;
+  use aeordb::engine::v4::value_store::decode_value_store_definition;
+  struct NoParser;
+  impl IndexParserExecutorV1 for NoParser {
+    fn parse(&self, _request: IndexParserExecutionRequestV1<'_>) -> Result<IndexParserOutcomeV1, IndexParserExecutionErrorV1> {
+      panic!("metadata extraction must not invoke a parser");
+    }
+  }
+  let scope = fixture("scope-definition-v1", "ascp-blake3-256-root-direct-valid");
+  let scope_id = decode_scope_definition(&scope, ALGORITHM).unwrap().scope_id;
+  let mut value = fixture("value-store-definition-v1", "avst-blake3-256-metadata-hash-corrected-valid");
+  value[32..64].copy_from_slice(&scope_id);
+  let value_id = decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
+  let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid");
+  field[32..64].copy_from_slice(&value_id);
+  let field_id = decode_field_index_definition(&field, ALGORITHM).unwrap().index_id;
+  let bundle = || IndexCollectorScopeDefinitionV1 {
+    expected_scope_id: &scope_id,
+    encoded_definition: &scope,
+    value_stores: vec![IndexCollectorValueStoreDefinitionV1 {
+      expected_value_store_id: &value_id,
+      encoded_definition: &value,
+      field_indexes: vec![IndexCollectorFieldDefinitionV1 { expected_index_id: &field_id, encoded_definition: &field }],
+    }],
+  };
+  let memory = MemoryCoordinator::new(MemoryPolicy::new((144 << 20) - 1, 192 << 20, 1, 48 << 20).unwrap());
+  let options = IndexProducerCollectorOptionsV1::new(16, 16, 16, 2 << 20, 256, 2 << 20, 50).unwrap();
+  let collector = IndexProducerCollectorV1::new(ALGORITHM, memory.clone(), options).unwrap();
+  let mut record = FileRecord::new("/data".into(), None, 0, Vec::new());
+  record.content_hash = vec![1; 32];
+  let transition = IndexCollectorDocumentTransitionV1 {
+    document_ordinal: 7,
+    before: None,
+    after: Some(IndexCollectorDocumentV1 { namespace_root: &[2; 32], record_revision_hash: &[3; 32], file_record: &record }),
+  };
+  let input = bundle();
+  let (result, allocations) = measure(37, || collector.collect(input, transition, &NoParser, None, &|| false));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  let report = result.unwrap();
+  for owner in [&value_id, &field_id] {
+    let outcome = report.report().outcomes.iter().find(|outcome| &outcome.owner_id == owner).unwrap();
+    assert!(matches!(outcome.disposition, IndexProducerOwnerDispositionV1::Retryable { .. }));
+    assert!(outcome.mutations.is_empty());
+    assert!(outcome.membership.is_none());
+  }
+  drop(report);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  let report = collector.collect(bundle(), transition, &NoParser, None, &|| false).unwrap();
+  assert!(report.report().outcomes.iter().all(|outcome| matches!(outcome.disposition, IndexProducerOwnerDispositionV1::Ready)));
+  drop(report);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+}

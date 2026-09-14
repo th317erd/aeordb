@@ -1372,8 +1372,13 @@ fn selector_stage(kind: SourceSelectorKind) -> u8 {
   }
 }
 
+#[cfg(test)]
+#[path = "../../../spec/engine/index_collector_operational_error_spec.rs"]
+mod operational_error_spec;
+
 fn field_state(error: IndexDefinitionErrorV1) -> Result<Option<DocumentStateV1>, IndexProducerCollectorErrorV1> {
   let reason = match error.class() {
+    IndexDefinitionErrorClassV1::HostFailure => return Err(IndexProducerCollectorErrorV1::ResourcePressure(error.to_string())),
     IndexDefinitionErrorClassV1::IdentityMismatch
     | IndexDefinitionErrorClassV1::SemanticMismatch
     | IndexDefinitionErrorClassV1::UnsupportedDefinition => return Ok(None),
