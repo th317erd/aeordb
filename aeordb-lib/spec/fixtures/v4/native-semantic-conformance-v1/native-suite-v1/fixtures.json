@@ -1,0 +1,462 @@
+{
+  "schema_version": 1,
+  "component": "/org/aeordev/aeordb/native/native-suite-v1",
+  "metadata_size": 1234,
+  "cases": [
+    {
+      "id": "text",
+      "filename": "document.txt",
+      "mime": "text/plain",
+      "body_utf8": "Hello\nworld\n",
+      "expected": {
+        "text": "Hello\nworld\n",
+        "title": "Hello",
+        "metadata": {
+          "filename": "document.txt",
+          "content_type": "text/plain",
+          "size": 1234,
+          "line_count": 2,
+          "word_count": 2,
+          "char_count": 12,
+          "language": "plaintext",
+          "encoding": "utf-8",
+          "is_empty": false,
+          "has_bom": false
+        }
+      }
+    },
+    {
+      "id": "html",
+      "filename": "document.html",
+      "mime": "text/html",
+      "body_utf8": "<html><body>Hello</body></html>",
+      "expected": {
+        "text": "Hello",
+        "title": "",
+        "metadata": {
+          "filename": "document.html",
+          "content_type": "text/html",
+          "size": 1234,
+          "format": "html",
+          "line_count": 1,
+          "word_count": 1,
+          "headings": [],
+          "link_count": 0
+        }
+      }
+    },
+    {
+      "id": "xml",
+      "filename": "document.xml",
+      "mime": "text/xml",
+      "body_utf8": "<root xmlns=\"urn:test\">Hello</root>",
+      "expected": {
+        "text": "Hello",
+        "title": "",
+        "metadata": {
+          "filename": "document.xml",
+          "content_type": "text/xml",
+          "size": 1234,
+          "format": "xml",
+          "line_count": 1,
+          "word_count": 1,
+          "root_element": "root",
+          "namespaces": [
+            "urn:test"
+          ]
+        }
+      }
+    },
+    {
+      "id": "image",
+      "filename": "document.png",
+      "mime": "image/png",
+      "body_hex": "89504e470d0a1a0a0000000d4948445200000064000000c8080200000000000000",
+      "expected": {
+        "text": "",
+        "metadata": {
+          "filename": "document.png",
+          "content_type": "image/png",
+          "size": 1234,
+          "format": "png",
+          "is_animated": false,
+          "width": 100,
+          "height": 200,
+          "bit_depth": 8,
+          "color_type": "rgb",
+          "has_alpha": false
+        }
+      }
+    },
+    {
+      "id": "audio",
+      "filename": "document.wav",
+      "mime": "audio/wav",
+      "body_hex": "524946462400000057415645666d74201000000001000100401f0000803e0000020010006461746100000000",
+      "expected": {
+        "text": "",
+        "metadata": {
+          "filename": "document.wav",
+          "content_type": "audio/wav",
+          "size": 1234,
+          "format": "wav",
+          "duration_seconds": 0.0,
+          "sample_rate": 8000,
+          "channels": 1,
+          "bitrate": 128000,
+          "bits_per_sample": 16
+        }
+      }
+    },
+    {
+      "id": "video",
+      "filename": "document.flv",
+      "mime": "video/x-flv",
+      "body_hex": "464c56010500000009",
+      "expected": {
+        "text": "",
+        "metadata": {
+          "filename": "document.flv",
+          "content_type": "video/x-flv",
+          "size": 1234,
+          "format": "flv",
+          "brand": null,
+          "duration_seconds": null,
+          "width": null,
+          "height": null,
+          "frame_rate": null,
+          "has_audio": true,
+          "has_video": true,
+          "video_codec": null,
+          "audio_codec": null
+        }
+      }
+    },
+    {
+      "id": "pdf",
+      "filename": "document.pdf",
+      "mime": "application/pdf",
+      "body_utf8": "%PDF-1.7\n1 0 obj << /Type /Page >> endobj\n%%EOF\n",
+      "expected": {
+        "text": "",
+        "title": "",
+        "metadata": {
+          "filename": "document.pdf",
+          "content_type": "application/pdf",
+          "size": 1234,
+          "format": "pdf",
+          "version": "1.7",
+          "page_count": 1,
+          "author": "",
+          "subject": "",
+          "keywords": "",
+          "creator": "",
+          "producer": "",
+          "creation_date": "",
+          "mod_date": ""
+        }
+      }
+    },
+    {
+      "id": "docx",
+      "filename": "document.docx",
+      "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "zip_entries": [
+        [
+          "word/document.xml",
+          "<w:document><w:p>Hello</w:p></w:document>"
+        ]
+      ],
+      "expected": {
+        "text": "Hello",
+        "title": "",
+        "metadata": {
+          "filename": "document.docx",
+          "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "size": 1234,
+          "format": "docx",
+          "author": null,
+          "subject": null,
+          "description": null,
+          "keywords": null,
+          "created": null,
+          "modified": null,
+          "last_modified_by": null,
+          "paragraph_count": 1,
+          "sheet_count": null
+        }
+      }
+    },
+    {
+      "id": "xlsx",
+      "filename": "document.xlsx",
+      "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "zip_entries": [
+        [
+          "xl/workbook.xml",
+          "<workbook><sheet name=\"Hello\"/></workbook>"
+        ]
+      ],
+      "expected": {
+        "text": "",
+        "title": "",
+        "metadata": {
+          "filename": "document.xlsx",
+          "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "size": 1234,
+          "format": "xlsx",
+          "author": null,
+          "subject": null,
+          "description": null,
+          "keywords": null,
+          "created": null,
+          "modified": null,
+          "last_modified_by": null,
+          "paragraph_count": null,
+          "sheet_count": 1
+        }
+      }
+    },
+    {
+      "id": "odt",
+      "filename": "document.odt",
+      "mime": "application/vnd.oasis.opendocument.text",
+      "zip_entries": [
+        [
+          "mimetype",
+          "application/vnd.oasis.opendocument.text"
+        ],
+        [
+          "content.xml",
+          "<text:p>Hello</text:p>"
+        ]
+      ],
+      "expected": {
+        "text": "Hello",
+        "title": "",
+        "metadata": {
+          "filename": "document.odt",
+          "content_type": "application/vnd.oasis.opendocument.text",
+          "size": 1234,
+          "format": "odt"
+        }
+      }
+    },
+    {
+      "id": "ods",
+      "filename": "document.ods",
+      "mime": "application/vnd.oasis.opendocument.spreadsheet",
+      "zip_entries": [
+        [
+          "mimetype",
+          "application/vnd.oasis.opendocument.spreadsheet"
+        ],
+        [
+          "content.xml",
+          "<text:p>Hello</text:p>"
+        ]
+      ],
+      "expected": {
+        "text": "Hello",
+        "title": "",
+        "metadata": {
+          "filename": "document.ods",
+          "content_type": "application/vnd.oasis.opendocument.spreadsheet",
+          "size": 1234,
+          "format": "ods"
+        }
+      }
+    }
+  ],
+  "dispatch": [
+    {
+      "seed": "text",
+      "mime": [
+        "text/plain",
+        "text/markdown",
+        "text/css",
+        "text/csv",
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/javascript",
+        "text/javascript"
+      ],
+      "prefix": [
+        "text/x-"
+      ],
+      "extensions": [
+        "txt",
+        "md",
+        "rs",
+        "js",
+        "py",
+        "ts",
+        "c",
+        "h",
+        "cpp",
+        "java",
+        "go",
+        "sh",
+        "css",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "xml",
+        "sql"
+      ]
+    },
+    {
+      "seed": "html",
+      "mime": [
+        "text/html",
+        "text/xml",
+        "application/xhtml+xml"
+      ],
+      "extensions": [
+        "html",
+        "htm",
+        "xhtml"
+      ]
+    },
+    {
+      "seed": "image",
+      "mime": [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/bmp",
+        "image/webp",
+        "image/tiff",
+        "image/svg+xml"
+      ],
+      "extensions": [
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "bmp",
+        "webp",
+        "tiff",
+        "tif",
+        "svg"
+      ]
+    },
+    {
+      "seed": "audio",
+      "mime": [
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/ogg",
+        "audio/vorbis"
+      ],
+      "extensions": [
+        "mp3",
+        "wav",
+        "ogg"
+      ]
+    },
+    {
+      "seed": "video",
+      "mime": [
+        "video/mp4",
+        "video/quicktime",
+        "video/x-msvideo",
+        "video/avi",
+        "video/webm",
+        "video/x-matroska",
+        "video/x-flv"
+      ],
+      "extensions": [
+        "mp4",
+        "mov",
+        "avi",
+        "webm",
+        "mkv",
+        "flv"
+      ]
+    },
+    {
+      "seed": "pdf",
+      "mime": [
+        "application/pdf"
+      ],
+      "extensions": [
+        "pdf"
+      ]
+    },
+    {
+      "seed": "docx",
+      "mime": [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/msword",
+        "application/vnd.ms-excel"
+      ],
+      "extensions": [
+        "docx",
+        "xlsx"
+      ]
+    },
+    {
+      "seed": "odt",
+      "mime": [
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet"
+      ],
+      "extensions": [
+        "odt",
+        "ods"
+      ]
+    }
+  ],
+  "prefix_inputs": [
+    {
+      "filename": "document.gif",
+      "mime": "image/gif",
+      "body_hex": "474946383961010001000000003b"
+    },
+    {
+      "filename": "document.jpg",
+      "mime": "image/jpeg",
+      "body_hex": "ffd8ffe000020000ffd9"
+    },
+    {
+      "filename": "document.bmp",
+      "mime": "image/bmp",
+      "body_hex": "424d00000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "filename": "document.tiff",
+      "mime": "image/tiff",
+      "body_hex": "49492a00080000000000"
+    },
+    {
+      "filename": "document.mp4",
+      "mime": "video/mp4",
+      "body_hex": "00000018667479706d703432000000006d70343269736f6d"
+    }
+  ],
+  "arithmetic_inputs": [
+    {
+      "id": "wav-full-width-byte-rate",
+      "filename": "document.wav",
+      "mime": "audio/wav",
+      "body_hex": "524946462400000057415645666d74201000000001000100401f0000ffffffff020010006461746100000000",
+      "expected_bitrate": 34359738360
+    }
+  ],
+  "properties": [
+    "all fixed dispatch aliases and text/x- prefix",
+    "unknown valid MIME never extension-falls-back",
+    "generic MIME permits extension fallback",
+    "corrected archive metadata retains stored MIME",
+    "every prefix of every seed returns without unwinding",
+    "declared numeric fields cannot overflow intermediate arithmetic",
+    "archive limits apply before expansion",
+    "malformed claimed corrected parser stops; legacy malformed skip unchanged"
+  ]
+}

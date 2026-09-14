@@ -10,6 +10,9 @@ use std::io::{Cursor, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
+
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 const MIB: usize = 1_024 * 1_024;
 const MAXIMUM_CORRECTED_PARSE_GROWTH: usize = 48 * MIB;
@@ -92,11 +95,13 @@ fn create_engine(directory: &tempfile::TempDir) -> StorageEngine {
 }
 
 fn corrected_definition_bytes() -> Vec<u8> {
-  std::fs::read(format!(
+  let mut bytes = std::fs::read(format!(
     "{}/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-corrected-valid.bin",
     env!("CARGO_MANIFEST_DIR")
   ))
-  .unwrap()
+  .unwrap();
+  native_semantic_dependencies::pin_native_semantics(&mut bytes, ALGORITHM);
+  bytes
 }
 
 fn parse_file(engine: &StorageEngine, root: &[u8], path: &str) -> IndexParserOutcomeV1 {

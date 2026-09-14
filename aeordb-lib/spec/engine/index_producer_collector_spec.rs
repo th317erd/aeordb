@@ -59,6 +59,7 @@ fn definitions_for(algorithm: HashAlgorithm, scope_fixture: &str, value_fixture:
   let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
 
   let mut value = fixture("value-store-definition-v1", value_fixture);
+  native_semantic_dependencies::pin_native_semantics(&mut value, algorithm);
   value[32..32 + algorithm.hash_length()].copy_from_slice(&scope_id);
   let value_id = decode_value_store_definition(&value, algorithm).unwrap().value_store_id;
 
@@ -67,6 +68,9 @@ fn definitions_for(algorithm: HashAlgorithm, scope_fixture: &str, value_fixture:
   let field_id = decode_field_index_definition(&field, algorithm).unwrap().index_id;
   Definitions { scope, scope_id, value, value_id, field, field_id }
 }
+
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
 
 fn scope_bundle<'a>(definitions: &'a Definitions) -> IndexCollectorScopeDefinitionV1<'a> {
   IndexCollectorScopeDefinitionV1 {

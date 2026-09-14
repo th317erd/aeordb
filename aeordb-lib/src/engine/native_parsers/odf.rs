@@ -36,6 +36,7 @@ pub fn parse(data: &[u8], filename: &str, _content_type: &str, size: u64) -> Res
 pub(super) fn parse_corrected(
   data: &[u8],
   filename: &str,
+  stored_content_type: &str,
   size: u64,
   limits: CorrectedNativeParserLimitsV1,
 ) -> Result<serde_json::Value, CorrectedNativeParserErrorV1> {
@@ -57,7 +58,7 @@ pub(super) fn parse_corrected(
   let extracted_text = strip_xml_tags_bounded(&content_xml, limits.maximum_scalar_bytes())?;
   drop(content_xml);
   let metadata = extract_metadata_bounded(meta_xml.as_deref(), limits, extracted_text.len() as u64)?;
-  Ok(build_value_from_parts(filename, size, mimetype, format, extracted_text, metadata))
+  Ok(build_value_from_parts(filename, size, stored_content_type, format, extracted_text, metadata))
 }
 
 fn build_value(
@@ -82,7 +83,7 @@ fn build_value_from_text(
   meta_xml: Option<String>,
 ) -> serde_json::Value {
   let metadata = extract_metadata(meta_xml.as_deref());
-  build_value_from_parts(filename, size, mimetype, format, extracted_text, metadata)
+  build_value_from_parts(filename, size, &mimetype, format, extracted_text, metadata)
 }
 
 struct OdfExtractedMetadata {
@@ -145,7 +146,7 @@ fn extract_metadata_bounded(
 fn build_value_from_parts(
   filename: &str,
   size: u64,
-  mimetype: String,
+  content_type: &str,
   format: &str,
   extracted_text: String,
   extracted: OdfExtractedMetadata,
@@ -160,7 +161,7 @@ fn build_value_from_parts(
 
   let mut metadata = serde_json::json!({
       "filename": filename,
-      "content_type": mimetype,
+      "content_type": content_type,
       "size": size,
       "format": format,
   });

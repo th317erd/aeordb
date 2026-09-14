@@ -1,4 +1,8 @@
 use std::borrow::Cow;
+
+#[cfg(test)]
+#[path = "../../../spec/engine/native_selector_conformance_spec.rs"]
+mod conformance_spec;
 use std::error::Error;
 use std::fmt;
 
@@ -12,6 +16,7 @@ use super::config_value::{
   CanonicalConfigValueV1, CanonicalValueBounds, canonical_value_to_json, decode_canonical_value, encode_canonical_value,
 };
 use super::dependency::DependencyRecordV1;
+use super::native_semantics::NativeSemanticComponentV1;
 use super::parser_plan::ParserCandidateV1;
 use super::source_selector::{JsonPathSegmentV1, REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT, SourceSelectorKind};
 use super::value_store::{ValueStoreDefinitionV1, ValueStoreSemanticFamily, decode_value_store_definition};
@@ -127,6 +132,7 @@ pub struct ValueStoreRuntimeV1<'a> {
   definition: ValueStoreDefinitionV1<'a>,
   hash_width: usize,
   json_segments: Vec<CompiledJsonPathSegmentV1>,
+  selector_execution_supported: bool,
 }
 
 impl<'a> ValueStoreRuntimeV1<'a> {
@@ -142,7 +148,14 @@ impl<'a> ValueStoreRuntimeV1<'a> {
   }
 
   pub(crate) fn from_definition(definition: ValueStoreDefinitionV1<'a>, hash_width: usize) -> SourceOperationalResultV1<Self> {
+    let selector_execution_supported = selector_execution_supported(&definition);
     let mut json_segments = Vec::new();
+    // Completed values/postings remain usable without their original executor.
+    // In particular, do not compile a different regex implementation as a
+    // substitute while merely constructing a retained definition runtime.
+    if !selector_execution_supported {
+      return Ok(Self { definition, hash_width, json_segments, selector_execution_supported });
+    }
     json_segments.try_reserve_exact(definition.selector.segments.len()).map_err(|source| {
       operational_error(
         SourceOperationalErrorClassV1::HostFailure,
@@ -169,7 +182,7 @@ impl<'a> ValueStoreRuntimeV1<'a> {
       };
       json_segments.push(segment);
     }
-    Ok(Self { definition, hash_width, json_segments })
+    Ok(Self { definition, hash_width, json_segments, selector_execution_supported })
   }
 
   pub(crate) fn maximum_retained_bytes_for_definition(definition: &ValueStoreDefinitionV1<'_>) -> SourceOperationalResultV1<u64> {
@@ -178,6 +191,9 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     bytes = checked_runtime_array::<JsonPathSegmentV1<'_>>(bytes, definition.selector.segments.capacity(), "decoded selector segments")?;
     bytes = checked_runtime_array::<ParserCandidateV1<'_>>(bytes, definition.parser_plan.candidates.capacity(), "parser candidates")?;
     bytes = checked_runtime_array::<DependencyRecordV1<'_>>(bytes, definition.dependencies.records.capacity(), "dependency records")?;
+    if !selector_execution_supported(definition) {
+      return Ok(bytes);
+    }
     bytes = checked_runtime_array::<CompiledJsonPathSegmentV1>(bytes, definition.selector.segments.len(), "compiled selector segments")?;
     for segment in &definition.selector.segments {
       match segment {
@@ -238,6 +254,24 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     &self.definition
   }
 
+  /// Gate actual evaluation, not construction or completed-value reads.
+  /// Mapper artifact resolution remains the supplied executor's responsibility;
+  /// an unknown ABI/profile can never be handed to that current executor.
+  pub(crate) fn selector_execution_supported(&self) -> bool {
+    self.selector_execution_supported
+  }
+
+  pub(crate) fn ensure_selector_execution_supported(&self) -> SourceOperationalResultV1<()> {
+    if !self.selector_execution_supported {
+      return Err(operational_error(
+        SourceOperationalErrorClassV1::DependencyUnavailable,
+        "selector_dependency_unavailable",
+        "the exact selector identity, ABI or executor profile is unavailable",
+      ));
+    }
+    Ok(())
+  }
+
   pub fn extract(
     &self,
     document: SourceDocumentV1<'_>,
@@ -247,6 +281,7 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     if is_cancelled() {
       return Err(cancelled());
     }
+    self.ensure_selector_execution_supported()?;
     if self.definition.max_document_input_bytes > 0 && document.file_record.total_size > self.definition.max_document_input_bytes {
       return Ok(deterministic_unindexable(
         "source_document_input_limit",
@@ -601,6 +636,32 @@ impl<'a> ValueStoreRuntimeV1<'a> {
   }
 }
 
+fn selector_execution_supported(definition: &ValueStoreDefinitionV1<'_>) -> bool {
+  match definition.selector.kind {
+    SourceSelectorKind::JsonPath => {
+      let mut selectors = definition.dependencies.records.iter().filter(|dependency| dependency.kind == 2 && dependency.role == 4);
+      selectors.next().is_some_and(|dependency| NativeSemanticComponentV1::RegexSelector.matches_dependency(dependency))
+        && selectors.next().is_none()
+    }
+    SourceSelectorKind::PluginMapper => {
+      let dependency = definition
+        .selector
+        .dependency_ordinal
+        .and_then(|ordinal| ordinal.checked_sub(1))
+        .and_then(|ordinal| definition.dependencies.records.get(ordinal as usize));
+      dependency.is_some_and(|dependency| {
+        dependency.kind == 1
+          && dependency.role == 2
+          && matches!(
+            (definition.semantic_family, dependency.abi, dependency.executor_profile),
+            (ValueStoreSemanticFamily::CorrectedV1, 4, 2) | (ValueStoreSemanticFamily::MigrationV0, 2, 3)
+          )
+      })
+    }
+    SourceSelectorKind::Metadata | SourceSelectorKind::AlwaysMissingV0 => true,
+  }
+}
+
 fn checked_runtime_array<T>(bytes: u64, count: usize, label: &'static str) -> SourceOperationalResultV1<u64> {
   let allocation =
     count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| runtime_accounting_error(format!("{label} allocation overflowed")))?;
@@ -886,22 +947,4 @@ fn cancelled() -> SourceOperationalErrorV1 {
 
 fn operational_error(class: SourceOperationalErrorClassV1, code: &'static str, context: impl Into<String>) -> SourceOperationalErrorV1 {
   SourceOperationalErrorV1 { class, code, context: context.into() }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn json_regex_workspace_accounts_for_worst_case_escape_expansion() {
-    let encoded = include_bytes!("../../../spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-corrected-valid.bin");
-    let runtime = ValueStoreRuntimeV1::from_encoded(encoded, HashAlgorithm::Blake3_256).unwrap();
-    let frame_count = runtime.json_segments.len() as u64 * 2 + 1;
-    let frame_bytes = frame_count * std::mem::size_of::<SelectorFrameV1<'_>>() as u64;
-
-    assert_eq!(
-      runtime.maximum_extract_workspace_bytes().unwrap(),
-      VALUE_STORE_EXTRACT_WORKSPACE_FIXED_BYTES + frame_bytes + 6 * 4 * 1_024 * 1_024,
-    );
-  }
 }

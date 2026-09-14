@@ -128,6 +128,22 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
         context: "ValueStore definition does not match its selected scope and identity".to_string(),
       });
     }
+    // An unavailable executor cannot allocate execution workspace or produce
+    // an outcome. Do not interpret historical unlimited semantic sentinels as
+    // allocation sizes while retaining this structurally valid definition.
+    // evaluate() reports typed unavailability before any parser work.
+    if !runtime.selector_execution_supported() {
+      return Ok(Self {
+        runtime,
+        memory,
+        policy,
+        parser_transient_bytes: 0,
+        parser_outcome_retained_bytes: 0,
+        source_transient_bytes: 0,
+        source_outcome_retained_bytes: 0,
+        _runtime_memory: runtime_memory,
+      });
+    }
     let parser_transient_bytes = parser_transient_bytes(&runtime.definition().parser_plan)?;
     let parser_outcome_retained_bytes = parser_outcome_retained_bytes(&runtime.definition().parser_plan)?;
     let source_outcome_retained_bytes = source_outcome_retained_bytes(runtime.definition())?;
@@ -166,6 +182,7 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
     if is_cancelled() {
       return Err(AuthoritativeSourceEvaluationErrorV1::Cancelled);
     }
+    self.runtime.ensure_selector_execution_supported().map_err(AuthoritativeSourceEvaluationErrorV1::Source)?;
     let parser_memory = if self.definition().parser_plan.kind == ParserPlanKind::None { None } else { Some(self.reserve_parser()?) };
     let parsed = if self.definition().parser_plan.kind == ParserPlanKind::None {
       None

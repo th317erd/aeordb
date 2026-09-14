@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "component": "/org/aeordev/aeordb/native/mime-router-v1",
+  "media_types": [
+    {
+      "stored": null,
+      "essence": null
+    },
+    {
+      "stored": "",
+      "essence": null
+    },
+    {
+      "stored": " \t ",
+      "essence": null
+    },
+    {
+      "stored": " \tText/Plain\t ",
+      "essence": "text/plain"
+    },
+    {
+      "stored": "Text/Plain; charset=\"utf-8\"",
+      "essence": "text/plain"
+    },
+    {
+      "stored": "application/problem+json; q=\"a\\\"b\"",
+      "essence": "application/problem+json"
+    },
+    {
+      "stored": "application/octet-stream",
+      "essence": "application/octet-stream"
+    },
+    {
+      "stored": "text/+bad",
+      "essence": null
+    },
+    {
+      "stored": "!bad/plain",
+      "essence": null
+    },
+    {
+      "stored": "text/plain; charset",
+      "essence": null
+    },
+    {
+      "stored": "text/plain; charset=\"unterminated",
+      "essence": null
+    },
+    {
+      "stored": "text/plain\r\n",
+      "essence": null
+    },
+    {
+      "stored": "text/plain\nInjected:x",
+      "essence": null
+    },
+    {
+      "stored": "text/*",
+      "essence": null
+    },
+    {
+      "stored": "*/plain",
+      "essence": null
+    },
+    {
+      "stored": "téxt/plain",
+      "essence": null
+    },
+    {
+      "stored": "text/pläin",
+      "essence": null
+    },
+    {
+      "stored": "text/plain/extra",
+      "essence": null
+    },
+    {
+      "stored": "text/",
+      "essence": null
+    },
+    {
+      "stored": "/plain",
+      "essence": null
+    },
+    {
+      "stored": "0/1",
+      "essence": "0/1"
+    },
+    {
+      "stored": "a!#$&^_.+-/b!#$&^_.+-",
+      "essence": "a!#$&^_.+-/b!#$&^_.+-"
+    }
+  ],
+  "boundary_media_types": [
+    {
+      "type_length": 127,
+      "subtype_length": 127,
+      "valid": true
+    },
+    {
+      "type_length": 128,
+      "subtype_length": 1,
+      "valid": false
+    },
+    {
+      "type_length": 1,
+      "subtype_length": 128,
+      "valid": false
+    },
+    {
+      "type_length": 0,
+      "subtype_length": 1,
+      "valid": false
+    },
+    {
+      "type_length": 1,
+      "subtype_length": 0,
+      "valid": false
+    }
+  ],
+  "extensions": [
+    {
+      "filename": "doc.TXT",
+      "extension": "txt"
+    },
+    {
+      "filename": "a.b.MD",
+      "extension": "md"
+    },
+    {
+      "filename": ".json",
+      "extension": "json"
+    },
+    {
+      "filename": "plain",
+      "extension": null
+    },
+    {
+      "filename": "doc.",
+      "extension": null
+    },
+    {
+      "filename": "",
+      "extension": null
+    },
+    {
+      "filename": "a.%74xt",
+      "extension": "%74xt"
+    },
+    {
+      "filename": "a.İ",
+      "extension": "İ"
+    },
+    {
+      "filename": "a.É",
+      "extension": "É"
+    },
+    {
+      "filename": "a..txt",
+      "extension": "txt"
+    }
+  ],
+  "json_media_types": [
+    {
+      "essence": "application/json",
+      "claimed": true
+    },
+    {
+      "essence": "application/problem+json",
+      "claimed": true
+    },
+    {
+      "essence": "application/json-seq",
+      "claimed": false
+    },
+    {
+      "essence": "text/json",
+      "claimed": false
+    },
+    {
+      "essence": "text/problem+json",
+      "claimed": false
+    },
+    {
+      "essence": "application/+json",
+      "claimed": false
+    },
+    {
+      "essence": null,
+      "claimed": false
+    }
+  ],
+  "parameter_cases": [
+    {"stored": "text/plain; q=\"a\\\"b\"", "valid": true},
+    {"stored": "text/plain; q=\"a\\\\b\"", "valid": true},
+    {"stored": "text/plain; q=\"\"", "valid": true},
+    {"stored": "text/plain; q=\"é\"", "valid": true},
+    {"stored": "text/plain; q=\"a\tb\"", "valid": true},
+    {"stored": "text/plain; q=\"a;b=c\"", "valid": true},
+    {"stored": "text/plain;", "valid": true},
+    {"stored": "text/plain;; q=x; ;", "valid": true},
+    {"stored": "text/plain \t;\t q=x\t; r=y", "valid": true},
+    {"stored": "text/plain; q =x", "valid": false},
+    {"stored": "text/plain; q= x", "valid": false},
+    {"stored": "text/plain; q=", "valid": false},
+    {"stored": "text/plain; =x", "valid": false},
+    {"stored": "text/plain; q=x y", "valid": false},
+    {"stored": "text/plain; q=\"x\"y", "valid": false},
+    {"stored": "text/plain; q=\"x\\", "valid": false},
+    {"stored": "text/plain; q=\"x\\\"", "valid": false},
+    {"stored": "text/plain; q=é", "valid": false},
+    {"stored": "text/plain; q=\"x\ny\"", "valid": false},
+    {"stored": "text/plain; q=\"x\\\ry\"", "valid": false},
+    {"stored": "text/plain; q=\"x\u007fy\"", "valid": false},
+    {"stored": "text/plain(comment); q=x", "valid": false}
+  ],
+  "properties": [
+    "ASCII-only trimming and folding",
+    "parameters validate but do not select",
+    "initial ALPHA/DIGIT, restricted continuation",
+    "stored metadata bytes unchanged",
+    "legacy exact matching remains distinct"
+  ]
+}

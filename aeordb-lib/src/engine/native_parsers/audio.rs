@@ -531,7 +531,7 @@ fn parse_wav(data: &[u8], metadata: &mut serde_json::Value) {
 
       metadata["channels"] = json!(channels);
       metadata["sample_rate"] = json!(sample_rate);
-      metadata["bitrate"] = json!(byte_rate * 8);
+      metadata["bitrate"] = json!(u64::from(byte_rate) * 8);
       metadata["bits_per_sample"] = json!(bits_per_sample);
 
       // Store byte_rate for duration calculation when we find the data chunk

@@ -14,6 +14,10 @@ mod pdf;
 mod text;
 mod video;
 
+#[cfg(test)]
+#[path = "../../../spec/engine/native_suite_conformance_spec.rs"]
+mod conformance_spec;
+
 use std::io::{Cursor, Read};
 
 #[derive(Debug)]
@@ -102,12 +106,20 @@ pub(crate) fn parse_native_corrected(
   size: u64,
   limits: CorrectedNativeParserLimitsV1,
 ) -> Option<Result<serde_json::Value, CorrectedNativeParserErrorV1>> {
-  corrected_parser(mime_essence, extension).map(|parser| match parser {
-    CorrectedParserV1::Generic(parser) => {
-      parser(data, filename, stored_content_type, size).map_err(CorrectedNativeParserErrorV1::Malformed)
+  corrected_parser(mime_essence, extension).map(|parser| {
+    // Every native output includes these strings. Check the stored metadata
+    // before copying it; the normalized routing essence is not the output.
+    let metadata_scalar_bytes = filename.len().max(stored_content_type.len()) as u64;
+    if metadata_scalar_bytes > limits.maximum_scalar_bytes() {
+      return Err(CorrectedNativeParserErrorV1::PolicyLimit { observed: metadata_scalar_bytes });
     }
-    CorrectedParserV1::MsOffice => msoffice::parse_corrected(data, filename, size, limits),
-    CorrectedParserV1::Odf => odf::parse_corrected(data, filename, size, limits),
+    match parser {
+      CorrectedParserV1::Generic(parser) => {
+        parser(data, filename, stored_content_type, size).map_err(CorrectedNativeParserErrorV1::Malformed)
+      }
+      CorrectedParserV1::MsOffice => msoffice::parse_corrected(data, filename, stored_content_type, size, limits),
+      CorrectedParserV1::Odf => odf::parse_corrected(data, filename, stored_content_type, size, limits),
+    }
   })
 }
 

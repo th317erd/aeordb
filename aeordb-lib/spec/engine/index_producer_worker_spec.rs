@@ -186,6 +186,7 @@ fn scope_work_with_value(semantic_state_root: &[u8], ordinal: u64, value_fixture
   let scope = fixture("scope-definition-v1", "ascp-blake3-256-root-direct-valid.bin");
   let scope_id = decode_scope_definition(&scope, ALGORITHM).unwrap().scope_id;
   let mut value = fixture("value-store-definition-v1", value_fixture);
+  native_semantic_dependencies::pin_native_semantics(&mut value, ALGORITHM);
   value[32..64].copy_from_slice(&scope_id);
   let value_id = decode_value_store_definition(&value, ALGORITHM).unwrap().value_store_id;
   let mut field = fixture("field-index-definition-v1", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
@@ -205,6 +206,9 @@ fn scope_work_with_value(semantic_state_root: &[u8], ordinal: u64, value_fixture
     },
   }
 }
+
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
 
 struct UnexpectedParser;
 

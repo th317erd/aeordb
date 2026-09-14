@@ -1,5 +1,9 @@
 //! Production parser executor for the native v4 index runtime.
 
+#[cfg(test)]
+#[path = "../../../spec/engine/native_parser_conformance_spec.rs"]
+mod conformance_spec;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::mem::size_of;
@@ -23,12 +27,13 @@ use super::index_producer_collector::{
   IndexParserOutcomeV1,
 };
 use super::parser_plan::{ParserCandidateKind, ParserCandidateV1, ParserPlanKind};
+use super::mime_router::corrected_mime_essence;
+use super::native_semantics::NativeSemanticComponentV1;
 use super::selected_file_body::selected_file_body_reservation_bytes_v1;
 
-const MIME_ROUTER_ID: &str = "/org/aeordev/aeordb/native/mime-router-v1";
-const RAW_JSON_ID: &str = "/org/aeordev/aeordb/native/raw-json-v1";
-const NATIVE_SUITE_ID: &str = "/org/aeordev/aeordb/native/native-suite-v1";
-const NATIVE_VERSION: &str = "1.0.0";
+const MIME_ROUTER_ID: &str = NativeSemanticComponentV1::MimeRouter.dependency_id();
+const RAW_JSON_ID: &str = NativeSemanticComponentV1::RawJson.dependency_id();
+const NATIVE_SUITE_ID: &str = NativeSemanticComponentV1::NativeSuite.dependency_id();
 const BODY_FIXED_BYTES: u64 = 4 * 1_024;
 const PARSER_WORKSPACE_MULTIPLIER: u64 = 4;
 const CORRECTED_ARCHIVE_EXPANSION_MULTIPLIER: u64 = 4;
@@ -837,20 +842,11 @@ fn require_native_dependency<'a>(
   expected_role: u16,
 ) -> Result<&'a DependencyRecordV1<'a>, IndexParserExecutionErrorV1> {
   let dependency = dependency_at(dependencies, ordinal)?;
-  let expected_fingerprint =
-    native_fingerprint(expected_id).ok_or_else(|| host_failure("native_parser_dependency", "unknown native ID"))?;
-  if dependency.kind != 2
-    || dependency.role != expected_role
-    || dependency.abi != 0
-    || dependency.executor_profile != 1
-    || dependency.fingerprint_semantics != 2
-    || dependency.artifact_kind != 0
-    || dependency.artifact_length != 0
-    || dependency.flags != 0
-    || dependency.dependency_id != expected_id
-    || dependency.version != NATIVE_VERSION
-    || dependency.fingerprint != expected_fingerprint
-  {
+  let component = NativeSemanticComponentV1::ALL
+    .into_iter()
+    .find(|component| component.dependency_id() == expected_id && component.role() == expected_role)
+    .ok_or_else(|| host_failure("native_parser_dependency", "unknown native ID/role"))?;
+  if !component.matches_dependency(dependency) {
     return Err(IndexParserExecutionErrorV1::dependency_unavailable(
       "native_parser_dependency_unavailable",
       format!("native semantic dependency {expected_id} does not match this executor"),
@@ -872,33 +868,6 @@ fn dependency_at<'a>(
     .records
     .get(index)
     .ok_or_else(|| host_failure("native_parser_dependency_ordinal", format!("dependency ordinal {ordinal} is outside the table")))
-}
-
-fn native_fingerprint(id: &str) -> Option<[u8; 32]> {
-  let bytes: &[u8] = match id {
-    MIME_ROUTER_ID => b"/org/aeordev/aeordb/native/mime-router-v1:semantic-conformance-v1",
-    RAW_JSON_ID => b"/org/aeordev/aeordb/native/raw-json-v1:semantic-conformance-v1",
-    NATIVE_SUITE_ID => b"/org/aeordev/aeordb/native/native-suite-v1:semantic-conformance-v1",
-    _ => return None,
-  };
-  Some(*blake3::hash(bytes).as_bytes())
-}
-
-#[allow(clippy::drop_non_drop)]
-fn corrected_mime_essence(content_type: Option<&str>) -> Option<String> {
-  let value = content_type?.trim_matches(|character| matches!(character, ' ' | '\t'));
-  if value.is_empty() {
-    return None;
-  }
-  let parsed = match value.parse::<mime::Mime>() {
-    Ok(parsed) => parsed,
-    Err(error) => {
-      drop(error);
-      return None;
-    }
-  };
-  let essence = parsed.essence_str().to_ascii_lowercase();
-  super::parser_plan::is_canonical_mime_essence(essence.as_bytes()).then_some(essence)
 }
 
 fn required_filename<'a>(request: &'a IndexParserExecutionRequestV1<'_>) -> Result<&'a str, IndexParserExecutionErrorV1> {

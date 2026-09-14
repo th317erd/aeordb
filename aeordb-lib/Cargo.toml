@@ -1420,6 +1420,18 @@ path = "spec/engine/parser_plan_writer_spec.rs"
 name = "mime_name_initial_spec"
 path = "spec/engine/mime_name_initial_spec.rs"
 
+[[test]]
+name = "native_public_boundary_spec"
+path = "spec/engine/native_public_boundary_spec.rs"
+
+[[test]]
+name = "native_archive_mime_spec"
+path = "spec/engine/native_archive_mime_spec.rs"
+
+[[test]]
+name = "dependency_availability_spec"
+path = "spec/engine/dependency_availability_spec.rs"
+
 
 [lints]
 workspace = true

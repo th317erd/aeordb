@@ -391,8 +391,8 @@ fn dependency_at<'records, 'bytes>(
 fn require_native_role(dependency: &DependencyRecordV1<'_>, role: u16) -> FormatResult<()> {
   if dependency.kind != 2
     || dependency.role != role
-    || dependency.abi != 0
-    || dependency.executor_profile != 1
+    || matches!(dependency.abi, 1..=4)
+    || matches!(dependency.executor_profile, 0 | 2 | 3)
     || dependency.artifact_kind != 0
     || dependency.artifact_length != 0
   {
@@ -417,8 +417,8 @@ fn require_wasm_role(
   let expected_executor = if family == ValueStoreSemanticFamily::CorrectedV1 { 2 } else { 3 };
   if dependency.kind != 1
     || dependency.role != role
-    || dependency.abi != expected_abi
-    || dependency.executor_profile != expected_executor
+    || (dependency.abi <= 4 && dependency.abi != expected_abi)
+    || (dependency.executor_profile <= 3 && dependency.executor_profile != expected_executor)
     || dependency.artifact_kind != 1
     || dependency.artifact_length == 0
     || (role == 1 && match_semantics != family.id() && match_semantics != 0)

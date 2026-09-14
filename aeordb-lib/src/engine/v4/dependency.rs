@@ -304,9 +304,17 @@ fn validate_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<(
   }
   match record.kind {
     1 => {
-      let corrected = matches!((record.role, record.abi, record.executor_profile), (1, 3, 2) | (2, 4, 2));
-      let legacy = matches!((record.role, record.abi, record.executor_profile), (1, 1, 3) | (2, 2, 3));
-      if (!corrected && !legacy)
+      // Round 9 retains future executors for known dependency kinds. Enforce
+      // every constraint we do know, without treating retention as execution.
+      let role_abi_valid = match record.role {
+        1 => matches!(record.abi, 1 | 3 | 5..=u16::MAX),
+        2 => matches!(record.abi, 2 | 4 | 5..=u16::MAX),
+        _ => false,
+      };
+      let known_profile_conflict = matches!((record.abi, record.executor_profile), (1 | 2, 2) | (3 | 4, 3));
+      if !role_abi_valid
+        || record.executor_profile < 2
+        || known_profile_conflict
         || record.fingerprint_semantics != 1
         || record.artifact_kind != 1
         || record.artifact_length == 0
@@ -321,8 +329,8 @@ fn validate_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<(
     }
     2 => {
       if !matches!(record.role, 1 | 3 | 4)
-        || record.abi != 0
-        || record.executor_profile != 1
+        || matches!(record.abi, 1..=4)
+        || matches!(record.executor_profile, 0 | 2 | 3)
         || record.fingerprint_semantics != 2
         || record.artifact_kind != 0
         || record.artifact_length != 0

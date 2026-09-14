@@ -11,6 +11,9 @@ use aeordb::engine::v4::value_store::decode_value_store_definition;
 
 const PUNCTUATION: &[u8] = b"!#$&^_.+-";
 
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
+
 fn fixture(family: &str, name: &str) -> Vec<u8> {
   std::fs::read(format!("{}/spec/fixtures/v4/{family}/{name}.bin", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
@@ -77,7 +80,8 @@ fn corrected_native_mime_treats_bad_initials_as_generic_without_changing_legacy_
   let revision = loaded.revision();
   for legacy in [false, true] {
     let family = if legacy { "legacy" } else { "corrected" };
-    let encoded = fixture("value-store-definition-v1", &format!("avst-blake3-256-json-{family}-valid"));
+    let mut encoded = fixture("value-store-definition-v1", &format!("avst-blake3-256-json-{family}-valid"));
+    native_semantic_dependencies::pin_native_semantics(&mut encoded, HashAlgorithm::Blake3_256);
     let definition = decode_value_store_definition(&encoded, HashAlgorithm::Blake3_256).unwrap();
     for initial in PUNCTUATION {
       for media_type in [format!("{}abc/plain", *initial as char), format!("text/{}abc", *initial as char)] {

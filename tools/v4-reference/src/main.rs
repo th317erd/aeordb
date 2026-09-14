@@ -29,6 +29,10 @@ mod value_store;
 #[path = "../spec/mime_name_initial_spec.rs"]
 mod mime_name_initial_spec;
 
+#[cfg(test)]
+#[path = "../spec/dependency_availability_spec.rs"]
+mod dependency_availability_spec;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;

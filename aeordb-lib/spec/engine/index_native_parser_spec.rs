@@ -14,6 +14,9 @@ use aeordb::engine::{HashAlgorithm, RequestContext, StorageEngine};
 use std::io::{Cursor, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
+
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
 fn create_engine(directory: &tempfile::TempDir) -> StorageEngine {
@@ -28,16 +31,23 @@ fn source_limits() -> NativeIndexSourceLimitsV1 {
 }
 
 fn corrected_definition_bytes() -> Vec<u8> {
-  std::fs::read(format!(
+  let mut bytes = std::fs::read(format!(
     "{}/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-corrected-valid.bin",
     env!("CARGO_MANIFEST_DIR")
   ))
-  .unwrap()
+  .unwrap();
+  native_semantic_dependencies::pin_native_semantics(&mut bytes, ALGORITHM);
+  bytes
 }
 
 fn legacy_definition_bytes() -> Vec<u8> {
-  std::fs::read(format!("{}/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-legacy-valid.bin", env!("CARGO_MANIFEST_DIR")))
-    .unwrap()
+  let mut bytes = std::fs::read(format!(
+    "{}/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-json-legacy-valid.bin",
+    env!("CARGO_MANIFEST_DIR")
+  ))
+  .unwrap();
+  native_semantic_dependencies::pin_native_semantics(&mut bytes, ALGORITHM);
+  bytes
 }
 
 fn corrected_definition(bytes: &[u8]) -> ValueStoreDefinitionV1<'_> {
@@ -143,6 +153,58 @@ fn corrected_json_claim_and_policy_failures_are_deterministic() {
     parse_file(&engine, &latest_root, "/large.json", &definition, 1, &|| false).unwrap(),
     IndexParserOutcomeV1::DeterministicUnindexable(_)
   ));
+}
+
+#[test]
+fn corrected_parameterized_mime_keeps_claims_and_legacy_routing_separate() {
+  let directory = tempfile::tempdir().unwrap();
+  let engine = create_engine(&directory);
+  let operations = DirectoryOps::new(&engine);
+  let context = RequestContext::system();
+  let corrected_bytes = corrected_definition_bytes();
+  let corrected = corrected_definition(&corrected_bytes);
+  let legacy_bytes = legacy_definition_bytes();
+  let legacy = corrected_definition(&legacy_bytes);
+  for (mime, expected) in [
+    ("application/json; q=\"a\\\"b\"", "json"),
+    ("application/problem+json; q=\"a\\\"b\"", "json"),
+    ("application/x-unregistered; q=\"a\\\"b\"", "unclaimed"),
+    ("text/markdown; q=\"a\\\"b\"", "text"),
+  ] {
+    operations.store_file_buffered(&context, "/parameterized.txt", b"not JSON", Some(mime)).unwrap();
+    let root = engine.head_hash().unwrap();
+    let source = NativeIndexFileRevisionSourceV1::new(&engine, source_limits());
+    let stored = source.load_file_revision(&root, "/parameterized.txt").unwrap().unwrap();
+    assert_eq!(stored.revision().file_record.content_type.as_deref(), Some(mime));
+    assert_eq!(corrected.parser_plan.resolution_semantics, 1);
+    let outcome = parse_file(&engine, &root, "/parameterized.txt", &corrected, 64 << 20, &|| false).unwrap();
+    match expected {
+      "json" => {
+        let IndexParserOutcomeV1::DeterministicUnindexable(failure) = outcome else {
+          panic!("JSON claim was lost: {mime}: {outcome:?}");
+        };
+        let evidence = aeordb::engine::v4::config_value::decode_canonical_value(
+          failure.evidence(),
+          aeordb::engine::v4::config_value::CanonicalValueBounds::CONFIG,
+        )
+        .unwrap();
+        assert_eq!(evidence, CanonicalConfigValueV1::String("raw_json_malformed".to_string()));
+      }
+      "unclaimed" => assert_eq!(outcome, IndexParserOutcomeV1::NotApplicable),
+      "text" => {
+        let value = parsed_map(outcome);
+        let Some(CanonicalConfigValueV1::Map(metadata)) = value.get("metadata") else {
+          panic!("missing native metadata");
+        };
+        assert_eq!(metadata.get("content_type"), Some(&CanonicalConfigValueV1::String(mime.to_string())));
+      }
+      _ => unreachable!(),
+    }
+    assert_eq!(
+      parse_file(&engine, &root, "/parameterized.txt", &legacy, 64 << 20, &|| false).unwrap(),
+      IndexParserOutcomeV1::NotApplicable
+    );
+  }
 }
 
 #[test]

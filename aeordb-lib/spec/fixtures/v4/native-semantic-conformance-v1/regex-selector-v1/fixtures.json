@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "component": "/org/aeordev/aeordb/native/aeor-regex-v1",
+  "cases": [
+    {
+      "id": "root-selection",
+      "input": {"a": [null, true, ""]},
+      "segments": [],
+      "expected_values": [{"a": [null, true, ""]}]
+    },
+    {
+      "id": "exact-key-is-not-a-dotted-path",
+      "input": {"a.b": "exact", "a": {"b": "nested"}},
+      "segments": [{"kind": "object_key", "value": "a.b"}],
+      "expected_values": ["exact"]
+    },
+    {
+      "id": "exact-key-is-case-sensitive",
+      "input": {"Name": "upper", "name": "lower"},
+      "segments": [{"kind": "object_key", "value": "name"}],
+      "expected_values": ["lower"]
+    },
+    {
+      "id": "missing-key-is-not-null",
+      "input": {"present": null},
+      "segments": [{"kind": "object_key", "value": "absent"}],
+      "expected_values": []
+    },
+    {
+      "id": "present-null",
+      "input": {"present": null},
+      "segments": [{"kind": "object_key", "value": "present"}],
+      "expected_values": [null]
+    },
+    {
+      "id": "numeric-array",
+      "input": ["zero", "one", "two"],
+      "segments": [{"kind": "numeric_index", "value": "1"}],
+      "expected_values": ["one"]
+    },
+    {
+      "id": "numeric-object-does-not-use-leading-zero-key",
+      "input": {"1": "canonical", "01": "other"},
+      "segments": [{"kind": "numeric_index", "value": "1"}],
+      "expected_values": ["canonical"]
+    },
+    {
+      "id": "numeric-full-u64-object-key",
+      "input": {"18446744073709551615": "maximum", "0": "zero"},
+      "segments": [{"kind": "numeric_index", "value": "18446744073709551615"}],
+      "expected_values": ["maximum"]
+    },
+    {
+      "id": "numeric-full-u64-array-does-not-wrap",
+      "input": ["zero"],
+      "segments": [{"kind": "numeric_index", "value": "18446744073709551615"}],
+      "expected_values": []
+    },
+    {
+      "id": "fanout-preserves-order-and-duplicates",
+      "input": ["same", null, "same", "", []],
+      "segments": [{"kind": "fan_out"}],
+      "expected_values": ["same", null, "same", "", []]
+    },
+    {
+      "id": "fanout-map-raw-utf8-order",
+      "input": {"𐀀": "four", "é": "three", "z": "two", "A": "one"},
+      "segments": [{"kind": "fan_out"}],
+      "expected_values": ["one", "two", "three", "four"]
+    },
+    {
+      "id": "nested-fanout-depth-first",
+      "input": [[1, 2], [3]],
+      "segments": [{"kind": "fan_out"}, {"kind": "fan_out"}],
+      "expected_values": [1, 2, 3]
+    },
+    {
+      "id": "fanout-scalar-is-missing",
+      "input": "not-a-container",
+      "segments": [{"kind": "fan_out"}],
+      "expected_values": []
+    },
+    {
+      "id": "fanout-empty-containers",
+      "input": [[], {}],
+      "segments": [{"kind": "fan_out"}, {"kind": "fan_out"}],
+      "expected_values": []
+    },
+    {
+      "id": "regex-is-search",
+      "input": ["prefix-needle-suffix", "needle", "other"],
+      "segments": [{"kind": "regex", "pattern": "needle", "case_insensitive": false}],
+      "expected_values": ["prefix-needle-suffix", "needle"]
+    },
+    {
+      "id": "regex-explicit-anchors",
+      "input": ["prefix-needle", "needle", "needle-suffix"],
+      "segments": [{"kind": "regex", "pattern": "^needle$", "case_insensitive": false}],
+      "expected_values": ["needle"]
+    },
+    {
+      "id": "regex-empty-body",
+      "input": ["", "text", null],
+      "segments": [{"kind": "regex", "pattern": "", "case_insensitive": false}],
+      "expected_values": ["", "text", null]
+    },
+    {
+      "id": "regex-matches-object-keys-not-values",
+      "input": {"match-z": "last", "unrelated": "match", "match-a": "first"},
+      "segments": [{"kind": "regex", "pattern": "^match", "case_insensitive": false}],
+      "expected_values": ["first", "last"]
+    },
+    {
+      "id": "regex-string-contents-not-quotes",
+      "input": ["word", "\"word\""],
+      "segments": [{"kind": "regex", "pattern": "^word$", "case_insensitive": false}],
+      "expected_values": ["word"]
+    },
+    {
+      "id": "regex-compact-map-sorts-keys",
+      "input": [{"z": 2, "a": 1}, {"a": 2, "z": 1}],
+      "segments": [{"kind": "regex", "pattern": "^\\{\"a\":1,\"z\":2\\}$", "case_insensitive": false}],
+      "expected_values": [{"a": 1, "z": 2}]
+    },
+    {
+      "id": "regex-unicode-simple-case-fold",
+      "input": ["K", "k", "K", "q"],
+      "segments": [{"kind": "regex", "pattern": "^k$", "case_insensitive": true}],
+      "expected_values": ["K", "k", "K"]
+    },
+    {
+      "id": "regex-case-sensitive-default",
+      "input": ["K", "k", "K"],
+      "segments": [{"kind": "regex", "pattern": "^k$", "case_insensitive": false}],
+      "expected_values": ["k"]
+    },
+    {
+      "id": "regex-unicode-word-classes",
+      "input": ["é", "á", "中文", "x-y", "💙"],
+      "segments": [{"kind": "regex", "pattern": "^\\w+$", "case_insensitive": false}],
+      "expected_values": ["é", "á", "中文"]
+    },
+    {
+      "id": "regex-newline-not-dot-default",
+      "input": ["a\nb", "ab"],
+      "segments": [{"kind": "regex", "pattern": "^.*$", "case_insensitive": false}],
+      "expected_values": ["ab"]
+    }
+  ],
+  "limit_cases": [
+    {"id": "fanout-work", "input": [1, 2], "segments": [{"kind": "fan_out"}], "field": "max_selector_work_items_per_document", "exact": 3, "expected_values": [1, 2], "below_error": "selector_work_limit"},
+    {"id": "nested-work", "input": [[1, 2], [3]], "segments": [{"kind": "fan_out"}, {"kind": "fan_out"}], "field": "max_selector_work_items_per_document", "exact": 8, "expected_values": [1, 2, 3], "below_error": "selector_work_limit"},
+    {"id": "array-utf8-bytes", "input": ["ab", "é"], "segments": [{"kind": "regex", "pattern": ".", "case_insensitive": false}], "field": "max_selector_examined_bytes_per_document", "exact": 4, "expected_values": ["ab", "é"], "below_error": "selector_examined_bytes_limit"},
+    {"id": "map-key-utf8-bytes", "input": {"é": 2, "z": 1}, "segments": [{"kind": "regex", "pattern": ".", "case_insensitive": false}], "field": "max_selector_examined_bytes_per_document", "exact": 3, "expected_values": [1, 2], "below_error": "selector_examined_bytes_limit"},
+    {"id": "complete-value-count", "input": [1, 2], "segments": [{"kind": "fan_out"}], "field": "max_source_values_per_document", "exact": 2, "expected_values": [1, 2], "below_error": "source_value_count_limit"},
+    {"id": "complete-canonical-bytes", "input": [1, 2], "segments": [{"kind": "fan_out"}], "field": "max_canonical_source_bytes_per_document", "exact": 26, "expected_values": [1, 2], "below_error": "source_value_bytes_limit"}
+  ],
+  "invalid_patterns": ["[", "(?=a)", "(a)\\1", "(?<name>a", "\\p{DefinitelyNotAUnicodeProperty}"]
+}

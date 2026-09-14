@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "component": "/org/aeordev/aeordb/native/raw-json-v1",
+  "parsed": [
+    {
+      "json": "null",
+      "canonical_hex": "0100000000"
+    },
+    {
+      "json": "false",
+      "canonical_hex": "0200000000"
+    },
+    {
+      "json": "true",
+      "canonical_hex": "0300000000"
+    },
+    {
+      "json": "0",
+      "canonical_hex": "04080000000000000000000000"
+    },
+    {
+      "json": "-1",
+      "canonical_hex": "0408000000ffffffffffffffff"
+    },
+    {
+      "json": "9223372036854775807",
+      "canonical_hex": "0408000000ffffffffffffff7f"
+    },
+    {
+      "json": "9223372036854775808",
+      "canonical_hex": "05080000000000000000000080"
+    },
+    {
+      "json": "18446744073709551615",
+      "canonical_hex": "0508000000ffffffffffffffff"
+    },
+    {
+      "json": "-9223372036854775808",
+      "canonical_hex": "04080000000000000000000080"
+    },
+    {
+      "json": "1.5",
+      "canonical_hex": "0608000000000000000000f83f"
+    },
+    {
+      "json": "0.0",
+      "canonical_hex": "06080000000000000000000000"
+    },
+    {
+      "json": "\"\"",
+      "canonical_hex": "0700000000"
+    },
+    {
+      "json": "\"é\"",
+      "canonical_hex": "0702000000c3a9"
+    },
+    {
+      "json": "\"\\u0061\"",
+      "canonical_hex": "070100000061"
+    },
+    {
+      "json": "[]",
+      "canonical_hex": "090400000000000000"
+    },
+    {
+      "json": "{}",
+      "canonical_hex": "0a0400000000000000"
+    },
+    {
+      "json": "[true,null]",
+      "canonical_hex": "090e0000000200000003000000000100000000"
+    },
+    {
+      "json": "{\"a\":true}",
+      "canonical_hex": "0a0e0000000100000001000000610300000000"
+    },
+    {
+      "json": " \t\r\nnull \n",
+      "canonical_hex": "0100000000"
+    }
+  ],
+  "rejected": [
+    {
+      "json": "{\"a\":1,\"a\":2}",
+      "json_mime": false,
+      "outcome": "malformed"
+    },
+    {
+      "json": "{\"a\":1,\"\\u0061\":2}",
+      "json_mime": false,
+      "outcome": "malformed"
+    },
+    {
+      "json": "-0.0",
+      "json_mime": false,
+      "outcome": "malformed"
+    },
+    {
+      "json": "[1,]",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "json": "[1,]",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "json": "{",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "json": "{",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "json": "null true",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "json": "null true",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "json": "hello",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "json": "hello",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "json": "",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "json": "",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "hex": "ff",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "hex": "ff",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    },
+    {
+      "hex": "efbbbf7b7d",
+      "json_mime": true,
+      "outcome": "malformed"
+    },
+    {
+      "hex": "efbbbf7b7d",
+      "json_mime": false,
+      "outcome": "not_claimed"
+    }
+  ],
+  "limits": [
+    {
+      "json": "[null]",
+      "field": "max_structure_nodes",
+      "limit": 1,
+      "outcome": "policy"
+    },
+    {
+      "json": "[null]",
+      "field": "max_structure_nodes",
+      "limit": 2,
+      "outcome": "parsed"
+    },
+    {
+      "json": "[null]",
+      "field": "max_structure_depth",
+      "limit": 1,
+      "outcome": "policy"
+    },
+    {
+      "json": "[null]",
+      "field": "max_structure_depth",
+      "limit": 2,
+      "outcome": "parsed"
+    },
+    {
+      "json": "\"é\"",
+      "field": "max_scalar_bytes",
+      "limit": 1,
+      "outcome": "policy"
+    },
+    {
+      "json": "\"é\"",
+      "field": "max_scalar_bytes",
+      "limit": 2,
+      "outcome": "parsed"
+    },
+    {
+      "json": "[1,2]",
+      "field": "max_container_members",
+      "limit": 1,
+      "outcome": "policy"
+    },
+    {
+      "json": "[1,2]",
+      "field": "max_container_members",
+      "limit": 2,
+      "outcome": "parsed"
+    }
+  ],
+  "properties": [
+    "canonical integer tags preserve exact full-width values",
+    "floating signed zero rejected at canonical JSON ingress",
+    "duplicate keys do not fall through",
+    "syntax mismatch only falls through without JSON MIME claim",
+    "whole-value resource rejection; no partial output"
+  ]
+}

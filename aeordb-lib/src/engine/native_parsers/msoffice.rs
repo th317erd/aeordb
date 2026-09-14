@@ -43,6 +43,7 @@ pub fn parse(data: &[u8], filename: &str, _content_type: &str, size: u64) -> Res
 pub(super) fn parse_corrected(
   data: &[u8],
   filename: &str,
+  stored_content_type: &str,
   size: u64,
   limits: CorrectedNativeParserLimitsV1,
 ) -> Result<serde_json::Value, CorrectedNativeParserErrorV1> {
@@ -63,7 +64,7 @@ pub(super) fn parse_corrected(
       let paragraph_count = count_tag_occurrences(&document_xml, "w:p");
       let text = strip_xml_tags_bounded(&document_xml, limits.maximum_scalar_bytes())?;
       drop(document_xml);
-      Ok(build_docx_output(text, paragraph_count, filename, size, &core_properties))
+      Ok(build_docx_output(text, paragraph_count, filename, stored_content_type, size, &core_properties))
     }
     OfficeFormat::Xlsx => {
       let shared_strings_xml = read_zip_entry_bounded(&mut archive, "xl/sharedStrings.xml", false, &mut budget)?;
@@ -78,7 +79,7 @@ pub(super) fn parse_corrected(
         None => 0,
       };
       drop(workbook_xml);
-      Ok(build_xlsx_output(text, sheet_count, filename, size, &core_properties))
+      Ok(build_xlsx_output(text, sheet_count, filename, stored_content_type, size, &core_properties))
     }
   }
 }
@@ -131,13 +132,21 @@ fn build_docx_value(document_xml: String, filename: &str, size: u64, core_proper
   let paragraph_count = count_tag_occurrences(&document_xml, "w:p");
   let text = strip_xml_tags(&document_xml);
   drop(document_xml);
-  build_docx_output(text, paragraph_count, filename, size, core_properties)
+  build_docx_output(
+    text,
+    paragraph_count,
+    filename,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    size,
+    core_properties,
+  )
 }
 
 fn build_docx_output(
   text: String,
   paragraph_count: usize,
   filename: &str,
+  content_type: &str,
   size: u64,
   core_properties: &CoreProperties,
 ) -> serde_json::Value {
@@ -153,7 +162,7 @@ fn build_docx_output(
       "title": title,
       "metadata": {
           "filename": filename,
-          "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "content_type": content_type,
           "size": size,
           "format": "docx",
           "author": core_properties.creator,
@@ -202,10 +211,17 @@ fn build_xlsx_value(
   };
   drop(workbook_xml);
 
-  build_xlsx_output(text, sheet_count, filename, size, core_properties)
+  build_xlsx_output(text, sheet_count, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", size, core_properties)
 }
 
-fn build_xlsx_output(text: String, sheet_count: usize, filename: &str, size: u64, core_properties: &CoreProperties) -> serde_json::Value {
+fn build_xlsx_output(
+  text: String,
+  sheet_count: usize,
+  filename: &str,
+  content_type: &str,
+  size: u64,
+  core_properties: &CoreProperties,
+) -> serde_json::Value {
   // Keep valid missing metadata explicit for the suppression audit.
   #[allow(clippy::manual_unwrap_or_default)]
   let title = match core_properties.title.clone() {
@@ -218,7 +234,7 @@ fn build_xlsx_output(text: String, sheet_count: usize, filename: &str, size: u64
       "title": title,
       "metadata": {
           "filename": filename,
-          "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "content_type": content_type,
           "size": size,
           "format": "xlsx",
           "author": core_properties.creator,

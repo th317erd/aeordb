@@ -335,7 +335,9 @@ fn parse_gif(data: &[u8]) -> FormatResult {
 
   // Count image descriptors (0x2C) to detect animation
   // Skip the logical screen descriptor and global color table first
-  let packed = data[10];
+  let Some(&packed) = data.get(10) else {
+    return result;
+  };
   let has_global_color_table = (packed & 0x80) != 0;
   let global_color_table_size = if has_global_color_table { 3 * (1 << ((packed & 0x07) + 1)) } else { 0 };
 

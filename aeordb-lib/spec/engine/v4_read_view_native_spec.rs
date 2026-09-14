@@ -422,12 +422,16 @@ fn complete_semantic_graph_with_extra_scopes(
   let hash_width = algorithm.hash_length();
   let scope_id = decode_scope_definition(&scope, algorithm).unwrap().scope_id;
   let mut value_store = semantic_definition_fixture(algorithm, "value-store-definition-v1", "avst", value_store_fixture);
+  native_semantic_dependencies::pin_native_semantics(&mut value_store, algorithm);
   value_store[32..32 + hash_width].copy_from_slice(&scope_id);
   let value_store_id = decode_value_store_definition(&value_store, algorithm).unwrap().value_store_id;
   let mut field_index = semantic_definition_fixture(algorithm, "field-index-definition-v1", "afix", field_index_fixture);
   field_index[32..32 + hash_width].copy_from_slice(&value_store_id);
   complete_semantic_graph_from_encoded(algorithm, scope, value_store, field_index, extra_scopes)
 }
+
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
 
 fn complete_size_semantic_graph_with_extra_scopes(
   algorithm: HashAlgorithm,

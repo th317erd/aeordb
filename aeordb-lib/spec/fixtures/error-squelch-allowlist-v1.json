@@ -5986,7 +5986,7 @@
     {
       "id": "esq-v1-c34dc22428663ff6aaff-00",
       "file": "aeordb-lib/src/engine/native_parsers/image.rs",
-      "line": 609,
+      "line": 611,
       "column": 40,
       "enclosing_item": "is_svg",
       "kind": "default_on_error",
@@ -5996,7 +5996,7 @@
     {
       "id": "esq-v1-3448c77ec17af4893b34-00",
       "file": "aeordb-lib/src/engine/native_parsers/image.rs",
-      "line": 611,
+      "line": 613,
       "column": 5,
       "enclosing_item": "is_svg",
       "kind": "broad_err_pattern",
@@ -6006,7 +6006,7 @@
     {
       "id": "esq-v1-930c40c26518da5e5ea3-00",
       "file": "aeordb-lib/src/engine/native_parsers/image.rs",
-      "line": 626,
+      "line": 628,
       "column": 5,
       "enclosing_item": "parse_svg",
       "kind": "broad_err_pattern",
@@ -6016,7 +6016,7 @@
     {
       "id": "esq-v1-665ab2b15e86d3e25115-00",
       "file": "aeordb-lib/src/engine/native_parsers/image.rs",
-      "line": 692,
+      "line": 694,
       "column": 3,
       "enclosing_item": "parse_svg_dimension",
       "kind": "result_to_option",
@@ -6026,7 +6026,7 @@
     {
       "id": "esq-v1-2ccf91c25572ae6b4d76-00",
       "file": "aeordb-lib/src/engine/native_parsers/msoffice.rs",
-      "line": 109,
+      "line": 110,
       "column": 19,
       "enclosing_item": "read_zip_entry",
       "kind": "result_to_option",
@@ -6036,7 +6036,7 @@
     {
       "id": "esq-v1-ee48c0ed6939de37e109-00",
       "file": "aeordb-lib/src/engine/native_parsers/msoffice.rs",
-      "line": 111,
+      "line": 112,
       "column": 3,
       "enclosing_item": "read_zip_entry",
       "kind": "result_to_option",
@@ -6056,7 +6056,7 @@
     {
       "id": "esq-v1-1996810a75ac571de0ad-00",
       "file": "aeordb-lib/src/engine/native_parsers/odf.rs",
-      "line": 420,
+      "line": 421,
       "column": 7,
       "enclosing_item": "extract_document_statistics",
       "kind": "success_only_conditional",
@@ -8486,7 +8486,7 @@
     {
       "id": "esq-v1-a504d3dbd52671c07ae9-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 389,
+      "line": 397,
       "column": 22,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -8496,7 +8496,7 @@
     {
       "id": "esq-v1-02a65f8ef7df6b993ae0-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 393,
+      "line": 401,
       "column": 22,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -8506,7 +8506,7 @@
     {
       "id": "esq-v1-4bb056ba769db5421f33-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 397,
+      "line": 405,
       "column": 22,
       "enclosing_item": "u64_at",
       "kind": "panic_method",

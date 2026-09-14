@@ -266,9 +266,14 @@ fn validate_record_fields(record: &DependencyRecord) -> Result<(), &'static str>
   }
   match record.kind {
     1 => {
-      let corrected = matches!((record.role, record.abi, record.executor_profile), (1, 3, 2) | (2, 4, 2));
-      let legacy = matches!((record.role, record.abi, record.executor_profile), (1, 1, 3) | (2, 2, 3));
-      if (!corrected && !legacy)
+      let known_executor = match (record.role, record.abi) {
+        (1, 1) | (2, 2) => Some(3),
+        (1, 3) | (2, 4) => Some(2),
+        (1 | 2, 5..=u16::MAX) => None,
+        _ => return Err("dependency_wasm_contract"),
+      };
+      if record.executor_profile < 2
+        || (record.executor_profile <= 3 && known_executor.is_some_and(|expected| expected != record.executor_profile))
         || record.fingerprint_semantics != 1
         || record.artifact_kind != 1
         || record.artifact_length == 0
@@ -279,8 +284,8 @@ fn validate_record_fields(record: &DependencyRecord) -> Result<(), &'static str>
     }
     2 => {
       if !matches!(record.role, 1 | 3 | 4)
-        || record.abi != 0
-        || record.executor_profile != 1
+        || (record.abi != 0 && record.abi <= 4)
+        || (record.executor_profile != 1 && record.executor_profile <= 3)
         || record.fingerprint_semantics != 2
         || record.artifact_kind != 0
         || record.artifact_length != 0

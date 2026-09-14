@@ -79,16 +79,18 @@ Cargo ≤2 jobs (native 1), serialized heavy workloads, 8 GiB/no-swap memory gat
 Data free floor 250,000,000,000 bytes, home 68,719,476,736 bytes.
 All long commands have host-side deadlines; monitor long work sparsely.
 
-Next action: U0 is committed/pushed as `94eb8f32b702f868bba98ad3d42196b5d06615bc`.
-U1's scope, invocation-policy, selector and parser-plan writers have completed
-their full Linux, affected-native and static/reference gates, including the
-late MIME correction. Land this coherent prerequisite snapshot, then continue
-the remaining U1 definitions, native conformance/availability, catalog and
-compiler. Three next-slice probes now preserve eight intended failing tests
-and three passing guards; turn those regressions green before native semantics
-are frozen. The dependency-key clarification remains pending owner
-review. The original normal-creation target remains red until actual
-runtime/default integration; this writer unit does not complete U1.
+Next action: U0 is committed/pushed as `94eb8f32b702f868bba98ad3d42196b5d06615bc`;
+U1's first four canonical writers are committed/pushed as `6cd7f3aa`.
+Native conformance/availability corrections pass final Linux, native and static
+qualification, including the corrected accounting-test binding. Exact-source,
+test-count, binary, receipt and resource evidence is independently audited in
+[the native unit proof](../evidence/user-facing-v4-u1-native-proof-20260914.json).
+Land this green native unit, then install the definition contract regressions
+and remaining four definition-writer targets before production changes.
+Then continue remaining definitions, catalog/COW and compilation. The
+dependency-key clarification remains pending owner review. The original
+normal-creation target remains red until actual runtime/default integration;
+neither prerequisite unit completes U1 or the full readiness goal.
 
 ### Live baseline result
 
@@ -664,3 +666,373 @@ refresh remains 0/0 at 94eb8f32. This completes only the four-writer landing
 unit; U1 semantic production, the default-v4 live target, native execution
 corrections, service/cutover integration and the full readiness goal remain
 open. The proof explicitly retains those limitations and original failures.
+
+## Active U1 native semantics and execution availability
+
+Entry is writer commit `6cd7f3aa0fe25af3f3bc8bd7dbe2b12055126b01`, pushed to
+development with upstream 0/0. Direct owner only. Preserve qualified `source-u1`
+and use a fresh detached desktop `source-u1-native`; reuse same-host targets
+only. No production operations or dependency-key contract change.
+
+- [x] Reproduce native framing/arithmetic, archive MIME, and availability
+  defects against the unchanged qualified Mac library; preserve all three
+  red receipts and the passing malformed/legacy/completed-value guards.
+- [x] Install the eleven regression tests in normal Cargo targets and confirm
+  the expected failing baseline on the desktop before production correction.
+- [x] Correct GIF/WAV boundaries and corrected archive metadata; prove adjacent
+  malformed prefixes and numeric boundaries without changing valid legacy data.
+- [x] Execute and refine the four hand-authored native conformance bundles,
+  freeze their reproducible identities, and replace placeholder identity checks.
+- [x] Separate structural dependency retention from exact execution availability
+  in library/reference readers, direct extraction and shared producer/query
+  evaluation; completed canonical-value queries must remain usable.
+- [x] Run affected, independent, static, full and native gates on the final
+  unit source before a coherent landing. Then continue remaining definitions,
+  catalog/COW/compiler; the catalog-key owner ruling remains a prerequisite.
+
+Desktop normal-Cargo baseline `u1-native-baseline-red` closes at **23:10:34
+UTC**, exit 101: availability 2 pass/4 fail, archive MIME 1 pass/1 fail,
+public parser boundaries 0 pass/3 fail. All six inputs pass pre/post SHA
+verification; no disk guard termination. Data/home free bytes are
+340,298,936,320 / 73,262,759,936. Source is detached `source-u1-native` at
+6cd7f3aa, not the preserved writer-qualified source. No Cargo remains running.
+Upstream refresh at 23:17 UTC is 0/0. Next: extend the archive scalar-policy
+perimeter before correction, then fix native boundaries and stored metadata.
+
+### Native corrections and structural-retention focused proof
+
+The first added archive-policy probe failed to compile (integer compared with
+the typed candidate enum); this is **not** behavioral red evidence. After the
+test-only correction, `u1-native-mime-policy-red2` fails at **23:22:35 UTC**:
+the 32-byte stored-MIME policy case rejects DOCX incorrectly; the below-limit
+guard passes. Independent reader tests both fail at **23:23:05 UTC**, preserving
+separate `u1-native-reference-availability-red` receipts.
+
+Corrections keep the GIF dimensions already present in ten bytes and guard the
+optional packed byte; widen WAV arithmetic before multiplying; carry original
+stored MIME through corrected Office/ODF builders; and check native metadata
+scalar size before copying/claimed parser work. Legacy archive builders retain
+their detected MIME. Library and independent reference retain unknown ABI and
+executor profiles, while still rejecting known kind/role/ABI/profile conflicts.
+
+Desktop `u1-native-corrections-green` closes **23:28:16 UTC**, exit 0:
+**12 focused passes** (3 public boundaries, 4 archive/limits, 5 structural
+availability guards including a 504-case permanent-ID matrix). The two still
+unfixed direct/shared selector-execution tests were explicitly filtered from
+this narrow run; this is **not** a green full unit. The independent reference
+suite closes **23:28:46 UTC**, **153 passes**, exit 0. All seventeen staged
+source hashes remain unchanged and no disk guard fires; final Data/home free
+bytes 340,200,124,416 / 73,263,599,616. No commit or readiness claim.
+
+Next, the four draft conformance bundles and three external private-owner
+harnesses are being installed, not fingerprinted yet. Before their first run,
+review corrected two draft transcription errors: WAV duration is floating
+`0.0`, and two canonical i64 values consume **26**, not 18 bytes (each has
+the frozen five-byte frame plus eight-byte payload). No previously frozen
+fixture or qualified evidence is rewritten. Runtime availability and final
+affected/full/native qualification remain open.
+
+### Conformance catches corrected MIME parameter routing defect
+
+`u1-native-conformance-initial` closes **23:36:09 UTC**, exit 101:
+**11 of 12 tests pass**. The remaining failure is valid quoted-pair escaping
+in a MIME parameter: `application/problem+json; q="a\"b"` incorrectly returns
+no essence through `mime::Mime`. Full native family outputs/dispatch/prefixes,
+raw-JSON independent bytes/failure distinctions, and both-width selector
+order/quotas pass. The MIME test stops at its first failing vector, not a claim
+that all remaining cases ran.
+
+The expanded parameter grammar regression closes red at **23:41:50 UTC**;
+the normal stored-file integration regression closes red at **23:45:31 UTC**,
+proving the JSON claim is lost for the escaped-quote case. RFC 9110
+[quoted strings](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.4) and
+[parameters](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.6) confirm
+the ratified grammar; whitespace around equals is forbidden while empty
+semicolon-delimited slots are allowed. The 22 added parameter cases and
+512 generated ASCII class checks are not yet green.
+
+The corrected parser now uses a dedicated bounded `mime_router` owner: validates
+parameter syntax without copying it, retains the original metadata, and copies
+only the at-most-255-byte normalized essence. Legacy exact routing is untouched.
+The integration test's native-text case uses `text/markdown`, because the old
+definition fixture explicitly routes `text/plain` to a registry WASM parser.
+That fixture's registry is preserved, not bypassed to force a native pass.
+Fresh conformance/affected proof is next; fingerprints and selector execution
+availability are still not completed.
+
+Desktop `u1-native-mime-grammar-green` passes **13 tests** at **23:52:02 UTC**.
+The subsequent integration failure was traced to a stale ordinary library:
+its Cargo dep-info omitted the new `mime_router.rs`, and its rlib timestamp
+was 23:45:21, newer than source timestamps preserved during the later rsync.
+The separately compiled unit-test library did include the new module. A stored
+MIME assertion and complete returned outcome confirmed the integration fixture
+itself was correct. Diagnostic stage closes 23:55:09, exit 101.
+
+Touching the two changed owning modules forced an ordinary-library rebuild
+without changing any source bytes or deleting targets. Then
+`u1-native-mime-affected-recompiled` passes **26 tests / five targets** at
+**23:57:44 UTC**, including the stored-file JSON/native/legacy regression,
+measured parser resource limits and all four archive formats. All 33 input
+hashes remain unchanged; no guard stop. Final Data/home free bytes:
+340,199,124,992 / 73,261,010,944. The earlier affected/diagnostic failures are
+retained as stale-build evidence, not unresolved MIME behavior.
+
+Future source synchronization uses checksum comparison and fresh destination
+timestamps (`rsync -acR --no-times`, explicit source files only); never transfer
+Cargo targets. Final-source broad gates must rebuild changed owners and retain
+source/dep-info proof. The next test compares native parser identity against
+the reviewed specification/fixture framing; the placeholder string hashes have
+not yet been replaced. Selector availability remains open.
+
+### Native identity and execution-support integration
+
+The first identity probe failed to compile because the typed parser error has
+Debug but no Display; it is not behavioral red evidence. After correcting that
+test, `u1-native-identity-red2` closes **2026-09-14 00:01:50 UTC**, exit 101,
+rejecting all three independently derived parser bundle fingerprints. The
+adjacent mapper probe closes **00:02:20 UTC**, exit 101: a structurally retained
+unknown ABI reaches the current mapper executor. These are preserved before
+production correction.
+
+Four literal native identities now derive from the reviewed two-file framing
+documented in the conformance README. The parser checks one exact registry;
+the selector runtime retains unknown definitions without compiling a substitute
+and gates direct extraction and shared evaluation before parser work. Unknown
+mapper ABI/profile is likewise refused before invoking the supplied executor;
+actual WASM artifact installation/resolution remains U4 work. Original binary
+format fixtures remain byte-identical; execution-test copies bind to current
+native identities and recompute their dependent definition IDs.
+
+`u1-native-execution-conformance-green` passes **16 tests** at **00:06:54 UTC**.
+The availability run then passes six and fails two at **00:07:54 UTC**:
+legacy unlimited output sentinels overflow shared setup before the new typed
+unavailability result. The follow-up correction retains the decoded runtime but
+does not compute execution allocations for an unavailable selector. This does
+not clamp semantic limits or qualify known legacy unlimited execution.
+
+Additional differential guards compare 1,024 generated integer canonical
+encodings with independent bytes, 256 nested map/traversal cases with a
+materialized ordering model, and 512 WAV rates with u128 arithmetic. These are
+new proof, not frozen-fixture changes; they have not yet passed. The next
+conformance/availability run uses 44 hashed inputs. The suppression inventory
+refresh changes only ten source line locations, retaining all 1,503 reviewed
+occurrences and their classifications; no baseline growth or new suppression.
+
+The corrected setup passes **19 conformance tests** at **00:12:23 UTC** and
+**all eight availability tests** at **00:13:23 UTC**, without filtering any
+availability cases. All 44 hashes remain unchanged; no guard termination.
+
+The 19-target affected run closes **00:16:01 UTC**, exit 101. Four targets
+expose one execution-fixture binding mismatch: the original selector's stable
+ID is `/org/aeordev/aeordb/native/aeor-regex-v1`, not the draft bundle's
+`regex-selector-v1` suffix. The helper had silently left this dependency at its
+placeholder identity, so real producer and selected-query paths correctly
+reported it unavailable. The stable component ID is now preserved; the helper
+requires every native dependency to bind, and the original .bin fixtures remain
+unchanged. The conformance folder keeps its descriptive `regex-selector-v1`
+name, distinct from the component's canonical ID.
+
+The corrected selector two-file digest is
+`eae50800c658f804c4bda0d0b20331399db77f078545759f2f20f52b88fe34d6`,
+computed by a small same-host Rust/BLAKE3 utility against the exact framing.
+The earlier `6aa293...` digest is an unlanded draft, not an accepted production
+identity. No executable writer has published it. Both prepared native source
+copies require the corrected snapshot before their first execution; no native
+Cargo job was started against the draft. Fresh conformance and full affected
+proof must pass before broader/native qualification.
+
+The corrected-ID conformance run passes **19 tests** at **00:21:31 UTC**;
+the full affected run passes **488 tests across 19 targets** at **00:23:31 UTC**,
+with no failed, ignored or filtered affected cases. Static analysis stops at
+**00:25:31 UTC** on one unnecessary clone in the new completed-value test.
+The test now borrows the canonical value through `std::slice::from_ref`; no
+production behavior or conformance input changed for this static correction.
+
+Final-source input manifest (44 files):
+`22ad44447abf46f61ba8c3ed6c5ed672aeb40c3a8e53751ae48299ebef0b4202`.
+Source-only archive `u1-native-execution-source3.tar`:
+`cdeb95844af18388544921d3e025e5f0a7b920f9761f9549a2efcfdb312f39f4`.
+Linux availability/static recheck and the four-stage native Mac/Windows
+qualification are running against that snapshot. The native gates have fresh
+evidence directories; no draft selector identity was executed there.
+Whole-workspace, release-boundary, reference and static-contract proof remains
+required before landing. Upstream is still 6cd7f3aa, 0/0 after a fresh fetch.
+
+Linux final availability recheck and whole-workspace Clippy pass, final static
+receipt **00:29:06 UTC**. Native Mac closes all four gates at **00:31:22 UTC**;
+Windows closes at **00:35:47 UTC**. Each passes **19 conformance tests**, the
+**488-test / 19-target affected set**, **153 independent reference tests**, and
+**454 independent format fixtures**. Conformance filters unrelated unit tests
+(661 Mac, 658 Windows); no conformance case is skipped. Windows retains an
+existing unused import warning in the Unix-only task-retention test helper;
+this is not a native Clippy qualification claim.
+
+Final free bytes: Mac **67,876,990,976**, Windows **18,948,304,896**. No native
+disk guard or deadline fired, and pre/post source hashes and patches match.
+Only small logs, receipts, manifests and patches are mirrored to the laptop.
+The Linux full workspace is running under the owned
+`aeordb-v4-u1-native-final-20260914` unit, with sequential exact large-KV,
+reference, release-boundary and static-contract stages still pending. This
+does not complete U1 or qualify an ordinary v4 database/service.
+
+### Full-workspace gate catches one remaining execution-fixture binding
+
+The source3 full-workspace run has **679 library passes and one failure**:
+`json_regex_workspace_accounts_for_worst_case_escape_expansion` still loads the
+old placeholder selector identity and expects executable-regex workspace. The
+new availability gate correctly retains no executable segments, giving 4,200
+bytes instead of the expected 25,170,024. This is not a green full run; its
+`--no-fail-fast` execution continues unchanged to collect remaining failures.
+
+The existing test is relocated to the external selector harness, preserves its
+24 MiB escape-expansion assertion, binds its decoded test copy to the exact
+current selector, and now covers both hash widths. An adjacent test checks that
+an unavailable selector retains only definition memory, no compiled segments,
+and reports typed unavailability. No production behavior or golden .bin bytes
+change for this correction. Native final qualification will execute the whole
+library test set, including this previously missed test, not only the narrower
+`conformance_spec` filter. Prior receipts remain immutable historical evidence.
+
+That full run closes at **01:07:20 UTC**, exit 101: **355 top-level targets,
+7,599 passed, one failed, seven existing ignores and two intentionally split
+large-KV cases**; three nested subprocess tests pass separately. The sole
+failure is the accounting fixture above. No guard fires. Free Data/home bytes
+are **340,196,892,672 / 73,182,568,448**; the driver does not run any later
+stages after the failed workspace. The failed log/receipt/source snapshot is
+also mirrored locally, before source synchronization resumes.
+
+The corrected 44-file manifest is
+`4b7e48b05ecd83df7f1be1a0cbefa2b5eb5e08604d50ee8e5e0eaf309cdfb3cb`;
+source-only archive `u1-native-execution-source4.tar` is
+`f71395b81646c94f7bfc318e66ad79013770fd7f5aca76113cbea0c0029c5bd5`.
+Both actual Cargo format checks pass with unchanged hashes. Source4 is now
+verified on all three hosts. Fresh stages use `u1-native-final2-*` / native
+`u1-native-final2-evidence`, preserving all previous runs. Linux conformance
+and static checks are active before the new whole-workspace qualification.
+
+Source4's **21 conformance/accounting cases pass at 01:13:00 UTC** (660
+unrelated library cases filtered in this narrow target), and strict workspace
+Clippy passes at **01:15:30 UTC**. Full Linux and native final2 gates start at
+**01:17 UTC**, with no source edits while they execute. Native library scope
+is expanded to all unit tests; the affected integration/reference set is
+unchanged. Final source4 format checks also pass. Full results remain pending.
+
+Native final2 is now green: Mac closes **01:21:27 UTC** with **681 library
+tests**, Windows closes **01:28:21 UTC** with **678 library tests**. Each
+also passes **488 affected tests / 19 targets**, **153 independent reference
+tests**, and **454 format fixtures**. Source hashes and pre/post patches match;
+no timeout/disk stop. Final free bytes are Mac **67,859,484,672**, Windows
+**18,946,170,880**. The library sets include both accounting regressions.
+Linux full qualification remains active, no failure observed at 01:32 UTC.
+
+### Next definition unit: independently reproduced contract corrections
+
+These are outstanding U1 definition work, **not changes to the frozen native
+qualification snapshot**. Read-only normative review resolves two reader/writer
+disagreements without a new product choice:
+
+- Round 8A section 1 explicitly preserves child caps **4/64/128/256 KiB**
+  (field/selector/parser/dependencies). The production selector reader/writer,
+  AVST child validator and reference currently cap selectors at **4 KiB**;
+  the copied machine registry repeats that error. No later override was found.
+- Round 9 section 1 explicitly makes canonical `none` the only parser plan
+  valid for `always_missing_v0`, superseding the Round 8A earlier non-none
+  statement. Round 8A section 6 says document input is zero for `none`.
+  Current AVST/reference readers and the two old always-missing examples
+  instead require a real legacy parser pipeline and nonzero document input.
+
+Six standalone in-memory probes run against the unchanged, source4-qualified
+Mac ordinary library; **one baseline guard passes and five intended contract
+tests fail at 01:30:56 UTC**, exit 101. Failures cover the selector reader,
+selector writer and AVST parent accepting >4 KiB through the exact 64 KiB
+boundary, accepting canonical parser-free always-missing bytes, and rejecting
+the superseded non-none example. Each test stops at its first failing case;
+this is not a claim that all subsequent widths/boundaries executed.
+
+Evidence is `semantic-definition-contract-red` under the durable campaign
+cache. Library SHA-256 is
+`b6389e94d0b727ad157ae86be0f442327916fa1a179d7c98edc59ced3fa43941`;
+probe source SHA-256 is
+`39245fd428f06f999b9d06c3f67fec843c48bc82100cce261ec2ebfd14576ad0`.
+All 44 inputs and the ordinary library remain unchanged. The probe and runner
+are retained alongside small logs/receipts locally; no test binary or database
+is transferred. The native test-binary digest packet is separately preserved.
+
+Before completing the remaining definitions, install these normal-Cargo targets,
+expand malformed/boundary cases, reconcile independent reference/registry
+expectations to the normative contracts, and preserve old binary artifacts as
+historical evidence. Do not rewrite those artifacts merely to make a writer
+round trip pass. This does not resolve or approve the separate class6/7
+catalog-key owner question.
+
+The next-unit cap territory also includes generated
+`v4/contract_generated.rs` (`source-selector-v1` hard cap 4096), the
+reference's selector fixture generator, and
+`source_selector_writer_spec::selector_writer_preflights_combined_lengths_and_counts_before_regex_work`.
+Preserve the existing 4,096-byte examples as valid historical cases, add the
+true 65,536-byte boundary and one beyond, and prove the independent 1,024
+segment-count boundary (the former byte cap prevented reaching that count).
+The AVST writer draft now uses the normative 64 KiB child bound; it remains
+outside the frozen candidate and has not been installed or executed.
+
+### Native final2 Linux qualification in progress
+
+The workspace closes **01:54:15 UTC**, exit 0. Both separately executed
+large-KV tests pass: clamp **01:59:45 UTC**, resize **02:06:15 UTC**.
+Independent reference passes **153 tests at 02:06:45 UTC** and verifies
+**454 fixtures at 02:07:15 UTC**. Release-mode public parser/archive boundary
+checks are compiling; contracts/debt remain queued. Full target/test counting
+and same-host executable hashes still require the final evidence audit.
+
+The next definition-unit draft now also contains seven converter/field writer
+tests in the durable task cache, not the qualified source. They independently
+parse the frozen Round 11 offsets, compare all 25 converters and corresponding
+fields at both widths, check all five hash algorithms, and cover malformed
+parameters/children, identity widths, limits and meaningfully changed inputs.
+The proposed writer derives strategy names, masks and fingerprints from the
+registry rather than accepting caller-authored semantic overrides. These APIs
+do not exist yet and the draft is neither executed proof nor a production edit.
+
+Additional cap-consumer inventory: `v4_format_fixture_spec` has an explicit
+4,097-byte amplification assertion to move to the true 65,537-byte boundary.
+Its complete fixture loops currently assume every selector/AVST example is
+valid. Preserve both old always-missing binary artifacts as explicitly rejected
+historical examples, add new canonical-none examples, and update independent
+manifest/annotation/outcome metadata transparently; do not mutate the old bytes.
+
+### Native landing unit: final verified evidence
+
+Linux final2 closes **02:16:17 UTC**, exit 0, with the owned unit inactive and
+MainPID 0. Release-boundary checks pass **seven tests at 02:15:16 UTC**;
+contracts pass **02:15:46 UTC**, debt self-tests pass **02:16:17 UTC**.
+Final Data/home free bytes are **337,891,184,640 / 73,165,402,112**.
+The build unit peaks at **15.4 GiB with zero swap**, under its 16 GiB build
+guard. This is explicitly **not** the final 8 GiB production-runtime proof.
+
+The independent evidence checker passes: **355 top-level workspace targets,
+7,601 passed, seven existing ignores, two explicitly split KV cases**; both
+split cases separately pass, giving **7,603 distinct workspace tests**. The
+three nested subprocess cases pass and are counted separately. It also checks
+all narrow/static/native/reference/release receipts, guards and exact 44-file
+source manifests, actual Cargo format receipts, and same-host hashes of
+**23 Linux, 21 Mac and 21 Windows** executed test binaries. Only small evidence
+files cross hosts; no binary or database transfer.
+
+The first binary-hash audit stops before writing because it also selected the
+CLI's `aeordb` test executable by basename. Cargo names both CLI and library
+tests `aeordb`; selection now additionally requires the library's
+`unittests src/lib.rs` header. The full workspace retains the CLI test results.
+This evidence-tool correction neither changes production source nor excuses a
+test failure. The retried 23-binary packet and complete evidence audit pass.
+
+All original binary format fixtures remain byte-identical; the suppression
+inventory still has the same 1,503 reviewed entries. Final source and test diffs,
+all four native specifications/fixture bundles, direct/shared availability,
+legacy routing and completed-value preservation have been reviewed. No new
+native-unit defect remains open. The earlier failed runs remain preserved.
+
+U1 semantic production and the full v4 goal are **not complete**. Remaining
+definition/canonical compiler/catalog work, the pending owner catalog-key
+ruling, actual WASM execution, legacy operational budgets, U2–U7 runtime,
+migration-to-service/default integration and final qualification still stand.
+No production database, service, install, release or default was changed.

@@ -673,8 +673,8 @@ fn dependency_at(dependencies: &[DependencyRecord], ordinal: u32) -> Result<&Dep
 fn require_native_role(dependency: &DependencyRecord, role: u16) -> Result<(), &'static str> {
   if dependency.kind != 2
     || dependency.role != role
-    || dependency.abi != 0
-    || dependency.executor_profile != 1
+    || (dependency.abi != 0 && dependency.abi <= 4)
+    || (dependency.executor_profile != 1 && dependency.executor_profile <= 3)
     || dependency.artifact_kind != 0
     || dependency.artifact_length != 0
   {
@@ -693,8 +693,8 @@ fn require_wasm_role(dependency: &DependencyRecord, role: u16, family: u16, matc
   };
   if dependency.kind != 1
     || dependency.role != role
-    || dependency.abi != expected_abi
-    || dependency.executor_profile != if family == 1 { 2 } else { 3 }
+    || (dependency.abi <= 4 && dependency.abi != expected_abi)
+    || (dependency.executor_profile <= 3 && dependency.executor_profile != if family == 1 { 2 } else { 3 })
     || dependency.artifact_kind != 1
     || dependency.artifact_length == 0
     || (role == 1 && match_semantics != if family == 1 { 1 } else { 2 } && match_semantics != 0)

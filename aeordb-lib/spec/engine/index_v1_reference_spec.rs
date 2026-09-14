@@ -196,8 +196,14 @@ fn field_index_fixture(name: &str) -> Vec<u8> {
 }
 
 fn value_store_fixture(name: &str) -> Vec<u8> {
-  std::fs::read(format!("{}/spec/fixtures/v4/value-store-definition-v1/{name}.bin", env!("CARGO_MANIFEST_DIR"))).unwrap()
+  let mut bytes = std::fs::read(format!("{}/spec/fixtures/v4/value-store-definition-v1/{name}.bin", env!("CARGO_MANIFEST_DIR"))).unwrap();
+  let algorithm = if name.contains("sha512") { HashAlgorithm::Sha512 } else { HashAlgorithm::Blake3_256 };
+  native_semantic_dependencies::pin_native_semantics(&mut bytes, algorithm);
+  bytes
 }
+
+#[path = "../helpers/native_semantic_dependencies.rs"]
+mod native_semantic_dependencies;
 
 fn corrected_json_value_store_with_selector(segments: &[Vec<u8>]) -> Vec<u8> {
   let mut selector = Vec::new();
