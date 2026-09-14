@@ -773,3 +773,76 @@ fn collector_keeps_allocation_failure_retryable_and_succeeds_after_pressure_clea
   drop(report);
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
 }
+
+#[test]
+fn complete_index_definition_output_allocations_are_fallible_and_release_only_their_admission() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::field_definition::EncodedFieldIndexDefinitionV1;
+  use aeordb::engine::v4::index_definition_compiler::{
+    ConverterDefinitionLimitsInputV1, CorrectedIndexInputV1, FieldDefinitionLimitsInputV1, IndexDefinitionCompilationRequestV1,
+    SourceDefinitionLimitsInputV1, compile_index_definitions_v1,
+  };
+  use aeordb::engine::v4::parser_context_compiler::{
+    ParserContextCompilationRequestV1, ParserContextSourceV1, ParserSelectorDependencyV1, compile_parser_context_v1,
+  };
+  use aeordb::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
+  use aeordb::engine::v4::source_selector_compiler::{SourceSelectorCompilationRequestV1, SourceSelectorInputV1, compile_source_selector_v1};
+
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+  let source = compile_source_selector_v1(
+    SourceSelectorCompilationRequestV1 {
+      field_name: "@hash",
+      source: SourceSelectorInputV1::Metadata,
+      maximum_source_bytes: 1 << 20,
+      maximum_workspace_bytes: 64 << 20,
+    },
+    &memory,
+    &|| false,
+  )
+  .unwrap();
+  let context = compile_parser_context_v1(
+    ParserContextCompilationRequestV1 {
+      source: ParserContextSourceV1::Metadata,
+      selector_dependency: ParserSelectorDependencyV1::None,
+      maximum_workspace_bytes: 64 << 20,
+    },
+    &memory,
+    &|| false,
+  )
+  .unwrap();
+  let indexes = [1, 3].map(|converter_id| CorrectedIndexInputV1 {
+    converter_id,
+    converter_limits: ConverterDefinitionLimitsInputV1::default(),
+    field_limits: FieldDefinitionLimitsInputV1::default(),
+  });
+  let request = IndexDefinitionCompilationRequestV1 {
+    scope_id: &[1; 32],
+    source: &source,
+    parser_context: &context,
+    source_limits: SourceDefinitionLimitsInputV1::default(),
+    indexes: &indexes,
+    hash_algorithm: ALGORITHM,
+    maximum_workspace_bytes: 64 << 20,
+  };
+  let baseline = memory.snapshot().unwrap().reserved_bytes;
+  let compiled = compile_index_definitions_v1(request.clone(), &memory, &|| false).unwrap();
+  let sizes = [
+    2 * std::mem::size_of::<EncodedFieldIndexDefinitionV1>(),
+    120,
+    compiled.value_store().value.len(),
+    compiled.field_indexes()[0].value.len(),
+  ];
+  drop(compiled);
+  for size in sizes {
+    let (result, allocations) = measure(size, || compile_index_definitions_v1(request.clone(), &memory, &|| false));
+    assert!(allocations.injected_failure, "size={size}: {allocations:?}");
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  }
+  let (result, allocations) = measure(0, || {
+    compile_index_definitions_v1(IndexDefinitionCompilationRequestV1 { maximum_workspace_bytes: 1, ..request }, &memory, &|| false)
+  });
+  assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+  assert_preflight(allocations);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+}

@@ -1012,6 +1012,200 @@ fn compiled_source_selectors_publish_complete_definition_objects_and_reopen() {
 }
 
 #[test]
+fn compiled_default_index_definitions_publish_and_reopen_without_selecting_a_new_root() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::database_header::SelectedDatabaseHeaderV4;
+  use aeordb::engine::v4::index_definition_compiler::{
+    ConverterDefinitionLimitsInputV1, CorrectedIndexInputV1, FieldDefinitionLimitsInputV1, IndexDefinitionCompilationRequestV1,
+    SourceDefinitionLimitsInputV1, compile_index_definitions_v1, default_metadata_indexes_v1,
+  };
+  use aeordb::engine::v4::parser_context_compiler::{
+    ParserContextCompilationRequestV1, ParserContextSourceV1, ParserSelectorDependencyV1, compile_parser_context_v1,
+  };
+  use aeordb::engine::v4::scope::{ScopeDefinitionWriteV1, ScopeMatchingMode, encode_scope_definition};
+  use aeordb::engine::v4::semantic_catalog::{
+    SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1,
+  };
+  use aeordb::engine::v4::semantic_catalog_mutation::{
+    SemanticCatalogMutationRequestV1, SemanticCatalogMutationV1, SemanticCatalogSnapshotV1, plan_semantic_catalog_mutation_v1,
+  };
+  use aeordb::engine::v4::source_selector_compiler::{SourceSelectorCompilationRequestV1, SourceSelectorInputV1, compile_source_selector_v1};
+  use tokio_util::sync::CancellationToken;
+
+  struct CapturedObjects<'a> {
+    publisher: &'a V4FirstAuthorityPublisher,
+    header: &'a SelectedDatabaseHeaderV4,
+    cancellation: &'a CancellationToken,
+  }
+
+  impl SemanticCatalogObjectSourceV1 for CapturedObjects<'_> {
+    fn load_semantic_object(&self, kind: u16, identity: &[u8]) -> Result<Option<Vec<u8>>, SemanticCatalogReadErrorV1> {
+      self
+        .publisher
+        .load_semantic_object_at_captured_header(self.header, kind, identity, self.cancellation)
+        .map_err(|source| SemanticCatalogReadErrorV1::corrupt(source.code(), source.to_string()))
+    }
+  }
+
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(192 << 20, 256 << 20, 32 << 20, 16 << 20).unwrap());
+    let scope =
+      encode_scope_definition(ScopeDefinitionWriteV1 { mode: ScopeMatchingMode::DirectChildren, owner_path: "/", glob: None }, algorithm)
+        .unwrap();
+    let mut definitions = vec![(3, encode_semantic_definition_object(3, &scope.value, algorithm).unwrap())];
+    for field in default_metadata_indexes_v1() {
+      let context = compile_parser_context_v1(
+        ParserContextCompilationRequestV1 {
+          source: ParserContextSourceV1::Metadata,
+          selector_dependency: ParserSelectorDependencyV1::None,
+          maximum_workspace_bytes: 64 << 20,
+        },
+        &memory,
+        &|| false,
+      )
+      .unwrap();
+      let source = compile_source_selector_v1(
+        SourceSelectorCompilationRequestV1 {
+          field_name: field.field_name,
+          source: SourceSelectorInputV1::Metadata,
+          maximum_source_bytes: 1 << 20,
+          maximum_workspace_bytes: 64 << 20,
+        },
+        &memory,
+        &|| false,
+      )
+      .unwrap();
+      let indexes: Vec<_> = field
+        .converter_ids
+        .iter()
+        .map(|converter_id| CorrectedIndexInputV1 {
+          converter_id: *converter_id,
+          converter_limits: ConverterDefinitionLimitsInputV1::default(),
+          field_limits: FieldDefinitionLimitsInputV1::default(),
+        })
+        .collect();
+      let request = IndexDefinitionCompilationRequestV1 {
+        scope_id: &scope.scope_id,
+        source: &source,
+        parser_context: &context,
+        source_limits: SourceDefinitionLimitsInputV1::default(),
+        indexes: &indexes,
+        hash_algorithm: algorithm,
+        maximum_workspace_bytes: 64 << 20,
+      };
+      assert!(compile_index_definitions_v1(request.clone(), &memory, &|| true).is_err());
+      assert_eq!(publisher.observe().unwrap(), before);
+      let compiled = compile_index_definitions_v1(request, &memory, &|| false).unwrap();
+      definitions.push((4, encode_semantic_definition_object(4, &compiled.value_store().value, algorithm).unwrap()));
+      for index in compiled.field_indexes() {
+        definitions.push((5, encode_semantic_definition_object(5, &index.value, algorithm).unwrap()));
+      }
+    }
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    assert_eq!(definitions.iter().filter(|(class, _)| *class == 4).count(), 8);
+    assert_eq!(definitions.iter().filter(|(class, _)| *class == 5).count(), 13);
+    definitions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.semantic_id.cmp(&right.1.semantic_id)));
+    let records: Vec<_> = definitions
+      .iter()
+      .map(|(class, definition)| SemanticCatalogRecordV1 {
+        record_kind: *class,
+        owner_key: &definition.semantic_id,
+        semantic_id: &definition.semantic_id,
+        definition_object_id: &definition.object.object_id,
+      })
+      .collect();
+    let mut objects: Vec<_> = definitions.iter().map(|(_, definition)| definition.object.clone()).collect();
+    publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+        database_id: &before.selected.header.database_id,
+        objects: &objects,
+        publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+      })
+      .unwrap();
+    let cancellation = CancellationToken::new();
+    let mut root = None;
+    let mut record_count = 0;
+    let mut node_count = 0;
+    for record in records {
+      let observed = publisher.observe().unwrap();
+      let source = CapturedObjects { publisher: &publisher, header: &observed.selected, cancellation: &cancellation };
+      let plan = plan_semantic_catalog_mutation_v1(
+        SemanticCatalogMutationRequestV1 {
+          hash_algorithm: algorithm,
+          snapshot: SemanticCatalogSnapshotV1 { root_object_id: root.as_deref(), record_count, node_count },
+          mutation: SemanticCatalogMutationV1::Upsert(record),
+          maximum_workspace_bytes: 32 << 20,
+        },
+        &source,
+        &memory,
+        &|| false,
+      )
+      .unwrap();
+      let publication = ImmutableSemanticObjectBatchPublicationRequestV1 {
+        database_id: &observed.selected.header.database_id,
+        objects: plan.objects(),
+        publication_timestamp_ms: observed.selected.header.updated_at_ms + 1,
+      };
+      assert!(!publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+      assert!(publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+      for object in plan.objects() {
+        if !objects.iter().any(|existing| existing.object_id == object.object_id) {
+          objects.push(object.clone());
+        }
+      }
+      root = plan.root_object_id().map(<[u8]>::to_vec);
+      record_count = plan.record_count();
+      node_count = plan.node_count();
+    }
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    assert_eq!(record_count, 22);
+    let after = publisher.observe().unwrap();
+    assert_eq!(after.selected.header.head_hash, before.selected.header.head_hash);
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    for object in &objects {
+      let kind = u16::from_le_bytes([object.value[6], object.value[7]]);
+      assert_eq!(reopened.load_semantic_object(kind, &object.object_id).unwrap().as_deref(), Some(object.value.as_slice()));
+    }
+    let source = CapturedObjects { publisher: &reopened, header: &after.selected, cancellation: &cancellation };
+    let reader = SemanticCatalogReaderV1::new(algorithm, &source);
+    let walked = reader
+      .walk_catalog(
+        root.as_deref().unwrap(),
+        SemanticCatalogTraversalBoundsV1::new(record_count, node_count).unwrap(),
+        &|| false,
+        |record| {
+          reader.with_definition(record, &|| false, |payload| {
+            let definition = definitions.iter().find(|(_, definition)| definition.semantic_id == record.semantic_id).unwrap();
+            assert_eq!(definition.0, record.record_kind);
+            assert_eq!(payload, &definition.1.object.value[32 + 16 + algorithm.hash_length()..definition.1.object.value.len() - 4]);
+            Ok(())
+          })
+        },
+      )
+      .unwrap();
+    assert_eq!(walked.class_counts, [0, 0, 0, 1, 8, 13, 0, 0]);
+    assert_eq!(walked.nodes, node_count);
+    assert!(
+      reopened
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+          database_id: &after.selected.header.database_id,
+          objects: &objects,
+          publication_timestamp_ms: after.selected.header.updated_at_ms + 1,
+        })
+        .unwrap()
+        .idempotent
+    );
+    assert_eq!(reopened.observe().unwrap(), after);
+  }
+}
+
+#[test]
 fn immutable_entity_batch_can_mix_existing_and_new_entities_without_rewriting_the_existing_identity() {
   let algorithm = HashAlgorithm::Blake3_256;
   let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);

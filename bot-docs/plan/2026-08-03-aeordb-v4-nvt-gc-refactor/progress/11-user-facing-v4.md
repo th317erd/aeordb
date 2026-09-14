@@ -26,11 +26,14 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: corrected source-selector compilation and operational
-canonical-allocation propagation pass all ten Linux qualification gates; see
+Current landing: complete corrected index-definition compilation and the eight
+metadata/thirteen-index recipe pass all ten Linux qualification gates; see the
+[strict index-definition proof](../evidence/user-facing-v4-u1-index-definition-proof-20260914.json).
+Whole configuration/profile compilation and staged activation remain outstanding;
+this is not v4 readiness. Source-selector compilation and operational
+canonical-allocation propagation are committed/pushed as `3f5752bd`; see
 the [strict source-selector proof](../evidence/user-facing-v4-u1-source-selector-proof-20260914.json).
-Parser-context compilation is committed/pushed as c694e64d. Full/default index
-compilation and staged activation remain outstanding; this is not v4 readiness.
+Parser-context compilation is committed/pushed as c694e64d.
 The preceding parser-registry compilation evidence remains in its
 [strict proof](../evidence/user-facing-v4-u1-parser-registry-proof-20260914.json).
 Definition wrappers and bounded catalog COW are committed and pushed as
@@ -2348,6 +2351,112 @@ remain; this is not U1 or campaign completion. Next is corrected source-selector
 normalization against the existing owner rules, followed by whole-definition
 compilation/integration. The 16-case cache-only draft is preparation, not executed
 evidence or production code.
+
+## U1 completed compiler unit: complete corrected index definitions
+
+Entry3f5752bd7e3573c4e92362898131c216a214f206,development/origin equal,
+tracked tree clean; source-selector commit/push5227closed0. Direct owner.
+Own new index-definition compiler/spec,Cargo/module registration,measured
+resource and physical-publication tests,ledger/proof. Preserve frozen codecs,
+allfixtures/nativeidentities,legacy source resolver and the single physical
+writer. No runtime/default/service activation or new public JSON schema here.
+
+Dependency trace: captured source_selector_compiler + parser_context_compiler
+feed value_store's complete corrected child-closure writer; permanent converter
+registry and field_definition own canonical ACNV/AFIX bytes. semantic_definition
+wrappers/catalog mutation then own immutable objects/COW, with staged task
+activation still pending. Existing field writers intentionally accept retained
+codec limits beyond the corrected public policy; enforce Round11hard maxima
+in this compiler without tightening migration-compatible readers.
+
+Typed input boundary: already compiled source/context,exact ScopeId/hash,optional
+finite source/converter/field limits,plural corrected converter requests and an
+operational workspace limit. Materialize Round11defaults; derive canonical zeros
+only for inapplicable metadata/document or non-JSON traversal fields, rejecting
+contradictory explicit values. Reject legacy/unknown converters. Compile complete
+ValueStore plus deterministically sorted/deduplicated complete FieldIndex
+definitions; changed converter limits are semantic, not silently collapsed by
+converter ID alone. Expose the exact eight-metadata/thirteen-index default recipe
+from Round11.10; whole semantic profile/atomic activation remains the next owner.
+
+Falsifying target to write before production: index_definition_compiler_spec.
+Independent fixture/offset/hash expectations must cover allfive algorithms,
+twelvecorrected converters,all default fields/strategies,source/context closure,
+default-versus-explicit equality,ordering/duplicate equivalence,meaningful limit
+changes,zero/over-max/migration rejection,metadata/mapper canonical zeros,
+1GiB explicit document ceiling,finite-workspace preflight/cancellation/revocation
+and retained ownership. Keep mapper/parser limits in their child records; no
+duplicated parent policy. Test actual runtime compilation and physical publish/
+reopen against real canonical outputs. Add measured failed allocations and
+broader consumer/reference gates before landing. Repeated selector validation
+can compile regex syntax: its workspace must be explicitly charged, not assumed
+covered by the encoded selector length or by another object's reservation.
+The API RED was subsequently captured before production implementation; see below.
+
+Nineteen index_definition_compiler_spec cases were installed before any
+production module. Four-input API RED ran32759 under
+aeordb-v4-u1-index-definition-red-20260914,inv92ac40f2cd82435393da75641bef2255;
+started15:28:39UTC,finished15:29:37UTC with expected E0432 missing compiler
+module (exit101, zero executed tests); six raw files mirrored6050closed0.
+Isolated worktree
+source-u1-index-definition is detached3f5752bd; preparation99926closed0.
+Manifesta084b8fca3135042878869c6bfa1a900b9345ee59e21461ceedc4685008a65b0;
+archive27787dc0c3bba1f8e1c85d1c747780c1429da9bc3225c80817f38999b1c85d75.
+Additional resource23rd test injects field-vector,converter,ValueStore
+andFieldIndex output allocations and checks workspace preflight/leak freedom.
+New20th migration-execution test publishes default8ValueStores/13FieldIndexes
+plusrealScope into immutableobjects/catalog,reopens/hardreads/idempotent republishes
+and provesnoHEADselection. Neither extra test is in the four-input APIRED packet;
+both are included in the first implementation packet. The new compiler now
+materializes the approved limits through the existing writers, reserves checked
+workspace before child decoding, retains its Task lease with the owned results,
+and checks cancellation/admission throughout. First narrow gate95379 started
+15:43UTC on desktop; all19compiler+23resource tests passed at15:43:46Z
+(57.406s,CPU1m3.077,invocationc880139d36524befb60c0f3257ce2c13).
+Six raw files and two same-host binary digests mirrored37055closed0.
+Eight-input manifest37c6873735702da89027048271bfcbf50d0113ab2662029fb8300f70bc24d917;
+archivec8718fb8f108ffc06b6f08166eeb34a66edc8824f4c57706e4ed308d90a6ecce.
+Final ten-gate qualification59499 started15:49:24UTC with byte-identical inputs.
+Includes physical default publication/reopen,37affected targets,library/reference,
+fixtures,format,strictworkspaceClippy,audit and debt self-test. Unit not yet landed.
+
+First final qualification stopped at the new physical test: it incorrectly
+put22different lookup digests into one collision leaf. The unchanged production
+writer correctly returned catalog_leaf_lookup_digest; this was a test-setup
+defect, not a relaxed format rule. Terminal59499exit101 at15:49:32Z,
+invocationa2196d39c04e4adb87e2630f871d4702,4.494sCPU3.314;42narrowpassed.
+Twelve raw files,driver and3same-host binary digests mirrored86623closed0.
+Only that new test changed: build the22-binding catalog through bounded COW
+against captured physical reads, check idempotent publication, reopen every
+object and traverse all classes/definition bytes while HEAD remains unchanged.
+Final2qualification99127 started15:54:52UTC,exact8inputs
+2f6f7e73b2911ecc49d55162a77a876c2fbdc1ef45181e1d873d94d2b8095a37;
+archive6ea7007ce6373cb2297a73e658e19ca966bb2f9947a10afb1d125573689a5998.
+
+Final2 passed all ten gates, terminal99127closed0 at16:00:38UTC, invocation
+0bad42a2a94b4b8cb105e0d5058d803b;5m43.526s elapsed,6m55.624s CPU.
+Passed42narrow tests(19compiler+23resource),one physical publication/reopen
+test across allfive algorithms,646affected tests in37targets,688library tests,
+175reference tests,472independent fixtures,1503reviewed audit occurrences,
+format,strictworkspaceClippy and debt self-test. Kernel peak5,932,097,536 bytes
+remained under6GiB/no-swap. Final Data336,051,429,376 and home69,996,326,912
+bytes remained above their floors. Sixty raw files,driver and43same-host
+executable digests mirrored61641closed0 before any subsequent remote update.
+Strict evidence verifier d10d73 PASS; the
+[complete proof](../evidence/user-facing-v4-u1-index-definition-proof-20260914.json)
+binds source/archives,failed-first API proof,the corrected test setup,commands,
+test counts,binary identity and resource samples. Original tests,codec readers,
+frozen fixtures,legacy controls and production authority are unchanged.
+
+Next: whole configuration/compiler-profile and staged task integration, with
+the remaining runtime-admission classification obligation retained below.
+The metadata recipe is not the complete CLI bootstrap: current start.rs also
+contains text,title,metadata.format andmetadata.duration content fields under
+rootglob**/*. Preserve/reconcile those existing behaviors when binding corrected
+configuration; do not silently delete them. Native selected reads also require
+one ValueStore per(field name,ScopeId), so conflicting repeated field definitions
+cannot be emitted merely because their complete IDs differ. No new public JSON
+schema or compiler-profile fingerprint was invented by this unit.
 
 ## U1 completed compiler unit: corrected source selectors
 

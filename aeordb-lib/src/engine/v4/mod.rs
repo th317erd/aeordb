@@ -64,6 +64,7 @@ pub mod index_copy_on_write;
 pub mod index_coverage_planner;
 pub mod index_coverage_registry;
 pub mod index_coverage_runtime;
+pub mod index_definition_compiler;
 pub mod index_definition_runtime;
 pub mod index_generation_authority;
 pub mod index_generation_publication;
