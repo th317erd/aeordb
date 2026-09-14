@@ -846,3 +846,66 @@ fn complete_index_definition_output_allocations_are_fallible_and_release_only_th
   assert_preflight(allocations);
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
 }
+
+#[test]
+fn whole_configuration_admits_before_parsing_and_handles_real_scope_output_refusal() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::DependencyRecordV1;
+  use aeordb::engine::v4::index_configuration_compiler::{
+    IndexConfigurationAliasSnapshotV1, IndexConfigurationCompilationRequestV1, compile_index_configuration_v1,
+  };
+  use aeordb::engine::v4::parser_registry_compiler::{
+    ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
+  };
+  struct Snapshot;
+  impl ParserAliasSnapshotV1 for Snapshot {
+    fn resolve_parser_alias(&self, _: &str) -> Result<Option<DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      panic!("empty configuration must not resolve aliases")
+    }
+  }
+  impl IndexConfigurationAliasSnapshotV1 for Snapshot {
+    fn resolve_mapper_alias(&self, _: &str) -> Result<Option<DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      panic!("empty configuration must not resolve aliases")
+    }
+  }
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+  let registry = compile_parser_registry_v1(
+    ParserRegistryCompilationRequestV1 {
+      source: None,
+      hash_algorithm: ALGORITHM,
+      maximum_source_bytes: 1024,
+      maximum_workspace_bytes: 32 << 20,
+    },
+    &Snapshot,
+    &memory,
+    &|| false,
+  )
+  .unwrap();
+  let baseline = memory.snapshot().unwrap().reserved_bytes;
+  let request = IndexConfigurationCompilationRequestV1 {
+    source: br#"{"$v":1,"indexes":[]}"#,
+    owner_path: "/",
+    registry: &registry,
+    hash_algorithm: ALGORITHM,
+    maximum_source_bytes: 1024,
+    maximum_workspace_bytes: 64 << 20,
+  };
+  let compiled = compile_index_configuration_v1(request, &Snapshot, &memory, &|| false).unwrap();
+  assert_eq!(compiled.scope().value.len(), 65);
+  drop(compiled);
+  let (result, allocations) = measure(65, || compile_index_configuration_v1(request, &Snapshot, &memory, &|| false));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  let oversized_owner = "/a".repeat((5 << 20) / 2);
+  for input in [
+    IndexConfigurationCompilationRequestV1 { maximum_source_bytes: 1, ..request },
+    IndexConfigurationCompilationRequestV1 { maximum_workspace_bytes: 1, ..request },
+    IndexConfigurationCompilationRequestV1 { owner_path: &oversized_owner, ..request },
+  ] {
+    let (result, allocations) = measure(0, || compile_index_configuration_v1(input, &Snapshot, &memory, &|| false));
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_preflight(allocations);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  }
+}

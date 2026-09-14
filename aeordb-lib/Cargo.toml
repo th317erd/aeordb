@@ -1488,6 +1488,10 @@ path = "spec/engine/source_selector_compiler_spec.rs"
 name = "index_definition_compiler_spec"
 path = "spec/engine/index_definition_compiler_spec.rs"
 
+[[test]]
+name = "index_configuration_compiler_spec"
+path = "spec/engine/index_configuration_compiler_spec.rs"
+
 
 [lints]
 workspace = true

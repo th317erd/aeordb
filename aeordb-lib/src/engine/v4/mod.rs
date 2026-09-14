@@ -56,6 +56,8 @@ pub mod index_artifact_cursor;
 pub mod index_artifact_native;
 pub mod index_batch_application;
 pub mod index_compaction_runtime;
+pub mod index_configuration_compiler;
+mod index_configuration_source;
 pub mod index_converter;
 pub mod index_converter_v0;
 pub mod index_coordinator;

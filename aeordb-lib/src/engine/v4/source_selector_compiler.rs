@@ -50,6 +50,10 @@ pub struct CompiledSourceSelectorV1 {
 }
 
 impl CompiledSourceSelectorV1 {
+  pub(crate) fn workspace_bytes(&self) -> u64 {
+    self._memory.bytes()
+  }
+
   pub fn field_name(&self) -> &str {
     &self.field_name
   }

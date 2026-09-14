@@ -54,6 +54,10 @@ pub struct CompiledParserContextV1 {
 }
 
 impl CompiledParserContextV1 {
+  pub(crate) fn workspace_bytes(&self) -> u64 {
+    self._memory.bytes()
+  }
+
   pub fn parser_plan(&self) -> &[u8] {
     &self.parser_plan
   }

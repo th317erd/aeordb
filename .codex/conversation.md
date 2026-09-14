@@ -15963,3 +15963,178 @@ v4 fixtures and persisted callers explicitly; preserve historical bytes and
 do not silently reinterpret old ambiguous bindings. This approval does not
 authorize production migration, installation, service activation, or changes
 to the retained corrupt FS-Server1 database.
+
+## September 14 U1 compiler integration — contract inventory and draft
+
+Planning Cap review at `b54549a7f47c4d42a07dfd2eab0d37f7a4e1fddf`.
+This section is a **draft implementation refinement**, not an owner ruling or
+permission to change any frozen wire schema. No new configuration compiler,
+profile fingerprint, or source schema has been implemented from this draft.
+
+Observed prerequisites now green: canonical class1–7 wrappers, bounded catalog
+COW, captured parser-registry/context compilation, source selectors, complete
+corrected definitions and the eight-metadata/thirteen-index recipe. The exact
+compiler-profile authority and complete source configuration compiler do not
+yet exist. CanonicalConfigValue is a structural codec, not a semantic compiler.
+
+Verified remaining boundaries:
+
+- `index_config.rs` accepts only$v0, with a flat indexes array and name/type/
+  source/min/max rows. Type is a string or array. The corrected path cannot
+  reuse its permissive legacy converter aliases or duplicate-member handling.
+- `cache_loaders.rs:138`, `index_config_resolver.rs:114`,
+  `server/legacy_v3_root_adapter.rs:600`, and
+  `server/engine_routes.rs:638` consume that legacy shape. Their versioned
+  behavior stays intact until the coordinated runtime/producer integration.
+- `read_view_native.rs` rejects duplicate(field name,ScopeId) ValueStores.
+  Different IDs do not make conflicting same-field sources acceptable.
+- CLI `start.rs::default_global_index_config` uses rootglob**/* and12fields:
+  eight metadata fields plus text,title,metadata.format,metadata.duration.
+  Its existing exact-only hash/content-type regression remains required.
+- Native image/audio/video outputs place format below metadata; audio/video
+  name duration `duration_seconds`. The bootstrap currently omits explicit
+  source arrays for its dotted field names. Round8 source syntax treats one
+  dotted string as one literal key, not a traversal. A corrected bootstrap
+  needs explicit source mappings, with failing-first proof of the discrepancy;
+  migrating/reopening$v0 must not silently acquire those corrected mappings.
+- `system_family.rs` already computes the semantic-only registry fingerprint.
+  No production compiler-profile fingerprint emitter was found; namespace
+  codecs merely carry/check its nonzero selected-hash-width slot.
+
+Technical draft for the next decision pass:
+
+1. Keep one corrected ingress and one explicit legacy adapter. Corrected JSON
+   retains `$v`, `glob`, `indexes`, `name`, `type`, `source`, and the scope parser
+   selection; require integer$v1. Duplicate/unknown members, invalid types,
+   conflicting aliases and legacy min/max/converter names fail explicitly.
+   Logging and compression remain nonsemantic policy owned by their existing
+   control validators; they cannot affect class1 identity.
+2. Optional limit overrides should use the exact existing typed limit names
+   grouped as source_limits,converter_limits,field_limits. Concrete invocation
+   policies must stay distinct: explicit/registry WASM, raw JSON, native suite,
+   and per-mapper calls cannot share one incorrectly context-filled policy.
+   Finalize exact source-property spelling, omitted defaults and bounds in the
+   same specification that defines the reproducible compiler profile. Do not
+   guess values from arbitrary test fixtures or expose operational budgets as
+   persisted semantic limits.
+3. Canonicalize source order only where it is a set: configured fields and
+   converter requests. Preserve JSON path segment order and mapper argument
+   arrays. Equivalent same-field rows combine converter definitions only when
+   their complete ValueStore semantics agree; otherwise reject the config.
+   Empty fields preserve the Scope definition and nearer-scope masking.
+4. Compile against one captured alias/registry snapshot. Emit complete scope,
+   value,field and dependency definitions. Retain output under one bounded
+   parent admission and release each transient child compiler lease promptly.
+   Alias lookup failures are not absence; no live alias lookups during later
+   execution or activation. Cancellation/resource refusal leaves old authority.
+5. Class1 projection should bind canonical ScopeId plus sorted field-to-
+   ValueStoreId/IndexId relationships, using the existing structural codec and
+   existing class1 hash domain. This captures complete transitive semantics,
+   not raw source identities or formatting. Source identities remain task
+   preconditions. Freeze exact projection keys/framing with independent bytes
+   before enabling it; do not infer full semantics from a generic JSON hash.
+6. Define the compiler profile from immutable normative semantics and independent
+   conformance artifacts, not source-code/build hashes. Use the selected
+   registered database hash width for its identity. Freeze exact artifact order,
+   framing/domain and all five expected digests before emitting a complete
+   SemanticStateRoot. Preserve existing historical fixtures and reader framing.
+7. New corrected bootstrap must retain the12 current field names and rootglob,
+   use corrected strategies and explicit nested sources where required, and
+   leave existing configs untouched. Exact metadata duration source spelling
+   remains an implementation proof item, not a silent migration correction.
+
+The next pass must turn this draft into a runnable, bounded test matrix and
+resolve technical details from the existing contracts. Escalate only an actual
+owner-policy conflict; the full campaign remains authorized and active. No
+production services, retained database, installed binaries or sealed evidence
+are involved in this refinement.
+
+### U1 source-configuration contract — technical decision pass
+
+**DECIDED (self, 2026-09-14):** Complete the above draft as the source compiler's
+implementation contract. These are previously unspecified source/profile
+details, not changes to Rounds8–16 persisted definitions, public query meaning,
+legacy adapters, catalog keys, or activation/crash rules. Existing$v0 files and
+readers remain unchanged. The following source schema applies only to explicitly
+authored$v1 index configuration; no existing file is upgraded on open.
+
+The required top-level members are integer `$v: 1` and `indexes` (array,
+possibly empty). Optional members are `glob`, `parser`, `logging`, `compression`,
+`parser_memory_limit`, and `parser_policies`. Strings/booleans retain their
+existing types. No null-as-omission, numeric coercion, unknown members, duplicate
+members or trailing JSON are accepted. Logging/compression do not enter the
+semantic projection; operational validation still belongs to their control owner.
+An absent file is handled as absence by the captured source owner, not replaced
+with a default by this compiler. New-database bootstrap supplies an explicit file.
+
+Each indexes row requires `name` and `type` (one canonical corrected converter
+name or a nonempty array of names). Optional row members are `source`,
+`source_limits`, `converter_limits`, and `field_limits`. The three limit objects
+use exactly the public typed fields in index_definition_compiler.rs; numeric
+values are unsigned JSON integers with the existing context-specific zeros,
+defaults and hard maxima. Repeated rows can express different converter/field
+limits. The compiler merges equivalent ValueStore meanings under one canonical
+field name and rejects conflicting ones. Legacy field/type aliases and min/max
+ranges remain$v0-only; @file_name remains the approved @filename spelling.
+
+Ordinary source arrays and omitted sources use Round8A exactly. A mapper source
+is an object with required `plugin` string and optional `args` and `policy`;
+arguments default to typed null. Metadata fields use their fixed selector and
+reject a contradictory explicit source. The mapper policy applies only to that
+concrete WASM call. `parser_policies` has optional `wasm`, `raw_json`, and
+`native_suite` policy objects; an explicit parser uses the WASM policy, while
+automatic parsing uses the appropriate separate tier policies. Policy objects
+are partial overrides of InvocationPolicyV1's named numeric fields, excluding
+`kind` (derived from the call site). Unknown/duplicate fields fail. Native-only
+zero rules and frozen WASM hard maxima are preserved, never filled from one
+incompatible shared policy. `parser_memory_limit` is the existing byte-size
+string spelling for the WASM parser linear-memory limit; if its explicit policy
+spelling is also supplied they must agree after normalization.
+
+Initial profile defaults not already numerically fixed by Round11 are:
+65,536 table elements,65,536 structure nodes,1MiB scalar bytes,depth32,
+65,535 container members,one WASM instance/memory/table,4,096 value-stack height,
+and256 recursion depth. These are explicit finite choices for the new compiler
+profile, not numbers inferred from old fixtures. Common response default is
+16MiB; WASM request/linear-memory/fuel defaults remain64MiB/64MiB/10,000,000.
+Native request and WASM-only values are zero; stack/recursion fields are common
+nonzero fields as required by the existing codec. Additional overrides retain
+codec/executor representability bounds; these defaults do not invent new hard
+maxima beyond existing intrinsic/protocol limits. All call sites still require
+independent shared operational admission. A future changed default requires a
+new compiler profile/conformance identity; retained definitions are not changed.
+
+The class1 projection is a canonical structural map with exactly `fields` and
+`scope_id`. `scope_id` is canonical Bytes containing the selected-H ScopeId.
+`fields` is a map from canonical field name to a map with exactly `indexes`
+(array of distinct complete IndexIds as Bytes, sorted by raw full ID) and
+`value_store_id` (Bytes). All maps use CanonicalConfigValue's raw-UTF8 key order.
+Scope, source, parser, mapper, dependency, converter and limit meanings are
+transitively bound by these complete IDs. Source-control FileRecord IDs,
+logging, compression, formatting and task/resource policy remain excluded.
+Existing class1 domain and wrapper are unchanged. Independently constructed
+projection bytes must precede its first producer implementation.
+
+The new compiler profile uses immutable `SPEC.md`, `invalid.bin`,
+`properties.json`, and `vectors.bin` in that exact name order. Its fingerprint
+is selected database H over ASCII `aeordb.semantic-compiler-profile.v1\0`, then
+for each file its byte length as u64LE followed by exact bytes. The corpus
+contains source-to-definition/projection cases, not a SemanticStateRoot or its
+own fingerprint, avoiding self-reference. Expected all-five-algorithm profile
+digests are separate assertions, not hashed corpus members. Do not use source-
+code/build hashes or mutable operational registry projections. Freeze these
+artifacts and independent digests before any production profile emitter.
+
+New corrected bootstrap retains rootglob**/* and all12 current field names.
+Metadata uses the approved8/13 recipe. Additional corrected fields are text
+(trigram),title(UTF8 order+trigram),metadata.format(UTF8 order,explicit source
+["metadata","format"]),andmetadata.duration(f64 finite order,explicit source
+["metadata","duration_seconds"]). The explicit nested mappings are a declared
+new-v1 default correction supported by actual parser outputs; they are never
+retroactive fixes to retained$v0 controls or definitions. Tests must reproduce
+the old literal-key miss and prove the corrected mapped values before rollout.
+
+Compilation itself grants no service/physical mutation authority. Stage complete
+definitions under shared admission, preserve strict conflict/error classes,
+and leave root selection/task activation to the existing coordinated owner.
+The full bridge's U2–U7 obligations remain unchanged and outstanding.

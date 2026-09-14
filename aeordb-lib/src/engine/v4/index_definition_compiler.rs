@@ -70,6 +70,10 @@ pub struct CompiledIndexDefinitionsV1 {
 }
 
 impl CompiledIndexDefinitionsV1 {
+  pub(crate) fn workspace_bytes(&self) -> u64 {
+    self._memory.bytes()
+  }
+
   pub fn value_store(&self) -> &EncodedValueStoreDefinitionV1 {
     &self.value_store
   }

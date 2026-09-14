@@ -26,11 +26,16 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: complete corrected index-definition compilation and the eight
-metadata/thirteen-index recipe pass all ten Linux qualification gates; see the
+Current landing: whole corrected index configuration compilation passes all ten
+Linux qualification gates, including real-file catalog publication/reopen with
+all five hash algorithms and all seven classes. See the
+[strict configuration proof](../evidence/user-facing-v4-u1-index-configuration-proof-20260914.json).
+Compiler-profile conformance/fingerprinting and staged activation are next;
+neither full U1 nor user-facing v4 readiness is complete. The preceding complete
+index-definition compiler and eight-metadata/thirteen-index recipe are committed
+and pushed as `b54549a7`; see the
 [strict index-definition proof](../evidence/user-facing-v4-u1-index-definition-proof-20260914.json).
-Whole configuration/profile compilation and staged activation remain outstanding;
-this is not v4 readiness. Source-selector compilation and operational
+Source-selector compilation and operational
 canonical-allocation propagation are committed/pushed as `3f5752bd`; see
 the [strict source-selector proof](../evidence/user-facing-v4-u1-source-selector-proof-20260914.json).
 Parser-context compilation is committed/pushed as c694e64d.
@@ -2351,6 +2356,145 @@ remain; this is not U1 or campaign completion. Next is corrected source-selector
 normalization against the existing owner rules, followed by whole-definition
 compilation/integration. The 16-case cache-only draft is preparation, not executed
 evidence or production code.
+
+## U1 completed compiler unit: whole corrected configuration compilation
+
+FINAL2 completed66907closed0 at2026-09-14T17:15:35Z, invocation
+5c60e2f038b6400989baed9d418a24e3;6m44.809s elapsed/8m8.186s CPU.
+Allten gates pass:45narrow(21configuration+24resource),1physical publication/
+reopen test,666affected across38targets,688library,175reference,472independent
+fixtures,1503reviewed audit occurrences,format,strictworkspaceClippy and debt
+self-test. Kernel peak6,222,929,920 bytes stays below6GiB with swap disabled.
+FinalData336,033,685,504/home69,925,265,408 bytes stay above both floors.
+All60raw stage files,driver and44same-host executable digests are mirrored.
+The strict proof was created17:20:39Z; after context recovery,128local input/
+evidence hashes were checked again against that proof. Executables remain on
+their build host; no target or executable was transferred. A first local-only
+recursive receipt check attempted a desktop executable path and failed ENOENT;
+the corrected check distinguishes local artifacts from same-host binary receipts.
+
+Initial eight missing-API tests remain byte-identical; nine additional tests
+preceded production, and the two measured admission regressions failed before
+their fixes. The first full audit failure and both resource failures remain in
+the proof history. Only the three read-only workspace getters affect existing
+child compilers. Existing23resource cases,20physical cases,frozen definitions,
+native identities,legacy configuration readers,bothlocks and the single physical
+writer are preserved. No root selection,production action or installation took
+place. The following entries are chronological history, not current blockers.
+
+Next: freeze independent compiler-profile source-to-byte conformance and allfive
+expected digests, implement its emitter, then staged task-backed integration.
+Extend exact numeric property-to-wire mapping coverage; do not silently modify
+the37 frozen converter/strategy bundles or treat this unit as full readiness.
+
+Resource review corrections have failing-first evidence. Owner-path RED59101
+failed with149,947,139 cumulative allocated bytes and67,108,864 maximum allocation
+before rejecting5MiB raw input. Six raw files plus one executed binary digest
+were captured55205. Child-budget RED34691a failed because a16MiB total budget
+incorrectly accepted overlapping source/context/definition workspaces; captured
+six raw files and one binary digest20784. New parent admission charges32x owner
+bytes before normalization and carves each child's limit from the aggregate
+remaining workspace, including transfer overlap. Three child compilers gain only
+read-only workspace-byte getters; their semantic compilation is unchanged.
+
+First full run5250 passed45narrow tests and the all-five-hash real publication/
+reopen case, then failed the existing architecture gate on three new suppression-
+shaped expressions. The audit reported a Result-to-Option conversion, an optional
+default and a discarded numeric conversion error. Captured18raw+driver20746 and
+seven same-host executable digests24358 before updating remote source. Current
+correction preserves numeric error details, makes default selection explicit,
+and uses map entry APIs. It does not raise the1503 reviewed baseline or change
+any frozen fixtures. FINAL2 is running from12inputs manifest
+4f5f5c611cd659c86bc30e6b7af1e31f0be35273e4a88d28871582f06803cd18,
+archivee762fe95ae20a3acaedf9a177aff387cb4e397646708265e2620bc0b8afeb9a8.
+Earlier final2 preparation was superseded before execution and retained separately;
+it provides no test evidence. Expected remaining full proof is45narrow,1physical,
+666affected across38targets,688library,175reference,472fixtures and static gates.
+
+First implementation22262 PASS at16:47:36Z:17configuration+24resource tests,
+57.415s elapsed/1m3.643s CPU, invocationee91aa8b29324f2fb03d477f3d660411.
+Eight-input manifest1ed887716389cbb6235643ea006a9368e26629fbd0ded86d86affa44fa7b781e,
+archive8abaaf3af576b946a40c0c785604ad78ac48e84e0a104f7ea871a6df9d2b4bf3;
+six raw stage files and two same-host binary digests mirrored3625closed0.
+This is an interim compiler baseline, not full unit qualification. New registry
+and artifact/profile perimeter cases bring the local target to19. New physical
+proof covers all5hashes with default/explicit-WASM+mapper/empty configurations,
+all7 catalog classes across the scenarios, exact reopened payloads, idempotent
+publication and unchanged selected HEAD. It has not yet executed.
+
+Review found owner normalization may allocate its path-segment vector before
+rejecting an oversized canonical scope; the8x raw-owner charge is insufficient
+to conservatively cover all normalization scratch. A new measured5MiB owner
+case is running as owner-admission-red59101 from otherwise unchanged production.
+Capture the falsifying allocation evidence before adjusting that charge, then
+carry the permanent guard through narrow and full qualification.
+
+September14 APIRED16010closed101 at16:33:45Z, invocation
+5cd0bccf656843e7a053b6552eb6f7f9: E0432 missing compiler module, zero executed
+tests,57.960s elapsed/1m2.947s CPU. Four-input manifest
+ce3b6489b78fdbd3e03e8145e12ff62994321f00cd5c5b2085eab4cbd659ef31,
+archive3782c78b90066a539468e49e268b01d3f8ffd7bf29b609548bfc84e0d992d5e8.
+Six raw files mirrored88556closed0 before any remote source changes.
+Eight initial tests included independent Scope/ValueStore/FieldIndex/projection
+bytes and all-five-algorithm hashes. Expanded preimplementation cases cover
+all13 definition limit fields,14 invocation fields across4 call sites, strict
+nested schema, parser-memory alias conflict/equivalence, alias capture reuse,
+mapper argument/source ordering, transient lease release/cancellation/revocation,
+and actual native WAV metadata versus the old default literal-key miss.
+The appended conversation technical decision specifies the v1 source/projection
+contract; it is not an owner policy ruling or frozen-format change. Profile
+conformance artifacts and emitter remain separately gated and not implemented.
+
+Entry `b54549a7f47c4d42a07dfd2eab0d37f7a4e1fddf`, development/origin equal,
+tracked tree clean after commit/push26260closed0. Direct owner. The preceding
+ten-gate compiler baseline is preserved; do not rerun it without a change.
+This entry is an inventory/proof obligation, not an implemented compiler.
+
+Read-only next-profile refinement: existing `semantics/v1/fingerprint-registry.json`
+and the contract generator freeze exactly37 converter/strategy bundles. The
+compiler profile is a separate identity family, not another converter/strategy
+or permission to regenerate those fingerprints. Its four-file corpus must bind
+both parser-registry and index-configuration compilation, all policy/limit
+defaults, canonical projection and dependency pinning rules. Freeze independent
+source-to-byte vectors and five expected profile digests before an emitter.
+Extend the current meaningful-change tests with exact source-property-to-wire
+mapping oracles in that corpus (including equal-default limit pairs), not just
+identity inequality. Do not derive expected corpus bytes using the production
+compiler. No profile artifacts/emitter or new SemanticStateRoot producer were
+started during this compiler's qualification.
+
+Trace the existing flat indexes.json shape through PathIndexConfig, the CLI
+bootstrap, corrected source/context/definition compilers, class-1 projection,
+dependency wrappers/catalog COW, and native selected semantic readers. The
+legacy reader supports only$v0 and remains unchanged. New$v1 source parsing
+must detect duplicate members before generic Value conversion, distinguish
+missing sources from failures, normalize path/glob/metadata aliases once, and
+exclude formatting/logging/physical compression from semantic identity.
+
+The selected native reader rejects two ValueStores for the same field/scope.
+Equivalent repeated rows may combine converter sets; conflicting source or
+parser/limit semantics must fail instead of publishing an unreadable catalog.
+Empty configured fields still preserve the nearer scope's masking behavior.
+Alias/dependency capture is immutable for the compilation; absent, unavailable,
+failed and cancelled resolution cannot collapse into the same result.
+
+Use existing compiled child bytes, one parent-owned retained-output admission,
+and bounded transient child compilation. Do not retain8MiB source and4MiB
+parser workspace per field across a large configuration. Exact class1 semantic
+projection must derive from normalized complete meanings, not raw JSON hashes.
+SystemFamily's semantic projection fingerprint already exists; the actual
+compiler-profile authority still needs its reproducible semantic specification
+and conformance definition before activation. Ordinary runtime/root selection
+and the single physical writer remain untouched by compilation tests.
+
+Before production, establish named source-configuration regression targets for
+strict schema/version/duplicate/error behavior, effective alias/default/order
+equivalence, every meaningful changed dependency/scope/source/limit, fieldless
+scopes, all registered hashes, shared memory/cancellation/revocation, exact
+independent projection bytes and physical staged closure/reopen. Preserve the
+current CLI's four extracted-content defaults as well as the eight metadata
+defaults when the eventual bootstrap is integrated. No new source schema,
+profile fingerprint or production implementation has been added by this entry.
 
 ## U1 completed compiler unit: complete corrected index definitions
 
