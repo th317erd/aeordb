@@ -2240,6 +2240,110 @@ selectors. Corrected metadata has no parser/dependencies and zero document/
 selector work limits. Complete concrete default profiles and source compilation
 must follow before semantic task activation. No next-unit source is written yet.
 
+## U1 next compiler unit: parser and selector dependency context
+
+Entry `2b50579a762472edc3872cfbe88bfbb3eab3e802`, development and origin equal,
+tracked tree clean, prior325affected/681library gate is the current baseline.
+Direct implementation owner; no agents. Own new `v4/parser_context_compiler.rs`
+and dedicated spec, v4 export/Cargo, dependency comparator visibility only,
+resource/persistence test extensions, ledger/proof. No registry-source behavior,
+fixture bytes, v0 adapters, physical writer or authority selection changes.
+
+Compile metadata-none, explicit corrected parser, or automatic captured registry
+plus fixed raw-JSON/native footer. The selector contributes no dependency for
+metadata, exactly the frozen Regex component for JSON, or one corrected mapper
+record. Only metadata can pair with no selector dependency. Deduplicate complete
+records and apply the existing exact Round9 comparator before assigning any
+ordinal. Parser candidates and mapper/Regex selector references share that one
+table. Exclude unused executables and mutable aliases. Invocation policies remain
+per call site; they never affect executable deduplication. Enforce existing
+structural policy constraints and corrected public WASM maxima (request64MiB,
+response16MiB, linear64MiB, fuel10million), not the more permissive structural
+retention contract. Preserve bounded outputs/admission/cancellation; no second
+memory manager or live alias resolver.
+
+Narrow target: `cargo test --offline --locked -j 2 -p aeordb --test
+parser_context_compiler_spec`. Failing-first API proof before implementation.
+Expected cases: independent none/automatic/explicit bytes and ordinal model;
+normalization/order/alias equivalence through the compiled registry; shared
+parser pins dedup but parser/mapper roles remain distinct; complete-record
+differences survive dedup; metadata/ordinary mismatches, unknown/legacy/wrong
+roles and malformed records rejected; exact plan/table caps and public policy
+maxima; shared memory refusal/cancellation/revocation; all-five-hash ValueStore
+closure and meaningful policy/dependency identity changes; real publication/
+reopen and native parser execution through existing owners where applicable.
+API-source recipes are typed internal compiler inputs, not a new public JSON
+schema. Full index/default/source compilation and task activation follow.
+
+API RED37134 completed101 at12:56:08Z: absent compiler module E0432, no behavioral
+test execution. Original13 tests, then two additional cap/revocation checks were
+installed before production implementation. First8274 completed0 at13:07:22Z:
+all15 passed including native execution and both hash widths/allfive algorithms.
+Unit5fb2561caeda42e6ab27d09b93dc320a;58.621s elapsed/1m1.827s CPU; unchanged
+seven-input manifest1f86ec491036241a68e3e0acfed836e7d84f82b80a49537d575d903998808ae3.
+Artifact prefix `u1-parser-context-first` in the established durable cache.
+Production compiler272lines; exact comparator shared by visibility-only change.
+Review adds explicit unused registry-policy rejection and distinct full-record
+identity checks, plus allocation injection and v4 publication/reopen before the
+final narrow-to-broad gate. No source/compiler/authority activation claimed yet.
+
+Final2 qualification74523 completed101 at13:13:59Z. Narrow17compiler+12resource
+passed; supplemental persistence setup supplied JSON traversal limits to a
+mapper ValueStore and the existing validator correctly refused it before any
+publication (`value_store_closure`). Test construction corrected to zero mapper
+traversal limits; allthree invalid work/examined combinations are retained as
+negative assertions with unchanged physical observation. Production compiler
+and all17 compiler/12resource tests remain byte-identical. Final2 source/driver/
+12stage records and three executed binary digests preserved/mirrored23599closed0.
+Earlier preparation-only `final` packet was never executed; review corrected
+mapperclass6 versus nativeclass7 and distinct lookup-digest leaf construction.
+No fixture, validator, production writer or frozen contract was weakened.
+Next: allten final3 gates from9-input893f6628e2350ae36bea6ad1d6b1cbd871c2bbac974bbc7c1f8cae82526732f4.
+
+Final3 88158 completed101 at13:22:15Z: narrow and corrected persistence pass;
+affected architecture gate finds discarded binary-search insertion position at
+newcompiler206 (`esq-v1-997fa2a9da40a09aae45-00`). Retained the position in the
+diagnostic instead of discarding it; no allowance/baseline change. Only one
+production line changes, with all17compiler/12resource/persistence tests frozen.
+Final3 raw18stage records+driver and six executed digests retained; initial
+capture expectedfour binaries but correctly refused because two dependency
+targets also ran before the failing architecture target. Successful six-binary
+capture62479closed0; no failed capture output was created. Previous result is
+preserved as failure, not called a completed affected suite.
+Next: final4 allten gates,9-input1310f28771bce0ec8ae19654ab85a331e969c83524672f105245cf7034c0ef6b.
+
+Final4 91210 completed1 at13:32:01Z:29narrow, selectedpersistence, all22affected
+targets and unchanged1503 audit pass. Formatting alone required alphabetical
+module order (`parser_context_compiler` before `parser_plan`). Final5 changes
+only that declaration order; no implementation/test changes. All30stage files,
+driver and25executed binary digests retained/mirrored37805closed0. Final5 source
+prepared10794closed0;9-input2183b3d34eb003231b05b006a346547079eb94d819ccefc697f76495f5c15068,
+archive6cd14e20643ae9cddad4556ba8486ed634bc5e3665804363de549f24f2eba294.
+Ten-stage final5 run38924 launched13:36:37Z; next ordinary monitor>=13:41:37Z.
+
+### Parser-context unit complete
+
+Final5 38924 completed0 at13:43:13Z, unitd97849952c1b42d0937c4bc57b2c52ab,
+6m33.375s elapsed/7m20.217s CPU. Allten gates pass:17compiler+12resource,
+selectedpersistence1,346affected across22targets, unchanged1503audit, formatting,
+strictworkspaceClippy,681library,175independentreference,472fixtures and the
+actual debt self-test. No ignored tests, source drift or resource guard stop.
+Finalfree Data336080670720/home70119559168. All61stage/driver records plus28
+same-host executed-binary digests mirrored6911closed0. Strict evidence verifier
+dba442PASS produced [the parser-context proof](../evidence/user-facing-v4-u1-parser-context-proof-20260914.json).
+
+Review confirms complete-record ordering/dedup before ordinals, policies separate
+from executable identity, corrected-only source recipes, retained shared Task
+admission, no new physical writer and no root selection. Publication test uses
+real v4 definitions/per-key leaves and reopen; native parser execution uses the
+existing v3-backed captured source adapter and is explicitly not a v4 service
+proof. Tests and baselines were preserved throughout the documented corrections.
+Full source/default/index compilation, semantic profile and task activation
+remain; this is not U1 or campaign completion. Next is corrected source-selector
+normalization against the existing owner rules, followed by whole-definition
+compilation/integration. The 16-case cache-only draft is preparation, not executed
+evidence or production code.
+
 ## U2 read-only entry refinement: public append-writer guard
 
 Audited against `369cb199` plus the unchanged 43-input U1 candidate while Linux

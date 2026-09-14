@@ -1476,6 +1476,10 @@ path = "spec/engine/semantic_catalog_mutation_spec.rs"
 name = "parser_registry_compiler_spec"
 path = "spec/engine/parser_registry_compiler_spec.rs"
 
+[[test]]
+name = "parser_context_compiler_spec"
+path = "spec/engine/parser_context_compiler_spec.rs"
+
 
 [lints]
 workspace = true

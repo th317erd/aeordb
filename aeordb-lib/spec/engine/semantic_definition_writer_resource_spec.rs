@@ -424,3 +424,48 @@ fn registry_source_allocation_failure_is_operational_not_invalid_configuration()
   assert!(matches!(error, SemanticCompilationErrorV1::Resource { .. }), "{error}");
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
 }
+
+#[test]
+fn parser_context_allocations_are_fallible_and_release_shared_admission() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::{DependencyRecordV1, decode_dependency_record_bytes};
+  use aeordb::engine::v4::parser_context_compiler::{
+    ParserContextCompilationRequestV1, ParserContextSourceV1, ParserSelectorDependencyV1, compile_parser_context_v1,
+  };
+  use aeordb::engine::v4::parser_plan::{ParserCandidateV1, decode_parser_resolution_plan};
+  use aeordb::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
+
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 << 20, 128 << 20, 32 << 20, 8 << 20).unwrap());
+  let definition = fixture("semantic-object-v1", "asem-blake3-256-wasm-parser-definition-valid");
+  let dependency = decode_dependency_record_bytes(&definition[80..definition.len() - 4]).unwrap();
+  let program = fixture("parser-resolution-plan-v1", "aprp-blake3-256-explicit-plugin-valid");
+  let mut policy = decode_parser_resolution_plan(&program).unwrap().candidates[0].policy.clone();
+  policy.max_fuel = 10_000_000;
+  for source in [ParserContextSourceV1::Metadata, ParserContextSourceV1::Explicit { dependency: dependency.clone(), policy: &policy }] {
+    let metadata = matches!(source, ParserContextSourceV1::Metadata);
+    let request = ParserContextCompilationRequestV1 {
+      source,
+      selector_dependency: if metadata { ParserSelectorDependencyV1::None } else { ParserSelectorDependencyV1::JsonPath },
+      maximum_workspace_bytes: 16 << 20,
+    };
+    // Warm native identities before injecting individual output/metadata failures.
+    let compiled = compile_parser_context_v1(request.clone(), &memory, &|| false).unwrap();
+    let mut sizes = vec![compiled.dependencies().len(), compiled.parser_plan().len()];
+    if !metadata {
+      sizes.extend([2 * std::mem::size_of::<DependencyRecordV1<'_>>(), std::mem::size_of::<ParserCandidateV1<'_>>()]);
+    }
+    drop(compiled);
+    for size in sizes {
+      let (result, allocations) = measure(size, || compile_parser_context_v1(request.clone(), &memory, &|| false));
+      assert!(allocations.injected_failure, "metadata={metadata} size={size}: {allocations:?}");
+      assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    }
+    let (result, allocations) = measure(0, || {
+      compile_parser_context_v1(ParserContextCompilationRequestV1 { maximum_workspace_bytes: 1, ..request }, &memory, &|| false)
+    });
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_preflight(allocations);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}

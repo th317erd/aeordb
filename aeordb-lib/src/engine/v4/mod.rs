@@ -133,6 +133,7 @@ mod mime_router;
 pub mod namespace;
 mod native_path;
 pub mod native_semantics;
+pub mod parser_context_compiler;
 pub mod parser_plan;
 pub mod parser_registry_compiler;
 pub mod plugin_native_read;

@@ -470,7 +470,7 @@ fn write_dependency_record(value: &mut [u8], record: &DependencyRecordV1<'_>) {
   value[id_end..].copy_from_slice(record.version.as_bytes());
 }
 
-fn compare_records(left: &DependencyRecordV1<'_>, right: &DependencyRecordV1<'_>) -> Ordering {
+pub(crate) fn compare_records(left: &DependencyRecordV1<'_>, right: &DependencyRecordV1<'_>) -> Ordering {
   (
     left.kind,
     left.role,
