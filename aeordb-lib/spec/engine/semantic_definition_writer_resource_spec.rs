@@ -8,7 +8,8 @@ use aeordb::engine::v4::field_definition::{
 };
 use aeordb::engine::v4::native_semantics::NativeSemanticComponentV1;
 use aeordb::engine::v4::namespace::{
-  encode_semantic_catalog_internal, encode_semantic_catalog_leaf, SemanticCatalogChildV1, SemanticCatalogRecordV1,
+  encode_semantic_catalog_internal, encode_semantic_catalog_leaf, encode_semantic_definition_object, SemanticCatalogChildV1,
+  SemanticCatalogRecordV1,
 };
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::value_store::{encode_value_store_definition, ValueStoreDefinitionWriteV1, ValueStoreSemanticFamily};
@@ -288,5 +289,22 @@ fn both_catalog_writers_return_typed_allocation_failure_for_every_hash_width() {
     let (result, allocations) = measure(length, || encode_semantic_catalog_internal(0, &[], &children, algorithm));
     assert!(allocations.injected_failure);
     assert_eq!(result.unwrap_err().code(), "catalog_writer_allocation");
+  }
+}
+
+#[test]
+fn definition_object_wrapper_caps_inputs_and_returns_output_allocation_failures() {
+  let excessive = vec![0; 1_048_576];
+  for class in 1..=7 {
+    let (result, allocations) = measure(0, || encode_semantic_definition_object(class, &excessive, ALGORITHM));
+    assert_eq!(result.unwrap_err().code(), "semantic_definition_exceeds_cap");
+    assert_preflight(allocations);
+  }
+  let projection = [0x0a, 4, 0, 0, 0, 0, 0, 0, 0];
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let length = 52 + algorithm.hash_length() + projection.len();
+    let (result, allocations) = measure(length, || encode_semantic_definition_object(1, &projection, algorithm));
+    assert!(allocations.injected_failure);
+    assert_eq!(result.unwrap_err().code(), "semantic_definition_writer_allocation");
   }
 }

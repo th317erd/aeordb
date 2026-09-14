@@ -14,6 +14,10 @@ use super::scope::validate_canonical_absolute_path;
 mod catalog_encoding;
 pub use catalog_encoding::{encode_semantic_catalog_internal, encode_semantic_catalog_leaf};
 
+#[path = "namespace_definition.rs"]
+mod definition_encoding;
+pub use definition_encoding::{EncodedSemanticDefinitionObjectV1, encode_semantic_definition_object};
+
 const DIRECTORY_HEADER_LENGTH: usize = 32;
 const DIRECTORY_KIND_NAMESPACE_ROOT: u16 = 0x0003;
 const SEMANTIC_HEADER_LENGTH: usize = 32;

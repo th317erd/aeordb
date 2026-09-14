@@ -1464,6 +1464,10 @@ path = "spec/engine/dependency_catalog_identity_spec.rs"
 name = "semantic_catalog_writer_spec"
 path = "spec/engine/semantic_catalog_writer_spec.rs"
 
+[[test]]
+name = "semantic_definition_object_writer_spec"
+path = "spec/engine/semantic_definition_object_writer_spec.rs"
+
 
 [lints]
 workspace = true

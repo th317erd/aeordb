@@ -1970,6 +1970,100 @@ resource-readiness evidence. Final free bytes Data336148262912/home70447308800.
 No new release/native/full-workspace test claim is made for this landing.
 See [catalog encoding proof](../evidence/user-facing-v4-u1-catalog-encoding-proof-20260914.json).
 
+## Completed U1 prerequisite: validated definition-object wrapping
+
+Entry/last greend1efd7bf. Direct owner; owned namespace exports/new definition
+encoding module, new `semantic_definition_object_writer_spec`, existing
+allocation spec extension, target registration, ledger/proof. All-class payload
+writers and typed readers remain their existing owners. No compiler, physical
+owner, frozen fixture, service or default-format mutation belongs to this slice.
+
+Territory: Round10 kind4 ASEM metadata/domain identity; typed scope/value/field
+readers; canonical-value structural admission for post-compiler projections;
+Round9/16 dependency kind and identity; existing borrowed definition reader;
+catalog binding closure and `first_authority` immutable publication. A semantic
+definition ID and the wrapping immutable object ID remain separate identities.
+Generic JSON normalization is not compilation. Structural empty-map test inputs
+only prove this codec; they do not certify meaningful compiled configurations.
+The historical opaque parser-projection reader fixture must remain unchanged,
+but is not acceptable input to a newly validated projection writer.
+
+- [x] Execute missing-API RED for the dedicated8 cases and existing resource
+  target extension before implementation; report compilation absence honestly.
+- [x] Implement bounded wrapping for all7 classes using their existing typed
+  payload validators and class domains; retain unknown executable profiles
+  structurally without falsely claiming executor availability.
+- [x] Qualify exact independent bytes/identities across all5 algorithms,
+  truncation/trailing/wrong-class/raw-JSON/smaller-cap failures, measured
+  allocation refusal, affected closure/publication regressions and broad gates.
+- [x] Record green wrapping proof for landing; bounded catalog COW and actual
+  semantic compilation remain next, not satisfied by codec completion.
+
+The prior unit's implausible terminal memory summaries were checked separately:
+a16MiB touched buffer reported28,246,016bytes through its own kernel cgroup
+counter, but systemd's exit summary printed5.2MiB. The cgroup's actual limit
+was6GiB, swap0, CPU200000/100000. Future Linux gate wrappers will also record
+direct cgroup counters and limits, not interpret the terminal summary as peak
+memory. This harness diagnostic does not replace actual-v4 resource qualification.
+
+Missing-API RED8314 completed11:01:10 with E0432 on the resource target's
+missing `encode_semantic_definition_object` import; neither target executed
+behavioral cases. Both test files were installed before implementation.
+Source5-input manifestde7ade18c43cf107fa3d6317a4b4df9707e4a6346167b36f66fc29cd85364164,
+archiveb3d81c84bc19bd9fd475c4631e016fcc44589123020bb1757bfb0c70cfee570b.
+All source/lock checks and limits pass; direct kernel memory.peak3,341,803,520
+bytes is recorded, unlike the inaccurate512KiB terminal summary.
+
+The writer now validates all7 payload classes before allocating one enclosing
+object. One additional final real-file test publishes/reopens every class
+under all5 registered hashes, preserving selected root and idempotent retry.
+It is supplemental integration proof, not a behavioral RED claim.
+
+An omitted affected gate from the previous catalog unit was discovered during
+the current consumer audit: adding its module moved5 reviewed namespace panic
+locations by4lines. Independent audit RED80443 fails exactly those5 stale
+locations at11:10:36 on the d1 source; no new/unreviewed occurrence exists.
+The new definition-module declaration moves them another4lines. Update only
+those5 inventory line fields by8; all1503 IDs, patterns, reviews and the
+baseline remain unchanged. Include `error_squelch_architecture_spec` and the
+direct audit CLI in final qualification. This is tracked metadata maintenance,
+not suppression-policy relaxation or a frozen format-fixture change.
+
+Final94817 completed2026-09-14T11:25:02Z with all10 gates passing:
+8new writer+8 allocation, selected all-class persistence1/14filtered,
+364affected cases across18targets, audit1503, formatting, strict workspace
+Clippy,681library,175independent reference,472fixtures/contracts and actual
+debt self-test. The persistence case is included among364, not an extra test.
+The initial estimate365 counted an embedded `#[test]` string in the architecture
+scanner fixture; the target has29 executable tests, not30. No test was skipped.
+Source9-input manifest6fbde4800ffd08ab30c39b278132787be6d6ba9ab4dd673797562f549817ea3d;
+archive568efcf902dd8040e2d582189b1a4b1872d711f08824eb1e41aef68b5eea8795.
+Both RED test files remain unchanged; no final source/lock drift occurred.
+The unit96df49c3e9f94519a403edc94d06bf84 ran6m26.443s/CPU7m9.426s under
+6GiB/noSwap/2CPU; kernel cgroup memory.peak reached5,920,202,752bytes.
+Final free bytes Data336130846720/home70328467456. Complete raw log/receipt
+set and24same-host executed binary digests are retained; executable bytes are
+reusable build outputs, not an archival release. No new native/release/full-
+workspace test or actual-v4 service readiness claim is made by this unit.
+See [definition object proof](../evidence/user-facing-v4-u1-definition-object-proof-20260914.json).
+
+### Next U1 landing: bounded catalog copy-on-write
+
+Implement a storage-neutral, shared-budget planner using the existing node
+codecs and captured-object source. One explicit H-bounded path, canonical
+prefix splits/collapse, sorted collision buckets, checked record/node deltas,
+dependency-first node output, no-op identity reuse. Do not load unrelated
+definitions, infer distinct-definition count from binding count, activate a
+root or add another physical writer. The owning compiler must supply an
+admitted captured catalog and prove definition closure before activation.
+
+- [ ] Finish independent whole-set test oracle and explicit path-reuse,
+  malformed/source-failure/cancellation/shared-memory failure cases; API RED.
+- [ ] Implement bounded COW with result-lifetime shared-memory reservation.
+- [ ] Prove exact canonical identities/counts across all5 hashes and insertion/
+  removal permutations, real-file publication/reopen, affected/static gates.
+- [ ] Land green and continue actual semantic compilation/atomic producers.
+
 ## U2 read-only entry refinement: public append-writer guard
 
 Audited against `369cb199` plus the unchanged 43-input U1 candidate while Linux

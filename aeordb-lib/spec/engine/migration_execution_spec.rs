@@ -20,7 +20,7 @@ use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
 use aeordb::engine::v4::namespace::{
   EncodedSemanticObjectV1, SemanticCatalogChildV1, SemanticCatalogNodeV1, SemanticCatalogRecordV1, decode_semantic_catalog_node,
-  decode_semantic_definition_record, encode_semantic_catalog_internal, encode_semantic_catalog_leaf,
+  decode_semantic_definition_record, encode_semantic_catalog_internal, encode_semantic_catalog_leaf, encode_semantic_definition_object,
 };
 use aeordb::engine::v4::root_authority::decode_root_admission_commit;
 use aeordb::engine::hot_tail::read_hot_tail_checked;
@@ -501,6 +501,75 @@ fn encoded_catalog_nodes_publish_and_reopen_through_the_existing_authority_witho
         .unwrap()
         .idempotent
     );
+    assert_eq!(reopened.observe().unwrap(), selected);
+  }
+}
+
+#[test]
+fn validated_definition_objects_publish_and_reopen_for_all_classes_and_registered_hashes() {
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let profile = if algorithm.hash_length() == 32 { "blake3-256" } else { "sha512" };
+    let objects: Vec<_> = (1..=7)
+      .map(|class| {
+        let payload = if class <= 2 {
+          // Structural projection payload only; no semantic compilation or root
+          // activation is claimed by this physical-object storage test.
+          vec![0x0a, 4, 0, 0, 0, 0, 0, 0, 0]
+        } else {
+          let name = match class {
+            3 => format!("scope-definition-v1/ascp-{profile}-root-direct-valid.bin"),
+            4 => format!("value-store-definition-v1/avst-{profile}-metadata-hash-corrected-valid.bin"),
+            5 => format!("field-index-definition-v1/afix-{profile}-bool_order_v1-valid.bin"),
+            6 => format!("semantic-object-v1/asem-{profile}-wasm-parser-definition-valid.bin"),
+            7 => format!("semantic-object-v1/asem-{profile}-native-dependency-definition-valid.bin"),
+            _ => unreachable!(),
+          };
+          let bytes = std::fs::read(format!("{}/spec/fixtures/v4/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+          if class <= 5 {
+            bytes
+          } else {
+            bytes[48 + algorithm.hash_length()..bytes.len() - 4].to_vec()
+          }
+        };
+        let encoded = encode_semantic_definition_object(class, &payload, algorithm).unwrap();
+        assert_eq!(encoded.semantic_id.len(), algorithm.hash_length());
+        assert_ne!(encoded.semantic_id, encoded.object.object_id);
+        encoded.object
+      })
+      .collect();
+    let request = ImmutableSemanticObjectBatchPublicationRequestV1 {
+      database_id: &before.selected.header.database_id,
+      objects: &objects,
+      publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+    };
+    let receipt = publisher.publish_immutable_semantic_objects(request).unwrap();
+    assert!(!receipt.idempotent);
+    assert_eq!(receipt.entities.len(), 14);
+    assert_eq!(receipt.observation.selected.header.head_hash, before.selected.header.head_hash);
+    let selected = publisher.observe().unwrap();
+    let frontier = coordinator.snapshot().unwrap().hard_frontier;
+    assert!(publisher.publish_immutable_semantic_objects(request).unwrap().idempotent);
+    assert_eq!(publisher.observe().unwrap(), selected);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, frontier);
+    let mut malformed = objects[0].clone();
+    malformed.value[34] = 2;
+    assert!(publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 { objects: &[malformed], ..request })
+      .is_err());
+    assert_eq!(publisher.observe().unwrap(), selected);
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    for (index, object) in objects.iter().enumerate() {
+      let loaded = reopened.load_semantic_object(4, &object.object_id).unwrap().unwrap();
+      assert_eq!(loaded, object.value);
+      assert_eq!(decode_semantic_definition_record(&loaded, algorithm).unwrap().class, index as u16 + 1);
+    }
+    assert!(reopened.publish_immutable_semantic_objects(request).unwrap().idempotent);
     assert_eq!(reopened.observe().unwrap(), selected);
   }
 }
