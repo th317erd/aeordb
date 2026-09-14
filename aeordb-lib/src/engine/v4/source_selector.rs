@@ -151,7 +151,10 @@ fn decode_json_path(value: &[u8], item_count: u32, regex_semantics: u16, mapper_
     ));
   }
   let mut cursor = SELECTOR_HEADER_LENGTH;
-  let mut segments = Vec::with_capacity(item_count as usize);
+  let mut segments = Vec::new();
+  segments.try_reserve_exact(item_count as usize).map_err(|source| {
+    FormatError::allocation_failure("selector_decode_allocation", format!("cannot reserve decoded selector segments: {source}"))
+  })?;
   for _ in 0..item_count {
     let (segment, next) = decode_segment(value, cursor)?;
     segments.push(segment);

@@ -155,7 +155,7 @@ impl<'value, 'field> IndexDefinitionRuntimeV1<'value, 'field> {
     })?;
     let value_store = ValueStoreRuntimeV1::from_definition(value_store_definition, hash_width).map_err(|source| {
       error(
-        IndexDefinitionErrorClassV1::UnsupportedDefinition,
+        IndexDefinitionErrorClassV1::HostFailure,
         "index_source_runtime_unavailable",
         format!("{}: {}", source.code(), source.context()),
       )
@@ -355,14 +355,22 @@ fn decode_definitions<'value, 'field>(
 ) -> IndexDefinitionResultV1<(ValueStoreDefinitionV1<'value>, FieldIndexDefinitionV1<'field>)> {
   let value_store_definition = decode_value_store_definition(value_store_value, hash_algorithm).map_err(|source| {
     error(
-      IndexDefinitionErrorClassV1::UnsupportedDefinition,
+      if source.is_allocation_failure() {
+        IndexDefinitionErrorClassV1::HostFailure
+      } else {
+        IndexDefinitionErrorClassV1::UnsupportedDefinition
+      },
       "index_value_store_definition_invalid",
       format!("{}: {}", source.code(), source.context()),
     )
   })?;
   let field_definition = decode_field_index_definition(field_definition_value, hash_algorithm).map_err(|source| {
     error(
-      IndexDefinitionErrorClassV1::UnsupportedDefinition,
+      if source.is_allocation_failure() {
+        IndexDefinitionErrorClassV1::HostFailure
+      } else {
+        IndexDefinitionErrorClassV1::UnsupportedDefinition
+      },
       "index_field_definition_invalid",
       format!("{}: {}", source.code(), source.context()),
     )

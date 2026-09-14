@@ -599,10 +599,15 @@ impl IndexProducerCollectorV1 {
     ) {
       Ok(evaluator) => evaluator,
       Err(error) => {
-        tracing::warn!(%error, "ValueStore runtime rejected decoded configuration");
-        report.push_degraded(value.expected_value_store_id, stable_reason_v1::INVALID_CONFIGURATION)?;
-        for field in &value.field_indexes {
-          report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
+        tracing::warn!(%error, "ValueStore runtime construction failed");
+        let retry_reason = source_constructor_retry_reason(error)?;
+        for owner_id in
+          std::iter::once(value.expected_value_store_id).chain(value.field_indexes.iter().map(|field| field.expected_index_id))
+        {
+          match retry_reason {
+            Some(reason) => report.push_retryable(owner_id, reason, self.options.retry_after_ms)?,
+            None => report.push_degraded(owner_id, stable_reason_v1::INVALID_CONFIGURATION)?,
+          }
         }
         return Ok(());
       }
@@ -812,6 +817,9 @@ impl IndexProducerCollectorV1 {
         return Ok(());
       }
       Err(error) => {
+        if error.is_allocation_failure() {
+          return Err(IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()));
+        }
         tracing::warn!(code = error.code(), context = %error.context(), "FieldIndex configuration is malformed");
         report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
         return Ok(());
@@ -820,6 +828,9 @@ impl IndexProducerCollectorV1 {
     let runtime = match IndexDefinitionRuntimeV1::from_encoded(value.encoded_definition, field.encoded_definition, self.hash_algorithm) {
       Ok(runtime) => runtime,
       Err(error) => {
+        if matches!(error.class(), IndexDefinitionErrorClassV1::HostFailure | IndexDefinitionErrorClassV1::ResourceLimit) {
+          return Err(IndexProducerCollectorErrorV1::ResourcePressure(error.to_string()));
+        }
         tracing::warn!(code = error.code(), context = %error.context(), "FieldIndex runtime rejected decoded configuration");
         report.push_degraded(field.expected_index_id, stable_reason_v1::INVALID_CONFIGURATION)?;
         return Ok(());
@@ -1320,6 +1331,26 @@ fn parser_operational(error: IndexParserExecutionErrorV1) -> Result<SourceEvalua
     IndexParserExecutionErrorClassV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
     IndexParserExecutionErrorClassV1::DependencyUnavailable => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::DEPENDENCY_UNAVAILABLE)),
     IndexParserExecutionErrorClassV1::HostFailure => Ok(SourceEvaluationV1::Retryable(stable_reason_v1::RETRYABLE_IO)),
+  }
+}
+
+// Construction has not produced a document outcome. Refused workspace must
+// discard the report; only an invalid definition may degrade its owners.
+fn source_constructor_retry_reason(error: AuthoritativeSourceEvaluationErrorV1) -> Result<Option<u16>, IndexProducerCollectorErrorV1> {
+  match error {
+    AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { .. } => Ok(None),
+    AuthoritativeSourceEvaluationErrorV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
+    AuthoritativeSourceEvaluationErrorV1::ResourcePressure(context) => Err(IndexProducerCollectorErrorV1::ResourcePressure(context)),
+    AuthoritativeSourceEvaluationErrorV1::Parser(error) => match error.class() {
+      IndexParserExecutionErrorClassV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
+      IndexParserExecutionErrorClassV1::DependencyUnavailable => Ok(Some(stable_reason_v1::DEPENDENCY_UNAVAILABLE)),
+      IndexParserExecutionErrorClassV1::HostFailure => Err(IndexProducerCollectorErrorV1::ResourcePressure(format!("{error:?}"))),
+    },
+    AuthoritativeSourceEvaluationErrorV1::Source(error) => match error.class() {
+      SourceOperationalErrorClassV1::Cancelled => Err(IndexProducerCollectorErrorV1::Cancelled),
+      SourceOperationalErrorClassV1::DependencyUnavailable => Ok(Some(stable_reason_v1::DEPENDENCY_UNAVAILABLE)),
+      SourceOperationalErrorClassV1::HostFailure => Err(IndexProducerCollectorErrorV1::ResourcePressure(error.to_string())),
+    },
   }
 }
 

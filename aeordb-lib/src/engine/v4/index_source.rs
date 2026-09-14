@@ -166,7 +166,14 @@ impl<'a> ValueStoreRuntimeV1<'a> {
     })?;
     for segment in &definition.selector.segments {
       let segment = match segment {
-        JsonPathSegmentV1::ObjectKey(key) => CompiledJsonPathSegmentV1::ObjectKey((*key).to_string()),
+        JsonPathSegmentV1::ObjectKey(key) => {
+          let mut owned_key = String::new();
+          owned_key
+            .try_reserve_exact(key.len())
+            .map_err(|source| operational_error(SourceOperationalErrorClassV1::HostFailure, "selector_key_reserve", source.to_string()))?;
+          owned_key.push_str(key);
+          CompiledJsonPathSegmentV1::ObjectKey(owned_key)
+        }
         JsonPathSegmentV1::NumericIndex(index) => CompiledJsonPathSegmentV1::NumericIndex(*index),
         JsonPathSegmentV1::FanOut => CompiledJsonPathSegmentV1::FanOut,
         JsonPathSegmentV1::Regex { pattern, case_insensitive } => {

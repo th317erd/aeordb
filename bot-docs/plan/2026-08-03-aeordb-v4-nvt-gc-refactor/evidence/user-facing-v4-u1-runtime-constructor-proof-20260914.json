@@ -1,0 +1,1835 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-14T19:01:55.237Z",
+  "baseCommit": "24230bf522d13aea709990afb3ad93ea65e3d0c6",
+  "unit": "U1 runtime constructor allocation and admission classification",
+  "unitComplete": true,
+  "fullU1Complete": false,
+  "fullV4Ready": false,
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+      "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+      "sha256": "7ebbf0c9fb97a38171f06c9a5c4d7d0e77020bc3ee8b01d382ecbd44b591c555"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+      "sha256": "f96aaeabc460f6fb928771f220f4088af832e4228517b6716b71b633c8820ea1"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_source.rs",
+      "sha256": "c65e8c59d936b3b93173824f8b0d4deccf4a8f7cb6e166e33b09b8dae61d6669"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_definition_runtime.rs",
+      "sha256": "1289ff2c683580defa5352d8791713c2b2b0b9b2bff9a61a756d564336257237"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/source_evaluator.rs",
+      "sha256": "eb0eed3206d0a239b1f6f80fcd9d56b752cbafc321f91ee632ef5cf2c7e7e56e"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_producer_collector.rs",
+      "sha256": "8030ba37249eec939edec5b894c8aa34103a3b66efea6fa4f43f1bfc0696834e"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_collector_operational_error_spec.rs",
+      "sha256": "ae57169ec9d27507b5e464345242a06b440f9d13a7a8e8a055fadd4807288640"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/error-squelch-allowlist-v1.json",
+      "sha256": "a01753a68627774915e4426606d7d651f044bceb0c16beba8aa966b1f9e54c4f"
+    }
+  ],
+  "sourceManifest": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-source-inputs.sha256",
+    "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+  },
+  "archive": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-source.tar.gz",
+    "sha256": "cbee7d4e340d8f3459f4a31a8b21db3459473e30d8b3bba245aeeb325a99f29f"
+  },
+  "gates": [
+    {
+      "stage": "narrow",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test index_producer_collector_spec --test semantic_definition_writer_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.exit",
+        "sha256": "b65b67c9e7ee1a0d7be80cca72090e5b0772058a7085f5b5ac7cc4ca80f3c5d8",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:51:04Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016400384",
+          "final_secondary_free_bytes": "69717254144"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.log",
+        "sha256": "e85fed354919e8c757b01a0d878d49f28e7bbc33bbf3fb89e0fbbebe93e91d77"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.guard.log",
+        "sha256": "5b1e4deed95bd87c61c35a67379559838ed0fef2f1dbe98abff406d1e85827a8"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": [
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          29,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "persistence",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test migration_execution_spec complete_configuration_catalogs_publish_reopen_and_preserve_all_seven_classes_without_root_selection ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.exit",
+        "sha256": "e97415b7c145c38d40d9378ac141d5660898fc4ad391dca57a49022774be853a",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:51:11Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016404480",
+          "final_secondary_free_bytes": "69717041152"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.log",
+        "sha256": "731fdb552b65d06c8dddda24bbdb81812482ab7830625e710aa91b63a602b932"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.guard.log",
+        "sha256": "0b21469b9ef374bca916a5fb8eb11b0aa4aa26a894a84345982ffc122ec3066c"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": [
+        [
+          1,
+          0,
+          0,
+          0,
+          20
+        ]
+      ]
+    },
+    {
+      "stage": "affected",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test parser_plan_writer_spec --test index_native_parser_spec --test index_native_semantic_source_spec --test index_semantic_source_spec --test semantic_definition_contract_spec --test semantic_definition_object_writer_spec --test dependency_table_writer_spec --test dependency_availability_spec --test semantic_catalog_mutation_spec --test semantic_catalog_reader_spec --test v4_format_fixture_spec --test migration_execution_spec --test memory_coordinator_spec --test mime_name_initial_spec --test index_native_parser_resource_spec --test value_store_writer_spec --test field_definition_writer_spec --test parser_integration_spec --test v4_first_authority_spec --test error_squelch_architecture_spec --test parser_registry_compiler_spec --test source_selector_writer_spec --test parser_context_compiler_spec --test configuration_control_store_spec --test gc_v4_lineage_recovery_spec --test v4_query_planner_spec --test index_v1_reference_spec --test source_resolver_spec --test v4_position_writer_spec --test index_producer_collector_spec --test v4_query_executor_spec --test v4_query_complete_candidate_spec --test v4_query_order_execution_spec --test v4_query_aggregate_execution_spec --test v4_query_result_pipeline_spec --test v4_reader_hardening_spec --test source_selector_compiler_spec --test index_definition_compiler_spec --test index_configuration_compiler_spec --test semantic_compiler_profile_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.exit",
+        "sha256": "aa85912f6e69eea5b9df0ccb89d9b6d34235a2838138770e9aa8276b0af19eba",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:53:14Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016379904",
+          "final_secondary_free_bytes": "69716025344"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log",
+        "sha256": "884c26e800d4a186e36862d4784963cdc7cf7151b4f320f65b8b1648ab27779b"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.guard.log",
+        "sha256": "deebcda586b5d473829d94e549e692ec72cb5952d3ae9c1e5235f0b0af230a62"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": [
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          29,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          21,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          34,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          47,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          21,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          17,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          37,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          16,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          12,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          54,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          77,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          37,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          26,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          9,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          20,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "audit",
+      "command": "cargo run --offline --locked -j 2 -p aeordb-error-squelch-audit -- check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.exit",
+        "sha256": "e2726f5ed2c8bf48405e4cf1e3d675c9e79f1e0dc54c50d1a5d5be6efce5a1ea",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:53:24Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016379904",
+          "final_secondary_free_bytes": "69715947520"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.log",
+        "sha256": "688e322353520e42303feee8c9c058ca4f43d3316885dc97e1f1ac085af03642"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.guard.log",
+        "sha256": "f68655add3e4371dfe92aa647c5525b5c18f943081d48f423e7e1986116f4142"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": []
+    },
+    {
+      "stage": "format",
+      "command": "cargo fmt --all -- --check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.exit",
+        "sha256": "15325766459fd5b79b510a73c43d5b9720f2ab041821589774de76b00eaa155c",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:53:31Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016379904",
+          "final_secondary_free_bytes": "69715857408"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.log",
+        "sha256": "5f85b80a8123b31965a26c86f093c75c7246dee1e19818b784387b363a329c43"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.guard.log",
+        "sha256": "714c53a3dc2bec5ea22879a41a517d51f19aec9d181bab04e8e4411debac251e"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/format.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": []
+    },
+    {
+      "stage": "clippy",
+      "command": "cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.exit",
+        "sha256": "b8372b49aa358bdbc0e8b3e906897d8b87950b1798d179f16811714ff03476c7",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:56:08Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016375808",
+          "final_secondary_free_bytes": "69714616320"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.log",
+        "sha256": "1ca96f51fe55908b369d734771e5de6de90e8062787afe876068a174a7377e5e"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.guard.log",
+        "sha256": "5f75f2dbc74c7834f7837905ee2d42f09e42fcf76ff179fcf51e9097a5b55c13"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/clippy.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": []
+    },
+    {
+      "stage": "library",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.exit",
+        "sha256": "7eb840545b74ebad51413f2638e0ac003d1d34183806f84cb6e68e16c734d13c",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:56:26Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016375808",
+          "final_secondary_free_bytes": "69714313216"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.log",
+        "sha256": "84b7a628e7ca85d619a8124d5e977a3971792345865c75810f70d3cffc343550"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.guard.log",
+        "sha256": "e4e439adb338878b59b6c07037f850dc2ff9a3bb107c0e778214aaa6d044a256"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": [
+        [
+          689,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "reference",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.exit",
+        "sha256": "16afc03ddbb6e7bf580e9bdf527755757736a352e460db7433cbfba4ec864e38",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:56:44Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016375808",
+          "final_secondary_free_bytes": "69712994304"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.log",
+        "sha256": "264821f3fca4ef63408862b89a0324d5f1e3910e7cf9769a621baa1e2f5a0f40"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.guard.log",
+        "sha256": "9bb174f6a9005eecc2dacdf3e1eff8b1204ea7a5dd65dfb1b9bb75a1ea350ebb"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": [
+        [
+          175,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "contracts",
+      "command": "bash scripts/plan/check-v4-contracts.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.exit",
+        "sha256": "3e90448153829e09aba4bce9335456b9012fcf489e071f57489373835e730b91",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:56:52Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016375808",
+          "final_secondary_free_bytes": "69712924672"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.log",
+        "sha256": "cf4b8543d94072c6e50d343c575076084ba227a92757713a5bd4d6b45556a098"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.guard.log",
+        "sha256": "55b4bb232facf094f14e255fd8e26ce126a7a682163424f4cfaab759dd992509"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": []
+    },
+    {
+      "stage": "debt-selftest",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.exit",
+        "sha256": "3306058c4b71362fc758c3b4ddfc077569058c2148c537133518d62e114d3ad8",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:56:56Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016375808",
+          "final_secondary_free_bytes": "69712842752"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.log",
+        "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.guard.log",
+        "sha256": "dba6ce71e9bd014a4c37c8fc453d5eeeb75e1e448cebe99c3dc4bae96d95c11e"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.source-inputs.sha256",
+        "sha256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.source-before.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/debt-selftest.source-after.patch",
+        "sha256": "4deb9eb62504df9862c7a0efd3ecd5da62a0892239693aadc520199e4fbf1fa2"
+      },
+      "tests": []
+    }
+  ],
+  "driver": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-driver.exit",
+    "sha256": "0c69ac8dd416d4847987d3150fade6c319a7acbbef606ea6671810303ca46233",
+    "values": {
+      "exit_status": "0",
+      "last_stage": "complete",
+      "finished_utc": "2026-09-14T18:56:56Z"
+    }
+  },
+  "history": [
+    {
+      "name": "u1-runtime-constructor-red",
+      "stage": "admission-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test index_producer_collector_spec source_runtime_admission_pressure_is_not_persisted_as_invalid_configuration ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.exit",
+        "sha256": "a1daa8ba13d9099bd7bab48a726bcc0a74d16e7f37d483c52a7c393bc56fd9e3",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T18:22:12Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016769024",
+          "final_secondary_free_bytes": "69737250816"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.log",
+        "sha256": "f5b8a64872859c151e0273e2281b7a82df2f9f4f42cedb22f392a7f0701e5523"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.guard.log",
+        "sha256": "a3baee771d4114650867529b7c87d5d923e510172e309edaee277c0ad5ede237"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.source-inputs.sha256",
+        "sha256": "965cc0f694bc3ae1246af60924d5480f73d97ffde0d060818ec382c952f3830a"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.source-before.patch",
+        "sha256": "06062db77c4597ebe74a0c10942d3d927f379a5b40b95d2afa501a2a64291857"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.source-after.patch",
+        "sha256": "06062db77c4597ebe74a0c10942d3d927f379a5b40b95d2afa501a2a64291857"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-source.tar.gz",
+        "sha256": "ed4178b18ab72cd6dedec88c2b0841508bf1156720f72911c6dfd3905ee75cc2"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-linux-test-binaries.json",
+        "sha256": "e6a75f484a9ffe5c5470cc9ab8d734cb38aee5b59764bb6d205277be7b19355e",
+        "recordedUTC": "2026-09-14T18:26:38.361Z",
+        "sourceManifestSHA256": "965cc0f694bc3ae1246af60924d5480f73d97ffde0d060818ec382c952f3830a",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-red-evidence/admission-red.log"
+            ],
+            "bytes": 13776576,
+            "modifiedUTC": "2026-09-14T18:22:11.893Z",
+            "sha256": "b1683225d4ce7732ca1f24f10deeb8111eb8d027cb141c8889494b4d83b1c151"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-allocation-red",
+      "stage": "key-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec selector_key_allocation_refusal_remains_operational_for_runtime_construction ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.exit",
+        "sha256": "cd504d6644dbf02cb40e13d553a2b09aff994ff8f00f8a853e358a428a1fc991",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T18:27:37Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016711680",
+          "final_secondary_free_bytes": "69720383488"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.log",
+        "sha256": "8fc83abc81ac42ba8cca950560fc74e2eaef4dae69966d4ea3754755d33a2471"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.guard.log",
+        "sha256": "d56fd9763bf6cc229618aabdffa2205a3415f6fdfaf5ebe84947fa99d909982c"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.source-inputs.sha256",
+        "sha256": "e1961fcc345f64b6c9c1f913989030e3d997d79e5750fdcc9ad27c53632f158f"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.source-before.patch",
+        "sha256": "cfdcdecd89b4d2c8d939c3b28b3698c33dee08e238f7998d606e24225758b2c5"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.source-after.patch",
+        "sha256": "cfdcdecd89b4d2c8d939c3b28b3698c33dee08e238f7998d606e24225758b2c5"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "f3e780a72d17f4c57ac4899404572732867597ca354a915c6dd92611ae10101a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-source.tar.gz",
+        "sha256": "f4163d0235a8b5696e1483f9e9b42530f99a9e871c640ed01d6c5056b18c35a4"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-linux-test-binaries.json",
+        "sha256": "067eb03dbe8c2121ec81bec86463eb2c753527b8f6db6caf4963035e867a1b07",
+        "recordedUTC": "2026-09-14T18:29:05.107Z",
+        "sourceManifestSHA256": "e1961fcc345f64b6c9c1f913989030e3d997d79e5750fdcc9ad27c53632f158f",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.log",
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.log"
+            ],
+            "bytes": 15204976,
+            "modifiedUTC": "2026-09-14T18:27:35.418Z",
+            "sha256": "d8ebba016c4442ec910eac6348ebceadb3f806314388e1d02ba81e4a2f0eda95"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-allocation-red",
+      "stage": "decoder-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec selector_decoder_allocation_refusal_remains_operational_for_runtime_construction ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.exit",
+        "sha256": "56d05b34b9e8fff465ad88f127c285db2a3db13acd144f273860aebfc1ae2777",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T18:28:19Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016711680",
+          "final_secondary_free_bytes": "69719638016"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.log",
+        "sha256": "bc760de2328bbc240b776cadce867e65ad89b69ae8e095cfbb6ac09e1baf4960"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.guard.log",
+        "sha256": "21819845fb09a8fd066b088ab938f833ddd7f0ded4681348a15401379290ecaa"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.source-inputs.sha256",
+        "sha256": "e1961fcc345f64b6c9c1f913989030e3d997d79e5750fdcc9ad27c53632f158f"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.source-before.patch",
+        "sha256": "cfdcdecd89b4d2c8d939c3b28b3698c33dee08e238f7998d606e24225758b2c5"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.source-after.patch",
+        "sha256": "cfdcdecd89b4d2c8d939c3b28b3698c33dee08e238f7998d606e24225758b2c5"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "f3e780a72d17f4c57ac4899404572732867597ca354a915c6dd92611ae10101a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-source.tar.gz",
+        "sha256": "f4163d0235a8b5696e1483f9e9b42530f99a9e871c640ed01d6c5056b18c35a4"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-linux-test-binaries.json",
+        "sha256": "067eb03dbe8c2121ec81bec86463eb2c753527b8f6db6caf4963035e867a1b07",
+        "recordedUTC": "2026-09-14T18:29:05.107Z",
+        "sourceManifestSHA256": "e1961fcc345f64b6c9c1f913989030e3d997d79e5750fdcc9ad27c53632f158f",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/key-red.log",
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-allocation-red-evidence/decoder-red.log"
+            ],
+            "bytes": 15204976,
+            "modifiedUTC": "2026-09-14T18:27:35.418Z",
+            "sha256": "d8ebba016c4442ec910eac6348ebceadb3f806314388e1d02ba81e4a2f0eda95"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-classification-red",
+      "stage": "classification-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --no-fail-fast --test semantic_definition_writer_resource_spec --test index_producer_collector_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.exit",
+        "sha256": "5ec204be04a98c9a09e2e6481b60931df09d5a4e2d925162ac09eb1f1fe1edaa",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T18:31:48Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016773120",
+          "final_secondary_free_bytes": "69720829952"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.log",
+        "sha256": "12fef2a343bfaa29f0d47da73ac2395a5ecf584a4f7fee516848669222e470ae"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.guard.log",
+        "sha256": "e0ae81246b373eff4e0224ed317700f8460822be4990ee93877c3afca040535b"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.source-inputs.sha256",
+        "sha256": "aedede23fca495e3c01d816e5ee8502dbf5ed05b01beaede172aaec6199aeafe"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.source-before.patch",
+        "sha256": "413405a80c17f290ac8dfe83a389e81cf8ddb9061c963d3c7f5faec9cadea047"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.source-after.patch",
+        "sha256": "413405a80c17f290ac8dfe83a389e81cf8ddb9061c963d3c7f5faec9cadea047"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "f3e780a72d17f4c57ac4899404572732867597ca354a915c6dd92611ae10101a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+          "sha256": "f96aaeabc460f6fb928771f220f4088af832e4228517b6716b71b633c8820ea1"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_source.rs",
+          "sha256": "c65e8c59d936b3b93173824f8b0d4deccf4a8f7cb6e166e33b09b8dae61d6669"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-source.tar.gz",
+        "sha256": "0b8cabdc38443d2ddf384fd2128f39c92e96b8b59d0786c791a262ee3746a332"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-linux-test-binaries.json",
+        "sha256": "ecc6545c573136ccb744deae4946778ce58c0eb5a8b3f0eef0fd03890bbc321d",
+        "recordedUTC": "2026-09-14T18:35:26.493Z",
+        "sourceManifestSHA256": "aedede23fca495e3c01d816e5ee8502dbf5ed05b01beaede172aaec6199aeafe",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.log"
+            ],
+            "bytes": 13779056,
+            "modifiedUTC": "2026-09-14T18:31:45.014Z",
+            "sha256": "d02596ea513afd8852d4d90810f7b608d7281b7b78e1261b45f954ef6fd3fe87"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-classification-red-evidence/classification-red.log"
+            ],
+            "bytes": 15206936,
+            "modifiedUTC": "2026-09-14T18:31:45.138Z",
+            "sha256": "b42ab449c181c41e0250778e1eaa33591b0c25afde47cb540a8b46c12a2340ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-candidate",
+      "stage": "narrow",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --no-fail-fast --test semantic_definition_writer_resource_spec --test index_producer_collector_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.exit",
+        "sha256": "a74980e0d05ed71964cbc8e369b70ee80adfed96f2998ddd33413f2d46d11b9f",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T18:45:55Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016510976",
+          "final_secondary_free_bytes": "69718646784"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.log",
+        "sha256": "665a34adf46c944e2da3c7c28083fe71023627e68a5dfba226c6bb8c8a57dd4a"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.guard.log",
+        "sha256": "b17fdc72a9a1f1787f05b2b5c25012edd4e0255502d19f37ee0fe1a7590fad5b"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.source-inputs.sha256",
+        "sha256": "441b16ed4443bd6e8997835d8f09c6929c9f658af305c1cf5e60ce91ca915801"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.source-before.patch",
+        "sha256": "80d548dc278f9dcc4560d904ea3cbf28932572bfc20be11ad4e1c5f6a06ee9f5"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-evidence/narrow.source-after.patch",
+        "sha256": "80d548dc278f9dcc4560d904ea3cbf28932572bfc20be11ad4e1c5f6a06ee9f5"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "e7757424195f4a2089fe9ea629593394c889acf33b86aa6615921582054b373d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+          "sha256": "f96aaeabc460f6fb928771f220f4088af832e4228517b6716b71b633c8820ea1"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_source.rs",
+          "sha256": "c65e8c59d936b3b93173824f8b0d4deccf4a8f7cb6e166e33b09b8dae61d6669"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_definition_runtime.rs",
+          "sha256": "1289ff2c683580defa5352d8791713c2b2b0b9b2bff9a61a756d564336257237"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_evaluator.rs",
+          "sha256": "eb0eed3206d0a239b1f6f80fcd9d56b752cbafc321f91ee632ef5cf2c7e7e56e"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_collector.rs",
+          "sha256": "8030ba37249eec939edec5b894c8aa34103a3b66efea6fa4f43f1bfc0696834e"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_collector_operational_error_spec.rs",
+          "sha256": "44dc24dcaadb7e9aef6e9200c025341f3e229934ab93759251538fc66c04d67a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate-source.tar.gz",
+        "sha256": "4b5ddbf8674543a7eec0410f0ff236fa2a3266aaaa979c203e1fd86c22db1f71"
+      },
+      "binaries": {
+        "executed": 0,
+        "reason": "Test compilation failed before execution."
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-candidate2",
+      "stage": "narrow",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --no-fail-fast --test semantic_definition_writer_resource_spec --test index_producer_collector_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.exit",
+        "sha256": "998dddc9dd7f023de307eb6dfc5b18458be467195cd4b13c337c09fa7016b943",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:48:06Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016437248",
+          "final_secondary_free_bytes": "69718274048"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.log",
+        "sha256": "d9d96b833c6174fc2bbb43435fca9013b39ddaefbfebf17a5ef5c1a2b84bbff1"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.guard.log",
+        "sha256": "60dbbf93cbb324398121f8a23d739c6f6ec8280af51c83cb61eaec44d30ca4ac"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.source-inputs.sha256",
+        "sha256": "be5885e7874cf158f3d4c65369c6c52ad13aa3104aec67b9ca2ddf2bd5158605"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.source-before.patch",
+        "sha256": "cd9ae72f39ab19cc3d1d941f104b32710ca9fa0ea31fc2f2586cab018d9b3420"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.source-after.patch",
+        "sha256": "cd9ae72f39ab19cc3d1d941f104b32710ca9fa0ea31fc2f2586cab018d9b3420"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "7ebbf0c9fb97a38171f06c9a5c4d7d0e77020bc3ee8b01d382ecbd44b591c555"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+          "sha256": "f96aaeabc460f6fb928771f220f4088af832e4228517b6716b71b633c8820ea1"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_source.rs",
+          "sha256": "c65e8c59d936b3b93173824f8b0d4deccf4a8f7cb6e166e33b09b8dae61d6669"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_definition_runtime.rs",
+          "sha256": "1289ff2c683580defa5352d8791713c2b2b0b9b2bff9a61a756d564336257237"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_evaluator.rs",
+          "sha256": "eb0eed3206d0a239b1f6f80fcd9d56b752cbafc321f91ee632ef5cf2c7e7e56e"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_collector.rs",
+          "sha256": "8030ba37249eec939edec5b894c8aa34103a3b66efea6fa4f43f1bfc0696834e"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_collector_operational_error_spec.rs",
+          "sha256": "ae57169ec9d27507b5e464345242a06b440f9d13a7a8e8a055fadd4807288640"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-source.tar.gz",
+        "sha256": "3cfbeeb1639769d4304e1258dbbff5ddf03319004eb978ebf90a9fc31b6d3037"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-linux-test-binaries.json",
+        "sha256": "26bd146ec0132ccd7f0d6d8cb26f5450a81a3ba15ba6be4eed9bad352b75ae7c",
+        "recordedUTC": "2026-09-14T18:50:45.675Z",
+        "sourceManifestSHA256": "be5885e7874cf158f3d4c65369c6c52ad13aa3104aec67b9ca2ddf2bd5158605",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.log"
+            ],
+            "bytes": 13786168,
+            "modifiedUTC": "2026-09-14T18:45:54.123Z",
+            "sha256": "c9c432e5516ce06f224bcea9eb62e92a5df38bd81d54039410abad0a0c883202"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.log"
+            ],
+            "bytes": 15292928,
+            "modifiedUTC": "2026-09-14T18:48:05.559Z",
+            "sha256": "dd116cbc25c3da1a3350623e861c852629ddb2b6e81c71202360bd0436868a3f"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.log"
+            ],
+            "bytes": 52529856,
+            "modifiedUTC": "2026-09-14T18:50:25.914Z",
+            "sha256": "675adc485fedceeb6cae6fba266ddbc964bd13130fff43abe61ceb96f2e97ba8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-runtime-constructor-candidate2",
+      "stage": "private",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib index_producer_collector::operational_error_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.exit",
+        "sha256": "820eda5fab6ff988622bd0720a187224a8b4a697dbf67dfe4e9d1b55d736ef60",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T18:50:26Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336016400384",
+          "final_secondary_free_bytes": "69717573632"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.log",
+        "sha256": "23644c74b6beeb9a7fb5a5a1608ef54fefd9a65b4acda89beb13273cfeaee279"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.guard.log",
+        "sha256": "ab4b7afc2e6ff0822336af75230d9994fee8e225c6322e87052c5cd4ce2a0528"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.source-inputs.sha256",
+        "sha256": "be5885e7874cf158f3d4c65369c6c52ad13aa3104aec67b9ca2ddf2bd5158605"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.source-before.patch",
+        "sha256": "cd9ae72f39ab19cc3d1d941f104b32710ca9fa0ea31fc2f2586cab018d9b3420"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.source-after.patch",
+        "sha256": "cd9ae72f39ab19cc3d1d941f104b32710ca9fa0ea31fc2f2586cab018d9b3420"
+      },
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_producer_collector_spec.rs",
+          "sha256": "0844b8e5f2eefa4f304ba9251621b963e63098ca3fed9c09294a05f47fd8c9a2"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "7ebbf0c9fb97a38171f06c9a5c4d7d0e77020bc3ee8b01d382ecbd44b591c555"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+          "sha256": "f96aaeabc460f6fb928771f220f4088af832e4228517b6716b71b633c8820ea1"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_source.rs",
+          "sha256": "c65e8c59d936b3b93173824f8b0d4deccf4a8f7cb6e166e33b09b8dae61d6669"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_definition_runtime.rs",
+          "sha256": "1289ff2c683580defa5352d8791713c2b2b0b9b2bff9a61a756d564336257237"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/source_evaluator.rs",
+          "sha256": "eb0eed3206d0a239b1f6f80fcd9d56b752cbafc321f91ee632ef5cf2c7e7e56e"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_collector.rs",
+          "sha256": "8030ba37249eec939edec5b894c8aa34103a3b66efea6fa4f43f1bfc0696834e"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_collector_operational_error_spec.rs",
+          "sha256": "ae57169ec9d27507b5e464345242a06b440f9d13a7a8e8a055fadd4807288640"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-source.tar.gz",
+        "sha256": "3cfbeeb1639769d4304e1258dbbff5ddf03319004eb978ebf90a9fc31b6d3037"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-linux-test-binaries.json",
+        "sha256": "26bd146ec0132ccd7f0d6d8cb26f5450a81a3ba15ba6be4eed9bad352b75ae7c",
+        "recordedUTC": "2026-09-14T18:50:45.675Z",
+        "sourceManifestSHA256": "be5885e7874cf158f3d4c65369c6c52ad13aa3104aec67b9ca2ddf2bd5158605",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.log"
+            ],
+            "bytes": 13786168,
+            "modifiedUTC": "2026-09-14T18:45:54.123Z",
+            "sha256": "c9c432e5516ce06f224bcea9eb62e92a5df38bd81d54039410abad0a0c883202"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/narrow.log"
+            ],
+            "bytes": 15292928,
+            "modifiedUTC": "2026-09-14T18:48:05.559Z",
+            "sha256": "dd116cbc25c3da1a3350623e861c852629ddb2b6e81c71202360bd0436868a3f"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-candidate2-evidence/private.log"
+            ],
+            "bytes": 52529856,
+            "modifiedUTC": "2026-09-14T18:50:25.914Z",
+            "sha256": "675adc485fedceeb6cae6fba266ddbc964bd13130fff43abe61ceb96f2e97ba8"
+          }
+        ]
+      }
+    }
+  ],
+  "binaries": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-linux-test-binaries.json",
+    "sha256": "afe01f18f20607900472716b638d698240c7274fa7ff6c123c27ec9e7e2653d4",
+    "recordedUTC": "2026-09-14T19:01:37.526Z",
+    "sourceManifestSHA256": "d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513",
+    "binaries": [
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.log",
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 13786168,
+        "modifiedUTC": "2026-09-14T18:45:54.123Z",
+        "sha256": "c9c432e5516ce06f224bcea9eb62e92a5df38bd81d54039410abad0a0c883202"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/narrow.log"
+        ],
+        "bytes": 15292928,
+        "modifiedUTC": "2026-09-14T18:48:05.559Z",
+        "sha256": "dd116cbc25c3da1a3350623e861c852629ddb2b6e81c71202360bd0436868a3f"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/migration_execution_spec-27d66db1c659b3fe",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/persistence.log",
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 17237448,
+        "modifiedUTC": "2026-09-14T18:51:07.571Z",
+        "sha256": "c4a7f2be0a3b86fbd19e102c8cf24383cb0d3f703e6bc7a70b45ed4dc122c007"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/configuration_control_store_spec-a17495d24dee4e4a",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 21171064,
+        "modifiedUTC": "2026-09-14T18:51:40.197Z",
+        "sha256": "41f1b0776a8f5a82859d965bd22019d1c6185daa673294e321cfca76810a796d"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_availability_spec-231174280f281c68",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 13143560,
+        "modifiedUTC": "2026-09-14T18:51:32.968Z",
+        "sha256": "784e63274474e759613e142476371d8190c04612f5a873e615853622d7c180c4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_table_writer_spec-295d7d8a9ab46f0e",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 5779856,
+        "modifiedUTC": "2026-09-14T18:51:51.197Z",
+        "sha256": "bfbf0f0c29392fcf3e87758754f90dc51d21eb8694f628f396ef468821490c21"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/error_squelch_architecture_spec-b294287edc43f895",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 5601504,
+        "modifiedUTC": "2026-09-14T18:51:43.242Z",
+        "sha256": "ec35a9af07d865e5574b91c3ab113ef654fae6183b63de1c053a97fb32294e26"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/field_definition_writer_spec-a602a086de2abd91",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 6232864,
+        "modifiedUTC": "2026-09-14T18:51:53.198Z",
+        "sha256": "bda0d58f60d58c484ee1232b9f0b5c4cd408c5b8b1b5c44c8468dbeb91b291b8"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/gc_v4_lineage_recovery_spec-a2e546450a5809e4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 7296408,
+        "modifiedUTC": "2026-09-14T18:51:58.667Z",
+        "sha256": "3df0b6c1deea31965db2d9bf207bb1b78c87ea003858b9ee8ba83f0921737198"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_configuration_compiler_spec-db5b4be9c4734259",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 15242168,
+        "modifiedUTC": "2026-09-14T18:51:37.011Z",
+        "sha256": "a974f246f10b374dbdec18a16ffa3e69cf494693a1c1f5b03591e8724374141a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_definition_compiler_spec-cdc6211ea82702e0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 13659600,
+        "modifiedUTC": "2026-09-14T18:51:23.008Z",
+        "sha256": "085a15aeb8bd00167187200d21fd839a2f6ed4cf48cf468eefdd7f4e82f0740c"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_resource_spec-23ff3917b4618488",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 27375512,
+        "modifiedUTC": "2026-09-14T18:51:15.281Z",
+        "sha256": "d201aa8f19245a39e6841f8543ff96d3646959bc01e2a0e961540f8846020fa2"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_spec-c9ededea143172e8",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 27780448,
+        "modifiedUTC": "2026-09-14T18:51:28.330Z",
+        "sha256": "b81970f5ac2c71f79b83191a73c69d76bf1def694c688055b4b6922bbc6e1946"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_semantic_source_spec-3aeb5391d2e0c8b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 16700408,
+        "modifiedUTC": "2026-09-14T18:51:49.012Z",
+        "sha256": "d11b44d31bfbfc1769cd593b1e401d2cd1e8244dcd56b5294d8f58ac512bed1c"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_semantic_source_spec-af18e51dabcb8dcf",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 26213888,
+        "modifiedUTC": "2026-09-14T18:51:35.583Z",
+        "sha256": "e06406012e9cea8fca95b58ea1d0ee78010210d19a77bcfcde4ed448fd775b45"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_v1_reference_spec-3dcc6833a7e18381",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14273200,
+        "modifiedUTC": "2026-09-14T18:51:53.974Z",
+        "sha256": "e046fe050076b2e5fd0b3b79ad6b82e6a1084a2008dddbe3ac92d37c133e9080"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/memory_coordinator_spec-92b606512447f8eb",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 20898864,
+        "modifiedUTC": "2026-09-14T18:51:42.419Z",
+        "sha256": "6b2b3b298fc4f4fbe1099abbcd42e336646fe2c9cc526f60f94d97334f1383aa"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/mime_name_initial_spec-685fdf6f005ac057",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 26561168,
+        "modifiedUTC": "2026-09-14T18:51:25.489Z",
+        "sha256": "121c0f73e8927d61fa55dbeacd93bec6d743176dd3a2c6a4d6a32e3bf6cec1cb"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_context_compiler_spec-31b2c885a629b324",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 27103544,
+        "modifiedUTC": "2026-09-14T18:51:20.397Z",
+        "sha256": "f98a2f68e2d7f19ffec6bea2048e774e38dddd3438dd073f0394cbd0c0358cf7"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_integration_spec-bc830d545222c90b",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 39932808,
+        "modifiedUTC": "2026-09-14T18:51:45.062Z",
+        "sha256": "4a74667157d589863ba8874fe2a519a74116704dc09b1c8e01fe9a494d95c205"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_plan_writer_spec-4dbf0ecfd22754be",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 5731408,
+        "modifiedUTC": "2026-09-14T18:51:55.175Z",
+        "sha256": "b666d78c7b1d553033ca61237db4fb13b4cb2f28ad843bd44e29a06dc0da48b5"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_registry_compiler_spec-b813226275387a17",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 12791752,
+        "modifiedUTC": "2026-09-14T18:52:00.146Z",
+        "sha256": "56e42011e42e1d4c2504802c120acd595e8368208ff7d5a0e2d7b8960d72ae0e"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_mutation_spec-3d59a5ddbc83daa3",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 7292392,
+        "modifiedUTC": "2026-09-14T18:51:56.493Z",
+        "sha256": "a3d9b1a965376fd23d6905db65a51bd3e35810400eab60f747b565651b109173"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_reader_spec-85880fc6802f7a9e",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 6372160,
+        "modifiedUTC": "2026-09-14T18:51:37.758Z",
+        "sha256": "e38ac4a6dec425bd8b05a89f5753bb3c313c27d5a3c2d061a92aeeed837ab50a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_compiler_profile_spec-9e31a43fbeea7425",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14683864,
+        "modifiedUTC": "2026-09-14T18:51:58.111Z",
+        "sha256": "af7e396fb06f6d277fa7c1238824fb81bfad380182a5c175fe08b7bec5968327"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_contract_spec-3af562a005fd2af5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 12107568,
+        "modifiedUTC": "2026-09-14T18:51:14.985Z",
+        "sha256": "165c846df140c726747ca49e6fbedf1c5f218298180aaecc23bef11f4c2a41fb"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_object_writer_spec-ec1540f937b5c3b7",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 11915080,
+        "modifiedUTC": "2026-09-14T18:51:51.181Z",
+        "sha256": "b54fb98db1cb39a5a8017d7b9e3c602e9c41823bf5fdf38cf43194fdd8395767"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_resolver_spec-48362e96b961be42",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 11379120,
+        "modifiedUTC": "2026-09-14T18:51:27.571Z",
+        "sha256": "b4ff391abfb062393891322d866942d0d4c0df55515eaa8e5aa22630e3c4b509"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_selector_compiler_spec-fa163a6bb07fde0a",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 12877240,
+        "modifiedUTC": "2026-09-14T18:51:25.625Z",
+        "sha256": "ba415b702a05b11fdbdc2d939533368fbec83c376a6f2ddae30592fe76ad3369"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_selector_writer_spec-07372de588b138c5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 11083928,
+        "modifiedUTC": "2026-09-14T18:51:29.911Z",
+        "sha256": "78a19f91738b142d4be94a8f4b48be4b50a2ffb3d3f1b5fc135a5eaacfea82f1"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_first_authority_spec-acfe509bfa97454f",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 9300880,
+        "modifiedUTC": "2026-09-14T18:51:17.239Z",
+        "sha256": "171217a33152e957cde033c1eb066784939a13bf987568eea5b672053b07f49a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_format_fixture_spec-e2f5546085ad17bb",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 15485312,
+        "modifiedUTC": "2026-09-14T18:51:46.731Z",
+        "sha256": "d353900777ecf784c9fbc4e6e2418beafd950621d01da85247cdf9e0c6a81fc4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_position_writer_spec-7ba88062a779c0a5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 6731824,
+        "modifiedUTC": "2026-09-14T18:51:34.653Z",
+        "sha256": "e5ef8c18b6679321ccc7318e2988e1c9d692dd4b1bf8e89258045941ac2b2ee2"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_aggregate_execution_spec-fa2853eff09ab8bf",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14829000,
+        "modifiedUTC": "2026-09-14T18:51:20.520Z",
+        "sha256": "34cec49c745adefa535d2fff3ef6400e466d54fbf05e81eb21d084ca6e100625"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_complete_candidate_spec-5f8f02adb5d5a298",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 17113224,
+        "modifiedUTC": "2026-09-14T18:51:48.875Z",
+        "sha256": "b679a707fc57fbfa682318f0b1a9e2bb2a2cafc037d3eafd53eaf7da8a462e94"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_executor_spec-502b8d7c205779f4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 15077640,
+        "modifiedUTC": "2026-09-14T18:51:32.641Z",
+        "sha256": "aca34e52589fd95a02e61510f614d2ae3ac37566be0d2d2c7f96c2d04a946be2"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_order_execution_spec-fdd61e5f050d531c",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14235728,
+        "modifiedUTC": "2026-09-14T18:51:23.354Z",
+        "sha256": "391e8e6f54d39bc3c63c9fbf093827897353996184a6bd4a3073cf653c78781d"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_planner_spec-7cd40ec24d2ffd20",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14191984,
+        "modifiedUTC": "2026-09-14T18:51:39.890Z",
+        "sha256": "d5284efe4084ddddedf09e8ba5d7f5986a8d27b3f9c0712d15cd81ea03362a51"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_result_pipeline_spec-df8d07158db94bd4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 15192392,
+        "modifiedUTC": "2026-09-14T18:51:30.823Z",
+        "sha256": "17393631ea631860be47a305e334d5ffeecd1d380dde01be59c522b8b7c40836"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_reader_hardening_spec-02c6cac161b2a015",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 14321304,
+        "modifiedUTC": "2026-09-14T18:51:17.935Z",
+        "sha256": "c58161119dad5672da78de733f05baa321c08c82c4cd35747040f7a539b57634"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/value_store_writer_spec-efb104c0dd9b7f92",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/affected.log"
+        ],
+        "bytes": 11736352,
+        "modifiedUTC": "2026-09-14T18:51:42.086Z",
+        "sha256": "ce0e149c37dfca69600b1787155741b0743ccb8debea183d4d924a9bb8e2c367"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/aeordb-error-squelch-audit",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/audit.log"
+        ],
+        "bytes": 4694912,
+        "modifiedUTC": "2026-09-14T18:53:16.946Z",
+        "sha256": "164e7dcbd96b77a695d3efbb0ed88b9130b4731bf5bd54598d2237087b7362c0"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/library.log"
+        ],
+        "bytes": 52529856,
+        "modifiedUTC": "2026-09-14T18:50:25.914Z",
+        "sha256": "675adc485fedceeb6cae6fba266ddbc964bd13130fff43abe61ceb96f2e97ba8"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/deps/aeordb_v4_reference-837889bea7290fc5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/reference.log"
+        ],
+        "bytes": 11820848,
+        "modifiedUTC": "2026-09-14T18:56:30.939Z",
+        "sha256": "7929a24a00df12852ff3cdd2181131f35fb3a668283173c118c00b8ed44e35e6"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/aeordb-v4-reference",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-runtime-constructor-final-evidence/contracts.log"
+        ],
+        "bytes": 10939856,
+        "modifiedUTC": "2026-09-14T18:56:51.117Z",
+        "sha256": "4a51686e8ddac76e8a9d90e4e148ef641f62fd8f02b444b044cbd36e534028ce"
+      }
+    ]
+  },
+  "resources": {
+    "memoryMaximumBytes": 6442450944,
+    "swapMaximumBytes": 0,
+    "cpuQuotaPercent": 200,
+    "kernelPeakBytes": 6047608832,
+    "behavior": "Actual selector-vector and copied-key refusal, producer/query policies, first/second constructor, no partial report on resource failure, lease release and successful retry."
+  },
+  "counts": {
+    "narrow": 44,
+    "persistence": 1,
+    "affectedTargets": 40,
+    "affectedTests": 695,
+    "library": 689,
+    "reference": 175,
+    "fixtures": 472,
+    "audit": 1503
+  },
+  "proofBoundary": "Operational source-construction errors remain operational; deterministic malformed definitions remain invalid. Unknown historical executors remain structurally retainable. Per-document retry and frozen semantic-limit behavior is preserved. These tests do not claim universal allocation recovery or complete retained-manifest error propagation.",
+  "unchanged": [
+    "frozen format, compiler and native semantic identities",
+    "single physical writer and selected-root authority",
+    "both lockfiles",
+    "all existing regression test names and reviewed audit identities"
+  ],
+  "pending": [
+    "retained definition/manifest read and active-pointer selection allocation-error perimeter",
+    "staged task-backed semantic activation",
+    "U2 through U7 runtime, producers, queries, maintenance, migration-to-service, defaults and native/release/soak qualification"
+  ]
+}

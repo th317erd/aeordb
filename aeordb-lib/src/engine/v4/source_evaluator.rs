@@ -113,15 +113,18 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
       .reserve(policy.source_owner, decode_workspace.max(1), policy.source_admission)
       .map_err(|error| AuthoritativeSourceEvaluationErrorV1::ResourcePressure(error.to_string()))?;
     let definition = decode_value_store_definition(encoded_definition, hash_algorithm).map_err(|error| {
-      AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
+      if error.is_allocation_failure() {
+        AuthoritativeSourceEvaluationErrorV1::ResourcePressure(error.to_string())
+      } else {
+        AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
+      }
     })?;
     let runtime_bytes = ValueStoreRuntimeV1::maximum_retained_bytes_for_definition(&definition).map_err(|error| {
       AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
     })?;
     resize_reservation(&mut runtime_memory, runtime_bytes)?;
-    let runtime = ValueStoreRuntimeV1::from_definition(definition, hash_algorithm.hash_length()).map_err(|error| {
-      AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration { code: error.code(), context: error.context().to_string() }
-    })?;
+    let runtime = ValueStoreRuntimeV1::from_definition(definition, hash_algorithm.hash_length())
+      .map_err(AuthoritativeSourceEvaluationErrorV1::Source)?;
     if runtime.definition().scope_id != expected_scope_id || runtime.definition().value_store_id != expected_value_store_id {
       return Err(AuthoritativeSourceEvaluationErrorV1::InvalidConfiguration {
         code: "authoritative_source_identity",

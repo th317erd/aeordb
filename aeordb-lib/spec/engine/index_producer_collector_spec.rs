@@ -698,3 +698,34 @@ fn cancellation_and_report_memory_pressure_fail_without_retained_state() {
   ));
   assert_eq!(tiny_memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
 }
+
+#[test]
+fn source_runtime_admission_pressure_is_not_persisted_as_invalid_configuration() {
+  let definitions = definitions("avst-blake3-256-metadata-hash-corrected-valid.bin", "afix-blake3-256-typed_exact_blake3_v1-valid.bin");
+  let root = hash(b"root");
+  let revision = hash(b"revision");
+  let record = file("/doc.json", 0x44, 32);
+  let transition =
+    IndexCollectorDocumentTransitionV1 { document_ordinal: 1, before: None, after: Some(document(&root, &revision, &record)) };
+  let parser = Parser::new(ParserBehavior::DependencyUnavailable);
+  // Report admission fits, but the source constructor's 2 MiB decode workspace
+  // does not. This is different from refusing the report before any work.
+  let pressure = memory(2 * 1_024 * 1_024);
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, pressure.clone(), options()).unwrap();
+  match collector.collect(scope_bundle(&definitions), transition, &parser, None, &|| false) {
+    Err(IndexProducerCollectorErrorV1::ResourcePressure(_)) => {}
+    Err(error) => panic!("source construction returned the wrong failure: {error}"),
+    Ok(report) => panic!("temporary constructor pressure produced persisted outcomes: {:?}", report.report().outcomes),
+  }
+  assert_eq!(pressure.snapshot().unwrap().reserved_bytes, 0);
+  assert_eq!(parser.calls.load(Ordering::SeqCst), 0);
+
+  let recovered = memory(PARSER_TEST_HARD_LIMIT);
+  let collector = IndexProducerCollectorV1::new(HASH_ALGORITHM, recovered.clone(), options()).unwrap();
+  let report = collector.collect(scope_bundle(&definitions), transition, &parser, None, &|| false).unwrap();
+  assert!(matches!(outcome(&report, &definitions.value_id).disposition, IndexProducerOwnerDispositionV1::Ready));
+  assert!(matches!(outcome(&report, &definitions.field_id).disposition, IndexProducerOwnerDispositionV1::Ready));
+  drop(report);
+  assert_eq!(recovered.snapshot().unwrap().reserved_bytes, 0);
+  assert_eq!(parser.calls.load(Ordering::SeqCst), 0);
+}

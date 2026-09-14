@@ -27,7 +27,7 @@ cross those operational boundaries.
 ## Current facts (not a readiness claim)
 
 Current landing: the independent compiler profile and selected-H fingerprint
-pass all ten Linux qualification gates. See the
+are committed/pushed as `24230bf5` and pass all ten Linux qualification gates. See the
 [strict profile proof](../evidence/user-facing-v4-u1-compiler-profile-proof-20260914.json).
 The frozen corpus covers 109 valid configurations and 340 invalid sources across
 all five registered hashes. Runtime lookup is allocation-free; retained unknown
@@ -2474,6 +2474,111 @@ bytes must keep their old classification. No production edits for this follow-up
 have been made. Add actual admission/allocation failing-first regressions,
 preserve cancellation/dependency distinctions and prove retry after pressure
 clears. This is an existing U1 prerequisite, not an additional format decision.
+
+## U1 completed unit: runtime constructor operational failures
+
+Entry `24230bf522d13aea709990afb3ad93ea65e3d0c6`; direct owner, preserving the
+just-passed ten-gate baseline and unrelated WIP. Owned production boundaries:
+`index_definition_runtime.rs`, `source_evaluator.rs`,
+`index_producer_collector.rs`, and any directly necessary fallible selector
+construction in `index_source.rs`. Query adapters remain behavior-identical
+unless a failing regression demonstrates a lost operational distinction.
+Frozen formats, profiles, physical writers, task activation and services are
+forbidden in this unit.
+
+First target:
+`index_producer_collector_spec::source_runtime_admission_pressure_is_not_persisted_as_invalid_configuration`.
+It admits the report but refuses the constructor's decode workspace, requires a
+resource failure without any returned degradation, checks lease release and
+proves that identical definitions succeed after pressure clears. This is a new
+test before any production edit. Follow with measured constructor allocation
+refusals, deterministic-malformed guards, query error propagation and the
+existing cancellation/dependency failure matrix. Run narrow to broad under the
+same desktop timeout, two-job, no-swap and disk-floor limits. Staged task-backed
+semantic activation remains the following integration step.
+
+Failing-first results, September 14:
+
+- Admission RED ended 18:22:12 UTC: zero passed, one failed. The report contained
+  a Ready scope plus two Degraded outcomes with stable reason 14, demonstrating
+  the temporary-resource-to-invalid-configuration conversion. Six raw files and
+  the same-host executable digest were preserved before the next source packet.
+- Key-allocation RED ended 18:27:37 UTC: the process aborted on an injected
+  4093-byte allocation refusal. Decoder-allocation RED ended 18:28:19 UTC:
+  the process aborted on an injected 24-byte allocation refusal. Neither used
+  a database; test-process core dumps were disabled. Twelve raw files and the
+  shared test executable digest were captured.
+- The directly affected `source_selector.rs` reader joins the owned scope:
+  its decoded segment vector now uses fallible reservation with the existing
+  allocation-origin flag. `index_source.rs` likewise reserves copied keys
+  fallibly. No persisted bytes or deterministic validation rules change.
+  Constructor/collector translation is deliberately still unchanged for the
+  next classification RED run. The two new resource tests retain both corrected
+  and legacy runtime checks and recovery after the injected failure is removed.
+
+Classification RED completed at18:31:48 UTC:14 collector cases passed and the
+admission case still failed;25 resource cases passed while both allocation
+cases now returned UnsupportedDefinition instead of HostFailure. No aborts
+occurred. Six raw files and two same-host binary digests were mirrored before
+changing the isolated worktree. This separates the allocation correction from
+the independently reproduced error-translation defect.
+
+The candidate preserves decoder allocation origin through both runtime
+constructors, source construction through the authoritative evaluator, and
+refused construction through the collector. Shared-budget/host refusal discards
+the partial report; dependency unavailability remains retryable and cancellation
+remains cancellation. Invalid definitions still degrade, and per-document
+operational retry behavior is unchanged. The expanded tests exercise both
+memory policies, legacy/corrected retained runtimes, actual first and second
+key-copy refusals (ValueStore then FieldIndex), malformed bytes, lease release,
+and retry after pressure clears. Candidate1 failed to compile because a new
+test diagnostic required Debug on the intentionally opaque report; that test
+message was corrected without changing production API. Candidate2 narrow
+completed18:48:06 UTC:15 collector and29 resource cases passed. Full proof is
+still pending; the only audit-ledger change moves one reviewed source-selector
+location by three lines without changing its identity or policy.
+
+### Required next perimeter: retained definition read/selection failures
+
+Constructor final qualification completed18:56:56 UTC (22979closed0): allten
+gates passed in5m53.010s elapsed/7m2.881s CPU. Exact counts44narrow,
+1physical-persistence,695affected across40targets,689library,175reference,
+472independent fixtures,1503reviewed audit occurrences, strict workspaceClippy,
+format and debt self-test. The eleven-input manifest is
+`d9664358cdfde78c706944426267d3864acb1893fbd22d83572bdc4a3f029513`;
+kernel peak6,047,608,832 bytes under6GiB/no-swap. FinalData336,016,375,808 and
+home69,712,842,752 bytes remain above their floors. Sixty raw stage files,
+driver and45same-host executable digests are mirrored; strict proof verifier
+d84f2a passed and created the
+[constructor evidence](../evidence/user-facing-v4-u1-runtime-constructor-proof-20260914.json).
+This completes only the constructor landing unit. The required read/selection
+perimeter below remains open before staged task integration or readiness.
+
+The new fallible selector decoder exposes operational errors at additional
+pre-existing boundaries, outside constructor ownership. Before task integration,
+qualify/correct the following exact paths with allocation injection:
+
+- `query_planner::validate_scope` preflight, selected definitions in
+  `read_view_native`, and both normal/compaction `index_semantic_source` walks
+  currently translate all ValueStore decoder errors to corrupt-source errors.
+- `index_manifest::nested_definition_error` and
+  `index_artifact::validate_correctness_manifest_chain` erase the allocation flag
+  before it reaches retained manifest consumers. Preserve deterministic closure
+  error codes while carrying actual allocation origin.
+- The resulting manifest errors feed coverage registry, native selected
+  artifact cursors and native compaction. Their current all-corrupt mappers
+  need operational branches. `first_authority::index_active_pointer_closure_valid`
+  additionally converts any decoder/chain failure to false; resource refusal
+  must not select an older generation as if a valid candidate were corrupt.
+- `namespace_definition` and `index_producer_source` preserve the underlying
+  FormatError via `?`; follow their outer consumers before claiming complete
+  propagation. Batch application, generation publication and task decoders
+  likewise return FormatError rather than directly discarding it.
+
+This is a bounded follow-up unit, not completion of universal allocator
+recovery. Do not alter frozen codecs/identities or interpret missing historical
+executors as malformed definitions. No selected physical writer changes are
+included in the constructor unit.
 
 ## U1 completed compiler unit: whole corrected configuration compilation
 
