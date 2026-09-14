@@ -360,3 +360,67 @@ fn catalog_cow_returns_fallible_metadata_and_leaf_output_allocation_errors_witho
     }
   }
 }
+
+#[test]
+fn registry_compiler_preflights_source_and_propagates_projection_allocation_failure() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::DependencyRecordV1;
+  use aeordb::engine::v4::parser_registry_compiler::{
+    ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
+  };
+
+  struct Snapshot;
+  impl ParserAliasSnapshotV1 for Snapshot {
+    fn resolve_parser_alias(&self, _alias: &str) -> Result<Option<DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      panic!("empty or unadmitted sources may not resolve dependencies");
+    }
+  }
+  let excessive = vec![b' '; 1_048_576];
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(96 * 1024 * 1024, 128 * 1024 * 1024, 32 * 1024 * 1024, 8 * 1024 * 1024).unwrap());
+    let request = ParserRegistryCompilationRequestV1 {
+      source: Some(&excessive),
+      hash_algorithm: algorithm,
+      maximum_source_bytes: 4096,
+      maximum_workspace_bytes: 16 * 1024 * 1024,
+    };
+    let (result, allocations) = measure(0, || compile_parser_registry_v1(request, &Snapshot, &memory, &|| false));
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_preflight(allocations);
+    let (result, allocations) = measure(61 + algorithm.hash_length(), || {
+      compile_parser_registry_v1(ParserRegistryCompilationRequestV1 { source: None, ..request }, &Snapshot, &memory, &|| false)
+    });
+    assert!(allocations.injected_failure, "{allocations:?}");
+    assert!(matches!(result, Err(SemanticCompilationErrorV1::Resource { .. })));
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn registry_source_allocation_failure_is_operational_not_invalid_configuration() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::DependencyRecordV1;
+  use aeordb::engine::v4::parser_registry_compiler::{
+    ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
+  };
+
+  struct NoLookup;
+  impl ParserAliasSnapshotV1 for NoLookup {
+    fn resolve_parser_alias(&self, _alias: &str) -> Result<Option<DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      panic!("source allocation refusal must occur before dependency lookup");
+    }
+  }
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(96 * 1024 * 1024, 128 * 1024 * 1024, 32 * 1024 * 1024, 8 * 1024 * 1024).unwrap());
+  let request = ParserRegistryCompilationRequestV1 {
+    source: Some(br#"{"$v":1,"parsers":{"text/plain":"x"}}"#),
+    hash_algorithm: HashAlgorithm::Blake3_256,
+    maximum_source_bytes: 4096,
+    maximum_workspace_bytes: 16 * 1024 * 1024,
+  };
+  let (result, allocations) =
+    measure(4 * std::mem::size_of::<(String, String)>(), || compile_parser_registry_v1(request, &NoLookup, &memory, &|| false));
+  assert!(allocations.injected_failure, "{allocations:?}");
+  let error = result.err().expect("allocation refusal must propagate");
+  assert!(matches!(error, SemanticCompilationErrorV1::Resource { .. }), "{error}");
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+}

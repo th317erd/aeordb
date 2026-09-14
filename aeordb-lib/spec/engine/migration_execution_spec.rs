@@ -680,6 +680,92 @@ fn immutable_entity_batch_refuses_invalid_bounds_roles_and_collisions_without_pu
 }
 
 #[test]
+fn compiled_parser_registry_pins_publish_and_reopen_without_selecting_new_authority() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::dependency::{DependencyRecordV1, decode_dependency_record_bytes};
+  use aeordb::engine::v4::parser_registry_compiler::{
+    ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
+  };
+
+  struct Snapshot(Vec<u8>);
+  impl ParserAliasSnapshotV1 for Snapshot {
+    fn resolve_parser_alias(&self, _alias: &str) -> Result<Option<DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      Ok(Some(decode_dependency_record_bytes(&self.0).unwrap()))
+    }
+  }
+
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let profile = if algorithm.hash_length() == 32 { "blake3-256" } else { "sha512" };
+    let fixture = std::fs::read(format!(
+      "{}/spec/fixtures/v4/semantic-object-v1/asem-{profile}-wasm-parser-definition-valid.bin",
+      env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let snapshot = Snapshot(fixture[48 + algorithm.hash_length()..fixture.len() - 4].to_vec());
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(96 * 1024 * 1024, 128 * 1024 * 1024, 32 * 1024 * 1024, 8 * 1024 * 1024).unwrap());
+    let request = ParserRegistryCompilationRequestV1 {
+      source: Some(br#"{"$v":1,"parsers":{"TEXT/PLAIN":"captured"}}"#),
+      hash_algorithm: algorithm,
+      maximum_source_bytes: 4096,
+      maximum_workspace_bytes: 16 * 1024 * 1024,
+    };
+    let compiled = compile_parser_registry_v1(request, &snapshot, &memory, &|| false).unwrap();
+    let dependency = encode_semantic_definition_object(6, compiled.entries()[0].dependency_bytes(), algorithm).unwrap();
+    let projection = compiled.projection();
+    let leaf = encode_semantic_catalog_leaf(
+      &[SemanticCatalogRecordV1 {
+        record_kind: 2,
+        owner_key: b"\x02\x00/.aeordb-config/parsers.json",
+        semantic_id: &projection.semantic_id,
+        definition_object_id: &projection.object.object_id,
+      }],
+      algorithm,
+    )
+    .unwrap();
+    let objects = [dependency.object, projection.object.clone(), leaf];
+    let publication = ImmutableSemanticObjectBatchPublicationRequestV1 {
+      database_id: &before.selected.header.database_id,
+      objects: &objects,
+      publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+    };
+    assert!(!publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+    let selected = publisher.observe().unwrap();
+    assert_eq!(selected.selected.header.head_hash, before.selected.header.head_hash);
+    assert!(publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+    let equivalent = compile_parser_registry_v1(
+      ParserRegistryCompilationRequestV1 { source: Some(br#"{ "parsers": {"text/plain":"renamed"}, "$v":1 }"#), ..request },
+      &snapshot,
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    assert_eq!(equivalent.projection(), projection);
+    assert!(compile_parser_registry_v1(
+      ParserRegistryCompilationRequestV1 { source: Some(br#"{"$v":1,"parsers":null}"#), ..request },
+      &snapshot,
+      &memory,
+      &|| false,
+    )
+    .is_err());
+    assert_eq!(publisher.observe().unwrap(), selected);
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    assert_eq!(reopened.observe().unwrap(), selected);
+    for object in &objects {
+      let kind = u16::from_le_bytes([object.value[6], object.value[7]]);
+      assert_eq!(reopened.load_semantic_object(kind, &object.object_id).unwrap().as_deref(), Some(object.value.as_slice()));
+    }
+    assert!(reopened.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+    assert_eq!(reopened.observe().unwrap(), selected);
+  }
+}
+
+#[test]
 fn immutable_entity_batch_can_mix_existing_and_new_entities_without_rewriting_the_existing_identity() {
   let algorithm = HashAlgorithm::Blake3_256;
   let (_directory, _coordinator, publisher) = initialized_publisher(algorithm);

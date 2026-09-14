@@ -26,8 +26,11 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: catalog leaf/internal writers are qualified on Linux;
-next is all-class definition wrapping, followed by bounded COW/compiler.
+Current landing: corrected parser-registry compilation passes all ten Linux
+qualification gates; see its [strict proof](../evidence/user-facing-v4-u1-parser-registry-proof-20260914.json).
+Definition wrappers and bounded catalog COW are committed and pushed as
+`7eb1a40d` and `19284eea`. Next is parser-plan/default/index compilation and
+staged integration, not a completed full semantic compiler.
 Independent semantic-envelope size admission is committed/pushed as429dc71a.
 See the [envelope proof](../evidence/user-facing-v4-u1-semantic-envelope-proof-20260914.json).
 Owner-key validation is committed/pushed as
@@ -2134,6 +2137,108 @@ but excludes raw source formatting/logging from semantic IDs; Round11 fixes
 the corrected$v1 default field/strategy matrix and finite semantic bounds.
 Implement from those contracts through the typed definition owners; do not
 use generic JSON canonicalization or a fixture fingerprint as a compiler.
+
+## U1 current compiler unit: corrected parser registry
+
+Entry `19284eeac9c8a74ef55ede207c19a220f2902f75`, development and freshly fetched
+origin equal, tracked tree clean. Direct owner; `implement` execution continues.
+Own new `v4/parser_registry_compiler.rs`, dedicated spec/Cargo registration,
+v4 module export, this ledger and proof. Extend real-file/resource proof through
+existing test owners only. Preserve v0 indexing_pipeline registry behavior,
+all frozen fixture bytes, physical publication and authority selection.
+
+Round9 lines7097–7137 freezes corrected source: strict `$v:1`/`parsers` object,
+512 entries, parameter-free normalized MIME, no duplicate normalized/source
+keys, reserved application/json, bounded non-control aliases. Missing source
+is empty; malformed/read failure is not absence. Round10 lines9421–9460 binds
+class2 to post-compilation CanonicalConfigValue, excluding alias names/source
+formatting. Compile a canonical essence-to-exact-dependency-bytes map; use the
+existing all-class wrapper for separate selected-H semantic/object identities.
+Only corrected parser-role WASM records are admissible here; retaining an
+unknown executor in a reader is not permission to compile it as executable.
+
+The caller supplies one captured deployment snapshot and already read source;
+source read/integrity failure must propagate before this API, not become None.
+Borrow the snapshot for the operation and pin its returned exact records.
+No live deployment lookup, artifact import, service route, root selection, or
+compiler-profile claim is introduced by this unit. Later parser-plan compilation
+and staged atomic integration still remain. Input/workspace limits are explicit
+operational request bounds, not new persisted semantics; retain shared Task
+memory admission through output lifetime and check cancellation/pressure.
+
+Narrow RED target: `cargo test --offline --locked -j 2 -p aeordb --test
+parser_registry_compiler_spec` on desktop under the existing guarded runner.
+Proof covers absent/empty equivalence, independent canonical projection/IDs at
+all five hashes, normalization/order/alias equivalence, all meaningful record
+changes, duplicates/schema/type/UTF8/alias/MIME errors, 512/513 and alias byte
+boundaries, source/workspace limits, missing/wrong/unknown dependencies,
+cancellation/operational failure/memory release and real-file reopen.
+API absence is compile-time RED, not a falsely reported behavioral test run.
+
+Setup observer10508 was still preparing the worktree when the first unit was
+launched; that unit exited1 before Cargo/no tests. Preparation then completed
+successfully and was verified before red2. Actual API RED38661 completed
+2026-09-14T12:21:48Z, exit101/E0432 missing `parser_registry_compiler`, zero
+behavioral tests executed; no source drift or guard stop. Four-input manifest
+0785ecdecf3829cec7e2468b8cbd3ae087d4a33e1c3386545a21c7c8f7897b7c,
+archive2f8720b4f58410e2f93368940849aed2f28d517daf3b5beeb433351f6e58df6c.
+Implementation installed only afterward. Original12-case spec unchanged.
+First candidate80141 runs the unchanged spec with six frozen inputs; manifest
+9c637319d2c7e5654e9df8bdf159eadf91fcaeec812252660a70f10abc0ac6b6,
+archiveb570bea3f607ea16c92c58e1a4be166c3a39a7427b4aac5c2c80f658044a0e2c.
+Separate supplemental real-file and allocator cases are written locally, not
+part of that first run. Final broad qualification remains pending.
+
+First80141 completed12:26:35Z, all12 tests pass,59.402s/CPU1m0.850s. Same-host
+binary digest and all six stage artifacts are retained. Added a thirteenth
+compiler case for exactly262144 projection bytes and one-byte excess, one
+real-file case (migration_execution now17), and two allocator cases (now11).
+The allocation-injection case produced behavioral RED1130 at12:31:29Z:
+0pass/1fail/10filtered; source Vec refusal was reported as InvalidSource.
+Seven-input manifest25275c82515a7d48d432deb8c2370c860fb2bef95259d76e84ef56b952fdf2f8,
+archive7ce4053804489a88d0fc32d4034824e26f4ee3c20c8f6d0f0ace8334210811b0.
+Only afterward, preserve the visitor's allocation error through an explicit
+visitor-owned marker and return Resource. All RED spec bytes remain unchanged.
+
+Final32965 launched12:34:05Z with eight frozen inputs, six source/test files
+plus both locks. Manifestd5a06b1c4a72497a91b4ec0189310303d1bf4252365e36869b2abddaa5d39328,
+archive9efea8fa186694f514eb78ae25d108a75218d412ecf51eec5f86c1dbfcb92bdc.
+Ten-stage qualification uses6GiB/noSwap/2CPU, same disk floors, source hashes
+before/after every stage, direct kernel memory counters and bounded deadlines.
+Do not alter these inputs until terminal capture. Final result/proof/commit
+are still pending. Following work remains actual parser-plan/default/index
+compilation and staged task integration; no full-compiler completion claim.
+
+Final32965 completed12:40:51Z, all10 gates green:24narrow (13compiler and
+11allocation), selected real-file persistence1/16filtered,325affected across
+20targets, audit1503 unchanged, fmt, strict workspaceClippy,681library,
+175independent reference,472fixtures/contracts and actual debt self-test.
+No ignored cases, source/lock drift or resource-guard stop. The selected
+persistence case is included among325, not another distinct case.
+Unitdc974081b95943a3be606c385450ad96 ran6m43.353s/CPU7m17.631s with direct
+kernel peak5946187776 bytes under6GiB/noSwap/2CPU. Final free bytes
+Data336108097536/home70190288896. All61stage/driver artifacts and26same-host
+executed binary digests mirrored1897closed0; strictproofc1b39ePASS.
+Both API-RED/first compiler specs have an unchanged prefix in final13cases;
+behavioral-RED compiler/resource spec bytes are identical to final. The exact
+eight source/lock inputs passed all gates. Six code/test files plus this ledger
+and proof form the green landing; ignored root lock is never staged.
+
+Review confirms no second physical writer, source-I/O fallback, live alias
+lookup, parser execution or selected-root activation. Snapshot/archive
+availability remain explicit caller obligations; only corrected ABI/executor
+records compile here. The public v0 registry pipeline, reader codecs,
+reference/fixture bytes, shared memory and1503-entry audit baseline are intact.
+No new release/native/full-workspace test run or whole-service readiness claim.
+
+Next bounded compiler territory is exact parser-plan construction: reuse the
+captured registry pins, native semantic components and dependency comparator;
+deduplicate/sort records before assigning one-based ordinals, then bind explicit
+or automatic candidates and selector dependencies. Existing ValueStore closure
+rejects unused dependencies and requires exactly one Regex component for JSON
+selectors. Corrected metadata has no parser/dependencies and zero document/
+selector work limits. Complete concrete default profiles and source compilation
+must follow before semantic task activation. No next-unit source is written yet.
 
 ## U2 read-only entry refinement: public append-writer guard
 
