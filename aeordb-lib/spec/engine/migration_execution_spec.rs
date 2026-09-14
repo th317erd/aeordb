@@ -18,6 +18,10 @@ use aeordb::engine::v4::first_authority::{
 };
 use aeordb::engine::v4::hash::digest_parts;
 use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, SemanticUnavailableReasonV1, encode_semantic_state_object};
+use aeordb::engine::v4::namespace::{
+  EncodedSemanticObjectV1, SemanticCatalogChildV1, SemanticCatalogNodeV1, SemanticCatalogRecordV1, decode_semantic_catalog_node,
+  decode_semantic_definition_record, encode_semantic_catalog_internal, encode_semantic_catalog_leaf,
+};
 use aeordb::engine::v4::root_authority::decode_root_admission_commit;
 use aeordb::engine::hot_tail::read_hot_tail_checked;
 use aeordb::engine::{CompressionAlgorithm, DiskKVStore, HashAlgorithm};
@@ -395,6 +399,109 @@ fn immutable_semantic_objects_publish_canonically_and_refuse_invalid_batches_wit
     let reopened_receipt = reopened.publish_immutable_semantic_objects(request).unwrap();
     assert!(reopened_receipt.idempotent);
     assert_eq!(reopened_receipt.observation, selected_after_publication);
+  }
+}
+
+#[test]
+fn encoded_catalog_nodes_publish_and_reopen_through_the_existing_authority_without_selecting_a_root() {
+  for (algorithm, profile) in [(HashAlgorithm::Blake3_256, "blake3-256"), (HashAlgorithm::Sha512, "sha512")] {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    let before = publisher.observe().unwrap();
+    let definitions: Vec<_> = ["parser", "mapper"]
+      .iter()
+      .map(|role| {
+        let path =
+          format!("{}/spec/fixtures/v4/semantic-object-v1/asem-{profile}-wasm-{role}-definition-valid.bin", env!("CARGO_MANIFEST_DIR"));
+        let value = std::fs::read(path).unwrap();
+        let object_id = decode_semantic_definition_record(&value, algorithm).unwrap().object_id;
+        EncodedSemanticObjectV1 { object_id, value }
+      })
+      .collect();
+    let leaves: Vec<_> = definitions
+      .iter()
+      .map(|definition| {
+        let decoded = decode_semantic_definition_record(&definition.value, algorithm).unwrap();
+        encode_semantic_catalog_leaf(
+          &[SemanticCatalogRecordV1 {
+            record_kind: 6,
+            semantic_id: decoded.semantic_id,
+            definition_object_id: &definition.object_id,
+            owner_key: decoded.semantic_id,
+          }],
+          algorithm,
+        )
+        .unwrap()
+      })
+      .collect();
+    let lookups: Vec<_> = leaves
+      .iter()
+      .map(|leaf| {
+        let SemanticCatalogNodeV1::Leaf(decoded) = decode_semantic_catalog_node(&leaf.value, algorithm).unwrap() else {
+          panic!("expected leaf");
+        };
+        decoded.lookup_digest().to_vec()
+      })
+      .collect();
+    let common = lookups[0].iter().zip(&lookups[1]).take_while(|(left, right)| left == right).count();
+    assert!(common < algorithm.hash_length());
+    let mut children = [
+      SemanticCatalogChildV1 { edge: lookups[0][common], record_count: 1, object_id: &leaves[0].object_id },
+      SemanticCatalogChildV1 { edge: lookups[1][common], record_count: 1, object_id: &leaves[1].object_id },
+    ];
+    children.sort_by_key(|child| child.edge);
+    let internal = encode_semantic_catalog_internal(0, &lookups[0][..common], &children, algorithm).unwrap();
+    let publish = |objects: &[EncodedSemanticObjectV1]| {
+      publisher
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+          database_id: &before.selected.header.database_id,
+          objects,
+          publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+        })
+        .unwrap()
+    };
+    // Dependency-first pages use the real file/KV/header publication owner.
+    // This does not advertise executable availability or activate semantics.
+    assert!(!publish(&definitions).idempotent);
+    assert!(!publish(&leaves).idempotent);
+    assert!(!publish(std::slice::from_ref(&internal)).idempotent);
+    let mut objects = definitions;
+    objects.extend(leaves);
+    objects.push(internal);
+    let selected = publisher.observe().unwrap();
+    assert_eq!(selected.selected.header.head_hash, before.selected.header.head_hash);
+    let frontier = coordinator.snapshot().unwrap().hard_frontier;
+    assert!(publish(&objects).idempotent);
+    assert_eq!(publisher.observe().unwrap(), selected);
+    assert_eq!(coordinator.snapshot().unwrap().hard_frontier, frontier);
+    let mut malformed = objects.last().unwrap().clone();
+    malformed.value[32] ^= 1;
+    assert!(publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+        database_id: &before.selected.header.database_id,
+        objects: &[malformed],
+        publication_timestamp_ms: before.selected.header.updated_at_ms + 1,
+      })
+      .is_err());
+    assert_eq!(publisher.observe().unwrap(), selected);
+    drop(publisher);
+    drop(coordinator);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    assert_eq!(reopened.observe().unwrap(), selected);
+    for object in &objects {
+      let kind = u16::from_le_bytes([object.value[6], object.value[7]]);
+      assert_eq!(reopened.load_semantic_object(kind, &object.object_id).unwrap().as_deref(), Some(object.value.as_slice()));
+    }
+    assert!(
+      reopened
+        .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+          database_id: &before.selected.header.database_id,
+          objects: &objects,
+          publication_timestamp_ms: before.selected.header.updated_at_ms + 2,
+        })
+        .unwrap()
+        .idempotent
+    );
+    assert_eq!(reopened.observe().unwrap(), selected);
   }
 }
 

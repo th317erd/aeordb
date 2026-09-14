@@ -1,0 +1,691 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-14T10:54:04.241Z",
+  "baseCommit": "429dc71a66121f61aee841ba0dbd03aeda34e7f4",
+  "unit": "U1 bounded semantic catalog leaf/internal encoders",
+  "unitComplete": true,
+  "fullU1Complete": false,
+  "fullV4Ready": false,
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "aeordb-lib/Cargo.toml",
+      "sha256": "847e3c4040ba7ed8d663914199a1419890e48d3d21f8074a7ad75ff32bd07f93"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/namespace.rs",
+      "sha256": "9b1e34c77929217f076870a0ead9d2b48215ac1875ef48881641a5912713d34d"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/namespace_catalog.rs",
+      "sha256": "14516424251575bb73d5ddfd2ffe0d3c8b66f19feadb8212e817ad31d06d7130"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_catalog_writer_spec.rs",
+      "sha256": "62212a52458df2ec17fd5bec73858c84d92954ee394a238200092c0923b81390"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+      "sha256": "a3ae5eec0c399c8fb43fc8c09d2bd439188311db312f4bf2ecae35757a1d0906"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/migration_execution_spec.rs",
+      "sha256": "100a15aedc3019f9a6969d48f609249f39f7cc9569f85d64a9e8147a92c888c7"
+    }
+  ],
+  "sourceManifest": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-source-inputs.sha256",
+    "sha256": "493abc5f0428d4e3ae047e8dd1a2b7e3bf0a50088e36bed2a914ff687897680d"
+  },
+  "archive": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-source.tar",
+    "sha256": "84d3e5dccbcb18c4b19a7cf7ded02b9589809e43bd1c3dd1e17c7c43b7a917d6"
+  },
+  "gates": [
+    {
+      "stage": "narrow",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_catalog_writer_spec --test semantic_definition_writer_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/narrow.exit",
+        "sha256": "49da1cdec77b23bd530021c9cb714f06af39a3080c7d9c7dad370e462b6201ac",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:47:22Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148291584",
+          "final_secondary_free_bytes": "70449000448"
+        }
+      },
+      "tests": [
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/narrow.guard.log",
+        "sha256": "e4a785664a38620e5cbc8eeaa7ba55030131c7b215b8eb5737b496e2525e96dc"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/narrow.log",
+        "sha256": "6e08de4bc9498751e94cff40fea10fca665bae951267651caf8fa01436a641b8"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/narrow.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/narrow.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "persistence",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test migration_execution_spec encoded_catalog_nodes_publish_and_reopen ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/persistence.exit",
+        "sha256": "2a60f2954e8e784992cfe97887b8169b462fb629adfe4b318902ead82a66440e",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:47:26Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148287488",
+          "final_secondary_free_bytes": "70448959488"
+        }
+      },
+      "tests": [
+        [
+          1,
+          0,
+          0,
+          0,
+          13
+        ]
+      ],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/persistence.guard.log",
+        "sha256": "7ac8ec97e377fdbc6e5dc8a862c18c5995f2dc478c00cdc49d0bdbd08282b4cf"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/persistence.log",
+        "sha256": "0a78e545d51398c948c843b9341e772b24c54ccece575bc8a2996fd7b53a0447"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/persistence.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/persistence.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "affected",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_catalog_reader_spec --test index_semantic_source_spec --test index_native_semantic_source_spec --test v4_semantic_object_store_spec --test v4_first_authority_spec --test migration_execution_spec --test dependency_catalog_identity_spec --test v4_root_migration_spec --test v4_format_fixture_spec --test semantic_definition_contract_spec --test v4_read_view_native_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/affected.exit",
+        "sha256": "24c7d7a5167fb484b20231268c7fd273437a094bffd2b8398b99f9ca99c3293b",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:47:38Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148287488",
+          "final_secondary_free_bytes": "70448889856"
+        }
+      },
+      "tests": [
+        [
+          16,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          34,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          12,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          77,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          85,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          17,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/affected.guard.log",
+        "sha256": "eadeb934818f834f9cff64112fa0c073238aff5ee0f81649a2f87da14fec92ee"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/affected.log",
+        "sha256": "f442367ac9584ef0abe1f4fdbc55586799ae4dd28bd04102a3e12bd19e9df66b"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/affected.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/affected.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "format",
+      "command": "cargo fmt --all -- --check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/format.exit",
+        "sha256": "0576db6c7b0efcf6737b611510555e37d3317e31fdb691e1c832a5c47435f62d",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:47:44Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148287488",
+          "final_secondary_free_bytes": "70448840704"
+        }
+      },
+      "tests": [],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/format.guard.log",
+        "sha256": "22faec868d0a547d2f4dd4182af4c924ec8dcb5c1fe9919ef727c35795f20899"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/format.log",
+        "sha256": "5f85b80a8123b31965a26c86f093c75c7246dee1e19818b784387b363a329c43"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/format.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/format.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "clippy",
+      "command": "cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/clippy.exit",
+        "sha256": "5a1cb2a2c19825988823c76dab253bf8be56249c55f2502c8749bc0c8ea32140",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:48:21Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148279296",
+          "final_secondary_free_bytes": "70448783360"
+        }
+      },
+      "tests": [],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/clippy.guard.log",
+        "sha256": "2c4f5c07f0e9d22c4979a57072d62d1bc8b7c2f8a246b6d8588715d1290df6ce"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/clippy.log",
+        "sha256": "dbec1d22035f133fa3849b058891e66d051e02a85f56cb7da3f7b8ca0db4ff01"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/clippy.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/clippy.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "library",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/library.exit",
+        "sha256": "dcd98130da3a49b3fbd6a9d9981d035a51dfdba04ecfe491d8e6da9930147b8f",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:49:25Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148262912",
+          "final_secondary_free_bytes": "70448295936"
+        }
+      },
+      "tests": [
+        [
+          681,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/library.guard.log",
+        "sha256": "21d36ff6863bea624a811f0b83e163b7ff0dacc11c654aae3ed8348add217474"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/library.log",
+        "sha256": "644d969b369a84ff0f403c0bab6586cbfa13799d2e12469f0683a58118a0d2d0"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/library.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/library.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "reference",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/reference.exit",
+        "sha256": "59d0079e976038003d9efdf9cc7089344fb6fff5d5fd42e0ef75f03939f2a8f7",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:49:43Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148262912",
+          "final_secondary_free_bytes": "70448041984"
+        }
+      },
+      "tests": [
+        [
+          175,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/reference.guard.log",
+        "sha256": "f9f652e2bcda89eb3905e75c4add687655abc28537f7a3de97353aed900d529f"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/reference.log",
+        "sha256": "8c31dfdf512ee010553dea47cfdafffbd4a66087760b13911d218504ea1cd26f"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/reference.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/reference.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "contracts",
+      "command": "bash scripts/plan/check-v4-contracts.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/contracts.exit",
+        "sha256": "863faf2a91e04fc8fcc7a4da4769f4506450d6daec082e83385bdabf1bda9169",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:49:53Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148262912",
+          "final_secondary_free_bytes": "70447349760"
+        }
+      },
+      "tests": [],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/contracts.guard.log",
+        "sha256": "53a128976941ae4a5685879364c2e0bd1273b21ff7f10118e0951a1cf9b65b0c"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/contracts.log",
+        "sha256": "cf4b8543d94072c6e50d343c575076084ba227a92757713a5bd4d6b45556a098"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/contracts.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/contracts.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    },
+    {
+      "stage": "debt-selftest",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/debt-selftest.exit",
+        "sha256": "bdc897314d26aeb023fc1ff0618f53a008335d8cd077a1498ec88738d5c917da",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:49:56Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336148262912",
+          "final_secondary_free_bytes": "70447308800"
+        }
+      },
+      "tests": [],
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/debt-selftest.guard.log",
+        "sha256": "11b2f12de99fb07c20696e62f1cd6192a16969d723fc8a09e4f59f77b580bb58"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/debt-selftest.log",
+        "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/debt-selftest.source-before.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-evidence/debt-selftest.source-after.patch",
+        "sha256": "c27a44250549dd71c0e4016f0343a43931e6dad367bffe1b7d1a3793d016b3b9"
+      }
+    }
+  ],
+  "driver": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-driver.exit",
+    "sha256": "e9a05dc2767f7c065a2ecb756671ab1b769162f02cb10a3900f36a451bfeb1c5",
+    "values": {
+      "exit_status": "0",
+      "last_stage": "complete",
+      "finished_utc": "2026-09-14T10:49:56Z"
+    }
+  },
+  "red": {
+    "terminal": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-red-linux-evidence/writer-api-red.exit",
+      "sha256": "cb98e9a6cc320483aee58b98bdda278aa4c00937fb7ebb66c4fb85dd24f5a0f3",
+      "values": {
+        "exit_status": "101",
+        "finished_utc": "2026-09-14T10:32:36Z",
+        "termination_reason": "none",
+        "final_free_bytes": "336155193344",
+        "final_secondary_free_bytes": "70453084160"
+      }
+    },
+    "log": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-red-linux-evidence/writer-api-red.log",
+      "sha256": "eb4858cf98c9ba8f3250bfef415ab30e499d56c22fd0fac035c8889a4fae859d"
+    },
+    "type": "Missing-API E0432 compilation failure; zero behavioral tests executed",
+    "unchangedNewSpecSHA256": "62212a52458df2ec17fd5bec73858c84d92954ee394a238200092c0923b81390"
+  },
+  "firstCandidate": {
+    "driver": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final-driver.exit",
+      "sha256": "1c54ffdc0d535dacd1bbdb9f86781fc955e7693a322eebbf4796d07763b4db14",
+      "values": {
+        "exit_status": "101",
+        "last_stage": "clippy",
+        "finished_utc": "2026-09-14T10:43:57Z"
+      }
+    },
+    "clippy": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final-linux-evidence/clippy.exit",
+      "sha256": "b7ef149c65511f276db606734fafdc40437ad2a30b9c3ad4e394df10f2cd4e13",
+      "values": {
+        "exit_status": "101",
+        "finished_utc": "2026-09-14T10:43:57Z",
+        "termination_reason": "none",
+        "final_free_bytes": "336148291584",
+        "final_secondary_free_bytes": "70450024448"
+      }
+    },
+    "log": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final-linux-evidence/clippy.log",
+      "sha256": "6277746a45ffb9f89e00da4101a621b2286bd7a392e47bd15c082b87bb881d86"
+    },
+    "explanation": "15 writer plus7 allocation tests, one selected persistence case, 280 affected tests and formatting passed. Strict Clippy found one unnecessary test-only borrow. That single expression was corrected and every final gate rerun; encoder source is unchanged.",
+    "binaries": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final-linux-test-binaries.json",
+      "sha256": "9c7dab256ceb92a6505551c4dcd8e7fd0d3c3fc5eb294df26e84803db69ea843"
+    }
+  },
+  "binaries": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-linux-test-binaries.json",
+    "sha256": "d5f2147ec00477e81cd037d8c0708a5673ee84eedd7b8a39a9b9bdaefc7e3a73",
+    "recordedUTC": "2026-09-14T10:53:24.208Z",
+    "sourceManifestSHA256": "493abc5f0428d4e3ae047e8dd1a2b7e3bf0a50088e36bed2a914ff687897680d",
+    "binaries": [
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_writer_spec-1a7d857e6cd45a1c",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/narrow.log"
+        ],
+        "bytes": 6390248,
+        "modifiedUTC": "2026-09-14T10:41:26.837Z",
+        "sha256": "57ad359be21923aaf790f13ae67fccac77af5e012ebbf5773f849952b0254587"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/narrow.log"
+        ],
+        "bytes": 11860752,
+        "modifiedUTC": "2026-09-14T10:41:23.507Z",
+        "sha256": "c7e0e253d31944285cf9beadc0ceeb8cf31f0bed99858a2818d44f9a94e7c14a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/migration_execution_spec-27d66db1c659b3fe",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/persistence.log",
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 9875456,
+        "modifiedUTC": "2026-09-14T10:47:25.348Z",
+        "sha256": "25f0786c506f8d2f3bc81973b3563f9f3d93883c47e389584f6ce8bf94c3ee23"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_catalog_identity_spec-525bf85bf8400187",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 6606480,
+        "modifiedUTC": "2026-09-14T10:41:53.498Z",
+        "sha256": "cff79c7b5d148a5ede0d8781f8d988712e9ed178c990389787b59ac3e6057bac"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_semantic_source_spec-3aeb5391d2e0c8b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 16670064,
+        "modifiedUTC": "2026-09-14T10:41:46.697Z",
+        "sha256": "c4e837b7e8851f3720b24fe40330e87feba063b210c4f1534538bb75e33c6cdd"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_semantic_source_spec-af18e51dabcb8dcf",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 26184040,
+        "modifiedUTC": "2026-09-14T10:41:47.584Z",
+        "sha256": "f990982e223810fee9d0438cbe2ff63c1982b9f3fac414a5c9ab7d0eec0cc8e4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_reader_spec-85880fc6802f7a9e",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 6343352,
+        "modifiedUTC": "2026-09-14T10:41:48.672Z",
+        "sha256": "7dcb09584a4c987742176fd47cf0642c7a908c7ac688e902eb1cc5daa30b6325"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_contract_spec-3af562a005fd2af5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 12070440,
+        "modifiedUTC": "2026-09-14T10:41:49.846Z",
+        "sha256": "8317b63578f5ca53f2adbde9018cc8072ea5cb602e7d51a1865dd4a475fdfe34"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_first_authority_spec-acfe509bfa97454f",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 9271000,
+        "modifiedUTC": "2026-09-14T10:41:50.838Z",
+        "sha256": "2afe9fbb13ae3e2ebfe7ccc8d5d1c6f5538e02dc6f3e5a743fc7786d9939cbb2"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_format_fixture_spec-e2f5546085ad17bb",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 15455408,
+        "modifiedUTC": "2026-09-14T10:41:43.293Z",
+        "sha256": "b34540458063b34d31334a6253348959700903af5ebad9a3e963dca8bd2b64ac"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_read_view_native_spec-1efd0524a90bff8b",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 26500064,
+        "modifiedUTC": "2026-09-14T10:41:40.194Z",
+        "sha256": "bab16833143ebfd5f03f96bee9fce80328beb6a1aacbf8e67423c2fe62c84aa7"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_root_migration_spec-ffda39251cd58244",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 20781448,
+        "modifiedUTC": "2026-09-14T10:41:43.768Z",
+        "sha256": "d4ffe60385e1fdecacfa3a4e95577a7e3f32754db5aa647a9440792889c7b56c"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_semantic_object_store_spec-db485a2f7defe867",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/affected.log"
+        ],
+        "bytes": 20687360,
+        "modifiedUTC": "2026-09-14T10:41:37.235Z",
+        "sha256": "f8803f7737f09780112a37d5ea381dabc2487c17902e6d2d5161bac7da1b80aa"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/library.log"
+        ],
+        "bytes": 52477200,
+        "modifiedUTC": "2026-09-14T10:49:07.747Z",
+        "sha256": "b0cf5e2f205d4bfac014e7620ccfbce38c025b5ec31bb910e6513015304fb8a6"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/deps/aeordb_v4_reference-837889bea7290fc5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/reference.log"
+        ],
+        "bytes": 11820848,
+        "modifiedUTC": "2026-09-14T10:49:30.029Z",
+        "sha256": "95864cecc8b919fc89c455b6dd65ae100bee55e8cbb12cd2287d526bc5cb46b4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/aeordb-v4-reference",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-catalog-encoding-final2-evidence/contracts.log"
+        ],
+        "bytes": 10939856,
+        "modifiedUTC": "2026-09-14T10:49:50.314Z",
+        "sha256": "4a51686e8ddac76e8a9d90e4e148ef641f62fd8f02b444b044cbd36e534028ce"
+      }
+    ]
+  },
+  "counts": {
+    "newWriterTests": 15,
+    "allocationTargetTests": 7,
+    "affectedTargetTests": 280,
+    "affectedTargets": 11,
+    "libraryTests": 681,
+    "independentReferenceTests": 175,
+    "independentFixtures": 472,
+    "selectedPersistenceCase": "Also included in affectedTargetTests; not another distinct test"
+  },
+  "scope": [
+    "All seven owner classes and five registered hash algorithms; independent layout/domain identity and frozen fixture byte agreement.",
+    "Count/size admission before copying, measured malformed/oversized allocation bounds and injected output-allocation failure at both hash widths.",
+    "Real-file dependency-first definition/leaf/internal publication, repeat-byte idempotence, invalid-input rejection and reopen through the existing physical authority; selected namespace root unchanged."
+  ],
+  "limitations": [
+    "No new native-platform, release or complete-workspace test run in this landing; strict Clippy covers the workspace and tests cover the library plus named affected targets.",
+    "Structural node encoders do not prove full graph closure, maximal radix compression or COW behavior. Definition-object writers, semantic compiler and U2-U7 remain pending.",
+    "Resource unit enforced6GiB/noSwap/2CPU; implausibly small systemd memory peaks are not treated as measured compiler RSS or actual-v4 resource proof.",
+    "No production database, service, default-format or frozen fixture mutation. Reusable same-host build outputs are not archival executables."
+  ]
+}

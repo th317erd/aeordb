@@ -7,6 +7,9 @@ use aeordb::engine::v4::field_definition::{
   encode_converter_definition, encode_field_index_definition, ConverterDefinitionWriteV1, FieldIndexDefinitionWriteV1,
 };
 use aeordb::engine::v4::native_semantics::NativeSemanticComponentV1;
+use aeordb::engine::v4::namespace::{
+  encode_semantic_catalog_internal, encode_semantic_catalog_leaf, SemanticCatalogChildV1, SemanticCatalogRecordV1,
+};
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::value_store::{encode_value_store_definition, ValueStoreDefinitionWriteV1, ValueStoreSemanticFamily};
 use aeordb::engine::HashAlgorithm;
@@ -227,4 +230,63 @@ fn every_definition_writer_returns_an_error_when_its_output_reservation_fails() 
   let (result, allocations) = measure(field_length, || encode_field_index_definition(field_request(&converter), ALGORITHM));
   assert!(allocations.injected_failure);
   assert_eq!(result.unwrap_err().code(), "definition_writer_allocation");
+}
+
+#[test]
+fn catalog_writers_preflight_large_inputs_without_copying_or_output_allocation() {
+  let owner = vec![0; 65_537];
+  let record = SemanticCatalogRecordV1 { record_kind: 1, semantic_id: &[1; 32], definition_object_id: &[2; 32], owner_key: &owner };
+  let records = vec![record; 17];
+  let (result, allocations) = measure(0, || encode_semantic_catalog_leaf(&records, ALGORITHM));
+  assert_eq!(result.unwrap_err().code(), "catalog_leaf_exceeds_cap");
+  assert_preflight(allocations);
+  let excessive_count = vec![record; 4097];
+  let (result, allocations) = measure(0, || encode_semantic_catalog_leaf(&excessive_count, ALGORITHM));
+  assert_eq!(result.unwrap_err().code(), "catalog_leaf_count");
+  assert_preflight(allocations);
+  let prefix = vec![0; 65_536];
+  let children = [
+    SemanticCatalogChildV1 { edge: 0, record_count: 1, object_id: &[1; 32] },
+    SemanticCatalogChildV1 { edge: 1, record_count: 1, object_id: &[2; 32] },
+  ];
+  let (result, allocations) = measure(0, || encode_semantic_catalog_internal(0, &prefix, &children, ALGORITHM));
+  assert_eq!(result.unwrap_err().code(), "catalog_internal_metadata");
+  assert_preflight(allocations);
+}
+
+#[test]
+fn catalog_writers_reject_malformed_bounded_records_before_allocating_output() {
+  let owner = vec![0xff; 60_000];
+  let record = SemanticCatalogRecordV1 { record_kind: 1, semantic_id: &[1; 32], definition_object_id: &[2; 32], owner_key: &owner };
+  let (result, allocations) = measure(0, || encode_semantic_catalog_leaf(&[record], ALGORITHM));
+  assert!(result.is_err());
+  assert_preflight(allocations);
+  let children = [
+    SemanticCatalogChildV1 { edge: 0, record_count: 1, object_id: &[1; 32] },
+    SemanticCatalogChildV1 { edge: 1, record_count: 1, object_id: &owner },
+  ];
+  let (result, allocations) = measure(0, || encode_semantic_catalog_internal(0, &[], &children, ALGORITHM));
+  assert!(result.is_err());
+  assert_preflight(allocations);
+}
+
+#[test]
+fn both_catalog_writers_return_typed_allocation_failure_for_every_hash_width() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let width = algorithm.hash_length();
+    let identity = vec![1; width];
+    let record = SemanticCatalogRecordV1 { record_kind: 3, semantic_id: &identity, definition_object_id: &identity, owner_key: &identity };
+    let length = 60 + 4 * width;
+    let (result, allocations) = measure(length, || encode_semantic_catalog_leaf(&[record], algorithm));
+    assert!(allocations.injected_failure);
+    assert_eq!(result.unwrap_err().code(), "catalog_writer_allocation");
+    let children = [
+      SemanticCatalogChildV1 { edge: 0, record_count: 1, object_id: &identity },
+      SemanticCatalogChildV1 { edge: 1, record_count: 1, object_id: &identity },
+    ];
+    let length = 56 + 2 * (12 + width);
+    let (result, allocations) = measure(length, || encode_semantic_catalog_internal(0, &[], &children, algorithm));
+    assert!(allocations.injected_failure);
+    assert_eq!(result.unwrap_err().code(), "catalog_writer_allocation");
+  }
 }

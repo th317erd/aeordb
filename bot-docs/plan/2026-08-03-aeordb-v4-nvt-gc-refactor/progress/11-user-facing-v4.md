@@ -26,8 +26,9 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: independent semantic-envelope size admission is qualified;
-next are catalog leaf/internal writers and all-class definition wrapping.
+Current landing: catalog leaf/internal writers are qualified on Linux;
+next is all-class definition wrapping, followed by bounded COW/compiler.
+Independent semantic-envelope size admission is committed/pushed as429dc71a.
 See the [envelope proof](../evidence/user-facing-v4-u1-semantic-envelope-proof-20260914.json).
 Owner-key validation is committed/pushed as
 `7ee309c424a7fad7dc550508a2d7acdb624b7ccd`.
@@ -1904,6 +1905,70 @@ Final manifestSHA39b6c13a102766bccaa42efe287ec45f283b09363323bffc48b05d665898873
 archiveSHA5ded9f358d90c8ca7105879b929cd3c00be65426c27b60d87a5211caaad2935e.
 Final free bytes Data336155209728/home70515556352; no resource stop.
 All stage receipts and both same-host binary identities are mirrored locally.
+
+## Active U1 landing: catalog leaf/internal encoders
+
+Entry/last green429dc71a, direct owner. Owned namespace codec plus a dedicated
+encoding implementation, `semantic_catalog_writer_spec`, target registration,
+ledger and proof. No definition/projection payload, physical publisher,
+fixture, default or service changes. Frozen Round10 layout and Round16 width
+remain authoritative. Existing `first_authority` remains the only physical
+semantic publisher; these functions only produce bounded immutable bytes.
+
+Territory: borrowed catalog records/children in `namespace.rs`, existing generic
+and typed decoders, lazy `SemanticCatalogReaderV1`, index semantic-source
+consumers, immutable object publication and GC closure traversal. Encoders must
+reuse the current owner grammar, hash and CRC conventions without claiming that
+node structural validation proves reachable-child counts or maximal COW shape.
+
+- [x] Establish new-API RED for15 dedicated cases before adding the missing
+  leaf/internal writer functions. An unresolved-import failure proves the API
+  is absent, not an executed behavioral regression.
+- [x] Implement only the bounded node encoders: count/length admission before
+  output allocation, all7 owner classes, all5 registered hashes, duplicate and
+  digest checks, prefix/edge validation and checked subtree counts.
+- [x] Pass exact independent layout/IDs and existing frozen bytes, malformed
+  and boundary requests, all affected reader/authority regressions, strict
+  lint/format, independent reference and contract/debt gates; land green.
+- [ ] Continue definition-object wrapping, canonical COW/compiler and U2–U7.
+
+The new315-line spec owns independent small-byte builders and direct digest
+implementations; it does not use a production serializer as its golden oracle.
+Cap refusal uses deliberately oversized requests before invalid field parsing;
+no test claims to have generated a real full cryptographic collision.
+
+RED completed10:32:36Z with E0432 for exactly the two missing public functions,
+exit101/no guard stop. This is an API absence check; no behavioral tests ran.
+The15case spec is unchanged. Manifestf446eb383134284e8d22bfdc52ceea5eff5ca28285c585706a649ad70f15738a,
+archive0bc28db31f50e21f601e0de43f8f56c69187bc3ef94176869706313a5f797e30.
+Implementation is isolated in namespace's `namespace_catalog.rs` child module,
+reusing private validation/hash/CRC helpers and allocating one bounded output.
+Additional final tests extend the existing allocation harness with3 catalog
+cases, including both-width injected output-allocation failure, and add one
+real-file publication/reopen/idempotence/malformed-input case to
+`migration_execution_spec`. Those4 cases were not part of the API RED and are
+not presented as failing-first behavioral evidence. Definition dependencies
+publish before leaves and the internal page; selected namespace root is unchanged.
+Owned files also include these two existing test targets. No physical owner
+implementation or frozen fixture was modified.
+
+Final1 passed15 writer+7 resource cases, selected persistence1/13filtered,
+all280 affected cases across11 targets, and formatting. Strict workspace
+Clippy rejected one unnecessary borrow in the new persistence test. Preserve
+that failure and its13 executed binary identities; it was not ignored.
+Final2 changes only that expression, keeping both encoders and all15 RED API
+test assertions byte-identical. All9 stages pass at2026-09-14T10:49:56Z:
+15+7 narrow, selected persistence,280 affected, formatting, strict workspace
+Clippy,681 library,175 independent reference,472 fixtures/contracts, actual
+debt self-test. The selected persistence case is included among280, not another
+distinct test. No ignored tests, source drift, or resource stop occurred.
+Source8-input manifest493abc5f0428d4e3ae047e8dd1a2b7e3bf0a50088e36bed2a914ff687897680d;
+archive84d3e5dccbcb18c4b19a7cf7ded02b9589809e43bd1c3dd1e17c7c43b7a917d6.
+Unit3175ce51628b4376b0c441cd33756f71 ran2m34.571s/CPU2m36.284s under
+6GiB/noSwap/2CPU; reported256KiB peak is not credible compiler RSS and is not
+resource-readiness evidence. Final free bytes Data336148262912/home70447308800.
+No new release/native/full-workspace test claim is made for this landing.
+See [catalog encoding proof](../evidence/user-facing-v4-u1-catalog-encoding-proof-20260914.json).
 
 ## U2 read-only entry refinement: public append-writer guard
 

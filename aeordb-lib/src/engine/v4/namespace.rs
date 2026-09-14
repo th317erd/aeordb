@@ -10,6 +10,10 @@ use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use super::scope::validate_canonical_absolute_path;
 
+#[path = "namespace_catalog.rs"]
+mod catalog_encoding;
+pub use catalog_encoding::{encode_semantic_catalog_internal, encode_semantic_catalog_leaf};
+
 const DIRECTORY_HEADER_LENGTH: usize = 32;
 const DIRECTORY_KIND_NAMESPACE_ROOT: u16 = 0x0003;
 const SEMANTIC_HEADER_LENGTH: usize = 32;
