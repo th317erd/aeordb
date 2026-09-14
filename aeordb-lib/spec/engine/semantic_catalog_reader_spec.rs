@@ -165,3 +165,97 @@ fn catalog_leaf_owner_contract_covers_control_paths_and_semantic_hash_widths() {
     }
   }
 }
+
+struct CatalogWalkSource {
+  bytes: Vec<u8>,
+  stored_kind: u16,
+}
+
+impl aeordb::engine::v4::semantic_catalog::SemanticCatalogObjectSourceV1 for CatalogWalkSource {
+  fn load_semantic_object(
+    &self,
+    kind: u16,
+    _: &[u8],
+  ) -> Result<Option<Vec<u8>>, aeordb::engine::v4::semantic_catalog::SemanticCatalogReadErrorV1> {
+    Ok((kind == self.stored_kind).then(|| self.bytes.clone()))
+  }
+}
+
+#[test]
+fn catalog_walk_rejects_a_valid_leaf_returned_from_the_internal_kind_slot() {
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReadErrorClassV1, SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1};
+  let algorithm = HashAlgorithm::Blake3_256;
+  let bytes = fixture("asem-blake3-256-catalog-leaf-valid.bin");
+  let root = decode_semantic_catalog_node(&bytes, algorithm).unwrap().object_id().to_vec();
+  let source = CatalogWalkSource { bytes, stored_kind: 3 };
+  let visits = std::cell::Cell::new(0);
+  let result = SemanticCatalogReaderV1::new(algorithm, &source).walk_catalog(
+    &root,
+    SemanticCatalogTraversalBoundsV1::new(1, 1).unwrap(),
+    &|| false,
+    |_| {
+      visits.set(visits.get() + 1);
+      Ok(())
+    },
+  );
+  assert_eq!(result.unwrap_err().class(), SemanticCatalogReadErrorClassV1::Corrupt);
+  assert_eq!(visits.get(), 0);
+}
+
+#[test]
+fn catalog_walk_observes_cancellation_after_its_last_record_visitor() {
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReadErrorClassV1, SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1};
+  let algorithm = HashAlgorithm::Blake3_256;
+  let bytes = fixture("asem-blake3-256-catalog-leaf-valid.bin");
+  let root = decode_semantic_catalog_node(&bytes, algorithm).unwrap().object_id().to_vec();
+  let source = CatalogWalkSource { bytes, stored_kind: 2 };
+  let cancelled = std::cell::Cell::new(false);
+  let result = SemanticCatalogReaderV1::new(algorithm, &source).walk_catalog(
+    &root,
+    SemanticCatalogTraversalBoundsV1::new(1, 1).unwrap(),
+    &|| cancelled.get(),
+    |_| {
+      cancelled.set(true);
+      Ok(())
+    },
+  );
+  assert_eq!(result.unwrap_err().class(), SemanticCatalogReadErrorClassV1::Cancelled);
+}
+
+#[test]
+fn definition_inspection_observes_cancellation_after_its_callback() {
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReadErrorClassV1, SemanticCatalogReaderV1};
+  for (algorithm, profile) in [(HashAlgorithm::Blake3_256, "blake3-256"), (HashAlgorithm::Sha512, "sha512")] {
+    let leaf_bytes = fixture(&format!("asem-{profile}-catalog-leaf-valid.bin"));
+    let SemanticCatalogNodeV1::Leaf(leaf) = decode_semantic_catalog_node(&leaf_bytes, algorithm).unwrap() else {
+      panic!("expected independent leaf fixture");
+    };
+    let record = leaf.records().next().unwrap().unwrap();
+    let source = CatalogWalkSource { bytes: fixture(&format!("asem-{profile}-definition-valid.bin")), stored_kind: 4 };
+    let cancelled = std::cell::Cell::new(false);
+    let result = SemanticCatalogReaderV1::new(algorithm, &source).with_definition(record, &|| cancelled.get(), |_| {
+      cancelled.set(true);
+      Ok(())
+    });
+    assert_eq!(result.unwrap_err().class(), SemanticCatalogReadErrorClassV1::Cancelled);
+  }
+}
+
+#[test]
+fn definition_inspection_preserves_callback_error_when_also_cancelled() {
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReadErrorV1, SemanticCatalogReaderV1};
+  let algorithm = HashAlgorithm::Blake3_256;
+  let bytes = fixture("asem-blake3-256-catalog-leaf-valid.bin");
+  let SemanticCatalogNodeV1::Leaf(leaf) = decode_semantic_catalog_node(&bytes, algorithm).unwrap() else {
+    panic!("expected independent leaf fixture");
+  };
+  let record = leaf.records().next().unwrap().unwrap();
+  let source = CatalogWalkSource { bytes: fixture("asem-blake3-256-definition-valid.bin"), stored_kind: 4 };
+  let cancelled = std::cell::Cell::new(false);
+  let expected = SemanticCatalogReadErrorV1::unavailable("test_inspection", "callback unavailable");
+  let result = SemanticCatalogReaderV1::new(algorithm, &source).with_definition(record, &|| cancelled.get(), |_| {
+    cancelled.set(true);
+    Err::<(), _>(expected.clone())
+  });
+  assert_eq!(result.unwrap_err(), expected);
+}

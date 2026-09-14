@@ -26,9 +26,16 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+Bounded point lookup and mutable-source traversal now pass all ten Linux gates;
+see the [strict reader proof](../evidence/user-facing-v4-u1-catalog-lookup-proof-20260914.json).
+Stored-kind validation, final-callback cancellation and root-count error
+classification are covered by failing-first regressions. This completes the
+reader prerequisite, not incremental updates, dependency pruning or activation.
+
 Bounded fresh catalog assembly is qualified through all ten Linux gates; its
 green landing includes the [strict assembly proof](../evidence/user-facing-v4-u1-catalog-assembly-proof-20260914.json).
 Incremental updates/shared-dependency pruning and task-backed integration remain next.
+Assembly is committed/pushed as `4cdd270412e04d1a8807516dae502537b1dfac13`.
 Retained-definition operational errors are committed/pushed as `cb37b0fe` and verified through
 all ten Linux gates and the [strict retained-reader proof](../evidence/user-facing-v4-u1-retained-definition-proof-20260914.json).
 The constructor correction is committed/pushed as `8aab3c91`; actual allocation
@@ -2729,6 +2736,179 @@ counts, resource guards and the four individually reviewed audit replacements.
 No selected write path, production service, original damaged database, or
 sealed release evidence was changed. This completes this bounded read-error
 unit, not complete U1, universal allocator/I/O recovery or user-facing readiness.
+
+## U1 completed unit: incremental catalog integration — reader prerequisite
+
+Next-entry note (September14): incremental update integration starts from
+`4cdd270412e04d1a8807516dae502537b1dfac13`, matching fetched origin with no
+tracked user WIP. Direct owner. First falsifying target is new
+`semantic_catalog_lookup_spec`, before reader production changes. Own the
+catalog reader, dedicated tests/Cargo registration, and bounded reuse of its
+traversal for a mutable staging-source visitor. Keep one traversal algorithm;
+do not add a second physical writer, change persisted bytes or profiles, touch
+production databases, or weaken existing reader/cancellation/resource tests.
+This is the reader prerequisite of incremental compilation, not completion of
+incremental mutation, dependency pruning or task activation.
+
+Point lookups follow one selected-H Patricia path and compare the exact full
+kind/owner key in a collision bucket. They validate root and visited closure,
+reject malformed/missing/ambiguous/wrong-kind objects, preserve source error
+classes, and never read unrelated definitions or claim whole-catalog validation.
+Traversal with a mutable source visits the captured immutable root exactly once
+while allowing the visitor to stage other immutable objects. Shared scratch
+admission and snapshot/GC protection remain caller obligations, as for the
+existing reader; new task integration must supply them. Prove all five hashes,
+hits and every absence branch, exact path read bounds, before/during/after
+cancellation, invalid metadata before source access, injected read/visitor
+errors, count/prefix/identity closure, and immutable staging during traversal.
+Use independent tree bytes; preserve existing oracle construction and all
+original reader tests. Then finish update/pruning through this same owner.
+
+Missing-API RED27820 completed101 at21:45:53Z: E0432/E0599 for the new
+mutable-source walk/point lookup, no behavioral tests executed. Four-input
+manifest`acd4a00df0cde0e7981bbd36c1a2af79913d6c8417b630d79bcdea04ab0d6524`;
+all six raw files preserved. Separate existing-reader RED8822 completed101 at
+21:47:28Z: both new cases fail (0pass/2fail/7filtered). The current walker
+accepts a valid leaf returned under the internal-kind locator and reports
+completion after its last visitor triggers cancellation. Five-input manifest
+`bfa120f4e1cb1bc2102556d798ab11dd720479a44296f21d9467d380e01d90d3`;
+all six raw files and one executed binary digest mirrored54695closed0 before
+source changes. No frozen format fixture changed.
+
+Candidate1 adds point lookup and extracts the single traversal implementation
+for both immutable and mutable-source callers. Shared node loading checks the
+stored kind/cap and cancellation around source reads; terminal traversal and
+point callbacks recheck cancellation. It also includes an actual selected-H
+lookup allocation-refusal test before storage access. The current lookup uses
+the existing infallible digest helper; that new test is expected to expose the
+allocation boundary before choosing its correction. Eight-input manifest
+`ca9b33b9c2c7d1e45b3d2604c3d70cc3a059800d6ad595341883eb8494c4aaa7`;
+candidate execution/proof pending. No hash helper has been changed yet.
+
+Candidate1 completed34588closed101 at21:54:40Z: all9lookup and9reader cases
+pass, then the real32-byte lookup-digest allocation refusal aborts the resource
+process (SIGABRT; core dumps disabled). Preserved6raw files and3executed binary
+digests31338closed0 before further builds. Corrected only the new lookup's
+digest allocation by adding crate-private `hash::try_digest_parts`: the same
+selected algorithm/domain bytes, stack hash state, and one fallibly reserved
+H-wide output. Existing digest callers remain unchanged. Two more independent
+lookup tests explicitly force prefix/edge absence and checksum-valid swapped
+child-prefix failure; another resource test refuses root/prefix allocations.
+Candidate2 is running against9inputs,
+manifest`217f1259543dd509d22d1e9c5233939c6ed386eb44bca43972d157d886250702`.
+Full affected/static/native-physical proof and incremental mutation remain pending.
+
+Candidate2 completed77627closed0 at21:58:33Z:63narrow cases pass, followed by
+1503unchanged audit occurrences40981closed0. All12raw and4same-host binaries
+preserved66441closed0 before final source update. Final36189closed101 at
+22:03:47Z:63narrow and1native physical/reopen case pass; the affected suite
+finds `semantic_state_catalog_count_mismatches_fail_closed` returning a new
+closure code instead of the established counts code. Ten-input manifest
+`c091cd6a933cdacc86b389efcb57d0c13cc86eafb8b30ec4d2579e10620c8402`.
+All18raw,driver and21executed binary digests preserved before further builds.
+Correction keeps the early exact-root record check, but distinguishes its
+selected-state count error from an internal parent/child closure mismatch.
+The existing consumer regression is unchanged; it remains the falsifying test.
+
+Adjacent definition callback RED18651closed101 at22:16:34Z:0pass1fail9filtered;
+inspection returns success after its callback sets cancellation. Ten-input
+manifest`1563307f5c7eda65053cc95d0e8a2e58d518b51056d4dba65df28ffc6eb00250`.
+This new regression uses independent retained fixtures at both hash widths.
+Add the same post-callback cancellation check as traversal/point lookup, while
+preserving a callback's own failure when both happen. No task/authority commit
+has occurred here, so this does not alter the commit-wins-cancellation contract.
+Final2 qualification is next; no unit completion is claimed yet.
+
+Final2 running74417, invocation`c89df8da12f040c8989733075b4e630e`, launched
+22:18:50UTC. Ten-input manifest
+`0cac507e310bfa1f242cf3f538e7f9e93faa8182acb01dc2588bb7112237741a`;
+expected65narrow/913affected53targets/709library and unchanged other gates.
+During review, the newly added wrong-identity lookup fixture was found to
+return a leaf under the internal slot, so it only retested wrong-kind handling.
+After preserving final2 output and binaries, tighten that fixture to return
+another valid internal node and assert the exact identity error. Do not claim
+that branch proven by the current fixture or overwrite the running snapshot.
+
+Read-only next-unit refinement: candidate-only dependency pruning improves on
+the initial whole-live-set idea. Track only class6/7 bindings referenced by
+removed/replaced ValueStores in a temporary immutable COW catalog, preserving
+their real binding/definition identities. Scan the final remaining class2/4
+references once and remove still-live candidates from that auxiliary catalog;
+then remove only the leftover candidates from the main catalog. Do not invent
+dummy bindings, a new persistent format, reference counts or a whole-world
+memory map. Final candidate closure still needs validation; no activation occurs.
+The old class1 projection must be decoded under its known compiler profile and
+its Scope/ValueStore/Field ownership validated before removal. Generic retained
+unknown profiles/aliases are not safe input to this corrected update compiler.
+The generic canonical DOM decoder's conservative per-node admission bound for
+dense256KiB input exceeds the32MiB staging allowance; use validated borrowed iteration through the existing
+codec owner instead of constructing the whole projection tree. No incremental
+production code or public update API is implemented by this note.
+
+Final2 completed74417closed101 at22:22:36Z,3m45.721s elapsed/3m55.227sCPU.
+65narrow and1persistence pass; count/cancellation corrections pass in the
+affected suite, which then catches duplicate node decoder calls in the shared
+semantic owner (`v4_read_view_native_spec` architecture guard). Preserve all
+18raw,driver and52executed binary digests7770 before remote changes. Extract
+the common decode/error-class/expected-identity validation for both traversal
+and point lookup; retain one physical loader and one traversal implementation.
+The architecture assertion is unchanged. Tighten the wrong-identity fixture
+to another valid internal node and require `semantic_catalog_identity`.
+Final3 has10inputs,manifest
+`2f619ac19f209e32670f9a739c0b303507c4a1854284c9b75d24d39f83ae2485`,
+archive`24a2ceea04200c9157805f8df674d4fea282d545b1ad93bf006925551f42fe8b`.
+All other final2 inputs are unchanged. Full green proof/landing remain pending.
+
+Final3 completed74628closed101 at22:31:12Z:65narrow,1physical,913affected
+across53targets,1503audit and format PASS. Strict Clippy stops at the new
+`visited >= width + 1` spelling (`int_plus_one`). Only change that comparison
+to equivalent `visited > width`; no suppression or test change. All36raw,
+driver and55same-host binary digests preserved93453 before further builds.
+Final4 ten-input manifest
+`2134ff4275debbcde6bfb0aea235595c59dcd64c51fcca9129a99289323f0615`,
+archive`63cd653b407d326ed748f498c5acb630889781ce87b813b41a709b94dbf322d1`.
+The verifier requires that exact one-line delta from final3. Full green proof
+and landing remain pending; the next borrowed-codec tests exist only as
+unregistered cache drafts (six functional plus one zero-allocation case).
+
+Task integration inventory (read-only, not a new contract): generated
+`contract_generated::task_kind_v1` has exactly11kinds (index_build through
+peer_sync), and `system_control::validate_task_pin` rejects kinds outside1..11.
+No native runtime consumer of `decode_task_pin_v1` or its `root_hashes` was found
+in production source; only the codec exists. The generic TaskQueue still owns
+JSON TaskRecord/checkpoint strings through concrete StorageEngine. Round12's
+IndexTaskCheckpoint has8derived-index kinds and typed IndexArtifact attachments;
+Round14's SemanticMutationSegment is a completed-publication soft stream under
+Round15, not unfinished semantic task authority. A dedicated semantic mutation
+task/staging-root contract remains an explicit prerequisite before activation.
+Do not relabel semantic definitions as IndexArtifacts or select an unrelated
+task kind to evade this gap. Bounded incremental compilation remains safe,
+in-scope work meanwhile; this inventory does not claim task integration done.
+
+Final4 completed28726closed0 at22:41:05Z: allten gates PASS,7m54.217s elapsed,
+9m27.766sCPU. Results:65narrow (11lookup/11reader/43resource),1physical-reopen
+case/21filtered,913affected across53targets,709library,175reference,472fixtures,
+1503reviewed audit occurrences,format,strictworkspaceClippy anddebt self-test.
+The persistence case is included in affected, not an additional distinct test.
+No ignored tests or source/lock drift. All60raw stage files,driver and58same-host
+executed binary digests mirrored88074closed0 before remote rebuild. Cgroup
+memory.peak reached its6,442,450,944-byte cap; swap stayed disabled and CPU200%.
+Final free bytes:Data335,983,955,968/home69,520,961,536, above both enforced floors.
+
+Strict verifier80291closed0 (`c8ec64`) validates exact10source/archive inputs,
+allcommands/counts/resources,18historical stages,threefailed full drivers,
+unchanged original regression bodies/tests,independent oracle,format/profile
+bytes,locks and1503suppression entries. The resulting
+[reader proof](../evidence/user-facing-v4-u1-catalog-lookup-proof-20260914.json)
+is immutable completion evidence for this unit. Do not rerun its wx writer.
+One shared node decoder/identity validator and one traversal algorithm serve
+the read-only and mutable staging interfaces. Point lookup proves its visited
+path only; admitted snapshot, scratch reservation and GC protection are caller
+obligations. No selected-root, native-platform-final, release, soak, universal
+allocator recovery or full user-facing readiness claim is made. Production,
+retained corruption and sealed release evidence were not touched. Continue
+incremental compilation/pruning, starting with borrowed canonical projection
+reads through the existing structural codec owner.
 
 ## U1 completed unit: bounded fresh catalog assembly
 

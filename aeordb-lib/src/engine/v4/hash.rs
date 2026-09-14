@@ -64,6 +64,36 @@ pub fn digest_parts(algorithm: HashAlgorithm, parts: &[&[u8]]) -> Vec<u8> {
   }
 }
 
+/// Same selected-algorithm digest, with fallible ownership of its output.
+/// The fixed-size hash state/final digest stay on the stack; the returned
+/// vector reserves its exact registered width before any bytes are appended.
+pub(crate) fn try_digest_parts(algorithm: HashAlgorithm, parts: &[&[u8]]) -> Result<Vec<u8>, std::collections::TryReserveError> {
+  let mut output = Vec::new();
+  output.try_reserve_exact(algorithm.hash_length())?;
+  match algorithm {
+    HashAlgorithm::Blake3_256 => {
+      let mut hasher = blake3::Hasher::new();
+      for part in parts {
+        hasher.update(part);
+      }
+      output.extend_from_slice(hasher.finalize().as_bytes());
+    }
+    HashAlgorithm::Sha256 => append_digest::<Sha256>(parts, &mut output),
+    HashAlgorithm::Sha512 => append_digest::<Sha512>(parts, &mut output),
+    HashAlgorithm::Sha3_256 => append_digest::<Sha3_256>(parts, &mut output),
+    HashAlgorithm::Sha3_512 => append_digest::<Sha3_512>(parts, &mut output),
+  }
+  Ok(output)
+}
+
+fn append_digest<D: Digest + Default>(parts: &[&[u8]], output: &mut Vec<u8>) {
+  let mut hasher = D::default();
+  for part in parts {
+    hasher.update(part);
+  }
+  output.extend_from_slice(&hasher.finalize());
+}
+
 fn digest_sha2<D: Digest + Default>(parts: &[&[u8]]) -> Vec<u8> {
   let mut hasher = D::default();
   for part in parts {

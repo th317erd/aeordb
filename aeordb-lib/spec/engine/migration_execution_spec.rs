@@ -2020,15 +2020,22 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     )
     .unwrap();
     let reader = SemanticCatalogReaderV1::new(algorithm, &store);
+    let bounds = SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap();
     let stats = reader
-      .walk_catalog(
-        &catalog_root,
-        SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap(),
-        &|| false,
-        |record| reader.with_definition(record, &|| false, |_| Ok(())),
-      )
+      .walk_catalog(&catalog_root, bounds, &|| false, |record| {
+        reader.with_definition(record, &|| false, |_| Ok(()))?;
+        let matched = reader.with_record(&catalog_root, bounds, record.record_kind, record.owner_key, &|| false, |candidate| {
+          Ok(candidate.semantic_id == record.semantic_id && candidate.definition_object_id == record.definition_object_id)
+        })?;
+        assert_eq!(matched, Some(true), "physical point lookup disagrees with captured catalog traversal");
+        Ok(())
+      })
       .unwrap();
     assert_eq!(stats.class_counts, [0, 2, 1, 2, 2, 2, 0, 4]);
+    assert_eq!(
+      reader.with_record(&catalog_root, bounds, 1, b"\x01\x00/missing/.aeordb-config/indexes.json", &|| false, |_| Ok(())).unwrap(),
+      None
+    );
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, [0; 16], 1, &cancellation).is_err());
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 0, &cancellation).is_err());
     cancellation.cancel();
