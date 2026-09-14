@@ -926,6 +926,15 @@
         "complete ASEM object including CRC"
       ],
       "key_domain": "H('aeordb.semantic-object.immutable.v1\\0' || object_kind u16 LE || complete object)",
+      "dependency_catalog_identity": {
+        "decision": "Round 16 owner ruling, 2026-09-14",
+        "hash_width": "H is the selected registered database hash algorithm's digest width; owner keys have exactly H bytes",
+        "class_6": "ExecutableDependencyDefinitionId = H('aeordb.semantic.executable-dependency-definition.v1\\0' || complete canonical Round 9 dependency record of kind 1)",
+        "class_7": "NativeDependencyDefinitionId = H('aeordb.semantic.native-dependency-definition.v1\\0' || complete canonical Round 9 dependency record of kind 2)",
+        "owner_key": "Class 6/7 owner key equals semantic_id, which must equal the recomputed class-domain complete dependency ID",
+        "artifact_fingerprint": "Raw WASM artifact and native conformance fingerprints remain separate 32-byte BLAKE3-256 values; they are not catalog owner keys",
+        "retention": "Structurally valid unknown executor metadata remains retainable; catalog membership does not authorize execution"
+      },
       "checksum": "crc32-iso-hdlc over the complete object except its final 4 bytes",
       "body_formula": "36 + kind body; state body 112 + 3H; definition body 16 + H + D; leaf body 16 + H + records; internal body 20 + P + child_count * (12 + H)",
       "hard_cap": 1048576,
@@ -998,14 +1007,26 @@
         "asem-blake3-256-catalog-leaf-valid",
         "asem-blake3-256-catalog-internal-valid",
         "asem-blake3-256-state-complete",
-        "asem-blake3-256-state-content-only"
+        "asem-blake3-256-state-content-only",
+        "asem-blake3-256-wasm-parser-definition-valid",
+        "asem-blake3-256-wasm-parser-binding-valid",
+        "asem-blake3-256-wasm-mapper-definition-valid",
+        "asem-blake3-256-wasm-mapper-binding-valid",
+        "asem-blake3-256-native-dependency-definition-valid",
+        "asem-blake3-256-native-dependency-binding-valid"
       ],
       "fixture_ids_64": [
         "asem-sha512-definition-valid",
         "asem-sha512-catalog-leaf-valid",
         "asem-sha512-catalog-internal-valid",
         "asem-sha512-state-complete",
-        "asem-sha512-state-content-only"
+        "asem-sha512-state-content-only",
+        "asem-sha512-wasm-parser-definition-valid",
+        "asem-sha512-wasm-parser-binding-valid",
+        "asem-sha512-wasm-mapper-definition-valid",
+        "asem-sha512-wasm-mapper-binding-valid",
+        "asem-sha512-native-dependency-definition-valid",
+        "asem-sha512-native-dependency-binding-valid"
       ]
     },
     {
@@ -3749,7 +3770,7 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 24,
-    "fixture_count": 460,
+    "fixture_count": 472,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
     "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, and P6-2d-c3c external index-runtime workspace extensions registered before their first writers"

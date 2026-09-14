@@ -4,7 +4,7 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "a4d942f7bf9492fe16cfa06937bae8c42b0e4afd4d7a4b242594f8d1939ca712",
+  "generated_rust_sha256": "0ea78c72f491b0ebf695420490a5ac57af5a3342e26fe6a8717b6019778621ca",
   "generated_rust_bytes": 61907,
   "counts": {
     "route_classes": 7,
@@ -15,11 +15,11 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 158,
+    "reference_tests_passed": 163,
     "production_tests_passed": 5,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 460,
+    "fixture_cases_verified": 472,
     "route_registrations_inventoried": 95,
     "documentation_pages_inventoried": 39,
     "v4_writers_activated": false
@@ -34,6 +34,33 @@
     "cleanup result without behavior or debt owner",
     "semantic bundle collision, noncanonical order, or malformed fingerprint"
   ],
+  "catalog_identity_refresh": {
+    "date_utc": "2026-09-14",
+    "source_entry_commit": "c222ee29a0dc3dd6c22d36868f5042dc6ad4621e",
+    "previous_live_values": {
+      "generated_rust_sha256": "a4d942f7bf9492fe16cfa06937bae8c42b0e4afd4d7a4b242594f8d1939ca712",
+      "generated_rust_bytes": 61907,
+      "reference_tests_passed": 158,
+      "fixture_cases_verified": 460
+    },
+    "generated_change": "Only contract registry SHA256/BLAKE3 constants; Round 16 dependency identity rules and 12 fixtures registered, architecture registry unchanged.",
+    "reference_test_stage": "u1-catalog-candidate1-reference",
+    "production_stage": "u1-catalog-preflight-production",
+    "production_identity_tests_passed": 16,
+    "production_format_tests_passed": 77,
+    "production_error_audit_tests_passed": 29,
+    "production_finished_utc": "2026-09-14T06:51:05Z",
+    "strict_reference_clippy_stage": "u1-catalog-preflight-reference-clippy",
+    "strict_reference_clippy_finished_utc": "2026-09-14T06:49:34Z",
+    "workspace_format_stage": "u1-catalog-preflight-workspace-format",
+    "reference_format_stage": "u1-catalog-preflight-reference-format",
+    "preflight_source_manifest_sha256": "bd408bfbfe26a160f12f5ce31751f2b8304f8a8eaacbca983c077327a5c093e3",
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/media/Data/AeorDB/Tests/v4-service-completion-20260913",
+    "historical_production_tests_passed_retained": true,
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
+  },
   "correction_refresh": {
     "date_utc": "2026-09-14",
     "source_entry_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",

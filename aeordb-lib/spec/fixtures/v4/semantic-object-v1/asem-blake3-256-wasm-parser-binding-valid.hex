@@ -1,0 +1,23 @@
+# fixture: asem-blake3-256-wasm-parser-binding-valid
+# contract: SemanticObjectV1
+# hash: blake3-256 (32 bytes)
+# expected: semantic:catalog-leaf:records=1
+# canonical key: 213d3439ccbad714be44551bbe12a5725df859a22bdeb39ce44fc043512189ed
+# relation: asem-blake3-256-wasm-parser-definition-valid
+# hex offsets are absolute within this fixture
+# envelope +0x000 len 32: ASEM common envelope
+# envelope kind: 0x0002
+# body +0x000: SemanticCatalogLeafV1
+# object +0x0b8 len 4: object_crc32
+00000000: 4153454d0100020020000000bc000000
+00000010: 98000000010000000000000000000000
+00000020: 00000000010000001179a62c91cff0d8
+00000030: 48efc1c7275dbe55f76fbbd0a633c766
+00000040: cc532fbb81f1d3406800000000000000
+00000050: 0600000020000000f6333135321f973a
+00000060: c394aea070ef8a88064258a05c678a9b
+00000070: fdfbc4e253a927fb4cd403041dfecded
+00000080: 4831699de6f1897dad13809609dcb7e9
+00000090: 7f9d1bb4c60a968af6333135321f973a
+000000a0: c394aea070ef8a88064258a05c678a9b
+000000b0: fdfbc4e253a927fb559b7356

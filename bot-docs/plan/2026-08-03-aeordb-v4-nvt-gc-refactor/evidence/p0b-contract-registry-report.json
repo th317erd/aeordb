@@ -3,12 +3,12 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19",
-  "fixture_manifest_sha256": "1bb1f6567b63e2254045e52bb9760024d2dfa8fa14cb41c8ec23bc63a5ee3c2e",
+  "source_sha256": "b510d31bcaad611897f76adc7c3b577b62f2bea8da751424e2d861e10b806d5b",
+  "fixture_manifest_sha256": "7d05abdc174b398ec42af6c3440d27e797b43cd3cf42d4c5f05dde7c6a0e6749",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 24,
-    "fixtures": 460,
+    "fixtures": 472,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,8 +55,30 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 158,
+    "tests_passed": 163,
     "reviewer_status": "pending-owner-review-before-production-writer"
+  },
+  "catalog_identity_refresh": {
+    "date_utc": "2026-09-14",
+    "unit": "U1 Round 16 dependency catalog identity and dynamic width",
+    "source_entry_commit": "c222ee29a0dc3dd6c22d36868f5042dc6ad4621e",
+    "scope": "Class 6/7 keys use complete class-domain dependency IDs of selected database hash width; artifact fingerprints and service activation are unchanged.",
+    "previous_live_values": {
+      "source_sha256": "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19",
+      "fixture_manifest_sha256": "1bb1f6567b63e2254045e52bb9760024d2dfa8fa14cb41c8ec23bc63a5ee3c2e",
+      "fixtures": 460,
+      "reference_tests_passed": 158
+    },
+    "reference_test_stage": "u1-catalog-candidate1-reference",
+    "reference_test_finished_utc": "2026-09-14T06:39:16Z",
+    "fixture_stage": "u1-catalog-preflight-reference-verify",
+    "fixture_finished_utc": "2026-09-14T06:51:36Z",
+    "existing_binary_files_unchanged": 461,
+    "added_binary_fixtures": 12,
+    "production_hash_algorithms_tested": 5,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/media/Data/AeorDB/Tests/v4-service-completion-20260913",
+    "production_readiness_claimed": false
   },
   "correction_refresh": {
     "date_utc": "2026-09-14",

@@ -186,7 +186,7 @@ fn every_namespace_and_semantic_fixture_matches_the_independent_oracle() {
   let root = fixture_root();
   let rows: Vec<_> =
     manifest().fixtures.into_iter().filter(|row| row.format_id == "directory-index-v1" || row.format_id == "semantic-object-v1").collect();
-  assert_eq!(rows.len(), 12);
+  assert_eq!(rows.len(), 24);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();

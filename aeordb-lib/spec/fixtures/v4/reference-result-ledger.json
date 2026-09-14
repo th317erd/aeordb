@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "p6-3b-tombstone-only-manifests",
+  "tool_revision": "u1-round16-dependency-catalog-identity",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -184,6 +184,42 @@
       "result": "pass"
     },
     {
+      "fixture_id": "asem-blake3-256-wasm-parser-definition-valid",
+      "expected": "semantic:definition:class=6",
+      "observed": "semantic:definition:class=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-wasm-parser-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-wasm-mapper-definition-valid",
+      "expected": "semantic:definition:class=6",
+      "observed": "semantic:definition:class=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-wasm-mapper-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-native-dependency-definition-valid",
+      "expected": "semantic:definition:class=7",
+      "observed": "semantic:definition:class=7",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-blake3-256-native-dependency-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
       "fixture_id": "entity-sha512-directory-root-valid",
       "expected": "entity:version=1:entry-type=0x03",
       "observed": "entity:version=1:entry-type=0x03",
@@ -229,6 +265,42 @@
       "fixture_id": "asem-sha512-state-content-only",
       "expected": "semantic:state:content-only:reason=1",
       "observed": "semantic:state:content-only:reason=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-wasm-parser-definition-valid",
+      "expected": "semantic:definition:class=6",
+      "observed": "semantic:definition:class=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-wasm-parser-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-wasm-mapper-definition-valid",
+      "expected": "semantic:definition:class=6",
+      "observed": "semantic:definition:class=6",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-wasm-mapper-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-native-dependency-definition-valid",
+      "expected": "semantic:definition:class=7",
+      "observed": "semantic:definition:class=7",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asem-sha512-native-dependency-binding-valid",
+      "expected": "semantic:catalog-leaf:records=1",
+      "observed": "semantic:catalog-leaf:records=1",
       "result": "pass"
     },
     {

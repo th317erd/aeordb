@@ -4,6 +4,7 @@ use crate::engine::entry_type::EntryType;
 use crate::engine::{CompressionAlgorithm, HashAlgorithm};
 
 use super::database_header::validate_capabilities;
+use super::dependency::decode_dependency_record_bytes;
 use super::entity::{EntryTypeV4, WHOLE_ENTITY_V1_FLAG_SYSTEM, decode_whole_entity};
 use super::hash::digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass};
@@ -936,6 +937,29 @@ fn decode_definition(body: &[u8], item_count: u64, hash_algorithm: HashAlgorithm
       format!("expected {expected}, got {}", body.len()),
     ));
   }
+  if matches!(class, 6 | 7) {
+    let canonical_record = &body[minimum..];
+    let dependency = decode_dependency_record_bytes(canonical_record)?;
+    let (expected_kind, domain): (u16, &[u8]) = if class == 6 {
+      (1, b"aeordb.semantic.executable-dependency-definition.v1\0")
+    } else {
+      (2, b"aeordb.semantic.native-dependency-definition.v1\0")
+    };
+    if dependency.kind != expected_kind {
+      return Err(error(
+        MalformedInputClass::CrossRecordClosureMismatch,
+        "semantic_dependency_definition_kind",
+        "dependency kind disagrees with its semantic definition class",
+      ));
+    }
+    if digest_parts(hash_algorithm, &[domain, canonical_record]) != body[8..8 + hash_width] {
+      return Err(error(
+        MalformedInputClass::IdentityKeyOrGenerationMismatch,
+        "semantic_dependency_definition_identity",
+        "dependency definition ID disagrees with its complete canonical record",
+      ));
+    }
+  }
   Ok((SemanticObjectKind::Definition { class }, Vec::new()))
 }
 
@@ -1002,6 +1026,13 @@ fn decode_catalog_leaf(body: &[u8], item_count: u64, hash_algorithm: HashAlgorit
     }
     let owner_key = &body[cursor + record_prefix..record_end];
     validate_catalog_owner_key(kind, owner_key, hash_width)?;
+    if matches!(kind, 6 | 7) && owner_key != semantic_id {
+      return Err(error(
+        MalformedInputClass::IdentityKeyOrGenerationMismatch,
+        "catalog_leaf_dependency_identity",
+        "dependency owner key must equal its complete semantic definition ID",
+      ));
+    }
     let kind_bytes = kind.to_le_bytes();
     let expected_lookup = digest_parts(hash_algorithm, &[b"aeordb.semantic-catalog-key.v1\0", &kind_bytes, owner_key]);
     if expected_lookup != lookup_digest {

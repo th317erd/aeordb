@@ -1456,6 +1456,10 @@ path = "spec/engine/semantic_definition_writer_resource_spec.rs"
 name = "always_missing_evaluator_spec"
 path = "spec/engine/always_missing_evaluator_spec.rs"
 
+[[test]]
+name = "dependency_catalog_identity_spec"
+path = "spec/engine/dependency_catalog_identity_spec.rs"
+
 
 [lints]
 workspace = true

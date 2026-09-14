@@ -209,6 +209,14 @@ pub(crate) fn decode_table(value: &[u8]) -> Result<DecodedDependencyTable, &'sta
   Ok(DecodedDependencyTable { records })
 }
 
+pub(crate) fn decode_single_record(value: &[u8]) -> Result<DependencyRecord, &'static str> {
+  let (record, end) = decode_record(value, 0)?;
+  if end != value.len() {
+    return Err("dependency_record_trailing");
+  }
+  Ok(record)
+}
+
 fn decode_record(value: &[u8], start: usize) -> Result<(DependencyRecord, usize), &'static str> {
   let header_end = start.checked_add(RECORD_HEADER_LENGTH).ok_or("dependency_length_overflow")?;
   if header_end > value.len() {

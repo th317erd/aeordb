@@ -1,8 +1,15 @@
 use sha2::{Digest, Sha512};
 
+#[path = "dependency_catalog.rs"]
+mod dependency_catalog;
+
 #[cfg(test)]
 #[path = "../spec/core_empty_semantics_spec.rs"]
 mod core_empty_semantics_spec;
+
+#[cfg(test)]
+#[path = "../spec/dependency_catalog_contract_spec.rs"]
+mod dependency_catalog_contract_spec;
 
 const ENTITY_MAGIC: u32 = 0x0ae0_12db;
 const MAX_ENTITY_VERSION: u8 = 1;
@@ -204,6 +211,7 @@ pub fn fixture_cases() -> Vec<CoreFixtureCase> {
       canonical_key: Some(hex::encode(content_only_id)),
       bytes: content_only,
     });
+    cases.extend(dependency_catalog::fixture_cases(profile));
   }
   cases
 }
@@ -593,6 +601,23 @@ fn decode_definition(profile: HashProfile, body: &[u8], item_count: u64) -> Resu
   {
     return Err("semantic_definition_body");
   }
+  if class == 6 || class == 7 {
+    let payload = &body[16 + profile.width()..];
+    let record = crate::dependency::decode_single_record(payload)?;
+    let expected_kind = if class == 6 { 1 } else { 2 };
+    if record.kind != expected_kind {
+      return Err("semantic_dependency_definition_kind");
+    }
+    let mut preimage = if class == 6 {
+      b"aeordb.semantic.executable-dependency-definition.v1\0".to_vec()
+    } else {
+      b"aeordb.semantic.native-dependency-definition.v1\0".to_vec()
+    };
+    preimage.extend_from_slice(payload);
+    if profile.digest(&preimage) != body[8..8 + profile.width()] {
+      return Err("semantic_dependency_definition_identity");
+    }
+  }
   Ok(format!("semantic:definition:class={class}"))
 }
 
@@ -627,6 +652,14 @@ fn decode_catalog_leaf(profile: HashProfile, body: &[u8], item_count: u64) -> Re
       return Err("catalog_leaf_zero_hash");
     }
     let owner_key = body[cursor + 8 + 2 * profile.width()..cursor + record_length].to_vec();
+    if matches!(kind, 6 | 7) {
+      if owner_key.len() != profile.width() {
+        return Err("catalog_leaf_owner_key");
+      }
+      if owner_key != body[cursor + 8..cursor + 8 + profile.width()] {
+        return Err("catalog_leaf_dependency_identity");
+      }
+    }
     if semantic_catalog_lookup_digest(profile, kind, &owner_key) != lookup_digest {
       return Err("catalog_leaf_lookup_digest");
     }

@@ -65,7 +65,7 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "p6-3b-tombstone-only-manifests";
+const TOOL_REVISION: &str = "u1-round16-dependency-catalog-identity";
 const FIXTURE_STAGE: &str = "p6-3b-tombstone-only-manifests";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
@@ -346,7 +346,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
       production_dependencies: Vec::new(),
-      provenance: "Independent implementation of ratified decision-log Rounds 7-9 and 10-15; no AeorDB crate dependency".to_string(),
+      provenance: "Independent implementation of ratified decision-log Rounds 7-16; no AeorDB crate dependency".to_string(),
       reviewer_status: "pending-owner-review-before-production-writer".to_string(),
     },
     contract_registry: "format-contract-registry.json".to_string(),

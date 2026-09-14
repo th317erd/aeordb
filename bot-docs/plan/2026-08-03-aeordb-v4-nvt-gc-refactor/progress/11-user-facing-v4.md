@@ -26,13 +26,20 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+Current landing: the Round16 dependency catalog identity and dynamic-width
+correction, based on the completed definition writers at
+`c222ee29a0dc3dd6c22d36868f5042dc6ad4621e`. All three host qualifications and
+the [complete catalog proof](../evidence/user-facing-v4-u1-catalog-proof-20260914.json)
+pass; earlier pending statuses below are history, not current blockers.
+
 September 14 owner update: catalog-key clarification is approved, including
 dynamic width from the selected database hash registry; normative Round 16 is
-appended to `.codex/conversation.md`. Windows SSH is restored (verified hostname
-and 19,198,201,856 free bytes, no active Cargo/Rust process). Resume pending
-native qualification of the unchanged 43-input writer candidate first, then
-land it before the separately tested catalog identity/COW integration unit.
-Historical blocked/pending entries below are superseded by this owner update.
+appended to `.codex/conversation.md`. Windows SSH is restored and the prior
+43-input writer unit was qualified and landed as c222ee29. The current 44-input
+dependency catalog correction passes macOS, Windows and Linux full/release
+qualification. Preserve the Windows long-scratch
+failure and A/B receipts; native path hardening is the required following unit.
+Historical blocked/pending entries below are superseded by these updates.
 
 - Normal CLI/server creation calls `StorageEngine::create*` →
   `AppendWriter::create` → legacy `FileHeader::new`, whose version is 3.
@@ -1386,6 +1393,208 @@ gates passed. Final source/reference/fixture/report diffs and the unchanged
 43-input candidate have been reviewed. This closes the writer qualification
 unit, not all U1 or v4 runtime readiness. Round 16 approval is recorded in this
 snapshot; catalog behavior changes and their new tests remain the next unit.
+
+## Completed U1 landing unit: dependency catalog identity and dynamic width
+
+Entry/last green: `c222ee29a0dc3dd6c22d36868f5042dc6ad4621e`, pushed to
+development. Owner: direct integration agent. Owner ratification: Round 16.
+Isolated desktop checkout: durable campaign cache `source-u1-catalog`;
+previous writer/native checkouts and sealed evidence remain unchanged.
+
+Owned: class6/7 dependency identity derivation/validation, semantic catalog
+bindings and direct definition resolution, independent reference equivalents,
+new exact fixtures/registry metadata and required generation, dedicated tests,
+Cargo targets, reviewed error-location metadata and this ledger.
+Forbidden: arbitrary artifact fingerprint changes, blanket acceptance of mixed
+widths, silently reinterpreting existing ambiguous bindings, runtime/default
+activation, separate mutable physical/KV owners, and production databases.
+Catalog COW/compiler remain subsequent U1 work after this reader/identity gate.
+
+- [x] Execute eight production and five reference contract tests against the
+  unchanged implementation; record failures separately from positive controls.
+- [x] Enforce complete class-domain dependency IDs and registry-derived width
+  at low-level binding/definition and direct resolver boundaries.
+- [x] Expand adjacent malformed/class/domain/cancellation and allocation paths;
+  add independent both-width fixtures and all-five-algorithm production proof.
+- [x] Run affected reader/root/index/source regressions, independent/static,
+  full/release/native gates on frozen final inputs; preserve old fixture bytes.
+- [x] Review and independently verify all exact-source evidence for this
+  coherent correction. This snapshot is the catalog landing unit.
+- [ ] Next: Windows path hardening, bounded catalog writers/COW and compilation,
+  then U2–U7; no full v4 readiness claim.
+
+Named narrow commands (guarded desktop runner, Cargo two jobs):
+`cargo test --offline --locked -j 2 -p aeordb --test dependency_catalog_identity_spec`
+and `cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml dependency_catalog_contract_spec`.
+The reference filter intentionally selects only the new five red tests; full
+reference/fixture qualification remains a later mandatory gate.
+
+RED evidence: owned desktop unit `aeordb-v4-u1-catalog-identity-red-20260914`
+completed at 06:19:48 UTC; unified 9318 closed 0. Production: **3 pass / 5
+expected failures**, reference: **1 pass / 4 expected failures**; both Cargo
+stages exited 101. The supervisor's exit 0 means both expected RED outcomes,
+not passing tests. Failures reproduce wrong owner identity, raw artifact keys,
+stale definition IDs, correctly hashed malformed/wrong-class dependency
+payloads, direct resolver bypass, and reference width acceptance. Positive
+controls retain complete identities and unknown executor metadata. Six frozen
+source/lock inputs matched before/after; no guard stop. Small evidence mirrored
+to campaign cache `u1-catalog-red-evidence`; old source manifests and receipts
+are immutable historical inputs for this baseline. Next: add direct load-time
+cancellation and adjacent boundary proofs before the smallest reader fix.
+
+Adjacent RED: `u1-catalog-identity-adjacent-red`, unified 53281 closed 101,
+finished 06:29:43 UTC. Twelve production tests: **5 pass / 7 expected failures**;
+new failures prove load-time cancellation can reach the callback and correctly
+hashed empty/truncated payloads are accepted. Passing controls cover direct
+valid dynamic-width resolution, callback/source error propagation, missing
+definitions and substituted class/semantic/object bindings. Six inputs unchanged,
+no guard stop; these assertions were executed before their production fixes.
+Namespace validation now reuses bounded canonical single-record decoding,
+recomputes class6/7 semantic IDs, and requires matching owner keys. Direct
+resolution repeats identity closure and checks cancellation after load and
+before callback. Reference implementation remains independently constructed.
+
+Candidate-1 focused GREEN: unified 46342 closed 0 at 06:39:46 UTC. Production
+15/15, full reference 163/163, independent generated fixtures 472/472. All 14
+frozen source/lock hashes matched before/after, manifest SHA
+`2e499164d3aa01612170fefda5f0202d685cd350edb65d997b41c0a87d414f0a`.
+Twelve added fixtures cover parser/mapper/native definition and binding pairs
+at both widths; historical binary fixtures compare byte-for-byte equal.
+Production proof covers all five algorithms, same-width cross-algorithm
+rejection, ID-versus-object-ID confusion, all record truncations, bounded
+borrowed component lengths, and cancellation before load/during load/before
+inspection. Next add the independent fixture traversal/resolution test, refresh
+only reviewed error line positions and generated metadata, then freeze the
+final candidate for affected/static/full/release/native qualification.
+Mac/Windows baseline catalog worktrees were created at c222ee29, no builds yet;
+existing qualified worktrees remain untouched. All large work stays on desktop.
+
+Preflight candidate adds real catalog traversal plus definition resolution over
+all six independent dependency fixture pairs (16 identity tests total), imports
+12 new binary/annotation pairs, and preserves all **461** previously tracked
+binary files. The fixture registry's progress count is 472; final regeneration
+changes only the two registry digest constants in `contract_generated.rs`.
+The reviewed-error inventory changes exactly nine line positions, retaining
+all 1,503 occurrence identities, patterns, reviews and its fixed ceiling.
+Five-stage preflight (format/reference lint/three production targets/fixtures)
+is running under unit `aeordb-v4-u1-catalog-preflight-20260914`, unified 18470,
+42-input manifest `bd408bfbfe26a160f12f5ce31751f2b8304f8a8eaacbca983c077327a5c093e3`.
+Final affected-reader coverage expands the previous 27 targets with this new
+identity target, `migration_root_map_owner_spec`,
+`v4_index_native_compaction_spec` and `v4_semantic_object_store_spec` (31 total).
+
+Following U1 catalog-writer prerequisite: the independent generic reference
+leaf decoder still lacks production's pre-existing control-owner canonical
+path and class3–5 owner-width validation. This class6/7 ruling does not change
+those classes' identity policy. Cover those existing rules with independent
+malformed fixtures when landing the all-seven-class catalog codec/writer; do
+not treat this dependency-only unit as completion of that broader codec gate.
+
+Final candidate frozen 06:56 UTC: **44** source/lock/report inputs, manifest SHA
+`6811f96ce094e5f5db8ca0eae04e658c11734028eeee8c30270151f6212ddff7`;
+source-only archive SHA
+`c7af7892216ae93966cff037b4477712b2cb7d54fac17bce404b6445b28eccc0`.
+Preflight unified18470 closed0 at06:51:36: 16 identity /77 format /29 audit
+tests pass, formatting and strict reference lint pass, 472 fixtures verify.
+P0b/P0c live hashes/counts now link those executed receipts; previous refresh
+history is retained. Only metadata changed after the 42-input preflight.
+Native source import verified the same44inputs and exact44archive members on
+both hosts; no target or executable was transferred. Qualified prior checkouts
+remain unchanged. Linux reuses the three existing same-host U0 WASM targets
+through symlinks, with their original content digests verified before tests.
+
+Final qualification LIVE: Mac14548 and Windows55353 launched at06:58 UTC
+(library +31 affected targets +163 reference +472 fixtures, one Cargo job);
+desktop82742 under `aeordb-v4-u1-catalog-final-20260914`, invocation
+`90ba64934c57462cb8f56df8e18f4e26`, launched06:58:56 UTC. Desktop runs31affected,
+full static/contracts, complete workspace with two large KV cases isolated to
+the Data disk, eight release targets, reference and fixtures. Two Cargo jobs,
+16GiB/no-swap build guard, Data250GB/home64GiB floors remain enforced. This is
+unit qualification, not final8GiB production runtime or full v4-default proof.
+
+Catalog qualification update, September 14 07:13 UTC: Mac completes all four
+stages (681 library, 533 affected across 31 targets, 163 reference, 472 fixtures),
+with all 44 input hashes unchanged and 33 same-host executable digests captured.
+Linux static/contracts/debt stages pass; full workspace is still running.
+Windows stops at library: 674 pass / four fail, exit 101; no later stages ran.
+Three mark-control tests fail with OS 123 in private regular-file permissions;
+the spill failure test observes a stale manifest timestamp. Preserve those logs.
+
+An eight-case Windows A/B run uses the **same executable** for all four tests:
+each fails under the newly lengthened `catalog-temporary` scratch (89 characters),
+and each passes under the previously qualified `temporary` scratch (81 characters).
+Raw Win32 path calls in private workspace permissions and durable replacement
+do not handle extended-length paths. This is a distinct required hardening unit,
+not a catalog identity change. Restore the prior scratch setting for catalog
+qualification, write new `u1-catalog-final2-evidence` receipts, and keep both the
+failed first run and A/B observations. No test is skipped and no path-limit fix
+or full v4 readiness is claimed. Following-unit proof must deliberately cross
+the Win32 path boundary and cover workspace publication and manifest replacement.
+
+Windows retry completes at 07:23:37 UTC, unified56288 exits0: library678,
+532 tests across31 affected targets, reference163 and fixtures472 all pass. Final C free bytes
+18,944,954,368; all44source hashes and stage patches unchanged, no guard stop.
+The first failure and the same-binary A/B remain distinct evidence; the path
+defect below is still unresolved. Linux full workspace remains in progress.
+The same-host33executable digest packet is mirrored locally (SHA-256
+`d1af34aea3cb32e38c55165499bf12d4a9315068db3933f57c81429f69a25b8f`);
+the library executable hash matches all eight diagnostic A/B receipts.
+
+Linux full workspace completes at07:41:02 UTC: independently counted
+**7,663 top-level passes across362targets**, zero failures, seven existing ignores,
+two deliberately split large-KV cases still pending. Three nested subprocess
+passes are counted separately. Full-workspace source hashes/patches remain
+unchanged. Driver82742 continues into the two Data-disk KV cases, then release,
+reference and fixtures; do not treat those pending stages as complete.
+
+Both isolated KV tests pass: clamp at07:45:33 UTC (240.87 seconds), resize at
+07:50:04 UTC (245.82 seconds), one pass each and62other target tests filtered.
+Together with the full workspace this is **7,665 distinct passes**. The Linux
+driver continues into release compilation. Its memory peak reached the configured
+16GiB build/test limit with zero swap; this is not8GiB production-runtime proof.
+
+Final Linux qualification completes at07:54:35 UTC; driver82742 exits0 with
+all13stages complete. Release69 tests across8targets, reference163 tests and
+472independent fixtures pass. Final Data/home free bytes are336,186,961,920 /
+72,756,748,288. The memory sample after both large KV passes records448limit
+events but zero OOM events/kills and zero swap. All44inputs and per-stage
+before/after patches remain unchanged. No executable or database crossed hosts.
+
+After mirroring the92Linux terminal files, strict final verification checks
+native receipts/counts,41Linux/33Mac/33Windows same-host executable hashes,
+all44source/lock/report hashes, original failed Windows run and8A/B observations,
+and unchanged historical fixtures/error-review identities. The proof above
+records7665distinct Linux workspace passes, existing ignores/nested tests
+separately, both native scopes, and the still-open Windows path defect and
+U1–U7 work. A catalog reader correction is not completion of semantic production
+or ordinary v4 service/default integration. No production service, database,
+installation or default format was changed by this unit.
+
+### Required next unit: Windows native path boundary
+
+Entry inventory finds exactly four raw path API calls in library production:
+`CreateDirectoryW` and `SetFileSecurityW` in `v4/private_workspace.rs`, plus
+`ReplaceFileW` and `MoveFileExW` in `native_durability.rs`. Other `encode_wide`
+uses encode persisted location fingerprints, not Win32 call arguments, and must
+not change. Handle-based directory barriers, identities and permission validation
+remain their existing owners. Do not alter Windows system settings.
+
+Private-path consumers cover migration root-map/capture/run-manifest/cutover
+journal, GC mark workspaces, index runtime workspace storage and query spools.
+Durable replacement also serves emergency spill manifest updates and two backup
+publication paths. Required failure-first tests: long private directory creation,
+directory/file permission setup, replace-existing and move-to-absent, cross-parent
+publication, embedded NUL rejection without namespace mutation, and missing/invalid
+paths. Keep no-follow checks, lexical admission and uncertain-completion ordering.
+
+Use a shared native path conversion only at the raw API boundary. It must
+normalize relative/non-verbatim paths without resolving symlinks or requiring an
+existing destination; preserve already-verbatim paths and native UTF-16; support
+drive and UNC prefixes. Test normalization separately from actual long-path I/O.
+Do not change persistent path identity/fingerprint serialization. Re-run the four
+observed library failures and all affected Windows targets under the **longer**
+scratch, plus Linux/macOS regression guards, before this defect is called fixed.
+This unit follows catalog landing, not concurrent edits to its frozen candidate.
 
 ## U2 read-only entry refinement: public append-writer guard
 

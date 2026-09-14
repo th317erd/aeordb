@@ -298,6 +298,9 @@ impl<'source> SemanticCatalogReaderV1<'source> {
         format!("semantic definition {} is absent", hex::encode(record.definition_object_id)),
       )
     })?;
+    if is_cancelled() {
+      return Err(SemanticCatalogReadErrorV1::cancelled("semantic_cancelled", "semantic definition load was cancelled"));
+    }
     let definition = decode_semantic_definition_record(&bytes, self.hash_algorithm)
       .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
     if definition.object_id != record.definition_object_id
@@ -308,6 +311,14 @@ impl<'source> SemanticCatalogReaderV1<'source> {
         "semantic_definition_closure",
         "semantic definition identity, class, or semantic ID disagrees with its catalog binding",
       ));
+    }
+    if matches!(record.record_kind, 6 | 7) {
+      // The decoder recomputes the complete, class-domain dependency ID using
+      // the selected database algorithm. Public records may bypass leaf decode.
+      validate_semantic_definition_identity_v1(record, definition.semantic_id)?;
+    }
+    if is_cancelled() {
+      return Err(SemanticCatalogReadErrorV1::cancelled("semantic_cancelled", "semantic definition inspection was cancelled"));
     }
     inspect(definition.definition)
   }

@@ -227,6 +227,22 @@ pub fn decode_dependency_table(value: &[u8]) -> FormatResult<DependencyTableV1<'
   Ok(DependencyTableV1 { records })
 }
 
+/// Decode one complete canonical dependency record, without an ADPT envelope.
+///
+/// Semantic dependency definitions embed exactly these bytes. Borrowed strings
+/// retain the same component bounds and future-executor rules as table records.
+pub fn decode_dependency_record_bytes(value: &[u8]) -> FormatResult<DependencyRecordV1<'_>> {
+  let (record, end) = decode_dependency_record(value, 0)?;
+  if end != value.len() {
+    return Err(error(
+      MalformedInputClass::TruncationOrTrailingBytes,
+      "dependency_record_trailing",
+      "single dependency record has trailing bytes",
+    ));
+  }
+  Ok(record)
+}
+
 fn decode_dependency_record(value: &[u8], start: usize) -> FormatResult<(DependencyRecordV1<'_>, usize)> {
   let header_end = start.checked_add(RECORD_HEADER_LENGTH).ok_or_else(|| length_error("dependency record header overflow"))?;
   if header_end > value.len() {
