@@ -26,7 +26,10 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: retained-definition operational errors are verified through
+Bounded fresh catalog assembly is qualified through all ten Linux gates; its
+green landing includes the [strict assembly proof](../evidence/user-facing-v4-u1-catalog-assembly-proof-20260914.json).
+Incremental updates/shared-dependency pruning and task-backed integration remain next.
+Retained-definition operational errors are committed/pushed as `cb37b0fe` and verified through
 all ten Linux gates and the [strict retained-reader proof](../evidence/user-facing-v4-u1-retained-definition-proof-20260914.json).
 The constructor correction is committed/pushed as `8aab3c91`; actual allocation
 regressions now pass through retained readers, physical selection and native
@@ -2726,6 +2729,198 @@ counts, resource guards and the four individually reviewed audit replacements.
 No selected write path, production service, original damaged database, or
 sealed release evidence was changed. This completes this bounded read-error
 unit, not complete U1, universal allocator/I/O recovery or user-facing readiness.
+
+## U1 completed unit: bounded fresh catalog assembly
+
+Entry `cb37b0fe5d50be186d591d8d8b52823adc274aa5`, following allten retained-reader
+gates. Direct owner. This unit composes already-qualified compiler outputs into
+one complete, unselected semantic catalog. It does not alter frozen definitions,
+profile identity, namespace activation, task bytes or source configuration rules.
+
+The production owner will consume one captured registry and a counted stream of
+compiled configurations, retaining only one configuration plus one COW path.
+No whole-world map/list of bindings or definitions is allowed. The source owner
+must compile every item against that same captured registry/deployment snapshot;
+source capture and authorization remain outside this storage-neutral composition.
+Registry dependencies remain present even when no configured field invokes them:
+they are transitively referenced by the class2 projection. Complete class6/7 IDs
+deduplicate shared dependencies across configurations without conflating parser
+and mapper roles. A duplicate/conflicting control owner is rejected, not silently
+overwritten with stale fields left behind. Exact source count detects incomplete
+or excess enumeration. Complete fieldless scopes remain present.
+
+Use the existing single-binding COW planner and the sole native immutable
+semantic-object publisher. Definitions precede their catalog bindings; nodes
+precede parents. A final bounded closure/read-back pass verifies every binding
+and exact record/node/definition/dependency count before returning the candidate
+state. The actual compiler and semantic-only registry fingerprints populate
+that state; operational metadata does not change catalog identity. Publish no
+HEAD or namespace authority. Cancellation, sink/read failure and source failure
+return no completed candidate; immutable unselected orphans are allowed, mixed
+visible authority is not. Keep staging/read scratch admitted separately from
+the retained compiled input and COW path. A sink must enforce preallocation
+caps; receiving an already oversized Vec is not proof of bounded native reads.
+
+Narrow target: `cargo test --offline --locked -j2 -p aeordb --test
+semantic_catalog_compiler_spec`. Failing-first coverage: allfive hashes and
+independent Patricia bytes, multiple/nested fieldless scopes, shared parser/
+mapper/native dependencies and same-artifact role separation, input-order
+invariance, duplicate/conflicting controls, incomplete/excess/source-error
+streams, refused workspace/global admission, cancellation before/during work,
+read/write/malformed/missing-object faults, exact lease release and deterministic
+retry. Add real-file publication/reopen without HEAD movement and measured
+allocation refusal before the full landing gates. Preserve all existing tests.
+
+Following this unit, incremental old-to-new catalog mutation must prune only
+unreferenced shared dependencies with bounded, non-quadratic work. Fresh
+assembly does not complete that obligation or task-backed atomic activation.
+Round10 section4 still requires durable capture/checkpoint/semantic-generation
+recheck and mixed-batch atomicity. Existing generic TaskRecord JSON, R14 TaskPin,
+and index checkpoints are different contracts; do not invent semantic task
+wire bytes or borrow an index checkpoint kind without completing that inventory.
+
+API RED79917 completed101 at20:32:53 UTC: exact E0432 missing catalog compiler
+module, zero tests executed, no new production edits. Four-input manifest
+`c5047400855ce34a1a1f92117a326d5360084df3cda82d39815e82ccfafd339b`;
+all six raw files mirrored a40a61 before source changes. The original independent
+Patricia oracle is now mechanically extracted into a shared test helper, keeping
+all existing COW cases and byte construction unchanged. The new test target
+now also checks independent root bytes, input-order invariance, duplicate owners
+and constant retained memory at each next-source callback. Further shared-role,
+fault and native tests remain pending. Candidate1 adds the bounded compiler and
+extracts the existing COW workspace arithmetic without changing its bound.
+Candidate1 narrow70787 exited101 at20:49:29 UTC: compilation exposed an API
+mistake (CapabilitySet must use into_bytes before iteration), zero tests ran.
+All six raw files mirrored3f5aa9 before correction. Nine-input manifest
+`c9cede23e5aa0c71e8ac39bbc4301fcd88afef4d97ecb1b8fcac12a30b742775`.
+The ten composition cases include shared dependencies and registry-only closure.
+Native staging adapter and expanded failure/resource evidence are still owed.
+
+Candidate2 narrow54230 exited0 at20:52:12Z:10assembly+16existingCOW cases pass;
+six raw files and both same-host executable hashes mirrored49571closed0 before
+source updates. Fault RED18299 exited101 at20:55:24Z:16pass/2fail. One real
+failure accepted a configuration from a different captured registry. The other
+was a fixture mistake: low host-available memory produces soft pressure, which
+Workload admission permits. The corrected fixture raises RSS to the hard limit.
+All six raw files and executed binary identity mirrored81080closed0 before fixes.
+The registry correction retains its projection ID in the opaque compiled result
+and compares it at composition; persisted bytes and compiler identity unchanged.
+Native API RED83130 exited101 at20:58:46Z: exact missing native adapter import,
+zero executed tests; six raw files mirroredce66b9. The new adapter borrows the
+sole physical publisher, uses bounded captured-header reads, stages immutable
+objects and never selectsHEAD. GC/task staging protection remains the caller's
+explicit obligation; this adapter does not invent a task pin. Candidate3 combines
+18assembly cases,16COW,41resource and full migration-execution coverage including
+new real-file assembly/reopen/idempotence. Fourteen exact inputs, manifest
+`c481955616b38010a7be43830c232105948480fdbed0ff1d0c7a35ffa4bb9f66`.
+Still pending: candidate execution, review/further error-boundary tests, strict
+architecture/full gates, source-bound proof and coherent landing.
+
+Candidate3 completed74644closed0 at21:03:52Z:18assembly,16COW,41resource and
+22migration-execution cases pass (97total). Actual wrapper allocation refusals
+are recoverable for allfive hashes. Native real-file staging/reopen and a second
+idempotent compilation leave HEAD/NVT unchanged. Six raw files and four same-host
+binary hashes mirrored31206closed0 before further changes.
+Private RED4855closed101 at21:05:55Z:3pass/3fail; the new native adapter's broad
+Engine mapping misclassified resource, cancellation and corruption as Unavailable.
+All six raw files and library binary mirrored94389closed0. The correction
+classifies those variants explicitly, preserving actual I/O/durability/shutdown
+as operational. The expanded seven private tests also cover nested format-origin
+flags, exact allocation/read codes and a constructed post-publication receipt.
+Candidate4 running1563:20assembly (including normalized conflicting owners and
+the control-path suffix boundary),16COW,41resource,22physical/migration cases,
+seven private classifications, then outside-worktree audit candidate. Fifteen
+inputs manifest`b8faadf50281d3be9fe087138774a73e27a304dbb26cc17d7c067af21123abb2`.
+Final ten-gate driver prepared, not launched; no completed proof/commit yet.
+
+Candidate4 exited101 at21:09:25Z: native22pass, assembly19pass/1fixturefailure.
+The longest owner exceeded the smaller frozen scope cap before the catalog key
+cap (scope65571>65536); no format limit changed. Six raw files and both executed
+binaries mirrored34459closed0. The corrected public test exercises scope's exact
+64KiB limit, while a private test checks the separate65537-byte catalog key cap
+including kind prefix and suffix. Candidate5 completed64847closed0 at21:15:01Z:
+99narrow (20assembly16COW41resource22migration),8private,1503audit candidate pass.
+Eighteen raw files, six executable hashes and candidate inventory mirrored93439
+closed0. Inventory comparisonbbe5f0 confirms identical identities, locations and
+reviews (only JSON serialization ordering/newline differs); tracked audit stays
+unchanged. Removed the now-unused COW test import after oracle extraction.
+Final source has16 inputs, manifest
+`5ebcd32916441148bf4da768cb465c1fc8552f16cabf3ad526c734518233d79f`, archive
+`c72782b03b57862ce896d3705bb5ef85976ac4d151c31bf4592ee4dfae64c4e9`.
+The complete ten-gate final run is starting. Strict proof verifier is prepared
+and syntax-checked, but not executed and no proof output exists yet.
+
+Initial final53898 completed101 at21:20:44Z. Narrow61 and persistence1 passed;
+the affected suite caught the unreviewed new native adapter in the exact
+first-authority owner inventory. Later gates did not execute. Preserved all18
+raw files, driver and37 actually executed binary digests (24309closed0) before
+any remote source change. Reviewed the adapter: it borrows the sole writer,
+uses only observe/captured semantic reads/immutable semantic publication, and
+never selects HEAD. The architecture test now admits that one owner and adds
+an exact three-call assertion plus physical/authority-ownership exclusions.
+No production change, original-test removal or suppression-policy relaxation.
+
+Final2 now runs58597, invocation4c80f7fdb1b94bb4ba573992751a7826. The17-input
+manifest is`4ea127b45a05adb98cc1669bbecc709a3f63e8b1e5ccca034f790d23ae894bd6`;
+archive`79729b13b68b12c1aef72c6b926ce0a34479f3fa335fc4a71672780700480878`.
+All16 previous inputs remain byte-identical; only the ownership spec is added.
+The strict verifier retains all14 historical stages and the failed first driver.
+Final proof and landing remain pending allten green gates.
+
+Final2 completed58597closed0 at2026-09-14T21:34:23Z, allten gates PASS.
+Elapsed5m19.538s; CPU6m8.848s. Results:61narrow (20assembly/41resource),
+1selected physical test/21filtered,898affected across52targets,709library,
+175independent reference,472fixtures,1503reviewed audit occurrences,format,
+strict workspaceClippy and debt self-test. The physical test is included in
+the affected suite, not an additional distinct case. No ignored tests, source
+or lock drift, resource guard stop, or unexplained failure remains.
+
+All60raw files, driver and57same-host executed binary digests are mirrored
+(10241closed0) before any remote rebuild. Kernel memory.peak5,595,553,792 bytes
+stayed within6GiB with swap disabled and CPU200%; final free bytes were
+Data335,991,390,208/home69,572,292,608, above both floors. The strict verifier
+82097closed0 validates source/archive identity, all gates/counts,14historical
+stages, the failed first driver, preserved original tests and oracle construction,
+unchanged frozen bytes/profiles/locks, and unchanged suppression inventory.
+Its [proof](../evidence/user-facing-v4-u1-catalog-assembly-proof-20260914.json)
+is the completion evidence for this unit, not all U1 or actual-v4 service readiness.
+No new native-platform/release/soak or universal allocator/I/O-recovery claim
+is made. The original corrupt database, production services and sealed prior
+qualification remain untouched. Next: incremental catalog updates and
+shared-dependency pruning, then captured task-backed activation.
+
+Read-only next-unit inventory during final2: the catalog reader exposes only
+whole-tree traversal and definition inspection, not bounded point lookup. Its
+visitor holds an immutable store borrow, so a bounded pruning pass cannot stage
+COW nodes through the mutable sink while visiting retained records. Address
+those reader boundaries within incremental-update integration; do not repeatedly
+restart a full walk for each changed key or dependency. Preserve existing
+selected-read and index-compaction callers and their resource/error guards.
+
+The current compiler's class1 projection binds one ScopeId and a field map of
+ValueStoreId plus sorted IndexIds. Scope/ValueStore/Field definitions include
+their owning identities; shared class6/7 references instead come from the
+registry projection and ValueStore dependency tables. Incremental updates must
+remove stale owned definitions but retain shared dependencies until their last
+reference disappears. A bounded auxiliary COW catalog of live dependencies can
+support a whole-batch reference/pruning pass without a whole-world memory set,
+per-dependency scans, or a new persisted format. This is a technical candidate,
+not implemented or qualified yet; task-owned staging protection is still required.
+Registry changes need recompilation of affected automatic parser contexts; an
+incremental path must never retain contexts from a different captured registry.
+Use a freshly compiled equivalent catalog plus the independent Patricia oracle
+as differential proof across add/change/delete/order/retry, including shared
+parser/mapper roles. Unknown retained compiler profiles must not be interpreted
+as the current class1 projection schema. Generic retained class1/2 aliasing also
+precludes assuming definition_count equals record_count without closure proof.
+
+Round14 TaskPin only has root and typed IndexArtifact hash vectors; semantic
+definition objects are explicitly outside IndexArtifact. The ASMJ mutation
+segment records completed publications and is recoverable soft state (Round15),
+not an unfinished task checkpoint. No dedicated semantic-mutation checkpoint
+body or task-kind naming registry has yet been identified. Finish that inventory
+before selecting a restart representation or claiming GC-safe task activation;
+do not repurpose an index checkpoint or task artifact slot by analogy.
 
 ## U1 completed compiler unit: whole corrected configuration compilation
 

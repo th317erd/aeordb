@@ -1906,3 +1906,136 @@ fn catalog_cow_nodes_publish_reopen_and_traverse_through_the_captured_physical_a
     assert_eq!((records, nodes), (0, 0));
   }
 }
+
+#[test]
+fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_head() {
+  use aeordb::engine::v4::namespace::decode_semantic_object;
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::index_configuration_compiler::{
+    IndexConfigurationAliasSnapshotV1, IndexConfigurationCompilationRequestV1, compile_index_configuration_v1,
+  };
+  use aeordb::engine::v4::parser_registry_compiler::{
+    ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
+  };
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1};
+  use aeordb::engine::v4::semantic_catalog_compiler::{SemanticCatalogCompilationRequestV1, compile_semantic_catalog_v1};
+  use aeordb::engine::v4::semantic_catalog_native::NativeSemanticCatalogStagingStoreV1;
+  use tokio_util::sync::CancellationToken;
+
+  struct Snapshot;
+  impl ParserAliasSnapshotV1 for Snapshot {
+    fn resolve_parser_alias(
+      &self,
+      _: &str,
+    ) -> Result<Option<aeordb::engine::v4::dependency::DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      Ok(None)
+    }
+  }
+  impl IndexConfigurationAliasSnapshotV1 for Snapshot {
+    fn resolve_mapper_alias(
+      &self,
+      _: &str,
+    ) -> Result<Option<aeordb::engine::v4::dependency::DependencyRecordV1<'_>>, SemanticCompilationErrorV1> {
+      Ok(None)
+    }
+  }
+
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, publisher) = initialized_publisher(algorithm);
+    drop(coordinator);
+    let before = publisher.observe().unwrap();
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(384 << 20, 512 << 20, 1, 32 << 20).unwrap());
+    let registry = compile_parser_registry_v1(
+      ParserRegistryCompilationRequestV1 {
+        source: None,
+        hash_algorithm: algorithm,
+        maximum_source_bytes: 1 << 20,
+        maximum_workspace_bytes: 64 << 20,
+      },
+      &Snapshot,
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    let request = SemanticCatalogCompilationRequestV1 {
+      hash_algorithm: algorithm,
+      expected_configuration_count: 2,
+      required_capabilities: [0; 32],
+      maximum_workspace_bytes: 64 << 20,
+    };
+    let compile = |publisher: &V4FirstAuthorityPublisher| {
+      let mut store = NativeSemanticCatalogStagingStoreV1::new(
+        publisher,
+        before.selected.header.database_id,
+        before.selected.header.updated_at_ms + 1,
+        &cancellation,
+      )
+      .unwrap();
+      let inputs = ["/", "/nested"].into_iter().map(|owner_path| {
+        compile_index_configuration_v1(
+          IndexConfigurationCompilationRequestV1 {
+            source: br#"{"$v":1,"indexes":[{"name":"value","type":"typed_exact_blake3_v1"}]}"#,
+            owner_path,
+            registry: &registry,
+            hash_algorithm: algorithm,
+            maximum_source_bytes: 1 << 20,
+            maximum_workspace_bytes: 128 << 20,
+          },
+          &Snapshot,
+          &memory,
+          &|| false,
+        )
+      });
+      compile_semantic_catalog_v1(request, &registry, inputs, &mut store, &memory, &|| cancellation.is_cancelled()).unwrap()
+    };
+    let result = compile(&publisher);
+    let after = publisher.observe().unwrap();
+    assert_eq!(after.selected.header.head_hash, before.selected.header.head_hash);
+    assert_eq!(after.selected.header.nvt_length, before.selected.header.nvt_length);
+    assert!(after.selected.header.write_sequence_high_water > before.selected.header.write_sequence_high_water);
+    assert_eq!(compile(&publisher).semantic_state(), result.semantic_state());
+    assert_eq!(publisher.observe().unwrap(), after, "idempotent staging changed physical authority");
+    drop(publisher);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    assert_eq!(reopened.observe().unwrap(), after);
+    assert_eq!(compile(&reopened).semantic_state(), result.semantic_state());
+    assert_eq!(reopened.observe().unwrap(), after);
+    assert_eq!(reopened.load_semantic_object(1, &result.semantic_state().object_id).unwrap().unwrap(), result.semantic_state().value);
+    let state = decode_semantic_object(&result.semantic_state().value, algorithm).unwrap().semantic_state.unwrap();
+    let SemanticAvailabilityV1::Complete {
+      catalog_root, catalog_record_count, catalog_node_count, definition_count, dependency_count, ..
+    } = state.availability
+    else {
+      panic!("complete catalog")
+    };
+    assert_eq!((catalog_record_count, definition_count, dependency_count), (13, 13, 4));
+    let store = NativeSemanticCatalogStagingStoreV1::new(
+      &reopened,
+      before.selected.header.database_id,
+      before.selected.header.updated_at_ms + 1,
+      &cancellation,
+    )
+    .unwrap();
+    let reader = SemanticCatalogReaderV1::new(algorithm, &store);
+    let stats = reader
+      .walk_catalog(
+        &catalog_root,
+        SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap(),
+        &|| false,
+        |record| reader.with_definition(record, &|| false, |_| Ok(())),
+      )
+      .unwrap();
+    assert_eq!(stats.class_counts, [0, 2, 1, 2, 2, 2, 0, 4]);
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, [0; 16], 1, &cancellation).is_err());
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 0, &cancellation).is_err());
+    cancellation.cancel();
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 1, &cancellation).is_err());
+    assert_eq!(reopened.observe().unwrap(), after);
+    drop(result);
+    drop(registry);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}

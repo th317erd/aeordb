@@ -29,6 +29,9 @@ mod retained_native_resource_spec;
 #[path = "retained_semantic_catalog_resource_spec.rs"]
 mod retained_semantic_catalog_resource_spec;
 
+#[path = "semantic_catalog_compiler_resource_spec.rs"]
+mod semantic_catalog_compiler_resource_spec;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Allocations {
   total: usize,

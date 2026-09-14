@@ -191,6 +191,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let migration_owner_path = source_root.join("engine/v4/migration_owner.rs");
   let migration_root_map_owner_path = source_root.join("engine/v4/migration_root_map_owner.rs");
   let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
+  let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -224,6 +225,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &migration_owner_path,
       &migration_root_map_owner_path,
       &read_view_native_path,
+      &semantic_catalog_native_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
@@ -247,6 +249,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &migration_owner_path,
     &migration_root_map_owner_path,
     &read_view_native_path,
+    &semantic_catalog_native_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
     for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {
@@ -267,6 +270,17 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       assert_eq!(owner_source.matches(".load_index_artifact_at_captured_header(").count(), 1);
       for forbidden in [".publish_index_artifacts(", ".publish_successor_authority(", ".publish("] {
         assert!(!owner_source.contains(forbidden), "captured artifact reader gained first-authority writer {forbidden}");
+      }
+    } else if owner_path == &semantic_catalog_native_path {
+      // The staging adapter borrows the sole physical writer but can only
+      // observe, read back, and publish immutable, unselected semantic objects.
+      // Review any new publisher call instead of admitting authority selection
+      // merely because this file is already in the owner inventory.
+      let compact: String = owner_source.split_whitespace().collect();
+      let calls: Vec<_> = compact.split(".publisher.").skip(1).map(|call| call.split('(').next().unwrap()).collect();
+      assert_eq!(calls, ["observe", "load_semantic_object_at_captured_header", "publish_immutable_semantic_objects"]);
+      for forbidden in ["StorageEngine", "DiskKVStore", "FirstAuthorityPublicationRequestV1", "publish_successor_authority", ".publish("] {
+        assert!(!compact.contains(forbidden), "semantic staging gained authority or physical ownership: {forbidden}");
       }
     } else {
       assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");

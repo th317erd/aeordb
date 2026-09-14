@@ -62,6 +62,7 @@ impl CompiledConfigurationFieldV1 {
 }
 
 pub struct CompiledIndexConfigurationV1 {
+  registry_projection_id: Vec<u8>,
   scope: EncodedScopeDefinitionV1,
   projection: EncodedSemanticDefinitionObjectV1,
   fields: Vec<CompiledConfigurationFieldV1>,
@@ -70,6 +71,9 @@ pub struct CompiledIndexConfigurationV1 {
 }
 
 impl CompiledIndexConfigurationV1 {
+  pub(super) fn registry_projection_id(&self) -> &[u8] {
+    &self.registry_projection_id
+  }
   pub fn scope(&self) -> &EncodedScopeDefinitionV1 {
     &self.scope
   }
@@ -192,7 +196,14 @@ pub fn compile_index_configuration_v1(
   let mut dependency_objects = allocate(dependencies.len())?;
   dependency_objects.extend(dependencies.into_values());
   check(&reservation, is_cancelled)?;
-  Ok(CompiledIndexConfigurationV1 { scope, projection, fields, dependencies: dependency_objects, _memory: reservation })
+  Ok(CompiledIndexConfigurationV1 {
+    registry_projection_id: copy(&request.registry.projection().semantic_id)?,
+    scope,
+    projection,
+    fields,
+    dependencies: dependency_objects,
+    _memory: reservation,
+  })
 }
 
 struct FieldCompilation<'a, 'source> {

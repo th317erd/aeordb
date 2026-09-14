@@ -1500,6 +1500,10 @@ path = "spec/engine/semantic_compiler_profile_spec.rs"
 name = "semantic-compiler-profile-fixtures"
 path = "spec/tools/semantic_compiler_profile_fixtures.rs"
 
+[[test]]
+name = "semantic_catalog_compiler_spec"
+path = "spec/engine/semantic_catalog_compiler_spec.rs"
+
 
 [lints]
 workspace = true

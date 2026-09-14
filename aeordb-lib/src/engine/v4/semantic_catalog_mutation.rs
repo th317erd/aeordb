@@ -103,16 +103,7 @@ pub fn plan_semantic_catalog_mutation_v1(
   check_cancellation(is_cancelled)?;
   validate_request(request)?;
   let width = request.hash_algorithm.hash_length();
-  // Two full H-bounded internal paths (input and output), fixed metadata
-  // allowance, and six leaf-sized transient buffers cover raw reads, borrowed
-  // record/edge views, decoding scratch, and a replacement collision bucket.
-  // The charge is deliberately conservative and independent of catalog size.
-  let workspace = width
-    .checked_mul(2)
-    .and_then(|count| count.checked_add(8))
-    .and_then(|count| count.checked_mul(INTERNAL_CAP))
-    .and_then(|bytes| bytes.checked_add(6 * LEAF_CAP))
-    .ok_or_else(|| resource("catalog_mutation_workspace", "workspace size overflow"))?;
+  let workspace = semantic_catalog_mutation_workspace_bytes_v1(request.hash_algorithm)?;
   if workspace > request.maximum_workspace_bytes {
     return Err(resource("catalog_mutation_workspace", "bounded path workspace exceeds the caller's limit"));
   }
@@ -131,6 +122,18 @@ pub fn plan_semantic_catalog_mutation_v1(
     objects: planner.objects,
     _memory: planner.reservation,
   })
+}
+
+pub(super) fn semantic_catalog_mutation_workspace_bytes_v1(algorithm: HashAlgorithm) -> Result<usize> {
+  // Two full H-bounded internal paths, fixed metadata, and six leaf-sized
+  // buffers cover reads, decoding and replacement. Independent of catalog size.
+  algorithm
+    .hash_length()
+    .checked_mul(2)
+    .and_then(|count| count.checked_add(8))
+    .and_then(|count| count.checked_mul(INTERNAL_CAP))
+    .and_then(|bytes| bytes.checked_add(6 * LEAF_CAP))
+    .ok_or_else(|| resource("catalog_mutation_workspace", "workspace size overflow"))
 }
 
 struct Frame {
