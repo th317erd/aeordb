@@ -706,13 +706,23 @@ pub fn validate_correctness_manifest_chain(
     return Err(closure_error("correctness manifest coverage versions are not byte-identical"));
   }
 
-  let value_definition = decode_value_store_definition(value_body.value_store_definition, hash_algorithm)
-    .map_err(|source| closure_error(format!("correctness chain ValueStore definition rejected: {source}")))?;
+  let value_definition = decode_value_store_definition(value_body.value_store_definition, hash_algorithm).map_err(|source| {
+    if source.is_allocation_failure() {
+      source
+    } else {
+      closure_error(format!("correctness chain ValueStore definition rejected: {source}"))
+    }
+  })?;
   if value_definition.scope_id != scope.owner_id {
     return Err(closure_error("ValueStore definition ScopeId does not match the supplied ScopeCatalog owner"));
   }
-  let field_definition = decode_field_index_definition(field_body.field_index_definition, hash_algorithm)
-    .map_err(|source| closure_error(format!("correctness chain FieldIndex definition rejected: {source}")))?;
+  let field_definition = decode_field_index_definition(field_body.field_index_definition, hash_algorithm).map_err(|source| {
+    if source.is_allocation_failure() {
+      source
+    } else {
+      closure_error(format!("correctness chain FieldIndex definition rejected: {source}"))
+    }
+  })?;
   if field_definition.value_store_id != value.owner_id {
     return Err(closure_error("FieldIndex definition ValueStoreId does not match the supplied ValueStore owner"));
   }

@@ -516,7 +516,10 @@ fn map_semantic_error(error: IndexSemanticScopeReadErrorV1) -> IndexRuntimeCompa
 }
 
 fn map_application_error(error: IndexBatchApplicationErrorV1) -> IndexRuntimeCompactionErrorV1 {
-  let class = match error {
+  let class = match &error {
+    IndexBatchApplicationErrorV1::Malformed(source) if source.is_allocation_failure() => {
+      IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection
+    }
     IndexBatchApplicationErrorV1::Cancelled => IndexRuntimeCompactionErrorClassV1::CancelledBeforeSelection,
     IndexBatchApplicationErrorV1::SourcePressure(_)
     | IndexBatchApplicationErrorV1::SourceOperational(_)
@@ -537,6 +540,9 @@ fn map_publication_error(error: FrozenIndexGenerationPublicationErrorV1) -> Inde
     IndexRuntimeCompactionErrorClassV1::CommitUnknown
   } else {
     match &error {
+      FrozenIndexGenerationPublicationErrorV1::Format { source, .. } if source.is_allocation_failure() => {
+        IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection
+      }
       FrozenIndexGenerationPublicationErrorV1::Cancelled { .. } => IndexRuntimeCompactionErrorClassV1::CancelledBeforeSelection,
       FrozenIndexGenerationPublicationErrorV1::InvalidPlan { code: "index_generation_source_superseded", .. } => {
         IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection
@@ -563,6 +569,12 @@ fn classify_active_pointer_publication_error(error: &IndexActivePointerPublicati
 
 fn classify_authority_publication_error(error: &FirstAuthorityPublicationErrorV1) -> IndexRuntimeCompactionErrorClassV1 {
   match error {
+    FirstAuthorityPublicationErrorV1::Invalid { code: "immutable_index_read_allocation" | "first_authority_readback_io", .. } => {
+      IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection
+    }
+    FirstAuthorityPublicationErrorV1::Format(source) if source.is_allocation_failure() => {
+      IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection
+    }
     FirstAuthorityPublicationErrorV1::Committed { .. } => IndexRuntimeCompactionErrorClassV1::RetryableBeforeSelection,
     FirstAuthorityPublicationErrorV1::Engine(
       EngineError::IoError(_)
@@ -610,6 +622,13 @@ fn classify_retirement_owner_error(error: &RetirementJournalOwnerErrorV1) -> Ind
 
 fn map_authority_read_error(error: FirstAuthorityPublicationErrorV1) -> IndexRuntimeCompactionErrorV1 {
   match error {
+    FirstAuthorityPublicationErrorV1::Invalid { code: "immutable_index_read_allocation", message } => {
+      retryable("immutable_index_read_allocation", message)
+    }
+    FirstAuthorityPublicationErrorV1::Invalid { code: "first_authority_readback_io", message } => {
+      retryable("first_authority_readback_io", message)
+    }
+    FirstAuthorityPublicationErrorV1::Format(source) if source.is_allocation_failure() => retryable(source.code(), source.to_string()),
     FirstAuthorityPublicationErrorV1::Engine(EngineError::IoError(source)) => retryable("native_compaction_read_io", source.to_string()),
     FirstAuthorityPublicationErrorV1::Engine(EngineError::ResourceExhausted(context)) => {
       retryable("native_compaction_read_pressure", context)
@@ -627,6 +646,15 @@ fn map_authority_read_error(error: FirstAuthorityPublicationErrorV1) -> IndexRun
 
 fn map_artifact_read_error(error: FirstAuthorityPublicationErrorV1) -> IndexBatchArtifactReadErrorV1 {
   match error {
+    FirstAuthorityPublicationErrorV1::Invalid { code: "immutable_index_read_allocation", message } => {
+      IndexBatchArtifactReadErrorV1::ResourcePressure(message)
+    }
+    FirstAuthorityPublicationErrorV1::Invalid { code: "first_authority_readback_io", message } => {
+      IndexBatchArtifactReadErrorV1::Operational(message)
+    }
+    FirstAuthorityPublicationErrorV1::Format(source) if source.is_allocation_failure() => {
+      IndexBatchArtifactReadErrorV1::ResourcePressure(source.to_string())
+    }
     FirstAuthorityPublicationErrorV1::Engine(EngineError::IoError(source)) => {
       IndexBatchArtifactReadErrorV1::Operational(source.to_string())
     }
@@ -648,7 +676,11 @@ fn map_artifact_read_error(error: FirstAuthorityPublicationErrorV1) -> IndexBatc
 }
 
 fn map_format_error(error: super::reader::FormatError) -> IndexRuntimeCompactionErrorV1 {
-  corrupt(error.code(), error.to_string())
+  if error.is_allocation_failure() {
+    retryable(error.code(), error.to_string())
+  } else {
+    corrupt(error.code(), error.to_string())
+  }
 }
 
 fn retryable(code: &'static str, context: impl Into<String>) -> IndexRuntimeCompactionErrorV1 {
@@ -662,6 +694,10 @@ fn cancelled(code: &'static str, context: impl Into<String>) -> IndexRuntimeComp
 fn corrupt(code: &'static str, context: impl Into<String>) -> IndexRuntimeCompactionErrorV1 {
   IndexRuntimeCompactionErrorV1::new(IndexRuntimeCompactionErrorClassV1::Corrupt, code, context)
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/index_compaction_definition_error_spec.rs"]
+mod retained_definition_error_tests;
 
 #[cfg(test)]
 mod tests {

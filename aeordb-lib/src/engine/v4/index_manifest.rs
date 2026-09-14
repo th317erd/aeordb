@@ -710,6 +710,9 @@ fn write_u64(destination: &mut [u8], offset: usize, value: u64) -> FormatResult<
 }
 
 fn nested_definition_error(label: &'static str, source: FormatError) -> FormatError {
+  if source.is_allocation_failure() {
+    return source;
+  }
   closure_error(format!("embedded {label} definition rejected: {} ({})", source.code(), source.context()))
 }
 

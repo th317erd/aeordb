@@ -387,6 +387,14 @@ fn map_scope_winner_error(error: super::reader::FormatError) -> IndexSemanticSco
   }
 }
 
+fn map_definition_decode_error(error: super::reader::FormatError) -> IndexSemanticScopeReadErrorV1 {
+  if error.is_allocation_failure() {
+    IndexSemanticScopeReadErrorV1::retryable(error.code(), error.context())
+  } else {
+    IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context())
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CatalogExpectedCountsV1 {
   records: u64,
@@ -465,8 +473,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
         return Ok(());
       }
       self.with_definition(record, request.is_cancelled, |definition| {
-        let value_store = decode_value_store_definition(definition, self.hash_algorithm)
-          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+        let value_store = decode_value_store_definition(definition, self.hash_algorithm).map_err(map_definition_decode_error)?;
         validate_definition_identity(record, &value_store.value_store_id)?;
         let Some(scope) = scopes.iter_mut().find(|scope| scope.scope.scope_id == value_store.scope_id) else {
           return Ok(());
@@ -648,8 +655,7 @@ impl CatalogIndexSemanticScopeSourceV1<'_> {
         return Ok(());
       }
       self.with_definition(record, request.is_cancelled, |definition| {
-        let value_store = decode_value_store_definition(definition, self.hash_algorithm)
-          .map_err(|error| IndexSemanticScopeReadErrorV1::corrupt(error.code(), error.context()))?;
+        let value_store = decode_value_store_definition(definition, self.hash_algorithm).map_err(map_definition_decode_error)?;
         validate_definition_identity(record, &value_store.value_store_id)?;
         let Some(scope) = scopes.iter_mut().find(|scope| scope.scope_id == value_store.scope_id) else {
           return Ok(());

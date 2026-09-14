@@ -731,6 +731,7 @@ impl IndexProducerMutationWorkerV1 {
 
 fn source_is_retryable(source: &IndexProducerSourceErrorV1) -> bool {
   matches!(source, IndexProducerSourceErrorV1::Allocation(_))
+    || matches!(source, IndexProducerSourceErrorV1::Format(error) if error.is_allocation_failure())
     || matches!(
       source,
       IndexProducerSourceErrorV1::Coordinator(
@@ -768,3 +769,7 @@ fn source_is_cancelled(source: &IndexProducerSourceErrorV1) -> bool {
       IndexProducerSourceErrorV1::JournalRead(error) if error.class() == IndexProducerJournalReadErrorClassV1::Cancelled
     )
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/index_worker_definition_error_spec.rs"]
+mod retained_definition_error_tests;

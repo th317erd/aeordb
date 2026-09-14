@@ -267,6 +267,14 @@
       "test": "task worker, cron, index cleanup, integrity scanner, webhook, and error_squelch_architecture specs",
       "removal_condition": "Remove when the worker gains a durable per-attempt terminal record that can propagate the exact error."
     },
+    "retained-manifest-candidate-fallback": {
+      "review_status": "reviewed",
+      "class": "correctness_read_traversal",
+      "rationale": "Only deterministic malformed manifest or closure bytes invalidate one bounded A/B index candidate. Actual allocation-origin decoder errors propagate before these branches; read-buffer allocation and positional I/O errors also propagate from the loader. Temporary operational failure cannot justify selecting an older generation.",
+      "owner": "v4 first-authority index selection",
+      "test": "semantic_definition_writer_resource_spec physical_active_pointer_does_not_fall_back_on_real_definition_allocation_failure and physical_active_pointer_does_not_fall_back_on_manifest_read_allocation_failure; both also prove genuine checksum-corruption fallback",
+      "removal_condition": "Remove if deterministic invalid-candidate selection is replaced by a typed candidate-validation result; operational failures must remain errors."
+    },
     "typed-format-failure": {
       "review_status": "reviewed",
       "class": "correctness_read_traversal",
@@ -8924,49 +8932,49 @@
       "review": "bounded-authority-default"
     },
     {
-      "id": "esq-v1-399bd4bfd9641810b75f-00",
+      "id": "esq-v1-860777638405f8ccc735-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13898,
-      "column": 3,
+      "line": 13901,
+      "column": 5,
       "enclosing_item": "index_active_pointer_closure_valid",
-      "kind": "success_only_conditional",
-      "pattern": "let Ok (target) = decode_index_manifest (& target_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
-      "review": "parser-alternative-probe"
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "retained-manifest-candidate-fallback"
     },
     {
-      "id": "esq-v1-a9e4abdc8124216b29f4-00",
+      "id": "esq-v1-860777638405f8ccc735-01",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13917,
-      "column": 3,
+      "line": 13922,
+      "column": 5,
       "enclosing_item": "index_active_pointer_closure_valid",
-      "kind": "success_only_conditional",
-      "pattern": "let Ok (value) = decode_index_manifest (& value_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
-      "review": "parser-alternative-probe"
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "retained-manifest-candidate-fallback"
     },
     {
-      "id": "esq-v1-c96d3eb9c507b3a501d1-00",
+      "id": "esq-v1-860777638405f8ccc735-02",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13929,
-      "column": 3,
+      "line": 13936,
+      "column": 5,
       "enclosing_item": "index_active_pointer_closure_valid",
-      "kind": "success_only_conditional",
-      "pattern": "let Ok (scope) = decode_index_manifest (& scope_bytes , header . hash_algorithm) else { return Ok (false) ; } ;",
-      "review": "parser-alternative-probe"
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "retained-manifest-candidate-fallback"
     },
     {
-      "id": "esq-v1-6754e0619ed59001fb03-00",
+      "id": "esq-v1-860777638405f8ccc735-03",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13934,
-      "column": 10,
+      "line": 13944,
+      "column": 5,
       "enclosing_item": "index_active_pointer_closure_valid",
-      "kind": "result_status_probe",
-      "pattern": "validate_correctness_manifest_chain (& scope , & value , & target , header . hash_algorithm) . is_ok ()",
-      "review": "local-status-control"
+      "kind": "broad_err_pattern",
+      "pattern": "Err (_)",
+      "review": "retained-manifest-candidate-fallback"
     },
     {
       "id": "esq-v1-11fc5403e50b0c36463a-00",
       "file": "aeordb-lib/src/engine/v4/first_authority.rs",
-      "line": 13964,
+      "line": 13974,
       "column": 5,
       "enclosing_item": "index_manifest_immediate_roots_valid",
       "kind": "success_only_conditional",
@@ -9976,7 +9984,7 @@
     {
       "id": "esq-v1-a28f6e7883c522a78290-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 763,
+      "line": 773,
       "column": 6,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",
@@ -9986,7 +9994,7 @@
     {
       "id": "esq-v1-23c0c5c76c2da038f4d8-00",
       "file": "aeordb-lib/src/engine/v4/index_artifact.rs",
-      "line": 771,
+      "line": 781,
       "column": 21,
       "enclosing_item": "decode_index_envelope",
       "kind": "error_conversion",

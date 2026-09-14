@@ -28,6 +28,7 @@ use super::index_nvt::{
 };
 use super::index_page::{OrderedIndexRoleV1, compare_order_keys, decode_artifact_directory, decode_ordered_page};
 use super::query_planner::QueryPlanningCoverageGenerationV1;
+use super::reader::FormatError;
 
 const MANIFEST_READ_MAXIMUM_BYTES: usize = 1_048_576;
 
@@ -602,7 +603,7 @@ fn select_native_nvt_predecessor_page_id_v1(
     request.cancellation,
   )?;
   let nvt_manifest = decode_index_manifest(nvt_bytes.bytes(), request.captured.header.hash_algorithm)
-    .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_nvt_manifest", error.to_string()))?;
+    .map_err(|error| map_manifest_error("selected_nvt_manifest", error))?;
   require_manifest_capabilities(&nvt_manifest, request.supported_reader_capabilities)?;
   let NvtBasisStatusV1::Usable(basis) = validate_field_nvt_basis_v1(&field, Some(nvt_bytes.bytes())) else {
     return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
@@ -761,7 +762,7 @@ fn load_selected_directory_closure(
   let selected_bytes =
     load_required_manifest(publisher, memory, captured, &selected_generation.manifest_hash, "selected generation manifest", cancellation)?;
   let selected = decode_index_manifest(selected_bytes.bytes(), captured.header.hash_algorithm)
-    .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_manifest", error.to_string()))?;
+    .map_err(|error| map_manifest_error("selected_artifact_manifest", error))?;
   validate_selected_manifest_identity(&selected, selected_generation)?;
   require_manifest_capabilities(&selected, supported_reader_capabilities)?;
   match (&selected.details, role) {
@@ -787,7 +788,7 @@ fn load_selected_directory_closure(
         cancellation,
       )?;
       let value = decode_index_manifest(value_bytes.bytes(), captured.header.hash_algorithm)
-        .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_value_manifest", error.to_string()))?;
+        .map_err(|error| map_manifest_error("selected_artifact_value_manifest", error))?;
       require_manifest_capabilities(&value, supported_reader_capabilities)?;
       let IndexManifestBodyV1::ValueStore(value_body) = &value.details else {
         return Err(NativeSelectedArtifactCursorErrorV1::corrupt(
@@ -804,10 +805,10 @@ fn load_selected_directory_closure(
         cancellation,
       )?;
       let scope = decode_index_manifest(scope_bytes.bytes(), captured.header.hash_algorithm)
-        .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_scope_manifest", error.to_string()))?;
+        .map_err(|error| map_manifest_error("selected_artifact_scope_manifest", error))?;
       require_manifest_capabilities(&scope, supported_reader_capabilities)?;
       validate_correctness_manifest_chain(&scope, &value, &selected, captured.header.hash_algorithm)
-        .map_err(|error| NativeSelectedArtifactCursorErrorV1::corrupt("selected_artifact_manifest_chain", error.to_string()))?;
+        .map_err(|error| map_manifest_error("selected_artifact_manifest_chain", error))?;
       let definition_fingerprint = field_definition_fingerprint(captured.header.hash_algorithm, field_body.field_index_definition);
       let dependency_fingerprint = field_dependency_fingerprint(captured.header.hash_algorithm, scope.owner_id, value.owner_id);
       validate_selected_fingerprints(selected_generation, &definition_fingerprint, &dependency_fingerprint)?;
@@ -1090,8 +1091,19 @@ fn load_accounted_artifact(
   Ok(Some(RetainedArtifactBytesV1::from_accounted(bytes, reservation)))
 }
 
+fn map_manifest_error(code: &'static str, error: FormatError) -> NativeSelectedArtifactCursorErrorV1 {
+  if error.is_allocation_failure() {
+    NativeSelectedArtifactCursorErrorV1::resource(code, error.to_string())
+  } else {
+    NativeSelectedArtifactCursorErrorV1::corrupt(code, error.to_string())
+  }
+}
+
 fn map_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> NativeSelectedArtifactCursorErrorV1 {
   match error {
+    FirstAuthorityPublicationErrorV1::Invalid { code: "first_authority_readback_io", message } => {
+      NativeSelectedArtifactCursorErrorV1::unavailable("first_authority_readback_io", message)
+    }
     FirstAuthorityPublicationErrorV1::Invalid { code: "captured_authority_cancelled", .. } => {
       NativeSelectedArtifactCursorErrorV1::cancelled()
     }
@@ -1100,7 +1112,7 @@ fn map_first_authority_error(error: FirstAuthorityPublicationErrorV1) -> NativeS
       message,
     } => NativeSelectedArtifactCursorErrorV1::resource("selected_artifact_source_pressure", message),
     FirstAuthorityPublicationErrorV1::Invalid { code, message } => NativeSelectedArtifactCursorErrorV1::corrupt(code, message),
-    FirstAuthorityPublicationErrorV1::Format(error) => NativeSelectedArtifactCursorErrorV1::corrupt(error.code(), error.to_string()),
+    FirstAuthorityPublicationErrorV1::Format(error) => map_manifest_error(error.code(), error),
     FirstAuthorityPublicationErrorV1::Engine(error) => {
       NativeSelectedArtifactCursorErrorV1::unavailable("selected_artifact_storage", error.to_string())
     }
@@ -1161,6 +1173,10 @@ fn copy_bytes(value: &[u8], context: &'static str) -> Result<Vec<u8>, NativeSele
   copy.extend_from_slice(value);
   Ok(copy)
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/index_artifact_read_error_spec.rs"]
+mod retained_definition_error_tests;
 
 #[cfg(test)]
 mod tests {

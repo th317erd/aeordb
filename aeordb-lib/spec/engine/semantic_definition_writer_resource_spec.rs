@@ -17,10 +17,23 @@ use aeordb::engine::HashAlgorithm;
 
 const ALGORITHM: HashAlgorithm = HashAlgorithm::Blake3_256;
 
+#[path = "retained_active_pointer_resource_spec.rs"]
+mod retained_active_pointer_resource_spec;
+
+#[path = "retained_definition_read_resource_spec.rs"]
+mod retained_definition_read_resource_spec;
+
+#[path = "retained_native_resource_spec.rs"]
+mod retained_native_resource_spec;
+
+#[path = "retained_semantic_catalog_resource_spec.rs"]
+mod retained_semantic_catalog_resource_spec;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Allocations {
   total: usize,
   maximum: usize,
+  matching_requests: usize,
   injected_failure: bool,
 }
 
@@ -28,7 +41,7 @@ thread_local! {
   static ENABLED: Cell<bool> = const { Cell::new(false) };
   static FAIL_SIZE: Cell<usize> = const { Cell::new(0) };
   static FAIL_OCCURRENCE: Cell<usize> = const { Cell::new(1) };
-  static ALLOCATIONS: Cell<Allocations> = const { Cell::new(Allocations { total: 0, maximum: 0, injected_failure: false }) };
+  static ALLOCATIONS: Cell<Allocations> = const { Cell::new(Allocations { total: 0, maximum: 0, matching_requests: 0, injected_failure: false }) };
 }
 
 struct WriterAllocator;
@@ -54,6 +67,7 @@ fn should_fail(size: usize) -> bool {
     let mut measured = value.get();
     measured.total = measured.total.saturating_add(size);
     measured.maximum = measured.maximum.max(size);
+    measured.matching_requests += usize::from(matches_size);
     measured.injected_failure |= fail;
     value.set(measured);
   });

@@ -1,0 +1,3910 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-14T20:21:20.693Z",
+  "baseCommit": "8aab3c91982eda4ff7320ba3a9a5492fb4b61ab2",
+  "unit": "U1 retained definition operational failures",
+  "unitComplete": true,
+  "fullU1Complete": false,
+  "fullV4Ready": false,
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+      "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+      "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+      "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+      "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+      "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+      "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+      "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+    },
+    {
+      "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+      "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+      "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+      "sha256": "252d2d652e554d76211d8f1474027d6c83a125178f28c0fc1bbffd9a293b6a95"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+      "sha256": "61500d85ffb3072548de6354545bc2280702c8f065f9ae6eef05b2b1fc1abd28"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+      "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+      "sha256": "32f42b307e8324532825bedd83de1e0015d95034443ebe02d9f1076d09942289"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+      "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+      "sha256": "7e54dd84cb058a88c3559bd606b2132df3ee3191d9e857a3b2e9f4272361b83c"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+      "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+      "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+      "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+      "sha256": "1aff0ae3c14e99cbfead1e179f7d2f89f617f4c9d39beef2415b1d924027a35a"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+      "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/error-squelch-allowlist-v1.json",
+      "sha256": "f43a312cf64d1c82893bb32b7b487b3b08e02a4886ac9990ca52ce17ea1e227b"
+    }
+  ],
+  "sourceManifest": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-source-inputs.sha256",
+    "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+  },
+  "archive": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-source.tar.gz",
+    "sha256": "7c4723491b14387f87de00c52456143d85f76b49e615e3da341bd3c8d7953875"
+  },
+  "gates": [
+    {
+      "stage": "narrow",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test index_producer_collector_spec --test semantic_definition_writer_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.exit",
+        "sha256": "c1c786ba208a04d6dd6e8085a61414c1bc07fa7bab2be3f79bfd54076b809ae8",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:13:31Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007110656",
+          "final_secondary_free_bytes": "69627641856"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.log",
+        "sha256": "6369ed5fca0f4a0a87bdbf6d1f9e09a7fcbab5bd151afc467cf3332c0fa8073b"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.guard.log",
+        "sha256": "29e9c82c3e065b5f1fb88a20f5710066fa8f70be015a165dc4d2743f8908023a"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": [
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          40,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "persistence",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test migration_execution_spec complete_configuration_catalogs_publish_reopen_and_preserve_all_seven_classes_without_root_selection ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.exit",
+        "sha256": "d4e40910d051fef9cf022a62f5f70f279ac98c46fa21ac378e3d0d3f73bd6402",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:13:38Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007110656",
+          "final_secondary_free_bytes": "69627502592"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.log",
+        "sha256": "46c37b67e3f2a748949b7b716c5fc86f5eed60a9f29e61bf42d7160cd0e5ea26"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.guard.log",
+        "sha256": "be7ed03c98d98e229a3ffe06f25bd8f5ce05f88ac67d9a5eda3440fbb3759187"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": [
+        [
+          1,
+          0,
+          0,
+          0,
+          20
+        ]
+      ]
+    },
+    {
+      "stage": "affected",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test parser_plan_writer_spec --test index_native_parser_spec --test index_native_semantic_source_spec --test index_semantic_source_spec --test semantic_definition_contract_spec --test semantic_definition_object_writer_spec --test dependency_table_writer_spec --test dependency_availability_spec --test semantic_catalog_mutation_spec --test semantic_catalog_reader_spec --test v4_format_fixture_spec --test migration_execution_spec --test memory_coordinator_spec --test mime_name_initial_spec --test index_native_parser_resource_spec --test value_store_writer_spec --test field_definition_writer_spec --test parser_integration_spec --test v4_first_authority_spec --test error_squelch_architecture_spec --test parser_registry_compiler_spec --test source_selector_writer_spec --test parser_context_compiler_spec --test configuration_control_store_spec --test gc_v4_lineage_recovery_spec --test v4_query_planner_spec --test index_v1_reference_spec --test source_resolver_spec --test v4_position_writer_spec --test index_producer_collector_spec --test v4_query_executor_spec --test v4_query_complete_candidate_spec --test v4_query_order_execution_spec --test v4_query_aggregate_execution_spec --test v4_query_result_pipeline_spec --test v4_reader_hardening_spec --test source_selector_compiler_spec --test index_definition_compiler_spec --test index_configuration_compiler_spec --test semantic_compiler_profile_spec --test v4_index_active_pointer_authority_spec --test v4_active_pointer_spec --test index_coverage_registry_spec --test v4_read_view_native_spec --test v4_index_native_compaction_spec --test index_producer_worker_spec --test index_producer_source_spec --test v4_index_generation_publication_spec --test v4_index_generation_authority_spec --test v4_index_batch_application_spec --test index_scope_ordinal_checkpoint_store_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.exit",
+        "sha256": "190c74f0678698a58d7f63bc8df80cd52f598f34307ea403dc517ff82b3f4203",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:16:00Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006828032",
+          "final_secondary_free_bytes": "69625704448"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log",
+        "sha256": "5bdbc9b358ff49e123cd8ee4ebdde91e80cb9ff62ad4a02489e3fdbcb72a2e91"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.guard.log",
+        "sha256": "6a5d71c01d3a43d7f5be9dfe311cf2ac58334072c93e1ae9a4de7402019c4b57"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": [
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          29,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          21,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          34,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          47,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          21,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          17,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          37,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          16,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          12,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          54,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          77,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          22,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          19,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          37,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          26,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          9,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          20,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          85,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "audit",
+      "command": "cargo run --offline --locked -j 2 -p aeordb-error-squelch-audit -- check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.exit",
+        "sha256": "35852fa96624293048239786b23d6e4853f94420af80bde3ddba16cd2ee18472",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:16:09Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006828032",
+          "final_secondary_free_bytes": "69625597952"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.log",
+        "sha256": "77518a3354410b0a66325e1b717fafd775f316e712e243258ee5fd114cd32c54"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.guard.log",
+        "sha256": "3183265f11296229b5c094dc468e6bb916a6be029a7bdfd51dbfaf831389813a"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": []
+    },
+    {
+      "stage": "format",
+      "command": "cargo fmt --all -- --check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.exit",
+        "sha256": "f169b5722f91ed9314bc70937466b93f93d341f6da1ffda3bfeee7596032915a",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:16:16Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006828032",
+          "final_secondary_free_bytes": "69625483264"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.log",
+        "sha256": "5f85b80a8123b31965a26c86f093c75c7246dee1e19818b784387b363a329c43"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.guard.log",
+        "sha256": "7ab29188600e6ebb239f3558a00e738e6f3c7a87463110bde668924616d6eeab"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/format.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": []
+    },
+    {
+      "stage": "clippy",
+      "command": "cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.exit",
+        "sha256": "0c77eb6b8a7e405bd298c17376815eb0dea9c72e4b38c096e5b9426b7f74d5f2",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:18:48Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006819840",
+          "final_secondary_free_bytes": "69624983552"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.log",
+        "sha256": "9b838206b8a4fff846dcb299cb19e257586849be5f33b96191bc21b32e90266b"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.guard.log",
+        "sha256": "c9b8de724f1cc8f0c93925b8a5f81c27a7028b33d6d90741bb195fcbb63cb083"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/clippy.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": []
+    },
+    {
+      "stage": "library",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.exit",
+        "sha256": "cd5e6d15f27abdc3c3fb2d21427cc20cf0acac9bd8db80fbf205e4b883ece720",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:19:53Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006819840",
+          "final_secondary_free_bytes": "69626380288"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.log",
+        "sha256": "9d61f45f0db9c00472c2e74193dc07549e11506eb50904aa890623ea4f8f5a25"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.guard.log",
+        "sha256": "838fe6b3e132d6e8ad72d81f310ccce7fe687f96e659c278b44631244bd4a1dd"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": [
+        [
+          701,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "reference",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.exit",
+        "sha256": "736eef1ffed997f6d05042e1e1e2ca3725cb50a68d14eb51743aec023897e0f7",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:20:12Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006819840",
+          "final_secondary_free_bytes": "69626257408"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.log",
+        "sha256": "21ed09bd875cdea176e0a3b8ba5fb894129e8700487413b893be0061a5df88a6"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.guard.log",
+        "sha256": "3302668c7ea2c0dbb80f782a2fd0814bc2996a851e8c40d9a895f9585883a166"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": [
+        [
+          175,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "stage": "contracts",
+      "command": "bash scripts/plan/check-v4-contracts.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.exit",
+        "sha256": "70ea1d233669f59bd5270908d60293d760a0bce4931b3251fccdfb690875b65a",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:20:20Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006819840",
+          "final_secondary_free_bytes": "69626159104"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.log",
+        "sha256": "cf4b8543d94072c6e50d343c575076084ba227a92757713a5bd4d6b45556a098"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.guard.log",
+        "sha256": "cfcdc2684425112a24163afd62f5717f7dfb643fde2dfd37c8bdfc07cebd92bd"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": []
+    },
+    {
+      "stage": "debt-selftest",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.exit",
+        "sha256": "6ff2f3a4e71fb5f22d5e1a9f06be5b34fad2f03c5f948f4c9b6ab5d264987ade",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:20:24Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336006819840",
+          "final_secondary_free_bytes": "69626060800"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.log",
+        "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.guard.log",
+        "sha256": "ac9cb3e4ce2855beaf38c43edad5e93406839d7c209d32a3d1c6bd8a9fed531d"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.source-inputs.sha256",
+        "sha256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.source-before.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/debt-selftest.source-after.patch",
+        "sha256": "08ce1b3ed2ca322d6d3c2ee57b5d4aba07182916b0aba394b6cf408009b51c8a"
+      },
+      "tests": []
+    }
+  ],
+  "driver": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-driver.exit",
+    "sha256": "6c93ab04be05c43fc6418d10425ad6babafd37d22617def95deefd10cc67d735",
+    "values": {
+      "exit_status": "0",
+      "last_stage": "complete",
+      "finished_utc": "2026-09-14T20:20:24Z"
+    }
+  },
+  "history": [
+    {
+      "name": "u1-retained-definition-red",
+      "stage": "readers-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_definition_read_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.exit",
+        "sha256": "2997fe05a941aa19ae2f45c8b4d75812bbf19c62a7bf812e5e762dc73eb07239",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:05:45Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336015507456",
+          "final_secondary_free_bytes": "69644726272"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.log",
+        "sha256": "62aba8e5c2ccba36e7361d49347acc751cb7a16487c4cf111c99237fc697dd99"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.guard.log",
+        "sha256": "4358fd753c356d03b5247a9b11aa9e01881dcb5b8fb35d735442908354c6d611"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.source-inputs.sha256",
+        "sha256": "dcd86af5c30848f06d9922c0a7d0fe34522e9ebf9e547f495e506d7ae94bf2c0"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.source-before.patch",
+        "sha256": "e067afe6cc814777118192fe9d4a5080ec721cee7c4eb21efb9d6fa777d182fd"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.source-after.patch",
+        "sha256": "e067afe6cc814777118192fe9d4a5080ec721cee7c4eb21efb9d6fa777d182fd"
+      },
+      "interpretation": "Two real manifest marker losses; query warm-up fixture lacked Eq index.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "d37a4b5a00e30765087409aeca05a8b089d6eb47945187e2662dae50c6ece2c7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "b8c3249ead2802005579c5f363a0e7000ddfddf400325bfef4b1ebdee7cec408"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-source.tar.gz",
+        "sha256": "a4abfb3990d9bf84662e8f84379b56772cdcf0c2c13d7fbc1d59ad1529b43837"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-linux-test-binaries.json",
+        "sha256": "10e441f2132304e19a9d7897e929c67bb3abbdc16cc11259ac4a7734b4dc589f",
+        "recordedUTC": "2026-09-14T19:06:35.538Z",
+        "sourceManifestSHA256": "dcd86af5c30848f06d9922c0a7d0fe34522e9ebf9e547f495e506d7ae94bf2c0",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red-evidence/readers-red.log"
+            ],
+            "bytes": 16170544,
+            "modifiedUTC": "2026-09-14T19:05:44.436Z",
+            "sha256": "64c53b676685f9c37ef5bf2e774f7fb4a4c63328191532f6c78f2a52798d48c5"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-red2",
+      "stage": "readers-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_definition_read_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.exit",
+        "sha256": "6d7584285c3513e160d60e6a06e14060a98ce0da4e7dc06d50dbc6a770323206",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:07:21Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336015507456",
+          "final_secondary_free_bytes": "69644550144"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.log",
+        "sha256": "465db8d26d4ac53171e37cf182b278c29b7dedb9eb95fc76b13a1e15ee5c9a7c"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.guard.log",
+        "sha256": "480b2832fd2585528a42bcc0ca0515959f4c72e4c0094c5fedb52b8a5f379df3"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.source-inputs.sha256",
+        "sha256": "c99dd1380814717dbe41ed92428b77bd3622a7243dc829000892110af9710c40"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.source-before.patch",
+        "sha256": "e067afe6cc814777118192fe9d4a5080ec721cee7c4eb21efb9d6fa777d182fd"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.source-after.patch",
+        "sha256": "e067afe6cc814777118192fe9d4a5080ec721cee7c4eb21efb9d6fa777d182fd"
+      },
+      "interpretation": "Three real marker/query classification failures after fixture correction.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "d37a4b5a00e30765087409aeca05a8b089d6eb47945187e2662dae50c6ece2c7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-source.tar.gz",
+        "sha256": "f8082b90f6b653dcb3893f2c82d686b8075bdf543d7303543dcce2836d20d7cd"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-linux-test-binaries.json",
+        "sha256": "465f229b01d23f3cbae8256111f2b19345a09e980f70b5ab11a6fb84dd9b5e7c",
+        "recordedUTC": "2026-09-14T19:07:48.979Z",
+        "sourceManifestSHA256": "c99dd1380814717dbe41ed92428b77bd3622a7243dc829000892110af9710c40",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-red2-evidence/readers-red.log"
+            ],
+            "bytes": 16173824,
+            "modifiedUTC": "2026-09-14T19:07:21.036Z",
+            "sha256": "4dc7f599f9bfd2c7c5517bbdaa0d2b2becb17b10675891e5cccfb4333d11cde7"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-readers",
+      "stage": "readers",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.exit",
+        "sha256": "35e9600ee42a70f1046e33e9f1eb2930580ba2d7df06bf8b57918a56927dd8f9",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T19:10:12Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336015585280",
+          "final_secondary_free_bytes": "69642747904"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.log",
+        "sha256": "fa117650cc4ea606f430d580a14d08caff95f50c439b7aef156249928a5fb3aa"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.guard.log",
+        "sha256": "7d0fb5f653bdce5b099962c741d3b222182f92fb62c4bb86a8c629b675f34760"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.source-inputs.sha256",
+        "sha256": "753f9fe911cfb039547559ed33440591951782e12fe25891a0ad7054dc280aba"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.source-before.patch",
+        "sha256": "75be98841437781c1e054e8d86df355ee0ff22cf277698e944f3add1bbcbd938"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.source-after.patch",
+        "sha256": "75be98841437781c1e054e8d86df355ee0ff22cf277698e944f3add1bbcbd938"
+      },
+      "interpretation": "All retained reader and predecessor resource cases pass.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "d37a4b5a00e30765087409aeca05a8b089d6eb47945187e2662dae50c6ece2c7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-source.tar.gz",
+        "sha256": "665f090034832e9e3e844a6d8850567219274703ec62ee6feaf77633910cc2c7"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-linux-test-binaries.json",
+        "sha256": "0d34848cb208acc0721cdb26bc99ec18bdf1d34a370c698ff70d4f3db4b44eb8",
+        "recordedUTC": "2026-09-14T19:12:23.075Z",
+        "sourceManifestSHA256": "753f9fe911cfb039547559ed33440591951782e12fe25891a0ad7054dc280aba",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-readers-evidence/readers.log"
+            ],
+            "bytes": 16174464,
+            "modifiedUTC": "2026-09-14T19:10:11.622Z",
+            "sha256": "f03f3650622ffbf2b96c63fc62b5685401178ab749e8b9ddaf1acd45d4df6945"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-catalog-red",
+      "stage": "catalog-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_semantic_catalog_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.exit",
+        "sha256": "e0c3aec812c813393a49b30ffb6cd5debe0a98a31680e2275e8aafb02629736e",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:13:12Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336014884864",
+          "final_secondary_free_bytes": "69641768960"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.log",
+        "sha256": "6d7a82a438900bbdd03d7a7f39b5a9d3483251018b173546cba7b6f25f6c4854"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.guard.log",
+        "sha256": "72aaa1a1000451d7cd2f70ccbd8d573f223fdec364ab2d5168fc03a71a1e17c0"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.source-inputs.sha256",
+        "sha256": "2882e545c5710c1cf79966467cb365c3c5e219754269e1f0ce404453f55d8b33"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.source-before.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.source-after.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "interpretation": "Fixture construction failure: WASM dependency mislabeled native; not product proof.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "21cd1bb7379f3e670b4367614fe91f173b5990be29377e526cfb020eb09800c5"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "6cd6127c8d20028334992359161f781b50386952f02eaacbd065e7419eae7575"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-source.tar.gz",
+        "sha256": "6b290fd54b8b646d656a1bf1d33c62e7de88cff9e4699f1d6835241881466c34"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-linux-test-binaries.json",
+        "sha256": "0f5be33dccf3612bb4f705b69dcac3198af600ca18f7d1a1953324c9b9ae23ed",
+        "recordedUTC": "2026-09-14T19:14:12.584Z",
+        "sourceManifestSHA256": "2882e545c5710c1cf79966467cb365c3c5e219754269e1f0ce404453f55d8b33",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red-evidence/catalog-red.log"
+            ],
+            "bytes": 16879544,
+            "modifiedUTC": "2026-09-14T19:13:10.905Z",
+            "sha256": "c1448c7bef593c2bf57b0a87c33c8504336bdff6ba95859b1f9f4c2f80ba44c1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-catalog-red2",
+      "stage": "catalog-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_semantic_catalog_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.exit",
+        "sha256": "75ba6d34738ef56e5fcbf931f86b6b61641b05870353378f27de570f8cac36ea",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:15:06Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336014884864",
+          "final_secondary_free_bytes": "69641420800"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.log",
+        "sha256": "36f3950c0b1f2b7d6a56299425a2fdf946506758701c1f7781549e0906201810"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.guard.log",
+        "sha256": "3ba6faad69d7dd9b9f470cb79eee41933c07634f56ba26109f4c0fa9602cbfb1"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.source-inputs.sha256",
+        "sha256": "a09270278d168e0dbb5b200967efa1aaae475d52a6ed8701f0c38c4dd6e9076f"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.source-before.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.source-after.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "interpretation": "Test allocation-size collision in fixture object clone; not production decoder failure.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "21cd1bb7379f3e670b4367614fe91f173b5990be29377e526cfb020eb09800c5"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "65506f4537b25ca556dc2acf5fe4741ec188a2103dadee04ad18300d8ff229cb"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-source.tar.gz",
+        "sha256": "9f560a5b9a8252b5348945602035c9d3077c44e3d09672586e1f43c030a0a6e9"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-linux-test-binaries.json",
+        "sha256": "b255b0a8f3dcbb9f53a982de263b782074354fc742bfdf22c927ab06b39eafc3",
+        "recordedUTC": "2026-09-14T19:16:28.739Z",
+        "sourceManifestSHA256": "a09270278d168e0dbb5b200967efa1aaae475d52a6ed8701f0c38c4dd6e9076f",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red2-evidence/catalog-red.log"
+            ],
+            "bytes": 16879088,
+            "modifiedUTC": "2026-09-14T19:15:04.603Z",
+            "sha256": "1cd4f669841fb7595ce2d855ba907400d16eb8192213e01d0606289a5bbbcd7e"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-catalog-trace",
+      "stage": "catalog-trace",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_semantic_catalog_resource_spec -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.exit",
+        "sha256": "bbf0dc0f2c18721b61098b696db6dfc16c38e0339ad02800e1ca54b39039f73d",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:17:04Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336014868480",
+          "final_secondary_free_bytes": "69640507392"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.log",
+        "sha256": "a2e7ff413985492850de03fdfe7d592b1572cc47346371b16eb1adec54dcfe49"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.guard.log",
+        "sha256": "9f5c691c7c4da25967714ad6b996525eb407374d44da91c0051dec83d837c3cf"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.source-inputs.sha256",
+        "sha256": "cf57bedb760bafd277272dbb852c7a7281e4db6b889c92c7d50cb8b37fe724a4"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.source-before.patch",
+        "sha256": "fbddf22d989e0b3858a54df702e9df0aee592b25339b7f8c348d133132a0c7a8"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.source-after.patch",
+        "sha256": "fbddf22d989e0b3858a54df702e9df0aee592b25339b7f8c348d133132a0c7a8"
+      },
+      "interpretation": "Temporary backtrace identifies fixture object Vec clone; instrumentation removed.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "178c1107448fe8f08643d0d01218a76b7a4eb2098084bb43a8f24b35898499cd"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "65506f4537b25ca556dc2acf5fe4741ec188a2103dadee04ad18300d8ff229cb"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-source.tar.gz",
+        "sha256": "cf56705b39019ee89fda96f18189ae6edb5267cdb2800fa55e9df26bf3bdaf28"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-linux-test-binaries.json",
+        "sha256": "0be232561850de247d31f7f51e34590fe08bc570e7a3a86e9a7cea8a1bb9b2aa",
+        "recordedUTC": "2026-09-14T19:18:16.536Z",
+        "sourceManifestSHA256": "cf57bedb760bafd277272dbb852c7a7281e4db6b889c92c7d50cb8b37fe724a4",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-trace-evidence/catalog-trace.log"
+            ],
+            "bytes": 16895264,
+            "modifiedUTC": "2026-09-14T19:17:02.467Z",
+            "sha256": "9c7c3cb494cc9a42d1564367343b97469ab53872ad1128e7780abe5cdacd5dfb"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-catalog-red3",
+      "stage": "catalog-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_semantic_catalog_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.exit",
+        "sha256": "3bda22af57b61eac89be5d661fa13dcbe5111759c4a84181abc845a5874d9403",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:19:07Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336014876672",
+          "final_secondary_free_bytes": "69640130560"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.log",
+        "sha256": "a045f7e3a48b45f7c9e5b98876d0804756026ce83b267baf2bf9f2569feb84ef"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.guard.log",
+        "sha256": "5a17d3faaad802af19e08fa0b446121dc6436ed62b66d00ec59ba68b157e8083"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.source-inputs.sha256",
+        "sha256": "525240c1aa6aa1350ff8706432849e98ae471761a44e74cdd4868487d8ac212d"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.source-before.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.source-after.patch",
+        "sha256": "305ffe9f213fd99ac755d17a2165711c8f96eab2adc2e75cedaa1301104ab4e0"
+      },
+      "interpretation": "Actual 456-byte decoder refusals misclassified as corruption in both catalog walks.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "21cd1bb7379f3e670b4367614fe91f173b5990be29377e526cfb020eb09800c5"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "1fb20a574b535a4a37d243c340725c1029a0d720db0129b039ae9e46c3a687ae"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-source.tar.gz",
+        "sha256": "f1410a9e1e860efa2436747637dd108179649262bca09ba1c8066ab4fb614c8d"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-linux-test-binaries.json",
+        "sha256": "0adc6525dd2271c453e6241bf970f6dbe00046e2043c7cbb372e9e20f455dc4d",
+        "recordedUTC": "2026-09-14T19:19:45.616Z",
+        "sourceManifestSHA256": "525240c1aa6aa1350ff8706432849e98ae471761a44e74cdd4868487d8ac212d",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-red3-evidence/catalog-red.log"
+            ],
+            "bytes": 16879792,
+            "modifiedUTC": "2026-09-14T19:19:06.789Z",
+            "sha256": "22ca0f29e7c7eddbe23fc2ec15cfc4c76d740c22b8eecbbb7b1237776bbddc5a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-catalog",
+      "stage": "catalog",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec --test index_semantic_source_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.exit",
+        "sha256": "d27cec1807ff982ce36fd3d258af6eda29b5b2dcd330202f0af68ee9a0dbc001",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T19:21:14Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336014901248",
+          "final_secondary_free_bytes": "69641523200"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.log",
+        "sha256": "6f18830d7500924c43ee1dd9d8d3e13250f760bbc7b74aa94b7495f7d3446ab7"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.guard.log",
+        "sha256": "ce34743fd341e1aaf546e287e095c30d04ba382499d0b20b5f40a2aaefa5c978"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.source-inputs.sha256",
+        "sha256": "b1952dde910282b2d840f3fd3dfa704f3fc38c7503f42812289b97e175339f68"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.source-before.patch",
+        "sha256": "974b8e58ebb6549896270db15c199f916ec3a4c0723a8b014c0b3126ab2ca10b"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.source-after.patch",
+        "sha256": "974b8e58ebb6549896270db15c199f916ec3a4c0723a8b014c0b3126ab2ca10b"
+      },
+      "interpretation": "Resource and complete semantic-source targets pass.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "21cd1bb7379f3e670b4367614fe91f173b5990be29377e526cfb020eb09800c5"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "2f6621a6663a6a9c74cd670d0d790f485bec04e471424a8fec5064c35ab6c70a"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "1fb20a574b535a4a37d243c340725c1029a0d720db0129b039ae9e46c3a687ae"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-source.tar.gz",
+        "sha256": "1b08b6ab040ef86ba7cf77a46d381ddc66c72cbe300a5ffa7d4d5d3c67ebbf23"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-linux-test-binaries.json",
+        "sha256": "ddd18f65bc8f7c568843ac685a2d4994ca50c08b09dfb26b5796ab37aa325082",
+        "recordedUTC": "2026-09-14T19:21:51.965Z",
+        "sourceManifestSHA256": "b1952dde910282b2d840f3fd3dfa704f3fc38c7503f42812289b97e175339f68",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_semantic_source_spec-af18e51dabcb8dcf",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.log"
+            ],
+            "bytes": 26213752,
+            "modifiedUTC": "2026-09-14T19:21:11.134Z",
+            "sha256": "1e3b1ed2c83e28a3780ce277d1672280f96bd505d8e741716925925452568a9f"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-catalog-evidence/catalog.log"
+            ],
+            "bytes": 16879224,
+            "modifiedUTC": "2026-09-14T19:21:11.263Z",
+            "sha256": "2f7402abd561e3d355547cbf1abbd412d6b102751d58614de4c223ea074c0bde"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-pointer-red",
+      "stage": "pointer-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec physical_active_pointer_does_not_fall_back_on_real_definition_allocation_failure -- --exact retained_active_pointer_resource_spec::physical_active_pointer_does_not_fall_back_on_real_definition_allocation_failure ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.exit",
+        "sha256": "f12267b490564998cb580a7d0238c5832832eeb99f898015bf2066f14dfdabb7",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:31:19Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336012095488",
+          "final_secondary_free_bytes": "69637357568"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.log",
+        "sha256": "37946257b96117c22e68aaa0ea5c2aaf2a3b75ec07c70a0ea9c916728af5163f"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.guard.log",
+        "sha256": "55f9c9f9d19bdde7c6ddbc570758dbc5d7e4d422db2234678f544eb664059ecd"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.source-inputs.sha256",
+        "sha256": "f3b14504e32cf6db7b70a2c7712fcc55490c894ac58d5cb09244873c214653f0"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.source-before.patch",
+        "sha256": "1bf226a597f88590aa4f22947ec4fe3605fb653e845137a30eb3668eadfd9be7"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.source-after.patch",
+        "sha256": "1bf226a597f88590aa4f22947ec4fe3605fb653e845137a30eb3668eadfd9be7"
+      },
+      "interpretation": "Physical slot-B allocation refusal incorrectly selected older generation 4097.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "f103419ab1b2d2899c9723893ecf239d6c974dd73d71724421216b55db95169f"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "42488925108941fa2c8d9601a35c492bb32506185b437803b4f7743f4a7c30b6"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "1fb20a574b535a4a37d243c340725c1029a0d720db0129b039ae9e46c3a687ae"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "0b44914de3ce1249d517541f046c3cc489aa835ad9e44025a91b8f0443a67126"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "48d13125ef27ba4f0fbb17b91aaab9d9404b7ab8ba4d79d601cd906f259a6a65"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-source.tar.gz",
+        "sha256": "8c806e8c116fbf489cfac4d6d8c073d42ebfa18e1d4a3c3969ee4520a6902bd6"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-linux-test-binaries.json",
+        "sha256": "f45169a9415d7f988e7b35d4bf49d05a28c9e23f47e2ff1c1fe93583af6bf878",
+        "recordedUTC": "2026-09-14T19:32:01.189Z",
+        "sourceManifestSHA256": "f3b14504e32cf6db7b70a2c7712fcc55490c894ac58d5cb09244873c214653f0",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-red-evidence/pointer-red.log"
+            ],
+            "bytes": 19721208,
+            "modifiedUTC": "2026-09-14T19:31:18.669Z",
+            "sha256": "1412a9816b897b56bcdaedaee46702d44ed7250dba90241a7c6797aa5cbda1e6"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-pointer",
+      "stage": "pointer",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec --test v4_index_active_pointer_authority_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.exit",
+        "sha256": "6393cda743307c6e0cd161aac34eae8ee168a576d2b0b4a22723a98ddcad22d6",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:35:52Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336011968512",
+          "final_secondary_free_bytes": "69635899392"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.log",
+        "sha256": "d5a2ba65951115db765ebdb28841bcce7787cdd94a3aeeb429c880878b64a963"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.guard.log",
+        "sha256": "46a89100e0b843e1e370119dee372dd5416085ad0d6aad3b0c977b3a8ba15884"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.source-inputs.sha256",
+        "sha256": "66e642d1766165b829d38c0f3231fc5fca9d5abd7789be7385584d91d4bada85"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.source-before.patch",
+        "sha256": "6bc90cd310149b8cdb53d8f2f707b9220eb31dc47e47e43bb7939b93d786977e"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-evidence/pointer.source-after.patch",
+        "sha256": "6bc90cd310149b8cdb53d8f2f707b9220eb31dc47e47e43bb7939b93d786977e"
+      },
+      "interpretation": "New test used nonexistent ValueStore pointer kind; no execution.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "f103419ab1b2d2899c9723893ecf239d6c974dd73d71724421216b55db95169f"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "42488925108941fa2c8d9601a35c492bb32506185b437803b4f7743f4a7c30b6"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "1fb20a574b535a4a37d243c340725c1029a0d720db0129b039ae9e46c3a687ae"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "0b44914de3ce1249d517541f046c3cc489aa835ad9e44025a91b8f0443a67126"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "0c35ec953803aa7a8f495167831823674fcb7a2f22d13b37f0f789d15da1cdb7"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-pointer-source.tar.gz",
+        "sha256": "6e288452956c2e5e37274bc01f21150757fb93a9dd0467e32bb30971493cb24c"
+      },
+      "binaries": {
+        "executed": 0,
+        "reason": "Test compilation failed before execution."
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-red",
+      "stage": "native-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_ -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.exit",
+        "sha256": "f245362f375a36aa1171c696725dc2fe701ae76f1ace8032474f3ce7821fd9a2",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:41:45Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007397376",
+          "final_secondary_free_bytes": "69636018176"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.log",
+        "sha256": "4576e0b8ca21b45561d3f5b819b7082a40c2308d0fbe700f888136fabf3d0ba5"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.guard.log",
+        "sha256": "03e0710306433e3d44fb0daffb4136ede8a036b57b186f58924b5fff2644d75b"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.source-inputs.sha256",
+        "sha256": "7cd9991344bb23b8206faba266adb9c0cfc32786e238d4a5c1f87d7484f268f9"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.source-before.patch",
+        "sha256": "a1f106aa2bad4ccc23b2d25612271caef77845e4723293c67dca957ed10d2d57"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.source-after.patch",
+        "sha256": "a1f106aa2bad4ccc23b2d25612271caef77845e4723293c67dca957ed10d2d57"
+      },
+      "interpretation": "Physical pointer correction passes; native fixture omitted semantic state publication.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "0b44914de3ce1249d517541f046c3cc489aa835ad9e44025a91b8f0443a67126"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "8ffaca185d3a4c2a8f5cd2114a16b63f27b44df3c6fe6367d77d62f77a12aa3d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "fe0349d0ce99edde071430ed36dba13542da0965d3d1f17620bf14034dfda20b"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-source.tar.gz",
+        "sha256": "3271aa2fa09b4d1282b39a0d39b62020c7bb7772bcdb84cea12c72b5e174be5e"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-linux-test-binaries.json",
+        "sha256": "8627236afd1528f3e6d1107d86af1d09a78aca404086483309f669db34f3a442",
+        "recordedUTC": "2026-09-14T19:43:03.003Z",
+        "sourceManifestSHA256": "7cd9991344bb23b8206faba266adb9c0cfc32786e238d4a5c1f87d7484f268f9",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red-evidence/native-red.log"
+            ],
+            "bytes": 24340512,
+            "modifiedUTC": "2026-09-14T19:41:44.332Z",
+            "sha256": "4c7eb5c2ebc5cc380c37735ebe58392640c5fe64bb7e98d1e92c06478eccc94d"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-red3",
+      "stage": "native-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_ -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.exit",
+        "sha256": "cd32b1060ec072ae1b4dd1375e4d802f23c74074332828c8fe292521b47ac5d4",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:47:28Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007397376",
+          "final_secondary_free_bytes": "69638901760"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.log",
+        "sha256": "c07e0974d0f5d565e34025261c01e49be3b5a91f718876fbc3403a131b1870d6"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.guard.log",
+        "sha256": "ed3f4547a72e9c211c4ac55ca1e377050171471ff2bd59f30ddc564a9e4d67c1"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.source-inputs.sha256",
+        "sha256": "8d322488dbceb43812d1ad27f41556eea8a7896c38456328407330d72e98e32e"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.source-before.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.source-after.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "interpretation": "Coverage and compaction real failures; two selected-view fixture capability failures.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "e1a19286ce9b87073056422e8d74055f616c971d5bccefef5d65f4c876cd7b25"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "8ffaca185d3a4c2a8f5cd2114a16b63f27b44df3c6fe6367d77d62f77a12aa3d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "e3eb288dfb631662767f3e1fed4cefe68fff38070d1bfab9dce7727274595daa"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "8a3f3f1f80b3a2d570c029c7ca6308b55613d5c895bd67220af6cde1b8ffafd7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "bcf1e9ec67cc9102e229d2645f168916e0143288499c5da80676ac50c5a663b8"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "efdec82cb271325de7882db4d6000273bcaba32f29fe84d772c51a298fe9d88b"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-source.tar.gz",
+        "sha256": "22b33452f2c462418a9564aae8aa1fdf96f5f6576e2fd9b9693a3ea982a74538"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-linux-test-binaries.json",
+        "sha256": "21a01de3e1ac4ff8ff5b96cbda7d97283556b37d87840d096dd5532a04d8769b",
+        "recordedUTC": "2026-09-14T19:49:38.063Z",
+        "sourceManifestSHA256": "8d322488dbceb43812d1ad27f41556eea8a7896c38456328407330d72e98e32e",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.log"
+            ],
+            "bytes": 24340320,
+            "modifiedUTC": "2026-09-14T19:47:27.557Z",
+            "sha256": "605cba7c536f615677eca8c8ba87da8840bff987e8071bf213b817aa800c1c7a"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.log"
+            ],
+            "bytes": 52571328,
+            "modifiedUTC": "2026-09-14T19:48:17.352Z",
+            "sha256": "98a33441dde03d9842e6872b4887062899f259a9e00e4c84d132dc654a280f6c"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-red3",
+      "stage": "private-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib retained_definition_error_tests -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.exit",
+        "sha256": "4773b07b19bb6aee4d867c4c9391a61d0dc4999b6147684b36fb550832c5c1cc",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:48:19Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007360512",
+          "final_secondary_free_bytes": "69638799360"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.log",
+        "sha256": "ad597e793ca999840faa0e1d0b53d87b7471e6e429c7c2ab042b8180704f899a"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.guard.log",
+        "sha256": "05fac57f86018e71d6e1d81b28647603e5cfc87971b3897f0c24161e687a3a3e"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.source-inputs.sha256",
+        "sha256": "8d322488dbceb43812d1ad27f41556eea8a7896c38456328407330d72e98e32e"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.source-before.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.source-after.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "interpretation": "Five real compaction classification failures and three invalid maintenance fixture roots.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "e1a19286ce9b87073056422e8d74055f616c971d5bccefef5d65f4c876cd7b25"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "8ffaca185d3a4c2a8f5cd2114a16b63f27b44df3c6fe6367d77d62f77a12aa3d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "e3eb288dfb631662767f3e1fed4cefe68fff38070d1bfab9dce7727274595daa"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "8a3f3f1f80b3a2d570c029c7ca6308b55613d5c895bd67220af6cde1b8ffafd7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "bcf1e9ec67cc9102e229d2645f168916e0143288499c5da80676ac50c5a663b8"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "efdec82cb271325de7882db4d6000273bcaba32f29fe84d772c51a298fe9d88b"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-source.tar.gz",
+        "sha256": "22b33452f2c462418a9564aae8aa1fdf96f5f6576e2fd9b9693a3ea982a74538"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-linux-test-binaries.json",
+        "sha256": "21a01de3e1ac4ff8ff5b96cbda7d97283556b37d87840d096dd5532a04d8769b",
+        "recordedUTC": "2026-09-14T19:49:38.063Z",
+        "sourceManifestSHA256": "8d322488dbceb43812d1ad27f41556eea8a7896c38456328407330d72e98e32e",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/native-red.log"
+            ],
+            "bytes": 24340320,
+            "modifiedUTC": "2026-09-14T19:47:27.557Z",
+            "sha256": "605cba7c536f615677eca8c8ba87da8840bff987e8071bf213b817aa800c1c7a"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red3-evidence/private-red.log"
+            ],
+            "bytes": 52571328,
+            "modifiedUTC": "2026-09-14T19:48:17.352Z",
+            "sha256": "98a33441dde03d9842e6872b4887062899f259a9e00e4c84d132dc654a280f6c"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-red5",
+      "stage": "native-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec retained_ -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.exit",
+        "sha256": "7a71113abe6ce6a59b59c903f5c6b89507baca28596115c82873a92acffdfc55",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:50:27Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007360512",
+          "final_secondary_free_bytes": "69637677056"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.log",
+        "sha256": "820d8c0893cbadced97e39699559687a0397eb76f0db5718c18616ba5ed3940d"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.guard.log",
+        "sha256": "02bac6c371f84061e9731f4a9446e8b5a04bac425af6056140ed07b080619b27"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.source-inputs.sha256",
+        "sha256": "4f54aa4990fab29f095e5f47a476a3712fc8038f80a046a917c9d909f4a94765"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.source-before.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.source-after.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "interpretation": "All four native cases reproduce actual allocator error-classification failures.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "8ffaca185d3a4c2a8f5cd2114a16b63f27b44df3c6fe6367d77d62f77a12aa3d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "e3eb288dfb631662767f3e1fed4cefe68fff38070d1bfab9dce7727274595daa"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "8a3f3f1f80b3a2d570c029c7ca6308b55613d5c895bd67220af6cde1b8ffafd7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "bcf1e9ec67cc9102e229d2645f168916e0143288499c5da80676ac50c5a663b8"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-source.tar.gz",
+        "sha256": "3e91d54f3f91afcd0218617aba27b5509f3cb297cf95cfcaf7c734a6bbd4ba37"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-linux-test-binaries.json",
+        "sha256": "b5141be50d60a0041280a32b2ab97eb9a9517a6dc5307bf8e5834c2dca70e630",
+        "recordedUTC": "2026-09-14T19:52:12.096Z",
+        "sourceManifestSHA256": "4f54aa4990fab29f095e5f47a476a3712fc8038f80a046a917c9d909f4a94765",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.log"
+            ],
+            "bytes": 24340664,
+            "modifiedUTC": "2026-09-14T19:50:26.232Z",
+            "sha256": "6ebeb50f78e06a3b499f2a7a8cf5f11c730e1bc2099dff6f3ab610d3e8daac37"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.log"
+            ],
+            "bytes": 52571328,
+            "modifiedUTC": "2026-09-14T19:51:15.414Z",
+            "sha256": "34b02b818d008c85609fe9f05dc5cf1b2525e748f14ea2a9e47636e62b8d6772"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-red5",
+      "stage": "private-red",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib retained_definition_error_tests -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.exit",
+        "sha256": "43211f3031cd9d8f5706a4b248380ebcc21b1f318ee3677aae672483cceb7c73",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:51:16Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007360512",
+          "final_secondary_free_bytes": "69637558272"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.log",
+        "sha256": "4c793c52838b25332123ae124d244dc86d551b7d840bc8cfd797833824946f96"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.guard.log",
+        "sha256": "a28be7cce239bbeae9fc0bf4bc29f4afd474ddd9cc697205109fd11e7faacb7d"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.source-inputs.sha256",
+        "sha256": "4f54aa4990fab29f095e5f47a476a3712fc8038f80a046a917c9d909f4a94765"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.source-before.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.source-after.patch",
+        "sha256": "6256c9f039a393d82c708346ae680bde66f9b8ff6aa77bb5cc66f99a00a604e4"
+      },
+      "interpretation": "Five compaction and two worker classification failures, valid fixture.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "8ffaca185d3a4c2a8f5cd2114a16b63f27b44df3c6fe6367d77d62f77a12aa3d"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "e3eb288dfb631662767f3e1fed4cefe68fff38070d1bfab9dce7727274595daa"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "8a3f3f1f80b3a2d570c029c7ca6308b55613d5c895bd67220af6cde1b8ffafd7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "bcf1e9ec67cc9102e229d2645f168916e0143288499c5da80676ac50c5a663b8"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-source.tar.gz",
+        "sha256": "3e91d54f3f91afcd0218617aba27b5509f3cb297cf95cfcaf7c734a6bbd4ba37"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-linux-test-binaries.json",
+        "sha256": "b5141be50d60a0041280a32b2ab97eb9a9517a6dc5307bf8e5834c2dca70e630",
+        "recordedUTC": "2026-09-14T19:52:12.096Z",
+        "sourceManifestSHA256": "4f54aa4990fab29f095e5f47a476a3712fc8038f80a046a917c9d909f4a94765",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/native-red.log"
+            ],
+            "bytes": 24340664,
+            "modifiedUTC": "2026-09-14T19:50:26.232Z",
+            "sha256": "6ebeb50f78e06a3b499f2a7a8cf5f11c730e1bc2099dff6f3ab610d3e8daac37"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-red5-evidence/private-red.log"
+            ],
+            "bytes": 52571328,
+            "modifiedUTC": "2026-09-14T19:51:15.414Z",
+            "sha256": "34b02b818d008c85609fe9f05dc5cf1b2525e748f14ea2a9e47636e62b8d6772"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-candidate",
+      "stage": "native",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.exit",
+        "sha256": "f910fc380a81937714e381069da8192ca35ba065bfb98a2327966593c951e2a8",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:56:55Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007356416",
+          "final_secondary_free_bytes": "69632942080"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.log",
+        "sha256": "c18ee8128282f782d02f39616c7d0c00538b5ae50144d1fffe4c830c95984204"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.guard.log",
+        "sha256": "0614436d152adb5e3ae51b7b4098da735e07d421e2386d4ddebb2e8922a86acd"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.source-inputs.sha256",
+        "sha256": "1fd1dbbdd2018ca384f8d1e01bceac470654a0ff390f38f06991067963cd5bff"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.source-before.patch",
+        "sha256": "0337f4c8df6833593c3cc141af5458a3cb204cbd641dcf85a041e00a7ae6cb78"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.source-after.patch",
+        "sha256": "0337f4c8df6833593c3cc141af5458a3cb204cbd641dcf85a041e00a7ae6cb78"
+      },
+      "interpretation": "All decoder consumers pass; real manifest read-buffer refusal still swallowed.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "2163910f1d480867031e4b067a84d8e584e24eb36aa9a1c14108e8f18142d14e"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "21ff1ea5093e80108f31628582927de477e3d41496b2470331943d7dae1efebf"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "e73ccb495abbc8d7f248ecb7b7530ebf3f1ba31ede2616d11ae976d2d8f82388"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+          "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+          "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+          "sha256": "bc3a48d8e5cb1facded2c844c6f0cf44b985f751d14aa94394495f4d1645f02a"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+          "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-source.tar.gz",
+        "sha256": "9d9b5eb8b3a847b00366c3f6335516715f186b58ed6280880b2db6965074d5fa"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-linux-test-binaries.json",
+        "sha256": "0992433a301ddefb358d5c20b9bb0bcb592a8276b1157c64c21297fff20d42a6",
+        "recordedUTC": "2026-09-14T19:58:40.198Z",
+        "sourceManifestSHA256": "1fd1dbbdd2018ca384f8d1e01bceac470654a0ff390f38f06991067963cd5bff",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.log"
+            ],
+            "bytes": 24343872,
+            "modifiedUTC": "2026-09-14T19:56:54.836Z",
+            "sha256": "79df70f965bf83f065993dc0e4bc748fa9a751784d448ea48634bd41bb86533d"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.log"
+            ],
+            "bytes": 52586920,
+            "modifiedUTC": "2026-09-14T19:57:44.013Z",
+            "sha256": "601caa2f51219ce80c6e1e53bc50c3ed1e43cc294d3d36310808009062f621f6"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-candidate",
+      "stage": "private",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib retained_definition_error_tests -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.exit",
+        "sha256": "e09775bb6d773c76c5e657113a345cf9557cce5fa3db0bce5c5b1169541aa8e9",
+        "values": {
+          "exit_status": "101",
+          "finished_utc": "2026-09-14T19:57:44Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007340032",
+          "final_secondary_free_bytes": "69632823296"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.log",
+        "sha256": "64dc58c1e8f8645ab064703d9d57efb0933e4847ecf77243d7a6d35ab72210f8"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.guard.log",
+        "sha256": "ad3d0464c7c2074b27e528c789401a8709540e7bb0796888b595ab8d2a917b0d"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.source-inputs.sha256",
+        "sha256": "1fd1dbbdd2018ca384f8d1e01bceac470654a0ff390f38f06991067963cd5bff"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.source-before.patch",
+        "sha256": "0337f4c8df6833593c3cc141af5458a3cb204cbd641dcf85a041e00a7ae6cb78"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.source-after.patch",
+        "sha256": "0337f4c8df6833593c3cc141af5458a3cb204cbd641dcf85a041e00a7ae6cb78"
+      },
+      "interpretation": "Known positional-read and buffer error codes still misclassified downstream.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "2163910f1d480867031e4b067a84d8e584e24eb36aa9a1c14108e8f18142d14e"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "c77949039545619cdbc4ad29b468ad05b0c57aa3f2343a6685449744f8b32ebf"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "21ff1ea5093e80108f31628582927de477e3d41496b2470331943d7dae1efebf"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "e73ccb495abbc8d7f248ecb7b7530ebf3f1ba31ede2616d11ae976d2d8f82388"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+          "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+          "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+          "sha256": "bc3a48d8e5cb1facded2c844c6f0cf44b985f751d14aa94394495f4d1645f02a"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+          "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-source.tar.gz",
+        "sha256": "9d9b5eb8b3a847b00366c3f6335516715f186b58ed6280880b2db6965074d5fa"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-linux-test-binaries.json",
+        "sha256": "0992433a301ddefb358d5c20b9bb0bcb592a8276b1157c64c21297fff20d42a6",
+        "recordedUTC": "2026-09-14T19:58:40.198Z",
+        "sourceManifestSHA256": "1fd1dbbdd2018ca384f8d1e01bceac470654a0ff390f38f06991067963cd5bff",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/native.log"
+            ],
+            "bytes": 24343872,
+            "modifiedUTC": "2026-09-14T19:56:54.836Z",
+            "sha256": "79df70f965bf83f065993dc0e4bc748fa9a751784d448ea48634bd41bb86533d"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate-evidence/private.log"
+            ],
+            "bytes": 52586920,
+            "modifiedUTC": "2026-09-14T19:57:44.013Z",
+            "sha256": "601caa2f51219ce80c6e1e53bc50c3ed1e43cc294d3d36310808009062f621f6"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-candidate2",
+      "stage": "native",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --test semantic_definition_writer_resource_spec --test v4_index_active_pointer_authority_spec --test index_coverage_registry_spec --test v4_index_native_compaction_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.exit",
+        "sha256": "b02f0e4c094e3c36a3ec6179c325e943ccb6e94ed7e4d4f0af3e7b9afdbc51c4",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:07:31Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007114752",
+          "final_secondary_free_bytes": "69628137472"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log",
+        "sha256": "91e6554fab966fcf9b5a2cedec3932d9b54240020fb8d48c2aaa9fe2a4350f40"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.guard.log",
+        "sha256": "295b83ea192691102bee913e6ee269de9c99e16f736277c5d403279ffdac4bcb"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.source-inputs.sha256",
+        "sha256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.source-before.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.source-after.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "interpretation": "All resource, registry, authority and native compaction cases pass, including real malformed-checksum fallback.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "252d2d652e554d76211d8f1474027d6c83a125178f28c0fc1bbffd9a293b6a95"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "61500d85ffb3072548de6354545bc2280702c8f065f9ae6eef05b2b1fc1abd28"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "32f42b307e8324532825bedd83de1e0015d95034443ebe02d9f1076d09942289"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "e73ccb495abbc8d7f248ecb7b7530ebf3f1ba31ede2616d11ae976d2d8f82388"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+          "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+          "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+          "sha256": "1aff0ae3c14e99cbfead1e179f7d2f89f617f4c9d39beef2415b1d924027a35a"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+          "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-source.tar.gz",
+        "sha256": "f0dcdd4e791074e5f56b4a70ef43587c2eb8f5300d62926612191e622fe31081"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-linux-test-binaries.json",
+        "sha256": "c04f2ae34fb727f42d041f4d6c68a5b9782eb50052c854654b405449e5603108",
+        "recordedUTC": "2026-09-14T20:10:00.775Z",
+        "sourceManifestSHA256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_coverage_registry_spec-1ab418d5bc324ae3",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 13041616,
+            "modifiedUTC": "2026-09-14T20:07:25.471Z",
+            "sha256": "416e9624738f984ce2e7f2865f4b13024c9f453bbb43353f61d73f90c80cef19"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 24350392,
+            "modifiedUTC": "2026-09-14T20:07:26.236Z",
+            "sha256": "957ca2c5378cbf6930798b0d0c63ed9403c58d4855d86e641b87378eb6b56a56"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_active_pointer_authority_spec-fe1499ce67aabba8",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 15665624,
+            "modifiedUTC": "2026-09-14T20:07:27.816Z",
+            "sha256": "9bd3eb80167d03a1d1243b9631dfba8b5645591243c8dde3ea6044f65692c5a6"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_native_compaction_spec-656ee3a1767311c9",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 18012040,
+            "modifiedUTC": "2026-09-14T20:07:28.901Z",
+            "sha256": "01b3121bf01912f9e9b9a4210e4c75fa223b8b87bc130f85eaf517efe58386f4"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.log"
+            ],
+            "bytes": 52588416,
+            "modifiedUTC": "2026-09-14T20:08:55.185Z",
+            "sha256": "6f9bed20fe2df40bb5075d8ddb0278583e406375e61004c1764e71ad438da48d"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-candidate2",
+      "stage": "private",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --lib retained_definition_error_tests -- --nocapture ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.exit",
+        "sha256": "9e20877c5d392276ca6ed489285a7797408e7d805b13277466bd758e88fc6e8d",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:08:56Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007110656",
+          "final_secondary_free_bytes": "69627858944"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.log",
+        "sha256": "015cbd1f2086b6018ce2babe4e15cf5caefa0ecc73f234fec1af3977a04fb0f5"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.guard.log",
+        "sha256": "c186588f959ab8f4494386eceeebac2da080d961b936f3071d278a06470d11ba"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.source-inputs.sha256",
+        "sha256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.source-before.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.source-after.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "interpretation": "Constructed classification inputs prove worker backoff/cancellation and compaction CommitUnknown boundary.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "252d2d652e554d76211d8f1474027d6c83a125178f28c0fc1bbffd9a293b6a95"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "61500d85ffb3072548de6354545bc2280702c8f065f9ae6eef05b2b1fc1abd28"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "32f42b307e8324532825bedd83de1e0015d95034443ebe02d9f1076d09942289"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "e73ccb495abbc8d7f248ecb7b7530ebf3f1ba31ede2616d11ae976d2d8f82388"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+          "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+          "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+          "sha256": "1aff0ae3c14e99cbfead1e179f7d2f89f617f4c9d39beef2415b1d924027a35a"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+          "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-source.tar.gz",
+        "sha256": "f0dcdd4e791074e5f56b4a70ef43587c2eb8f5300d62926612191e622fe31081"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-linux-test-binaries.json",
+        "sha256": "c04f2ae34fb727f42d041f4d6c68a5b9782eb50052c854654b405449e5603108",
+        "recordedUTC": "2026-09-14T20:10:00.775Z",
+        "sourceManifestSHA256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_coverage_registry_spec-1ab418d5bc324ae3",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 13041616,
+            "modifiedUTC": "2026-09-14T20:07:25.471Z",
+            "sha256": "416e9624738f984ce2e7f2865f4b13024c9f453bbb43353f61d73f90c80cef19"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 24350392,
+            "modifiedUTC": "2026-09-14T20:07:26.236Z",
+            "sha256": "957ca2c5378cbf6930798b0d0c63ed9403c58d4855d86e641b87378eb6b56a56"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_active_pointer_authority_spec-fe1499ce67aabba8",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 15665624,
+            "modifiedUTC": "2026-09-14T20:07:27.816Z",
+            "sha256": "9bd3eb80167d03a1d1243b9631dfba8b5645591243c8dde3ea6044f65692c5a6"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_native_compaction_spec-656ee3a1767311c9",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 18012040,
+            "modifiedUTC": "2026-09-14T20:07:28.901Z",
+            "sha256": "01b3121bf01912f9e9b9a4210e4c75fa223b8b87bc130f85eaf517efe58386f4"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.log"
+            ],
+            "bytes": 52588416,
+            "modifiedUTC": "2026-09-14T20:08:55.185Z",
+            "sha256": "6f9bed20fe2df40bb5075d8ddb0278583e406375e61004c1764e71ad438da48d"
+          }
+        ]
+      }
+    },
+    {
+      "name": "u1-retained-definition-native-candidate2",
+      "stage": "audit-candidate",
+      "command": "cargo run --offline --locked -j 2 -p aeordb-error-squelch-audit -- write /home/wyatt/.cache/codex/v4-service-completion-20260913/retained-definition-audit-candidate.json ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.exit",
+        "sha256": "4d750661f66d45d29d3bcbd262bb4b1998f79ef6bbd9558802b75a05ed6871c9",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T20:09:07Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336007110656",
+          "final_secondary_free_bytes": "69627752448"
+        }
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.log",
+        "sha256": "3951971f30b7277ba6440421de8932f8cbb4b2a76ab0abc32e79118a6683bf1f"
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.guard.log",
+        "sha256": "ea0a4cb2223aba1a0a5df2cb4587518e4329304b65059520b65f29b87bd76f55"
+      },
+      "sourceManifest": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.source-inputs.sha256",
+        "sha256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1"
+      },
+      "sourceBefore": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.source-before.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "sourceAfter": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/audit-candidate.source-after.patch",
+        "sha256": "35b32eccf002131eedf9901313eb74db4ddb519c8e8d365ac86baa90c61ff4fd"
+      },
+      "interpretation": "Outside-worktree candidate preserves ceiling, marks new entries pending individual review.",
+      "sourceInputs": [
+        {
+          "path": "Cargo.lock",
+          "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+        },
+        {
+          "path": "tools/v4-reference/Cargo.lock",
+          "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+          "sha256": "b462e292f5f7999be3dc24b4453d97d84eaffa50b822a26c66f10c461bb45ef6"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_definition_read_resource_spec.rs",
+          "sha256": "0419245b25a12c84eb8adcdacd6c77c435edc22464e53df5e995bff67f2fd6f0"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_manifest.rs",
+          "sha256": "e026242577a3ea4fe5e9081bb13949a6b817cf2ffae809beb16c98e6081c2e28"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact.rs",
+          "sha256": "c5bef9e78c8bf137cfb87191097837a890e1d704e193f3cb631354a43d528331"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/query_planner.rs",
+          "sha256": "d4a06ab00f67fb8bf0a399d9f82451d7b6c3df5d58b163594133ad0e31551227"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_semantic_catalog_resource_spec.rs",
+          "sha256": "36b0a6d82c9b53d730443026fe69572d633c5bd7f5bff7d61658ab50f854a131"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_semantic_source.rs",
+          "sha256": "35002dc20cfb0224349c5a6d907efa018d64592023c6550ffbd796a131ce8f64"
+        },
+        {
+          "path": "aeordb-lib/spec/helpers/v4_index_authority.rs",
+          "sha256": "70711781e90a78b532b4d505687e3e527bbd8b9cbe492cdee92310ee03b5d6e7"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/v4_index_active_pointer_authority_spec.rs",
+          "sha256": "a82106a3f3a4e50a61dc77aafad2f66f904c18252fcaec945aba9230fed94790"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_active_pointer_resource_spec.rs",
+          "sha256": "252d2d652e554d76211d8f1474027d6c83a125178f28c0fc1bbffd9a293b6a95"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/first_authority.rs",
+          "sha256": "61500d85ffb3072548de6354545bc2280702c8f065f9ae6eef05b2b1fc1abd28"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/retained_native_resource_spec.rs",
+          "sha256": "6e86dbe1cc091e894a96656637283b31945a0f635c3a4cdc894f7257e1c0386c"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_native_compaction.rs",
+          "sha256": "32f42b307e8324532825bedd83de1e0015d95034443ebe02d9f1076d09942289"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_producer_worker.rs",
+          "sha256": "d0ea8d0507304f53eab3756b0901342906f95d48fe64f0f9b9eeef9e855f32a3"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_compaction_definition_error_spec.rs",
+          "sha256": "e73ccb495abbc8d7f248ecb7b7530ebf3f1ba31ede2616d11ae976d2d8f82388"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_worker_definition_error_spec.rs",
+          "sha256": "24169bbf711b6fa72c366a4a878db0509982da659e8c244297f716d003098567"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/read_view_native.rs",
+          "sha256": "4d17050d9a067d74f2a78ee0b967c35223abeaf919042975dd5ee0e17f041904"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_coverage_registry.rs",
+          "sha256": "e526a7479badbe5da612e6c54a0cc46ef3368c7d44af6c2371f997d1148838fc"
+        },
+        {
+          "path": "aeordb-lib/src/engine/v4/index_artifact_native.rs",
+          "sha256": "1aff0ae3c14e99cbfead1e179f7d2f89f617f4c9d39beef2415b1d924027a35a"
+        },
+        {
+          "path": "aeordb-lib/spec/engine/index_artifact_read_error_spec.rs",
+          "sha256": "21451e087eb8544419a2c442bce7b3e1ca69cfbf947b5c9844a376eea095645a"
+        }
+      ],
+      "archive": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-source.tar.gz",
+        "sha256": "f0dcdd4e791074e5f56b4a70ef43587c2eb8f5300d62926612191e622fe31081"
+      },
+      "binaries": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-linux-test-binaries.json",
+        "sha256": "c04f2ae34fb727f42d041f4d6c68a5b9782eb50052c854654b405449e5603108",
+        "recordedUTC": "2026-09-14T20:10:00.775Z",
+        "sourceManifestSHA256": "052cbe1973f57b3043177f7c867b7c7218b7a07453cb4efa9426bb46dbf360a1",
+        "binaries": [
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_coverage_registry_spec-1ab418d5bc324ae3",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 13041616,
+            "modifiedUTC": "2026-09-14T20:07:25.471Z",
+            "sha256": "416e9624738f984ce2e7f2865f4b13024c9f453bbb43353f61d73f90c80cef19"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 24350392,
+            "modifiedUTC": "2026-09-14T20:07:26.236Z",
+            "sha256": "957ca2c5378cbf6930798b0d0c63ed9403c58d4855d86e641b87378eb6b56a56"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_active_pointer_authority_spec-fe1499ce67aabba8",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 15665624,
+            "modifiedUTC": "2026-09-14T20:07:27.816Z",
+            "sha256": "9bd3eb80167d03a1d1243b9631dfba8b5645591243c8dde3ea6044f65692c5a6"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_native_compaction_spec-656ee3a1767311c9",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/native.log"
+            ],
+            "bytes": 18012040,
+            "modifiedUTC": "2026-09-14T20:07:28.901Z",
+            "sha256": "01b3121bf01912f9e9b9a4210e4c75fa223b8b87bc130f85eaf517efe58386f4"
+          },
+          {
+            "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+            "logs": [
+              "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-native-candidate2-evidence/private.log"
+            ],
+            "bytes": 52588416,
+            "modifiedUTC": "2026-09-14T20:08:55.185Z",
+            "sha256": "6f9bed20fe2df40bb5075d8ddb0278583e406375e61004c1764e71ad438da48d"
+          }
+        ]
+      }
+    }
+  ],
+  "binaries": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-linux-test-binaries.json",
+    "sha256": "79b9665b1551b39c4c0cd39f3cc68670647e864b71edf4b42d0a7051195dbba5",
+    "recordedUTC": "2026-09-14T20:20:56.246Z",
+    "sourceManifestSHA256": "71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c",
+    "binaries": [
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.log",
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 13784760,
+        "modifiedUTC": "2026-09-14T20:13:29.656Z",
+        "sha256": "06760f3b44b80821098d556eb18cbaf328273149c3867445434f3fbcb4742055"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/narrow.log"
+        ],
+        "bytes": 24350392,
+        "modifiedUTC": "2026-09-14T20:07:26.236Z",
+        "sha256": "957ca2c5378cbf6930798b0d0c63ed9403c58d4855d86e641b87378eb6b56a56"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/migration_execution_spec-27d66db1c659b3fe",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/persistence.log",
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 17236760,
+        "modifiedUTC": "2026-09-14T20:13:34.116Z",
+        "sha256": "763142adcb38f3f8aeecab3b42e0f70f843f37368f531ddddb81a7ff16c12289"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/configuration_control_store_spec-a17495d24dee4e4a",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 21172224,
+        "modifiedUTC": "2026-09-14T20:14:01.829Z",
+        "sha256": "340dc2fbfa6f9b150ce712e917d5b28b07d432ac30e4d6f9cc2ca0469e4c0d15"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_availability_spec-231174280f281c68",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 13143200,
+        "modifiedUTC": "2026-09-14T20:14:29.898Z",
+        "sha256": "bfbc99bcd204520170d590ff2a3961efda2a3f0a0338eafcddf0d94ed9570dc3"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_table_writer_spec-295d7d8a9ab46f0e",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 5779736,
+        "modifiedUTC": "2026-09-14T20:13:45.903Z",
+        "sha256": "09eb197a861d2f7caef97b9dd36965adccb551699d77fb91601a46f2ed1aa8bb"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/error_squelch_architecture_spec-b294287edc43f895",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 5601504,
+        "modifiedUTC": "2026-09-14T20:14:25.024Z",
+        "sha256": "8bd62987335c73b51f4f1ec9a26a50506fd37047482b0bcd33afeee91d56b72a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/field_definition_writer_spec-a602a086de2abd91",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 6232712,
+        "modifiedUTC": "2026-09-14T20:13:59.639Z",
+        "sha256": "f93ece8f6fcd66460b87924dfb622de13c1e7d769b97b989d2eb3f7c3026c453"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/gc_v4_lineage_recovery_spec-a2e546450a5809e4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 7296376,
+        "modifiedUTC": "2026-09-14T20:14:35.517Z",
+        "sha256": "0ceb4f3e72d96b1ea4319491145c0c8af31ba46fb2de35b4f8e45f67377d0cf4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_configuration_compiler_spec-db5b4be9c4734259",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15242168,
+        "modifiedUTC": "2026-09-14T20:14:27.596Z",
+        "sha256": "76249230cbdc8dcf7fb9ae85125d1bd2193e32a2abcec6d63dcffe77e1453a42"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_coverage_registry_spec-1ab418d5bc324ae3",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 13041616,
+        "modifiedUTC": "2026-09-14T20:07:25.471Z",
+        "sha256": "416e9624738f984ce2e7f2865f4b13024c9f453bbb43353f61d73f90c80cef19"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_definition_compiler_spec-cdc6211ea82702e0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 13659448,
+        "modifiedUTC": "2026-09-14T20:14:17.047Z",
+        "sha256": "44f97841764e5b3d3267b5be3da3b7ccb24d8356757315670515fed94cd38faf"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_resource_spec-23ff3917b4618488",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 27376520,
+        "modifiedUTC": "2026-09-14T20:14:30.458Z",
+        "sha256": "4ef648ec482af6079218221fc1c5358a269407e9283921ea43cecc5c1f033c72"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_spec-c9ededea143172e8",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 27781576,
+        "modifiedUTC": "2026-09-14T20:13:46.583Z",
+        "sha256": "f300198f208e9137b9c669d96d71e10ae24ede195864dbc4ac6537570b06b9dd"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_semantic_source_spec-3aeb5391d2e0c8b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 16700360,
+        "modifiedUTC": "2026-09-14T20:13:55.428Z",
+        "sha256": "f0c225ef9adf1a8c8912aee98dd47312eb8e1ae159661c199f4cb821a76cdf52"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_source_spec-89af19d52693ca07",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 12851304,
+        "modifiedUTC": "2026-09-14T20:14:15.642Z",
+        "sha256": "e7c3f44569191e9201a95291c52dbfc4a3630704a3554e4bd93a07d1fa76c527"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_worker_spec-2e02e436beac761d",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14541280,
+        "modifiedUTC": "2026-09-14T20:14:08.250Z",
+        "sha256": "64c0c8c58a85eec262eb148bc7b9b578ad9c4326589ac652762d86e922c10949"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_scope_ordinal_checkpoint_store_spec-4ad8d9a50b5a0064",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 13493240,
+        "modifiedUTC": "2026-09-14T20:13:51.016Z",
+        "sha256": "01d7f3392436417375f3a55d479eccc65b23fd75543feba00be1c11859e1692e"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_semantic_source_spec-af18e51dabcb8dcf",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 26213936,
+        "modifiedUTC": "2026-09-14T20:14:37.841Z",
+        "sha256": "bce49127df972373b948eb603e64f0355e1b71883afc22ca69c22d572b75fbd4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_v1_reference_spec-3dcc6833a7e18381",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14273208,
+        "modifiedUTC": "2026-09-14T20:13:43.890Z",
+        "sha256": "5e368860f4959933d2e195241f0634cfea463e03510e3be60b1dce1fa13ff064"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/memory_coordinator_spec-92b606512447f8eb",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 20899992,
+        "modifiedUTC": "2026-09-14T20:14:19.735Z",
+        "sha256": "5799ace2961821244ec594c4c1bc13f1904154ad7f1b06a2a8e6f674da384d2b"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/mime_name_initial_spec-685fdf6f005ac057",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 26562176,
+        "modifiedUTC": "2026-09-14T20:14:23.752Z",
+        "sha256": "15534ec842f51ed9c45a5021b9ccfa56ee995099ec61db7209547e83d9a10dc7"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_context_compiler_spec-31b2c885a629b324",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 27104192,
+        "modifiedUTC": "2026-09-14T20:13:48.797Z",
+        "sha256": "d2285100632655a3144820a98b6c1bc54772ee451971d486e6c9bdf3ed070358"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_integration_spec-bc830d545222c90b",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 39933528,
+        "modifiedUTC": "2026-09-14T20:14:32.729Z",
+        "sha256": "b5292c55139ec99134700406c04c2c4a33fc86cdc53a968742df51d4b9780eb9"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_plan_writer_spec-4dbf0ecfd22754be",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 5731272,
+        "modifiedUTC": "2026-09-14T20:14:10.291Z",
+        "sha256": "132cb9fd82f41466159ae757b23504246bec65708574053c816a0c2c41887b7e"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_registry_compiler_spec-b813226275387a17",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 12791512,
+        "modifiedUTC": "2026-09-14T20:14:35.396Z",
+        "sha256": "2879575516e90bcee191ca3e2ba4a5ffcebbf51253cf588223f928f1663c621b"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_mutation_spec-3d59a5ddbc83daa3",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 7291984,
+        "modifiedUTC": "2026-09-14T20:13:53.106Z",
+        "sha256": "4c54250e76d3ae105eedd1b9c2de0229774d26b6a0b7d75f7251758998f94009"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_reader_spec-85880fc6802f7a9e",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 6372024,
+        "modifiedUTC": "2026-09-14T20:13:48.745Z",
+        "sha256": "5f7a6e465916b7d4570656c95819c70e6a83e5ffbd17d9afeb1773868f9cb72a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_compiler_profile_spec-9e31a43fbeea7425",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14683752,
+        "modifiedUTC": "2026-09-14T20:14:28.120Z",
+        "sha256": "d8ad124a987353866ed7b4971c0e24416167f6e6fbb7d0d2d5fc19d1eb2b2eb4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_contract_spec-3af562a005fd2af5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 12107424,
+        "modifiedUTC": "2026-09-14T20:14:20.967Z",
+        "sha256": "6770361a88ce1bd589c040497aa60542be19fa36e196a19ede24eae127fb3007"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_object_writer_spec-ec1540f937b5c3b7",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 11914920,
+        "modifiedUTC": "2026-09-14T20:14:14.153Z",
+        "sha256": "b2e19c79ef3b0c8c693154cb3edb5c38b3da201134732985d6231b20f9eb933d"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_resolver_spec-48362e96b961be42",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 11378984,
+        "modifiedUTC": "2026-09-14T20:14:22.403Z",
+        "sha256": "829823cf0b34abf0348bf7756dde03a39b4100bc7f304a724b04233348a8a1f3"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_selector_compiler_spec-fa163a6bb07fde0a",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 12877080,
+        "modifiedUTC": "2026-09-14T20:13:55.867Z",
+        "sha256": "19847a68f89a3bab2a621360381d600ec62fa7d6eabc91763d5bba0cf7e3f9fa"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_selector_writer_spec-07372de588b138c5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 11083792,
+        "modifiedUTC": "2026-09-14T20:14:02.270Z",
+        "sha256": "3245a9d861d20c65b962429a57bc7da17133d3bf48dc50d5d8697044f5d9b4b4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_active_pointer_spec-6193e85b6fe06882",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 5540472,
+        "modifiedUTC": "2026-09-14T20:14:25.043Z",
+        "sha256": "09de6031d28489300cdf1dbb710612446fa1a38b1f27bab0fa8a12ef11500a6a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_first_authority_spec-acfe509bfa97454f",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 9299744,
+        "modifiedUTC": "2026-09-14T20:14:06.157Z",
+        "sha256": "ccb83066189a57c320349d9eede611b7404d4938bc72d86b2b5903cd7e8bc044"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_format_fixture_spec-e2f5546085ad17bb",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15485800,
+        "modifiedUTC": "2026-09-14T20:14:05.221Z",
+        "sha256": "f8f4f63d0e72320d03a2926b588fea4ddd68c056cc7ec303dcd1f86f4a5640c0"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_active_pointer_authority_spec-fe1499ce67aabba8",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15665624,
+        "modifiedUTC": "2026-09-14T20:07:27.816Z",
+        "sha256": "9bd3eb80167d03a1d1243b9631dfba8b5645591243c8dde3ea6044f65692c5a6"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_batch_application_spec-a260811f952a0ec8",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15028504,
+        "modifiedUTC": "2026-09-14T20:14:11.839Z",
+        "sha256": "756470cb944d56ac6be756c723f5c9fc1f8b7f55929b1c36ad36eddff517e91c"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_generation_authority_spec-6cb1de555200a91a",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 17990008,
+        "modifiedUTC": "2026-09-14T20:14:00.368Z",
+        "sha256": "8f0495ed2eb7dc3e80cbf610c6528f5ddde3f788e7209f6905678f098c7ea60a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_generation_publication_spec-9b44ba5478ee36e3",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 12396912,
+        "modifiedUTC": "2026-09-14T20:14:04.039Z",
+        "sha256": "4e872632c0203c163e01df10a27967bcf1852175f23b062577b6cc34309d4005"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_index_native_compaction_spec-656ee3a1767311c9",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 18012040,
+        "modifiedUTC": "2026-09-14T20:07:28.901Z",
+        "sha256": "01b3121bf01912f9e9b9a4210e4c75fa223b8b87bc130f85eaf517efe58386f4"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_position_writer_spec-7ba88062a779c0a5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 6731688,
+        "modifiedUTC": "2026-09-14T20:13:57.488Z",
+        "sha256": "4123c86363e311c1f7d0a8c5cd1c423bee8634d603d190af77e8048238e07527"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_aggregate_execution_spec-fa2853eff09ab8bf",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14828728,
+        "modifiedUTC": "2026-09-14T20:14:13.093Z",
+        "sha256": "53df9d48924d54f42089f0b69dfe64fdd4018a8fd56b4b558fe00861a388fa44"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_complete_candidate_spec-5f8f02adb5d5a298",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 17113352,
+        "modifiedUTC": "2026-09-14T20:14:09.155Z",
+        "sha256": "1565221e19bcfae7f8eb31fb6a3df6291e124ee8849e0a5b8412294c414b2664"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_executor_spec-502b8d7c205779f4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15077768,
+        "modifiedUTC": "2026-09-14T20:13:53.779Z",
+        "sha256": "2f15527819c606bf005eca7a6c5683c30c2f4b4c1fa298937dd33623a876720e"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_order_execution_spec-fdd61e5f050d531c",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14235456,
+        "modifiedUTC": "2026-09-14T20:13:58.036Z",
+        "sha256": "42c1c43bded0028270a97cab60c526bbac8309b61243c6705d98bced018da15a"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_planner_spec-7cd40ec24d2ffd20",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14191968,
+        "modifiedUTC": "2026-09-14T20:14:33.215Z",
+        "sha256": "5a83a5e50fcb821de9f6868a151d276e212e89b88370ed9603326f067fb0e736"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_result_pipeline_spec-df8d07158db94bd4",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 15192392,
+        "modifiedUTC": "2026-09-14T20:13:51.235Z",
+        "sha256": "23ddde79772b20b06a251e366c66821fced4890625a0fdfe849b9104782526ec"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_read_view_native_spec-1efd0524a90bff8b",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 26540800,
+        "modifiedUTC": "2026-09-14T20:13:43.702Z",
+        "sha256": "73e23213ba9795f3b935abf4f95e35a22643515e9a2189b49ed3881285209ff2"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_reader_hardening_spec-02c6cac161b2a015",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 14321416,
+        "modifiedUTC": "2026-09-14T20:14:18.805Z",
+        "sha256": "9155095535d0750669db86715bdf3366acd212d0f8e8751fa915443210602555"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/value_store_writer_spec-efb104c0dd9b7f92",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/affected.log"
+        ],
+        "bytes": 11736216,
+        "modifiedUTC": "2026-09-14T20:13:41.247Z",
+        "sha256": "7d51adcc06ee1e8157edc395acf4cdd450798b61b8613b614b2f9658483adaea"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/aeordb-error-squelch-audit",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/audit.log"
+        ],
+        "bytes": 4694912,
+        "modifiedUTC": "2026-09-14T20:08:58.420Z",
+        "sha256": "164e7dcbd96b77a695d3efbb0ed88b9130b4731bf5bd54598d2237087b7362c0"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/library.log"
+        ],
+        "bytes": 52588104,
+        "modifiedUTC": "2026-09-14T20:19:35.004Z",
+        "sha256": "e967fcbe92d9e3c348e1b2ec71a68c84428923b7920f98b3bdfd685fa756c7e6"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/deps/aeordb_v4_reference-837889bea7290fc5",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/reference.log"
+        ],
+        "bytes": 11820848,
+        "modifiedUTC": "2026-09-14T20:19:58.106Z",
+        "sha256": "ab31672ea1b3163afa97f98949c94c0ed26d38ca3d56db613825f6cee42d241c"
+      },
+      {
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/aeordb-v4-reference",
+        "logs": [
+          "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-retained-definition-final-evidence/contracts.log"
+        ],
+        "bytes": 10939856,
+        "modifiedUTC": "2026-09-14T20:20:19.119Z",
+        "sha256": "4a51686e8ddac76e8a9d90e4e148ef641f62fd8f02b444b044cbd36e534028ce"
+      }
+    ]
+  },
+  "audit": {
+    "unchangedCeiling": 1503,
+    "replacedIDs": [
+      "esq-v1-399bd4bfd9641810b75f-00",
+      "esq-v1-a9e4abdc8124216b29f4-00",
+      "esq-v1-c96d3eb9c507b3a501d1-00",
+      "esq-v1-6754e0619ed59001fb03-00"
+    ],
+    "newScopedIDs": [
+      "esq-v1-860777638405f8ccc735-00",
+      "esq-v1-860777638405f8ccc735-01",
+      "esq-v1-860777638405f8ccc735-02",
+      "esq-v1-860777638405f8ccc735-03"
+    ],
+    "movedLocations": [
+      "esq-v1-11fc5403e50b0c36463a-00",
+      "esq-v1-a28f6e7883c522a78290-00",
+      "esq-v1-23c0c5c76c2da038f4d8-00"
+    ]
+  },
+  "resources": {
+    "memoryMaximumBytes": 6442450944,
+    "swapMaximumBytes": 0,
+    "cpuQuotaPercent": 200,
+    "kernelPeakBytes": 6339493888,
+    "behavior": "Actual selector-vector and manifest-buffer refusal, unchanged physical authority/backing bytes, unchanged registry snapshot, released leases/pins, successful retry; deterministic checksum corruption still falls back."
+  },
+  "counts": {
+    "narrow": 55,
+    "persistence": 1,
+    "affectedTargets": 51,
+    "affectedTests": 877,
+    "library": 701,
+    "reference": 175,
+    "fixtures": 472,
+    "audit": 1503
+  },
+  "proofBoundary": "Actual host allocation origin remains operational through retained manifest, catalog, query, coverage, native artifact and compaction reads. Constructed private error inputs cover worker backoff/cancellation, known positional-I/O category and publication failure boundaries; they are not actual injected I/O. After pointer uncertainty the result remains CommitUnknown. These tests do not claim universal allocation/I/O recovery or user-facing runtime integration.",
+  "unchanged": [
+    "frozen format, compiler and native identities",
+    "physical publication write path",
+    "both lockfiles",
+    "all original test names and all unrelated audit identities/reviews"
+  ],
+  "pending": [
+    "bounded whole-catalog mutation and shared-dependency pruning",
+    "staged task-backed semantic activation",
+    "U2 through U7 runtime, producers, queries, maintenance, migration-to-service, defaults and final native/release/soak qualification"
+  ]
+}

@@ -26,13 +26,19 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: the independent compiler profile and selected-H fingerprint
-are committed/pushed as `24230bf5` and pass all ten Linux qualification gates. See the
+Current landing: retained-definition operational errors are verified through
+all ten Linux gates and the [strict retained-reader proof](../evidence/user-facing-v4-u1-retained-definition-proof-20260914.json).
+The constructor correction is committed/pushed as `8aab3c91`; actual allocation
+regressions now pass through retained readers, physical selection and native
+consumers. Bounded catalog/task integration remains next. The independent compiler
+profile and selected-H fingerprint are committed/pushed as `24230bf5` and pass
+all ten Linux qualification gates. See the
 [strict profile proof](../evidence/user-facing-v4-u1-compiler-profile-proof-20260914.json).
 The frozen corpus covers 109 valid configurations and 340 invalid sources across
 all five registered hashes. Runtime lookup is allocation-free; retained unknown
 producer identities remain admissible. The constructor error-boundary correction
-and staged activation remain next; neither full U1 nor v4 readiness is complete.
+is complete; staged activation remains next. Neither full U1 nor v4 readiness
+is complete.
 
 Whole corrected index configuration compilation is committed
 and pushed as `5c34d600`; it passes all ten
@@ -2579,6 +2585,147 @@ This is a bounded follow-up unit, not completion of universal allocator
 recovery. Do not alter frozen codecs/identities or interpret missing historical
 executors as malformed definitions. No selected physical writer changes are
 included in the constructor unit.
+
+## U1 completed unit: retained definition operational errors
+
+Entry `8aab3c91982eda4ff7320ba3a9a5492fb4b61ab2`, after allten constructor gates
+and commit/push. Direct owner; frozen bytes, compiler/native identities and
+unrelated WIP remain protected. Scope is the exact read/selection perimeter
+listed above. No production edits yet. New allocation-injection tests are a
+child of the existing resource target, sharing its thread-local allocator:
+manifest nested decode, chain revalidation, and query definition preflight.
+Each warms valid input, injects the actual selector-vector failure, requires
+operational classification, then retries identical bytes. They must fail before
+error mappers change. Extend through actual semantic-catalog normal/compaction
+walks, coverage/native cursors and active-pointer selection before landing;
+real corruption fallback and deterministic limits must remain unchanged.
+Worker classification of propagated `IndexProducerSourceErrorV1::Format` is
+also in scope: `index_producer_worker::source_is_retryable` currently
+does not list allocation-origin Format failures. NVT's existing
+`nvt_error_reason` already classifies AllocationAmplification as ResourceLimit;
+its retained diagnostic is not a lost-error boundary.
+
+Retained-reader failing-first history: initial RED49123closed101 at19:05:45Z
+proved both manifest error-marker losses but the query warm-up lacked an
+equality-capable field definition. RED2 corrected that fixture only and ended
+5397closed101 at19:07:21Z: allthree failures reproduced, including query
+CorruptSource versus expectedResourceLimit. Each run's six raw files and
+same-host executable digest were preserved before source replacement.
+The smallest three-module correction preserves the allocation-origin error in
+`index_manifest` and correctness-chain decoding and maps actual query-preflight
+allocation refusal to resource pressure. The full32-case resource target then
+passed69822closed0 at19:10:12Z; seven-input manifest
+`753f9fe911cfb039547559ed33440591951782e12fe25891a0ad7054dc280aba`.
+Six raw files and its executable digest were mirrored before the next packet.
+
+Two additional real catalog-walk cases now include typed Scope/ValueStore/field
+and native/WASM dependency records in a small Patricia catalog. They measure a
+distinct408-byte,17-segment decoder refusal and require retryability, lease
+release and no ordinal claim before a successful retry. Their initial run
+93078closed101 at19:13:12Z failed during fixture construction: one retained
+dependency is WASM, not native. The fixture now selects class6/7 by its decoded
+kind; no production reader has changed for these cases. CatalogRED2 runs
+against that corrected eight-input snapshot. The initial six raw files and
+binary digest were mirrored before update. Native selected-read, coverage,
+compaction and real active-pointer-selection allocation proofs remain owed.
+
+Catalog RED2/diagnostic runs isolated a test-fixture allocation collision: the
+17-segment selector's 408-byte allocation matched a fixture catalog-node clone.
+The corrected 19-segment/456-byte cases reproduced both real Corrupt-versus-
+Retryable failures (RED3, 19:19:07 UTC). Preserving the allocation flag in the
+two semantic-source decode mappers passed all34 resource tests and the full
+index_semantic_source target at19:21:14 UTC. All failed and passing raw stages
+and same-host executed binary identities were mirrored before source updates.
+
+Physical pointer RED77169 ended101 at19:31:19 UTC: one injected allocation
+while validating slot B caused a real-file load to select generation4097
+instead of valid generation4098, labeling B closure-invalid. This is a proven
+selection defect, not a damaged fixture. Its12-input manifest is
+f3b14504e32cf6db7b70a2c7712fcc55490c894ac58d5cb09244873c214653f0;
+six raw artifacts and one executed binary digest are preserved locally.
+The candidate preserves operational Format errors through the three manifest
+decodes and full-chain check, without changing actual corruption fallback.
+The first candidate run31251 failed to compile a newly added test referring to
+a nonexistent ValueStore pointer kind; no tests executed. ValueStores are
+dependencies of FieldIndex, not separately selectable pointers. That test-only
+mistake is removed; the retained physical case now covers all four decoder
+allocations across both FieldIndex slots, including chain revalidation.
+
+Next failing-first batch exercises real native coverage refresh, captured
+selected catalog/artifact reads, and native compaction using one tiny physical
+fixture. It measures the number of selector allocations in a successful run,
+then refuses each in turn. Required results: typed operational errors, stable
+selected registry snapshot, released leases, unchanged physical authority/bytes,
+and successful retries. Their consumer production mappers remain unchanged.
+The fixture uses a nonzero coverage publication sequence required by the real
+registry. Existing fixture files and frozen persistent bytes remain untouched.
+
+Native RED history is preserved without counting fixture failures as product
+evidence. The first native run required publishing its semantic-state object
+before successor activation. RED3 then proved compaction and coverage error
+misclassification, but selected-view setup still lacked baseline header
+capabilities; its private worker setup also needed identical before/after roots
+for root-pinned maintenance. The corrected RED5 ran both stages: allfour native
+consumer cases reproduced actual allocation misclassification at19:50:27 UTC;
+the nine private tests yielded2passes/7expected failures at19:51:16 UTC.
+Private tests explicitly distinguish constructed error-classification inputs
+from the native tests' actual allocator refusal. Both stages'12raw files and
+two same-host executable identities are mirrored before mapper changes.
+Prepared native-red2/native-red4 packets were never executed; they are not gates.
+
+The candidate now propagates flagged failures through selected semantic reads,
+coverage manifest/authority reads, selected artifact closures, native compaction
+read/application/preselection publication, and worker backoff. Tests protect
+deterministic bounds with identical diagnostic strings (classification follows
+origin, not text), cancellation, and CommitUnknown after pointer uncertainty.
+
+Adjacent source review found the same fallback problem below manifest decoding:
+`load_index_manifest_for_pointer_closure` discards all Invalid errors, including
+the actual `immutable_index_read_allocation` and `first_authority_readback_io`
+codes emitted by its underlying reader. A new physical failing-first test
+refuses the exact stored ValueStore WholeEntity buffer size in each slot;
+additional private checks cover downstream read-error categories. The current
+native-candidate run executes40 resource tests and12 private tests, expecting
+the new read-buffer/I/O cases to fail before those branches change. No such
+production read-buffer correction has been made yet. This expands the same
+bounded retained-read perimeter; it does not claim universal allocator or I/O
+failure recovery and makes no persistent-format change.
+
+The read-buffer RED completed19:56:55 UTC:39 resource cases passed, while the
+new physical case proved the buffer refusal was silently converted into an
+invalid slot. Private checks then yielded10passes/2failures for swallowed
+operational read categories. All12 raw artifacts and two same-host binaries
+were captured before the correction. Candidate2 propagates these exact reader
+codes and retains actual malformed-byte fallback; native63738closed0 at
+20:07:31 UTC, with40resource cases and the three full existing targets passing.
+Private3284 completed12passes/689filtered at20:08:56 UTC; audit-candidate
+completed20:09:07 UTC with1503 entries and no baseline growth. All18 raw files,
+five executed binary identities and the outside-worktree audit candidate are
+mirrored before final source sync. Final review tightens the private artifact
+test to distinguish ResourcePressure from Operational exactly, not either/or.
+The four changed authority fallback entries receive a scoped reviewed policy;
+all other audit identities/reviews remain unchanged, with only three line
+locations moving. Final qualification adds eleven affected targets to the
+prior forty, retaining full library, reference, contract, Clippy and debt gates.
+
+Final qualification completed1677closed0 at20:20:24 UTC: allten gates passed
+in6m57.405s elapsed/8m12.628s CPU. Results:55narrow (15collector/40resource),
+1physical-persistence,877affected/51targets,701library,175reference,
+472independent fixtures,1503reviewed audit occurrences,format,strict workspace
+Clippy and debt self-test. The23-input manifest is
+`71b0725d09eac081902bb4b651943cb51fe20a19fb530e6d6dc726fb16dcfb2c`;
+archive`7c4723491b14387f87de00c52456143d85f76b49e615e3da341bd3c8d7953875`.
+Kernel peak6,339,493,888 bytes remained below6GiB/no-swap; finalData336,006,819,840
+andhome69,626,060,800 bytes exceeded the standing floors. All60raw files,
+driver and56same-host executed binary identities are mirrored19114closed0.
+Strict evidence verifier929a3c passed, preserving twenty historical stages with
+explicit fixture-failure versus real-regression distinctions. The
+[complete proof](../evidence/user-facing-v4-u1-retained-definition-proof-20260914.json)
+checks source/archives, unchanged frozen identities, original tests, exact
+counts, resource guards and the four individually reviewed audit replacements.
+No selected write path, production service, original damaged database, or
+sealed release evidence was changed. This completes this bounded read-error
+unit, not complete U1, universal allocator/I/O recovery or user-facing readiness.
 
 ## U1 completed compiler unit: whole corrected configuration compilation
 

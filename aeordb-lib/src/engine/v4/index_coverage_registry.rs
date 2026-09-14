@@ -25,6 +25,7 @@ use super::index_artifact::{
 };
 use super::index_coverage_planner::{IndexCoverageGenerationHealthV1, IndexCoverageGenerationV1};
 use super::index_nvt::{PinnedFieldNvtV1, NvtBasisStatusV1, NvtFallbackReasonV1, pin_field_index_v1, validate_field_nvt_basis_v1};
+use super::reader::FormatError;
 
 const MANIFEST_READ_CAP: usize = 1_048_576;
 const MANIFEST_READ_RESERVATION_BYTES: u64 = MANIFEST_READ_CAP as u64 + 4 * 1_024;
@@ -474,7 +475,7 @@ impl IndexCoverageRegistryV1 {
       IndexCoverageRegistryOwnerKindV1::ScopeCatalog => {
         let manifest = load_manifest_bounded(&self.memory, source, &pointer.target_manifest_hash, cancellation)?;
         let manifest = decode_index_manifest(&manifest.bytes, self.hash_algorithm)
-          .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_scope_manifest", error.to_string()))?;
+          .map_err(|error| map_manifest_error("index_coverage_scope_manifest", error))?;
         let IndexManifestBodyV1::ScopeCatalog(body) = &manifest.details else {
           return Err(IndexCoverageRegistryErrorV1::corrupt(
             "index_coverage_scope_manifest_kind",
@@ -502,7 +503,7 @@ impl IndexCoverageRegistryV1 {
       IndexCoverageRegistryOwnerKindV1::FieldIndex => {
         let field_bytes = load_manifest_bounded(&self.memory, source, &pointer.target_manifest_hash, cancellation)?;
         let field = decode_index_manifest(&field_bytes.bytes, self.hash_algorithm)
-          .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_field_manifest", error.to_string()))?;
+          .map_err(|error| map_manifest_error("index_coverage_field_manifest", error))?;
         let IndexManifestBodyV1::FieldIndex(field_body) = &field.details else {
           return Err(IndexCoverageRegistryErrorV1::corrupt(
             "index_coverage_field_manifest_kind",
@@ -512,7 +513,7 @@ impl IndexCoverageRegistryV1 {
         require_manifest_pointer(pointer, &field.key, field.owner_id, field.generation)?;
         let value_bytes = load_manifest_bounded(&self.memory, source, field_body.value_store_manifest, cancellation)?;
         let value = decode_index_manifest(&value_bytes.bytes, self.hash_algorithm)
-          .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_value_manifest", error.to_string()))?;
+          .map_err(|error| map_manifest_error("index_coverage_value_manifest", error))?;
         let IndexManifestBodyV1::ValueStore(value_body) = &value.details else {
           return Err(IndexCoverageRegistryErrorV1::corrupt(
             "index_coverage_value_manifest_kind",
@@ -521,9 +522,9 @@ impl IndexCoverageRegistryV1 {
         };
         let scope_bytes = load_manifest_bounded(&self.memory, source, value_body.scope_catalog_manifest, cancellation)?;
         let scope = decode_index_manifest(&scope_bytes.bytes, self.hash_algorithm)
-          .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_scope_manifest", error.to_string()))?;
+          .map_err(|error| map_manifest_error("index_coverage_scope_manifest", error))?;
         validate_correctness_manifest_chain(&scope, &value, &field, self.hash_algorithm)
-          .map_err(|error| IndexCoverageRegistryErrorV1::corrupt("index_coverage_manifest_chain", error.to_string()))?;
+          .map_err(|error| map_manifest_error("index_coverage_manifest_chain", error))?;
         let IndexManifestBodyV1::ScopeCatalog(scope_body) = &scope.details else {
           return Err(IndexCoverageRegistryErrorV1::corrupt(
             "index_coverage_scope_manifest_kind",
@@ -1072,10 +1073,21 @@ fn require_not_cancelled(cancellation: &CancellationToken) -> Result<(), IndexCo
   Ok(())
 }
 
+fn map_manifest_error(code: &'static str, error: FormatError) -> IndexCoverageRegistryErrorV1 {
+  if error.is_allocation_failure() {
+    IndexCoverageRegistryErrorV1::Allocation(format!("{code}: {error}"))
+  } else {
+    IndexCoverageRegistryErrorV1::corrupt(code, error.to_string())
+  }
+}
+
 fn map_first_authority_source_error(error: FirstAuthorityPublicationErrorV1) -> IndexCoverageRegistrySourceErrorV1 {
   let code = error.code();
   let message = error.to_string();
   match error {
+    FirstAuthorityPublicationErrorV1::Format(source) if source.is_allocation_failure() => {
+      IndexCoverageRegistrySourceErrorV1::unavailable(code, message)
+    }
     FirstAuthorityPublicationErrorV1::Invalid { .. } if first_authority_read_failure_is_operational(code) => {
       IndexCoverageRegistrySourceErrorV1::unavailable(code, message)
     }

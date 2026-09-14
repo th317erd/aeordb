@@ -13895,8 +13895,10 @@ fn index_active_pointer_closure_valid(
   let Some(target_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, pointer.target_manifest_hash)? else {
     return Ok(false);
   };
-  let Ok(target) = decode_index_manifest(&target_bytes, header.hash_algorithm) else {
-    return Ok(false);
+  let target = match decode_index_manifest(&target_bytes, header.hash_algorithm) {
+    Ok(target) => target,
+    Err(error) if error.is_allocation_failure() => return Err(error.into()),
+    Err(_) => return Ok(false),
   };
   if target.key != pointer.target_manifest_hash
     || target.owner_id != pointer.owner_id
@@ -13914,8 +13916,10 @@ fn index_active_pointer_closure_valid(
   let Some(value_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, field_body.value_store_manifest)? else {
     return Ok(false);
   };
-  let Ok(value) = decode_index_manifest(&value_bytes, header.hash_algorithm) else {
-    return Ok(false);
+  let value = match decode_index_manifest(&value_bytes, header.hash_algorithm) {
+    Ok(value) => value,
+    Err(error) if error.is_allocation_failure() => return Err(error.into()),
+    Err(_) => return Ok(false),
   };
   let IndexManifestBodyV1::ValueStore(value_body) = &value.details else {
     return Ok(false);
@@ -13926,13 +13930,19 @@ fn index_active_pointer_closure_valid(
   let Some(scope_bytes) = load_index_manifest_for_pointer_closure(file, kv, header, value_body.scope_catalog_manifest)? else {
     return Ok(false);
   };
-  let Ok(scope) = decode_index_manifest(&scope_bytes, header.hash_algorithm) else {
-    return Ok(false);
+  let scope = match decode_index_manifest(&scope_bytes, header.hash_algorithm) {
+    Ok(scope) => scope,
+    Err(error) if error.is_allocation_failure() => return Err(error.into()),
+    Err(_) => return Ok(false),
   };
-  Ok(
-    index_manifest_immediate_roots_valid(file, kv, header, &scope)?
-      && validate_correctness_manifest_chain(&scope, &value, &target, header.hash_algorithm).is_ok(),
-  )
+  if !index_manifest_immediate_roots_valid(file, kv, header, &scope)? {
+    return Ok(false);
+  }
+  match validate_correctness_manifest_chain(&scope, &value, &target, header.hash_algorithm) {
+    Ok(()) => Ok(true),
+    Err(error) if error.is_allocation_failure() => Err(error.into()),
+    Err(_) => Ok(false),
+  }
 }
 
 fn index_manifest_immediate_roots_valid(
@@ -13984,6 +13994,10 @@ fn load_index_manifest_for_pointer_closure(
 ) -> Result<Option<Vec<u8>>, FirstAuthorityPublicationErrorV1> {
   match load_index_artifact_entity(file, kv, header, key) {
     Ok(loaded) => Ok(loaded.map(|loaded| loaded.value)),
+    Err(
+      source @ FirstAuthorityPublicationErrorV1::Invalid { code: "immutable_index_read_allocation" | "first_authority_readback_io", .. },
+    ) => Err(source),
+    Err(FirstAuthorityPublicationErrorV1::Format(source)) if source.is_allocation_failure() => Err(source.into()),
     Err(FirstAuthorityPublicationErrorV1::Invalid { .. } | FirstAuthorityPublicationErrorV1::Format(_)) => Ok(None),
     Err(source) => Err(source),
   }

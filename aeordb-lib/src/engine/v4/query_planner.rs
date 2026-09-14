@@ -1293,8 +1293,15 @@ fn validate_scope_catalog(
   if scope.scope_id != scope_definition.scope_id {
     return Err(corrupt_source("query_scope_identity_mismatch", "catalog ScopeId differs from its exact definition"));
   }
-  let value_definition = decode_value_store_definition(&scope.encoded_value_store_definition, request.context.hash_algorithm())
-    .map_err(|source| corrupt_source("query_value_definition_invalid", format!("{}: {}", source.code(), source.context())))?;
+  let value_definition =
+    decode_value_store_definition(&scope.encoded_value_store_definition, request.context.hash_algorithm()).map_err(|source| {
+      let context = format!("{}: {}", source.code(), source.context());
+      if source.is_allocation_failure() {
+        resource_error("query_value_definition_invalid", context)
+      } else {
+        corrupt_source("query_value_definition_invalid", context)
+      }
+    })?;
   if value_definition.value_store_id != scope.value_store_id
     || value_definition.scope_id != scope.scope_id
     || value_definition.field_name != field_name

@@ -1246,8 +1246,13 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
           return Ok(());
         }
         semantic_reader.with_definition(record, &|| self.view.cancellation().is_cancelled(), |definition| {
-          let value = decode_value_store_definition(definition, self.view.hash_algorithm())
-            .map_err(|error| SemanticCatalogReadErrorV1::corrupt(error.code(), error.context()))?;
+          let value = decode_value_store_definition(definition, self.view.hash_algorithm()).map_err(|error| {
+            if error.is_allocation_failure() {
+              SemanticCatalogReadErrorV1::resource(error.code(), error.context())
+            } else {
+              SemanticCatalogReadErrorV1::corrupt(error.code(), error.context())
+            }
+          })?;
           validate_semantic_definition_identity_v1(record, &value.value_store_id)?;
           if !scopes.contains_key(value.scope_id) {
             return Ok(());
