@@ -308,3 +308,55 @@ fn definition_object_wrapper_caps_inputs_and_returns_output_allocation_failures(
     assert_eq!(result.unwrap_err().code(), "semantic_definition_writer_allocation");
   }
 }
+
+#[test]
+fn catalog_cow_returns_fallible_metadata_and_leaf_output_allocation_errors_without_leaking_admission() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::namespace::EncodedSemanticObjectV1;
+  use aeordb::engine::v4::semantic_catalog::{SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorV1};
+  use aeordb::engine::v4::semantic_catalog_mutation::{
+    SemanticCatalogMutationRequestV1, SemanticCatalogMutationV1, SemanticCatalogSnapshotV1, plan_semantic_catalog_mutation_v1,
+  };
+
+  struct EmptySource;
+
+  impl SemanticCatalogObjectSourceV1 for EmptySource {
+    fn load_semantic_object(&self, _kind: u16, _identity: &[u8]) -> Result<Option<Vec<u8>>, SemanticCatalogReadErrorV1> {
+      panic!("empty catalog must not read a source node");
+    }
+  }
+
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let identity = vec![1; algorithm.hash_length()];
+    let definition = vec![2; algorithm.hash_length()];
+    let record = SemanticCatalogRecordV1 {
+      record_kind: 2,
+      owner_key: b"\x02\x00/controls/example.json",
+      semantic_id: &identity,
+      definition_object_id: &definition,
+    };
+    let encoded_length = encode_semantic_catalog_leaf(&[record], algorithm).unwrap().value.len();
+    let metadata_length = (algorithm.hash_length() + 3) * std::mem::size_of::<EncodedSemanticObjectV1>();
+    for (length, expected_code) in [(metadata_length, "catalog_mutation_allocation"), (encoded_length, "catalog_writer_allocation")] {
+      let memory =
+        MemoryCoordinator::new(MemoryPolicy::new(96 * 1024 * 1024, 128 * 1024 * 1024, 32 * 1024 * 1024, 8 * 1024 * 1024).unwrap());
+      let (result, allocations) = measure(length, || {
+        plan_semantic_catalog_mutation_v1(
+          SemanticCatalogMutationRequestV1 {
+            hash_algorithm: algorithm,
+            snapshot: SemanticCatalogSnapshotV1 { root_object_id: None, record_count: 0, node_count: 0 },
+            mutation: SemanticCatalogMutationV1::Upsert(record),
+            maximum_workspace_bytes: 32 * 1024 * 1024,
+          },
+          &EmptySource,
+          &memory,
+          &|| false,
+        )
+      });
+      assert!(allocations.injected_failure, "{allocations:?}");
+      assert_eq!(result.err().expect("allocation refusal must propagate").code(), expected_code);
+      assert!(allocations.total < 65536, "{allocations:?}");
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    }
+  }
+}

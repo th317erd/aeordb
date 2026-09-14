@@ -1063,7 +1063,7 @@ fn decode_catalog_leaf(body: &[u8], item_count: u64, hash_algorithm: HashAlgorit
   Ok((SemanticObjectKind::CatalogLeaf { record_count }, graph_edges))
 }
 
-fn validate_catalog_owner_key(kind: u16, owner_key: &[u8], hash_width: usize) -> FormatResult<()> {
+pub(crate) fn validate_catalog_owner_key(kind: u16, owner_key: &[u8], hash_width: usize) -> FormatResult<()> {
   match kind {
     1 | 2 => {
       if owner_key.len() < 3 || owner_key.len() > 65_537 {

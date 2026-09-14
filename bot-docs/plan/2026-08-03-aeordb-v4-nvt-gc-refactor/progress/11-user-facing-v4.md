@@ -2047,7 +2047,18 @@ reusable build outputs, not an archival release. No new native/release/full-
 workspace test or actual-v4 service readiness claim is made by this unit.
 See [definition object proof](../evidence/user-facing-v4-u1-definition-object-proof-20260914.json).
 
-### Next U1 landing: bounded catalog copy-on-write
+### Completed U1 prerequisite: bounded catalog copy-on-write
+
+Entry/last green7eb1a40d2c94c67c58c775aa9082e611d22b2374; direct owner.
+Own new `semantic_catalog_mutation.rs`, its dedicated spec, module/target
+registration, crate-private reuse of namespace owner validation, affected
+real-file test additions and ledger/proof. Forbid unrelated runtime/physical
+writer/default/service/fixture changes. Existing captured semantic object
+sources enforce per-kind read caps; no new storage source or authority owner.
+Narrow: `cargo test --offline --locked -j 2 -p aeordb --test semantic_catalog_mutation_spec`.
+Next: install the independent13case target and observe missing-API RED before
+implementation. Definitions remain external closure prerequisites, not copied
+into a second graph or reinterpreted as catalog-node counts.
 
 Implement a storage-neutral, shared-budget planner using the existing node
 codecs and captured-object source. One explicit H-bounded path, canonical
@@ -2057,12 +2068,72 @@ definitions, infer distinct-definition count from binding count, activate a
 root or add another physical writer. The owning compiler must supply an
 admitted captured catalog and prove definition closure before activation.
 
-- [ ] Finish independent whole-set test oracle and explicit path-reuse,
+- [x] Finish independent whole-set test oracle and explicit path-reuse,
   malformed/source-failure/cancellation/shared-memory failure cases; API RED.
-- [ ] Implement bounded COW with result-lifetime shared-memory reservation.
-- [ ] Prove exact canonical identities/counts across all5 hashes and insertion/
+- [x] Implement bounded COW with result-lifetime shared-memory reservation.
+- [x] Prove exact canonical identities/counts across all5 hashes and insertion/
   removal permutations, real-file publication/reopen, affected/static gates.
-- [ ] Land green and continue actual semantic compilation/atomic producers.
+- [x] Record green COW proof for landing; continue actual semantic compilation
+  and atomic producers rather than treating this codec/tree boundary as U1 done.
+
+Missing-API RED69197 completed11:40:00Z, E0432 absent module, exit101;
+no behavioral tests executed. The13case573line spec is unchanged. Four-input
+manifest56f7a43f636aaef37d3a0f56fbd59d2a955f1a17053522a14aa7d8edb3897526,
+archive22a6af577bd48884dc883f0b1dd6a6a00a135e4d5187e22819b67a97ef60ce74;
+complete raw files mirrored. Production implementation added only afterward.
+The first narrow candidate adds one storage-neutral planner, module export and
+crate-private reuse of the owner validator without changing its behavior or
+line positions. It reserves `(2H+8)*64KiB +6MiB` from the existing shared Task
+memory owner, retaining the conservative charge through output publication.
+No definitions are read; no physical or selected-root authority is changed.
+First7-input manifestda10d661b2ca5db96d178930b97cade586f5cbb49e4a9ddc1cfe72fc2767d2a8,
+archive2b24462c3f950b8de21eadecd1b58ae65e0d7e6b26cd9871287878fa11cab27f.
+Narrow result and supplemental allocation/real-file/order tests are pending.
+
+First narrow37684 completed11:48:37Z with all13cases passing, unchanged
+source, no guard stop. Preserve its exact executed test binary digest and raw
+logs before rebuilding. Additional review found an all-zero definition-owner
+removal could be accepted as an absent-key no-op. Append3 tests for that case,
+child-before-parent output and unavailable/mid-operation memory policy.
+Secondary behavioral RED21068 completed11:55:30Z:15pass/1fail, exactly the
+zero-owner deletion case. Manifest08b375fbabc34914449f0358512bc87b4702097400a54c585cf7be5465fe0b55,
+archive4abef95a3a2badc0227af9dd380a03b5a85740106532af9d3b4a63eedb0fe7cf.
+Reject zero owner IDs for both mutation kinds at preflight; keep all16 tests
+unchanged. Supplemental final tests inject metadata/output allocation refusal
+and exercise five-algorithm real-file catalog insert/delete, idempotence,
+captured reads, repeated reopen and full tree/definition traversal. One
+definition is deliberately shared by12 bindings. These do not select a root
+or prove source-configuration compilation.
+Final9-input manifeste1a22bb6accb1a3739b2b5dfc5f8c2c2040fbf490c5805bbe17ce7d752322b36,
+archive5bb27a19dfc34476e2d2b015738ffd82346258353462378654a77f83f34dd9d8.
+Ten-stage final qualification is pending; memory/audit/previous-fix regressions
+are included. Do not land until its exact candidate is green.
+
+Final41945 completed2026-09-14T12:04:40Z with all10 gates green:
+16COW+9resource, selected real-file persistence1/15filtered,391affected cases
+across20targets (including18shared-memory cases), audit1503 unchanged, fmt,
+strict workspaceClippy,681library,175independent reference,472fixtures/contracts
+and actual debt self-test. All16behavioral-RED spec bytes remain unchanged;
+original13API-RED cases remain an unchanged prefix. No source/lock drift,
+ignored case, unexplained variance or guard stop occurred. The selected
+persistence case is also among391, not an extra distinct test.
+Unit879e85afebb9453196c6b1d5bdf452fc ran6m21.648s/CPU7m18.895s under
+6GiB/noSwap/2CPU. Direct kernel memory counters are retained in the proof;
+the inaccurate256KiB systemd terminal summary is not memory evidence.
+Final free bytes Data336122028032/home70262951936. Complete raw stage/driver
+records and26same-host executed binary digests are mirrored. Strict proof
+2377e1 passes. No new native/release/full-workspace test or user-facing runtime
+activation claim is made. See [catalog COW proof](../evidence/user-facing-v4-u1-catalog-mutation-proof-20260914.json).
+
+Next remains U1's actual semantic compiler and staged atomic integration.
+Read-only refinement reconfirms `PathIndexConfig` only admits$v0 and the
+runtime/lifecycle `configuration_controls` module is not an index-semantic
+compiler. The reference's fixture-only compiler profile digest is not a
+production profile. Round10 captures source identities for activation races
+but excludes raw source formatting/logging from semantic IDs; Round11 fixes
+the corrected$v1 default field/strategy matrix and finite semantic bounds.
+Implement from those contracts through the typed definition owners; do not
+use generic JSON canonicalization or a fixture fingerprint as a compiler.
 
 ## U2 read-only entry refinement: public append-writer guard
 

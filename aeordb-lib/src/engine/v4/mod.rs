@@ -158,6 +158,7 @@ pub mod root_authority;
 pub mod scope;
 mod selected_file_body;
 pub mod semantic_catalog;
+pub mod semantic_catalog_mutation;
 pub mod semantic_store;
 pub mod source_evaluator;
 pub mod source_selector;

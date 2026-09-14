@@ -1062,3 +1062,124 @@ fn concurrent_successor_publications_from_one_predecessor_have_exactly_one_winne
   assert_eq!(selected.selected.header.head_hash, winner.namespace_root.root_hash);
   assert!(publisher.locator(&before.selected.header.head_hash).unwrap().is_some());
 }
+
+#[test]
+fn catalog_cow_nodes_publish_reopen_and_traverse_through_the_captured_physical_authority() {
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::database_header::SelectedDatabaseHeaderV4;
+  use aeordb::engine::v4::semantic_catalog::{
+    SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1,
+  };
+  use aeordb::engine::v4::semantic_catalog_mutation::{
+    SemanticCatalogMutationRequestV1, SemanticCatalogMutationV1, SemanticCatalogSnapshotV1, plan_semantic_catalog_mutation_v1,
+  };
+  use tokio_util::sync::CancellationToken;
+
+  struct CapturedObjects<'a> {
+    publisher: &'a V4FirstAuthorityPublisher,
+    header: &'a SelectedDatabaseHeaderV4,
+    cancellation: &'a CancellationToken,
+  }
+
+  impl SemanticCatalogObjectSourceV1 for CapturedObjects<'_> {
+    fn load_semantic_object(&self, kind: u16, identity: &[u8]) -> Result<Option<Vec<u8>>, SemanticCatalogReadErrorV1> {
+      self
+        .publisher
+        .load_semantic_object_at_captured_header(self.header, kind, identity, self.cancellation)
+        .map_err(|source| SemanticCatalogReadErrorV1::corrupt(source.code(), source.to_string()))
+    }
+  }
+
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let (directory, coordinator, mut publisher) = initialized_publisher(algorithm);
+    drop(coordinator);
+    let initial = publisher.observe().unwrap();
+    // One structural projection shared by12 owner paths: catalog binding count
+    // is intentionally NOT a distinct-definition-object count. No compiler or
+    // selected semantic-root activation is claimed by this staging test.
+    let definition = encode_semantic_definition_object(2, &[0x0a, 4, 0, 0, 0, 0, 0, 0, 0], algorithm).unwrap();
+    publisher
+      .publish_immutable_semantic_objects(ImmutableSemanticObjectBatchPublicationRequestV1 {
+        database_id: &initial.selected.header.database_id,
+        objects: std::slice::from_ref(&definition.object),
+        publication_timestamp_ms: initial.selected.header.updated_at_ms + 1,
+      })
+      .unwrap();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(96 * 1024 * 1024, 128 * 1024 * 1024, 32 * 1024 * 1024, 8 * 1024 * 1024).unwrap());
+    let cancellation = CancellationToken::new();
+    let mut root = None;
+    let mut records = 0;
+    let mut nodes = 0;
+    for operation in 0..24 {
+      let index = operation % 12;
+      let owner = [b"\x02\x00".as_slice(), format!("/controls/{index}.json").as_bytes()].concat();
+      let mutation = if operation < 12 {
+        SemanticCatalogMutationV1::Upsert(SemanticCatalogRecordV1 {
+          record_kind: 2,
+          owner_key: &owner,
+          semantic_id: &definition.semantic_id,
+          definition_object_id: &definition.object.object_id,
+        })
+      } else {
+        SemanticCatalogMutationV1::Remove { record_kind: 2, owner_key: &owner }
+      };
+      let observed = publisher.observe().unwrap();
+      let source = CapturedObjects { publisher: &publisher, header: &observed.selected, cancellation: &cancellation };
+      let plan = plan_semantic_catalog_mutation_v1(
+        SemanticCatalogMutationRequestV1 {
+          hash_algorithm: algorithm,
+          snapshot: SemanticCatalogSnapshotV1 { root_object_id: root.as_deref(), record_count: records, node_count: nodes },
+          mutation,
+          maximum_workspace_bytes: 32 * 1024 * 1024,
+        },
+        &source,
+        &memory,
+        &|| false,
+      )
+      .unwrap();
+      assert!(!plan.is_unchanged());
+      if !plan.objects().is_empty() {
+        let publication = ImmutableSemanticObjectBatchPublicationRequestV1 {
+          database_id: &observed.selected.header.database_id,
+          objects: plan.objects(),
+          publication_timestamp_ms: observed.selected.header.updated_at_ms + 1,
+        };
+        publisher.publish_immutable_semantic_objects(publication).unwrap();
+        let after = publisher.observe().unwrap();
+        assert!(publisher.publish_immutable_semantic_objects(publication).unwrap().idempotent);
+        assert_eq!(publisher.observe().unwrap(), after);
+      }
+      root = plan.root_object_id().map(<[u8]>::to_vec);
+      records = plan.record_count();
+      nodes = plan.node_count();
+      drop(plan);
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+      if operation % 3 == 2 {
+        drop(publisher);
+        publisher = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+      }
+      let observed = publisher.observe().unwrap();
+      assert_eq!(observed.selected.header.head_hash, initial.selected.header.head_hash);
+      let source = CapturedObjects { publisher: &publisher, header: &observed.selected, cancellation: &cancellation };
+      if let Some(identity) = &root {
+        let reader = SemanticCatalogReaderV1::new(algorithm, &source);
+        let walked = reader
+          .walk_catalog(identity, SemanticCatalogTraversalBoundsV1::new(records, nodes).unwrap(), &|| false, |record| {
+            assert_eq!(record.record_kind, 2);
+            assert_eq!(record.definition_object_id, definition.object.object_id);
+            reader.with_definition(record, &|| false, |payload| {
+              assert_eq!(payload, &[0x0a, 4, 0, 0, 0, 0, 0, 0, 0]);
+              Ok(())
+            })
+          })
+          .unwrap();
+        assert_eq!(walked.class_counts[2], records);
+        assert_eq!(walked.nodes, nodes);
+      }
+    }
+    assert!(root.is_none());
+    assert_eq!((records, nodes), (0, 0));
+  }
+}
