@@ -26,8 +26,16 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+Borrowed canonical projection reads pass all ten Linux gates; see the
+[strict borrowed-reader proof](../evidence/user-facing-v4-u1-canonical-borrowed-proof-20260914.json).
+Dense 256 KiB values validate and iterate with zero heap allocation. Existing
+canonical validation, DOM decoding, encoders, profiles and format bytes remain
+unchanged. Incremental updates, dependency pruning and task activation remain
+outstanding; this is their reader prerequisite, not full user-facing readiness.
+
 Bounded point lookup and mutable-source traversal now pass all ten Linux gates;
 see the [strict reader proof](../evidence/user-facing-v4-u1-catalog-lookup-proof-20260914.json).
+The reader unit is committed as `44746f19`.
 Stored-kind validation, final-callback cancellation and root-count error
 classification are covered by failing-first regressions. This completes the
 reader prerequisite, not incremental updates, dependency pruning or activation.
@@ -2736,6 +2744,135 @@ counts, resource guards and the four individually reviewed audit replacements.
 No selected write path, production service, original damaged database, or
 sealed release evidence was changed. This completes this bounded read-error
 unit, not complete U1, universal allocator/I/O recovery or user-facing readiness.
+
+## U1 completed unit: bounded borrowed canonical projection reads
+
+Entry `44746f19`, direct owner; the predecessor reader's allten gates and source
+review are green. This is an additive allocation-free view of already-validated
+CanonicalConfigValue bytes, needed to read old class1/2 projections without
+materializing a whole generic DOM. No format, semantic profile, compiler rule,
+legacy coercion, source authority, task, or selected-root change is authorized
+by this unit. Preserve existing validation/encoding/DOM behavior byte-for-byte.
+
+Own `config_value` and a focused borrowed-view child under that same owner,
+`canonical_value_borrowed_spec`, measured resource tests and Cargo registration.
+The new entry validates the entire value using the existing validator and
+returns lifetime-bound immutable slices. Map/array iteration retains only its
+cursor, yields typed errors on wrong requested container type, and never
+recursively allocates containers or copied keys. Preserve caller-specific
+scalar/key/total limits and CONFIG versus SOURCE_VALUE integer canonicality.
+Structural validation does not claim current compiler-profile projection schema
+or class-specific ID ownership; the subsequent update compiler must prove that.
+
+Falsifying API target: cargo test --offline --locked -j 2 -p aeordb --test
+canonical_value_borrowed_spec. Six prepared cases cover exact borrowed slices,
+both ID widths, empty/type mismatch/fused iteration, every truncation/trailing
+byte, order/duplicate/UTF8/count/depth rejection, caller bounds and permanent
+tags from unchanged independent fixtures. Two measured cases cover an exact
+256KiB array of52,427nulls and14,563one-entry maps in262,143bytes; both must
+allocate zero during validation and iteration. Install/run missing-API proof
+before production changes, then narrow/resource, affected consumers, allten
+gates and strict source-bound evidence. No new implementation or passing proof
+exists yet. Incremental updates/pruning and task activation remain required.
+
+API RED96688 exited101 at22:49:05Z with missingborrow_canonical_value import
+and consequent inference errors; zero tests executed. Allsix rawfiles mirrored
+0912ae before desktop source changes. Candidate1 now implements a focused
+borrowed child underconfig_value: existing validatoronce, BoundedReadercursor,
+private immutableviews, explicitwrongtype and fusediterators. All existing
+validation/DOM/encoding functions remain unchanged. Eightinputcandidate1
+35fbf8b15916ebed43a1120cc34bf0ea2ebdc339c175aa1b64e29259a661eee3 is running59392.
+Final local proof adds a seventh independent malformed/bounds case, two private
+defensivecursor error/fusion cases, and realphysicalreopen projectionreads for
+allfivehashes without selectingHEAD. No candidate pass is claimed yet.
+
+Candidate1 completed59392closed0 at22:57:41Z:6reader and45resourcecasesPASS,
+including bothzeroallocationcases. Allsixraw and2samehostexecutabledigests
+preserved80018closed0 before desktop source changes. Final qualification
+22755 is running with10inputs:
+manifestacf3eec0959575853281ec8dd58e36858a3abaa7100a4b488694ead9315cc001,
+archiveb49333b59dbf93d41ad2150b75a4b2d00d1802578e98dfda3f981f1c2b068354.
+Expected52narrow,1physical,920affected54targets,711library,175reference,
+472fixtures and1503audit. Initialsixreader/tworesource bodies remain exact
+prefixes of final tests. Fetch88251closed0 at23:01UTC confirms unchanged
+HEAD/origin44746f19. Strict verifier prepared, syntaxchecked, not executed.
+
+Firstfinal22755 exited101 at23:06:18Z after52narrow and1physicalcasePASS.
+Existing audit architecture rejects eight shiftedconfig_valuelocations plus
+three new syntactic suppressionforms (one resultstatusprobe,two discarded
+integerconversion errors). All18raw,driver and7samehostexecutabledigests were
+preserved90377closed0 before further remote changes. Keep all1503reviewed
+entries unchanged: append themoduledeclaration afterexistingcode, preserve the
+conversion source diagnostics, and explicitlymatch/returntheiterator error.
+No test was loosened. Final2 running58732 at23:12:25UTC,invocation
+9c3d9ac4c5684c5893a90214cf42fb4d,10inputs
+0b69b5b73dc07ea1e7aab281948c1a56e007d0a6b7460fe6234d985de9651f34,
+archivea49e841a0c14d9f79a152b0d32f6fc76e3044548a6c20ae690b7d7cf41dce8be.
+Strict verifier now includes firstfinalhistory; not executed. Final counts
+unchanged. Nextordinarymonitor23:17:26UTC; preserve60raw+driver+59bins before
+any new desktop source/build changes.
+
+Final2 completed58732closed101 at23:17:23Z:52narrow,1physical,920affected
+across54targets,1503unchangedaudit andformatPASS. StrictClippy catches
+unnecessary_unwrap in the new privateiterator test. All36raw,driver and56
+samehostbinaries preserved70975closed0 before desktop source changes. Only
+that test changes: explicitmatch preserves error checking and additionally
+asserts each fixture takes its correct first-item branch. No production or
+other test changes, no lint waiver. Final3 teninputs
+0aef1088bc3fe9fe6151941310755679942e918d229e900141e1c23600e04468,
+archivecca6bf149771c97e42ffb40940f776ed922c87be97b294d6ab06ea7ffe84f6d1.
+Strictproof requires all nine other inputs remain exactly final2; syntaxPASS,
+not executed. Fullunit qualification/landing remain pending.
+
+Final3 completed87179closed0 at23:25:14Z: all ten gates PASS,5m31.429s elapsed,
+6m5.837s CPU. Exact results:52narrow (7reader/45resource),1physicalreopen case
+(also included in affected),920affected across54targets,711library,175reference,
+472independentfixtures,1503unchanged audit entries,format,strictworkspaceClippy
+anddebt self-test. Kernel memory peak3,536,371,712 bytes under6GiB/no-swap;
+final Data335,977,951,232 andhome69,454,622,720 bytes remain above their floors.
+All60rawstagefiles,driver and59samehostexecutabledigests mirrored90843closed0
+before any new desktop source changes. Strict source/archive/count/resource/
+history verification e47880 PASS created the immutable borrowed-reader proof.
+No ignored tests, source/lock drift, oldtest removal, profile/format mutation,
+or audit allowance growth. No production service or retained corrupt database
+was touched. This completes this reader unit, not incremental compilation or
+fullU1/U7. Next: install the ten-case incremental draft, execute missing-API RED,
+implement bounded changes/pruning, and add admission/fault/physical proof.
+
+Read-only incremental API refinement during qualification: begin with an
+opaque `CompiledSemanticCatalogV1` base, which only the successful fresh/update
+compiler can return, plus the exact captured registry. This avoids treating
+arbitrary retained projection schemas as current compiler output. A counted,
+ordered stream owns one Upsert(compiled configuration) or Remove(owner path)
+at a time; repeats apply in stream order, with only the final unselected result
+returned. This is the internal staged instruction order, not a change to any
+public batch normalization policy. Require the final expected configuration
+count; errors expose no completed candidate. A changed registry requires the
+existing bounded full compilation path, never stale automatic parser contexts.
+Persisted known-profile admission/restart remains a separate explicit obligation
+before task integration; this narrow input cannot claim arbitrary reopened-root
+admission. Shared staging roots and cancellation/resource ownership remain with
+the task/publication owner. No incremental API or production code is written yet.
+
+Bounded update proof refinement: the opaque previous successful compiler result
+provides the unchanged-closure invariant. Validate/readback every newly staged
+object and affected ownership edge; preserve exact COW counts. Do not blindly
+reuse fresh compilation's full final-definition walk for a fieldless mutation:
+that would read every unrelated definition despite Round10's bounded update
+rule. Share final state emission, but keep fresh full validation and incremental
+construction/ownership proof distinct. When dependency candidates exist, one
+bounded-memory scan of remaining class2/4 references is required for last-use
+pruning; it must not become a full scan per candidate. A cache draft compares
+reads for the same fieldless addition with32versus128base configurations. No
+passing result is claimed. Independent final-catalog traversal/differential
+tests still verify the complete output; persisted admission must validate its
+base before receiving this opaque proof rather than inventing a trusted token.
+
+Owner decision requested asynchronously September14: permission to add dedicated
+versioned semantic-mutation task/checkpoint definitions, preserving all existing
+IDs and encodedformats. Round10 requires those resumabletasks, but the frozen
+taskkind registry and typed checkpoint inventory lack them. No answer or new
+wirecontract is assumed. Bounded compiler work continues without taskactivation.
 
 ## U1 completed unit: incremental catalog integration — reader prerequisite
 

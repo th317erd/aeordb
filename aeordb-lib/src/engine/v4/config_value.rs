@@ -638,3 +638,7 @@ fn length_error(context: impl Into<String>) -> FormatError {
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
 }
+
+#[path = "config_value_borrowed.rs"]
+mod borrowed;
+pub use borrowed::{BorrowedCanonicalArrayV1, BorrowedCanonicalMapV1, BorrowedCanonicalValueV1, borrow_canonical_value};

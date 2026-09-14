@@ -1909,6 +1909,7 @@ fn catalog_cow_nodes_publish_reopen_and_traverse_through_the_captured_physical_a
 
 #[test]
 fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_head() {
+  use aeordb::engine::v4::config_value::{CanonicalValueBounds, borrow_canonical_value};
   use aeordb::engine::v4::namespace::decode_semantic_object;
   use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
   use aeordb::engine::v4::index_configuration_compiler::{
@@ -2023,7 +2024,36 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     let bounds = SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap();
     let stats = reader
       .walk_catalog(&catalog_root, bounds, &|| false, |record| {
-        reader.with_definition(record, &|| false, |_| Ok(()))?;
+        reader.with_definition(record, &|| false, |payload| {
+          if record.record_kind == 1 {
+            let value = borrow_canonical_value(payload, CanonicalValueBounds::CONFIG).unwrap();
+            let mut entries = value.map_entries().unwrap();
+            let (key, fields) = entries.next().unwrap().unwrap();
+            assert_eq!(key, "fields");
+            let mut fields = fields.map_entries().unwrap();
+            let (_, field) = fields.next().unwrap().unwrap();
+            assert!(fields.next().is_none());
+            let mut members = field.map_entries().unwrap();
+            let (key, indexes) = members.next().unwrap().unwrap();
+            assert_eq!(key, "indexes");
+            let mut indexes = indexes.array_entries().unwrap();
+            let index = indexes.next().unwrap().unwrap();
+            assert_eq!(index.as_bytes().unwrap().len(), record.semantic_id.len());
+            assert!(indexes.next().is_none());
+            let (key, value_store) = members.next().unwrap().unwrap();
+            assert_eq!(key, "value_store_id");
+            assert_eq!(value_store.as_bytes().unwrap().len(), record.semantic_id.len());
+            assert!(members.next().is_none());
+            let (key, scope) = entries.next().unwrap().unwrap();
+            assert_eq!(key, "scope_id");
+            assert_eq!(scope.as_bytes().unwrap().len(), record.semantic_id.len());
+            assert!(entries.next().is_none());
+          } else if record.record_kind == 2 {
+            let value = borrow_canonical_value(payload, CanonicalValueBounds::CONFIG).unwrap();
+            assert!(value.map_entries().unwrap().next().is_none());
+          }
+          Ok(())
+        })?;
         let matched = reader.with_record(&catalog_root, bounds, record.record_kind, record.owner_key, &|| false, |candidate| {
           Ok(candidate.semantic_id == record.semantic_id && candidate.definition_object_id == record.definition_object_id)
         })?;

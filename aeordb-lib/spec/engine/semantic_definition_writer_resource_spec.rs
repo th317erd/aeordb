@@ -35,6 +35,9 @@ mod semantic_catalog_compiler_resource_spec;
 #[path = "semantic_catalog_lookup_resource_spec.rs"]
 mod semantic_catalog_lookup_resource_spec;
 
+#[path = "canonical_value_borrowed_resource_spec.rs"]
+mod canonical_value_borrowed_resource_spec;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Allocations {
   total: usize,

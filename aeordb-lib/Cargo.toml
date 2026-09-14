@@ -1508,6 +1508,10 @@ path = "spec/engine/semantic_catalog_compiler_spec.rs"
 name = "semantic_catalog_lookup_spec"
 path = "spec/engine/semantic_catalog_lookup_spec.rs"
 
+[[test]]
+name = "canonical_value_borrowed_spec"
+path = "spec/engine/canonical_value_borrowed_spec.rs"
+
 
 [lints]
 workspace = true
