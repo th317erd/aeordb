@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-14T10:26:44.728Z",
+  "baseCommit": "7ee309c424a7fad7dc550508a2d7acdb624b7ccd",
+  "unit": "U1 independent semantic envelope size admission",
+  "unitComplete": true,
+  "fullU1Complete": false,
+  "fullV4Ready": false,
+  "inputs": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "tools/v4-reference/src/core.rs",
+      "sha256": "ad313cef0cf5afdcbcd1d0b7f686ed329c87731f83cda54eaa0b2b3da3a67a72"
+    },
+    {
+      "path": "tools/v4-reference/spec/semantic_envelope_cap_spec.rs",
+      "sha256": "6304bc87b99fd4e39b0b50b78e3e2e7dc901697604fbdefe879494567426e388"
+    }
+  ],
+  "sourceManifest": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-source-inputs.sha256",
+    "sha256": "39b6c13a102766bccaa42efe287ec45f283b09363323bffc48b05d665898873e"
+  },
+  "archive": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-source.tar",
+    "sha256": "5ded9f358d90c8ca7105879b929cd3c00be65426c27b60d87a5211caaad2935e"
+  },
+  "gates": [
+    {
+      "stage": "narrow",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml semantic_envelope_cap_spec ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/narrow.exit",
+        "sha256": "f9ae7d5eb92a30350e3eb987ebb64fe95cc3f95f8df0784f186f47d3712f36d9",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:22:12Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515908608"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/narrow.guard.log",
+        "sha256": "87f60b3ac68c3b5381c793546c12fc6bafe67da9bbe738c06f65969d83c7b105"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/narrow.log",
+        "sha256": "9ae9ce9eaf1e18086853b70b5745fa8c343ebcd73663d54c9dc5e7d5127e2986"
+      }
+    },
+    {
+      "stage": "reference",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo test --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference.exit",
+        "sha256": "9053bc6e2d6c789d1f099fa299e0eedf1ceac4d403dc380251b15cf362aea2f6",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:22:26Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515879936"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference.guard.log",
+        "sha256": "22b68b68f3bba5f2ac3a449a66e7546860cb2ead709d882ee394c751e3e0c80b"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference.log",
+        "sha256": "d71e8e2778edad68647c461375fc79dc5eadffdf06f439a9359ba472a4ac5c0a"
+      }
+    },
+    {
+      "stage": "reference-format",
+      "command": "cargo fmt --manifest-path tools/v4-reference/Cargo.toml -- --check ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-format.exit",
+        "sha256": "8bb2ef21c94966dcb773dc0e01be96f756685a46cd4b2495b8fe799817adc8f9",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:22:27Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515859456"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-format.guard.log",
+        "sha256": "3ae422f2e32df0a2760abd64abb1914f28821f34e3e868793f197d47309b3175"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-format.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "stage": "reference-clippy-resumed",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo clippy --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml --all-targets -- -D warnings ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-clippy-resumed.exit",
+        "sha256": "fa20434b1ca296dc96b8477ac681197f22d55519ca782b8ee1d92e21e55a8a4a",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:23:58Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515646464"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-clippy-resumed.guard.log",
+        "sha256": "a6c0bce89cc27b5d87d16774f964042463c82b58856568c98e57414643d17ec7"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-clippy-resumed.log",
+        "sha256": "dda7980e8da1041233b9bd7cd86f479320cbe44ef953019bb06c5f1c023ea622"
+      }
+    },
+    {
+      "stage": "reference-fixtures",
+      "command": "env CARGO_TARGET_DIR=/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference cargo run --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4 ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-fixtures.exit",
+        "sha256": "82dc7c067436ba038d651d3656062b0b235b944b083abd57683af24d0defed3b",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:24:04Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515613696"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-fixtures.guard.log",
+        "sha256": "bb6649004a5dea0280cfadbbcc95954862876cd10962a14b143b00cbd481a2ba"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-fixtures.log",
+        "sha256": "c0ce0e00ceaeb8475ef37a32a39ddc2fc04f681d20ad61ef47242a8b326028f6"
+      }
+    },
+    {
+      "stage": "contracts",
+      "command": "bash scripts/plan/check-v4-contracts.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/contracts.exit",
+        "sha256": "5eab2b052e41aa3ed51f14432abff419d43e5319dee4f0a35c6d17bd8360abbd",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:24:08Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515585024"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/contracts.guard.log",
+        "sha256": "35a2c6bbc8f69b12f8363bd9ccf2e9aa987e201819d5e9fb6ecf480dcbc7d36e"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/contracts.log",
+        "sha256": "cf4b8543d94072c6e50d343c575076084ba227a92757713a5bd4d6b45556a098"
+      }
+    },
+    {
+      "stage": "debt-selftest",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "terminal": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/debt-selftest.exit",
+        "sha256": "bb97f38b9907d417cb694d1b35de0f8b5dbdeff499a7a41fc5dfbd7f39d5452d",
+        "values": {
+          "exit_status": "0",
+          "finished_utc": "2026-09-14T10:24:11Z",
+          "termination_reason": "none",
+          "final_free_bytes": "336155209728",
+          "final_secondary_free_bytes": "70515556352"
+        }
+      },
+      "guard": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/debt-selftest.guard.log",
+        "sha256": "0c5ca450dcc4be90d9e2f3dd6a955c9d4c25b36021661c69167d243b9220d219"
+      },
+      "log": {
+        "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/debt-selftest.log",
+        "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee"
+      }
+    }
+  ],
+  "red": {
+    "terminal": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-red-linux-evidence/envelope-red.exit",
+      "sha256": "c6b49e61bf8ebe03e6f81ba432b4103d7ff43671851ace7fbb647941de162124",
+      "values": {
+        "exit_status": "101",
+        "finished_utc": "2026-09-14T10:13:50Z",
+        "termination_reason": "none",
+        "final_free_bytes": "336155209728",
+        "final_secondary_free_bytes": "70518779904"
+      }
+    },
+    "log": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-red-linux-evidence/envelope-red.log",
+      "sha256": "ad9d5edabeec1bfc5e379c2c31eddac7343505e54712a03ddca4f662cab0e25f"
+    },
+    "passed": 1,
+    "failed": 2,
+    "specSHA256": "6304bc87b99fd4e39b0b50b78e3e2e7dc901697604fbdefe879494567426e388",
+    "binary": {
+      "schemaVersion": 1,
+      "recordedUTC": "2026-09-14 10:15:11 UTC",
+      "sourceManifestSHA256": "c39bc39636fd9ba379b0992ab7f69cd073ef47011820e5a12a7b6886edfbf01e",
+      "host": "wyatt-desktop",
+      "stage": "envelope-red",
+      "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/deps/aeordb_v4_reference-837889bea7290fc5",
+      "bytes": 11820712,
+      "modifiedUnixSeconds": 1789380830,
+      "sha256": "75f42d4d3ad1c9d66efb6097fce9efa560c1976cfe85e6c0e4d0154a2ed62da0",
+      "sourceChecksPassed": true,
+      "metadataBeforeAfterMatches": true
+    }
+  },
+  "binaries": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-binaries.json",
+    "sha256": "d76d74f66e3d53498d3711b0e4ff5c4c641aa329556b3ca15f760bea5f9b169d",
+    "schemaVersion": 1,
+    "recordedUTC": "2026-09-14T10:25:00.366Z",
+    "sourceManifestSHA256": "39b6c13a102766bccaa42efe287ec45f283b09363323bffc48b05d665898873e",
+    "platform": "linux",
+    "binaries": [
+      {
+        "name": "reference-tests",
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/deps/aeordb_v4_reference-837889bea7290fc5",
+        "log": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-evidence/reference.log",
+        "bytes": 11820848,
+        "modifiedUTC": "2026-09-14T10:22:11.881Z",
+        "sha256": "8f3909fca40a4aa2ffad3382d3620f0cfb6dfc916eae6a381b8e2a5b635d66f0"
+      },
+      {
+        "name": "reference-verifier",
+        "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/v4-reference/debug/aeordb-v4-reference",
+        "log": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-evidence/reference-fixtures.log",
+        "bytes": 10939856,
+        "modifiedUTC": "2026-09-14T10:24:02.710Z",
+        "sha256": "4a51686e8ddac76e8a9d90e4e148ef641f62fd8f02b444b044cbd36e534028ce"
+      }
+    ]
+  },
+  "interrupted": {
+    "driver": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-driver.exit",
+      "sha256": "44fd421c8703663a2208de7f16b8e6bd49c112bbc4a23d8800bd55310dd32ff2",
+      "values": {
+        "exit_status": "1",
+        "last_stage": "reference-clippy",
+        "finished_utc": "2026-09-14T10:22:34Z"
+      }
+    },
+    "stage": {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-final-linux-evidence/reference-clippy.exit",
+      "sha256": "388cadf4bb3f4b02405f3af738ba7840a4437c5c47c6bf109c6350a3f8173b0d",
+      "values": {
+        "exit_status": "92",
+        "finished_utc": "2026-09-14T10:22:34Z",
+        "termination_reason": "none",
+        "final_free_bytes": "336155209728",
+        "final_secondary_free_bytes": "70515830784"
+      }
+    },
+    "explanation": "The SSH observer was incorrectly limited to 30 seconds. Clippy finished compilation but its wrapper source check/output lost the pipe and returned 92. Exact source/patches were verified unchanged, and Clippy plus all remaining gates passed through a new driver with the normal overall deadline."
+  },
+  "remainingDriver": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-envelope-remaining-driver.exit",
+    "sha256": "a40ef03e9ce2ffd227cc08af4dd46b54a0b84707e6bbe03e27aec6df9edc40df",
+    "values": {
+      "exit_status": "0",
+      "last_stage": "complete",
+      "finished_utc": "2026-09-14T10:24:11Z"
+    }
+  },
+  "unchangedProductionProof": {
+    "path": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/user-facing-v4-u1-catalog-owner-proof-20260914.json",
+    "sha256": "c15086f5e9c08d82fe8c7c0a4e058bc2868d8fb7e66e0ffc7399fc66ef24ddd6"
+  },
+  "limitations": [
+    "Reference-only correction; no production AeorDB source or frozen fixture bytes changed.",
+    "No new native, release or full-workspace test claim. The 93 unchanged production regressions are recorded in the preceding proof, not rerun here.",
+    "Unit MemoryMax=4GiB, MemorySwapMax=0, CPUQuota=200%; reported few-MiB process peaks are not used as compiler RSS or actual-v4 resource proof.",
+    "Catalog writers, COW, semantic compiler and U2-U7 remain outstanding."
+  ]
+}

@@ -15,8 +15,13 @@ mod dependency_catalog_contract_spec;
 #[path = "../spec/catalog_owner_contract_spec.rs"]
 mod catalog_owner_contract_spec;
 
+#[cfg(test)]
+#[path = "../spec/semantic_envelope_cap_spec.rs"]
+mod semantic_envelope_cap_spec;
+
 const ENTITY_MAGIC: u32 = 0x0ae0_12db;
 const MAX_ENTITY_VERSION: u8 = 1;
+const SEMANTIC_OBJECT_MAXIMUM_LENGTH: usize = 1_048_576;
 const DIRECTORY_ENTRY_TYPE: u8 = 0x03;
 const INITIAL_CAPABILITIES: &[u8; 32] = &[
   0x7f, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -511,6 +516,9 @@ fn build_semantic_envelope(kind: u16, item_count: u64, body: Vec<u8>) -> Vec<u8>
 }
 
 fn decode_semantic_object(profile: HashProfile, object: &[u8]) -> Result<(String, Option<Vec<u8>>), &'static str> {
+  if object.len() > SEMANTIC_OBJECT_MAXIMUM_LENGTH {
+    return Err("semantic_object_exceeds_cap");
+  }
   if object.len() < 36 {
     return Err("semantic_truncated");
   }

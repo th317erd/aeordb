@@ -26,8 +26,12 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: independent catalog owner-key validation before the all-class
-writers. All ten required evidence gates pass, including the separate debt
+Current landing: independent semantic-envelope size admission is qualified;
+next are catalog leaf/internal writers and all-class definition wrapping.
+See the [envelope proof](../evidence/user-facing-v4-u1-semantic-envelope-proof-20260914.json).
+Owner-key validation is committed/pushed as
+`7ee309c424a7fad7dc550508a2d7acdb624b7ccd`.
+All ten owner-key evidence gates pass, including the separate debt
 self-test; see the [owner-key unit proof](../evidence/user-facing-v4-u1-catalog-owner-proof-20260914.json).
 The preceding Windows native-path fix is committed/pushed as
 `3354ee917266259ab342c087f1a504fbf121d82c`.
@@ -116,9 +120,9 @@ Windows qualification. The strict complete evidence check passes and its
 is included in that landing snapshot, committed/pushed as `c222ee29`.
 The subsequent Round16 catalog correction is also landed as `9d3d4b83`.
 The Windows native-path unit is committed/pushed as `3354ee91`.
-Next: land the verified independent owner-key correction, then close its
-envelope-cap prerequisite and implement catalog codecs/COW and compilation
-under the approved rule.
+Owner-key validation is committed/pushed as `7ee309c4`.
+Next: close the independent envelope-cap prerequisite and implement catalog
+codecs/COW and compilation under the approved rule.
 Do not repeat completed writer tests without a source or evidence reason. The original
 normal-creation target remains red until actual runtime/default integration;
 neither prerequisite unit completes U1 or the full readiness goal.
@@ -1851,6 +1855,55 @@ and its binary identity. Final free bytes: Data336,155,258,880 and
 home70,572,879,872. The user unit enforced4GiB/noSwap; its reported few-MiB peak
 is not credible compiler RSS and is not used as actual-v4 resource proof.
 Full U1 and U2–U7 remain required; no production service/default changed.
+
+## Active U1 prerequisite: independent semantic envelope cap
+
+Entry/last green7ee309c4; direct owner. Owned reference `core.rs`, dedicated
+`spec/semantic_envelope_cap_spec.rs`, ledger and proof. Production namespace
+decoding already rejects complete semantic objects larger than1,048,576bytes
+before CRC/identity work. The independent reader omits that admission check,
+and its final identity construction allocates a preimage from the whole input.
+Round10 requires kind caps before allocation; this is an existing contract.
+
+- [x] Execute independent RED: exact1MiB structural envelope stays accepted;
+  larger correctly framed definitions and oversized malformed input must fail
+  at size admission. These opaque payloads characterize only the structural
+  envelope boundary, not valid compiled semantic projections.
+- [x] Add the minimal pre-parse cap, pass all175 reference tests and472 frozen
+  fixtures, strict reference lint/format and actual contract/debt gates.
+- [x] Record unchanged fixtures, exact source/binaries, RED and final receipts;
+  land the green prerequisite before catalog encoding/COW/compiler integration.
+
+Three new tests are installed before any reader behavior change. Frozen RED
+4-input manifestSHA
+`c39bc39636fd9ba379b0992ab7f69cd073ef47011820e5a12a7b6886edfbf01e`;
+archiveSHA `3531a5dfe2b456aaf9ec3232d34ac0ae7a3df994c8a09453fe5a2f6f7ada61d0`.
+Use a new detached `source-u1-semantic-codecs` checkout at7ee; all prior source,
+failure evidence and executed-binary identity records remain retained. Reusable
+reference build-cache outputs may be rebuilt; pinned releases are untouched. No production
+codec, fixture, default or database change is included in this prerequisite.
+
+RED completed 2026-09-14T10:13:50Z: 1 passed, 2 behavioral failures,
+172 filtered, no ignored tests or resource stop. The oversized valid envelope
+was accepted, and oversized malformed magic reached framing validation instead
+of size admission. The unchanged three tests now accompany a pre-parse 1MiB
+cap; final qualification is next. RED logs, input manifest, archive, and
+same-host binary identity are preserved under the campaign cache.
+
+Final qualification completed2026-09-14T10:24:11Z: 3 narrow and175 full
+reference tests, format, strict Clippy,472 fixtures, contracts and actual debt
+self-test pass. The first SSH observer was mistakenly limited to30seconds;
+its driver failed while Clippy's terminal wrapper was reporting/checking
+source. Compilation itself succeeded, but that receipt is not a passing gate.
+All four source hashes and before/after patches were verified unchanged;
+Clippy and all remaining stages passed a separate correctly bounded driver.
+Both failures and successes are retained in the strict proof. No test was
+edited after RED and no frozen fixture or AeorDB production source changed.
+Previous93 production regressions remain separate predecessor evidence.
+Final manifestSHA39b6c13a102766bccaa42efe287ec45f283b09363323bffc48b05d665898873e;
+archiveSHA5ded9f358d90c8ca7105879b929cd3c00be65426c27b60d87a5211caaad2935e.
+Final free bytes Data336155209728/home70515556352; no resource stop.
+All stage receipts and both same-host binary identities are mirrored locally.
 
 ## U2 read-only entry refinement: public append-writer guard
 
