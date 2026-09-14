@@ -10,7 +10,7 @@
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 454,
+  "fixture_count": 460,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -5848,6 +5848,36 @@
       "relation": "boundary:4096-bytes"
     },
     {
+      "id": "asel-blake3-256-limit-65536-valid",
+      "format_id": "source-selector-v1",
+      "family": "SourceSelectorV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "source-selector-v1/asel-blake3-256-limit-65536-valid.bin",
+      "annotated_hex": "source-selector-v1/asel-blake3-256-limit-65536-valid.hex",
+      "byte_length": 65536,
+      "sha256": "9373582c9eb09a6241f87095de0051c4ff15a96ae6ba2dc874b4bd2f15b88cb9",
+      "blake3": "f076d6d867b8a9cb9b12ba445ff63dc3829a850ad6925842c8cf3f7b2ebae014",
+      "canonical_key": null,
+      "expected": "selector:plugin-mapper:items=0",
+      "relation": "boundary:65536-bytes"
+    },
+    {
+      "id": "asel-blake3-256-over-limit-65537-invalid",
+      "format_id": "source-selector-v1",
+      "family": "SourceSelectorV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "source-selector-v1/asel-blake3-256-over-limit-65537-invalid.bin",
+      "annotated_hex": "source-selector-v1/asel-blake3-256-over-limit-65537-invalid.hex",
+      "byte_length": 65537,
+      "sha256": "9fd6eac699d9000e91ed72189ae906a93dcf81a47c2c7ab1120fc18c26b67e76",
+      "blake3": "ecf46d8537aec67200ee78c425363accb3c395e9fa3cf923d763582931b556d1",
+      "canonical_key": null,
+      "expected": "error:selector_length",
+      "relation": "boundary:65537-bytes"
+    },
+    {
       "id": "asel-sha512-metadata-hash-valid",
       "format_id": "source-selector-v1",
       "family": "SourceSelectorV1",
@@ -5951,6 +5981,36 @@
       "canonical_key": null,
       "expected": "selector:plugin-mapper:items=0",
       "relation": "boundary:4096-bytes"
+    },
+    {
+      "id": "asel-sha512-limit-65536-valid",
+      "format_id": "source-selector-v1",
+      "family": "SourceSelectorV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "source-selector-v1/asel-sha512-limit-65536-valid.bin",
+      "annotated_hex": "source-selector-v1/asel-sha512-limit-65536-valid.hex",
+      "byte_length": 65536,
+      "sha256": "9373582c9eb09a6241f87095de0051c4ff15a96ae6ba2dc874b4bd2f15b88cb9",
+      "blake3": "f076d6d867b8a9cb9b12ba445ff63dc3829a850ad6925842c8cf3f7b2ebae014",
+      "canonical_key": null,
+      "expected": "selector:plugin-mapper:items=0",
+      "relation": "boundary:65536-bytes"
+    },
+    {
+      "id": "asel-sha512-over-limit-65537-invalid",
+      "format_id": "source-selector-v1",
+      "family": "SourceSelectorV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "source-selector-v1/asel-sha512-over-limit-65537-invalid.bin",
+      "annotated_hex": "source-selector-v1/asel-sha512-over-limit-65537-invalid.hex",
+      "byte_length": 65537,
+      "sha256": "9fd6eac699d9000e91ed72189ae906a93dcf81a47c2c7ab1120fc18c26b67e76",
+      "blake3": "ecf46d8537aec67200ee78c425363accb3c395e9fa3cf923d763582931b556d1",
+      "canonical_key": null,
+      "expected": "error:selector_length",
+      "relation": "boundary:65537-bytes"
     },
     {
       "id": "control-blake3-256-index-registry-valid",
@@ -6713,9 +6773,24 @@
       "byte_length": 1347,
       "sha256": "02e41347672c9be715364fe0508a1d3ff61cfb53464ea548b48885406d63e382",
       "blake3": "7633f92023de07374e60c7895531ffe9b039562014f1d2c787ef8fe33c2bc025",
-      "canonical_key": "233041f13ccad8c65adbd111d03f9f1798128a81a561da232a852ed53ce4601b",
-      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
-      "relation": "semantic-family:migration-always-missing-v0"
+      "canonical_key": null,
+      "expected": "error:value_store_always_missing_context",
+      "relation": "archival-rejection:round-9-supersedes-round-8a-parser-pipeline"
+    },
+    {
+      "id": "avst-blake3-256-always-missing-none-valid",
+      "format_id": "value-store-definition-v1",
+      "family": "ValueStoreDefinitionV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "value-store-definition-v1/avst-blake3-256-always-missing-none-valid.bin",
+      "annotated_hex": "value-store-definition-v1/avst-blake3-256-always-missing-none-valid.hex",
+      "byte_length": 270,
+      "sha256": "c4d549449d53c86cc456c460f59b75a16720074cf75e0aca21b2052b57d08b73",
+      "blake3": "b53023edf94e72362a9242a46f0da62ee57e74005b7aad1232f3344dd41236ba",
+      "canonical_key": "80da14ded804219a0cfdee66174d8d9a9b76bd6549632128f6e9da0227f77d9f",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=0",
+      "relation": "round-9:always-missing-canonical-none-no-content-input"
     },
     {
       "id": "avst-sha512-metadata-hash-corrected-valid",
@@ -6818,9 +6893,24 @@
       "byte_length": 1379,
       "sha256": "8b80224e3ce489bb5bd394a2bc58376d2858a8b9ed49bf1d815ceac7deb3bfab",
       "blake3": "1bdd725c5083567fb7bbc11b8191df1b14a02458a6b7a23a9097775d00da7ba8",
-      "canonical_key": "6b95389982da10b5b12f5ab601fcff0ce59fe5a876009c892f6fa1ad25b37a982730a514a68db8c506cf626687dd82aef2aa1df520c1560ed165d97d90cabe9e",
-      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
-      "relation": "semantic-family:migration-always-missing-v0"
+      "canonical_key": null,
+      "expected": "error:value_store_always_missing_context",
+      "relation": "archival-rejection:round-9-supersedes-round-8a-parser-pipeline"
+    },
+    {
+      "id": "avst-sha512-always-missing-none-valid",
+      "format_id": "value-store-definition-v1",
+      "family": "ValueStoreDefinitionV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "value-store-definition-v1/avst-sha512-always-missing-none-valid.bin",
+      "annotated_hex": "value-store-definition-v1/avst-sha512-always-missing-none-valid.hex",
+      "byte_length": 302,
+      "sha256": "cb9df7e1594f05da3de5780579900c2cadf0732bcf65a92d717250b0cad94567",
+      "blake3": "933182c6b9ed06f742295ce18233a49b552401e09b97540d436ec34de03cd128",
+      "canonical_key": "fedda0ad25881e45b2fb4108ca4343b7554dcedd027c9e756ab61a7d51a050c660f2c924ccc3f7ab37400adbb52b72f362bd8fd317d466a89424098e4dee9abf",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=0",
+      "relation": "round-9:always-missing-canonical-none-no-content-input"
     }
   ]
 }

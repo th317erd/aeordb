@@ -6,7 +6,7 @@ const SELECTOR_HEADER_LENGTH: usize = 32;
 const SEGMENT_HEADER_LENGTH: usize = 8;
 const MAPPER_HEADER_LENGTH: usize = 16;
 const POLICY_LENGTH: usize = 128;
-const SELECTOR_MAX_LENGTH: usize = 4 * 1_024;
+const SELECTOR_MAX_LENGTH: usize = 64 * 1_024;
 const MAX_SEGMENTS: usize = 1_024;
 const REGEX_COMPILED_SIZE_LIMIT: usize = 1_024 * 1_024;
 const REGEX_DFA_SIZE_LIMIT: usize = 1_024 * 1_024;
@@ -67,10 +67,19 @@ pub fn fixture_cases() -> Vec<SelectorFixtureCase> {
   let corrected_mapper = build_mapper(2, 1, &canonical_null()).expect("corrected mapper selector must encode");
   let legacy_mapper = build_mapper(1, 1, &canonical_null()).expect("legacy mapper selector must encode");
   let always_missing = build_always_missing();
-  let maximum = build_mapper(2, 1, &canonical_utf8(3_915)).expect("maximum selector must encode");
-  assert_eq!(maximum.len(), SELECTOR_MAX_LENGTH);
+  // Keep the old named 4 KiB example byte-identical; it was never the ratified
+  // maximum. New explicitly named examples cover the actual boundary.
+  let historical_maximum = build_mapper(2, 1, &canonical_utf8(3_915)).expect("4 KiB selector must encode");
+  assert_eq!(historical_maximum.len(), 4_096);
+  let maximum = build_mapper(2, 1, &canonical_utf8(65_355)).expect("64 KiB selector must encode");
+  assert_eq!(maximum.len(), 65_536);
+  let mut oversized = maximum.clone();
+  oversized.insert(53 + 65_355, b'x');
+  put_u32(&mut oversized, 4, 65_537);
+  put_u32(&mut oversized, 36, 65_361);
+  put_u32(&mut oversized, 49, 65_356);
 
-  let mut cases = Vec::with_capacity(14);
+  let mut cases = Vec::with_capacity(18);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     for (suffix, bytes, expected, relation) in [
       ("metadata-hash", metadata.clone(), "selector:metadata:items=0", Some("metadata-id:hash")),
@@ -79,7 +88,9 @@ pub fn fixture_cases() -> Vec<SelectorFixtureCase> {
       ("mapper-corrected", corrected_mapper.clone(), "selector:plugin-mapper:items=0", Some("mapper-contract:typed-plural-v1")),
       ("mapper-legacy", legacy_mapper.clone(), "selector:plugin-mapper:items=0", Some("mapper-contract:legacy-single-v0")),
       ("always-missing", always_missing.clone(), "selector:always-missing-v0:items=0", Some("migration:canonical-always-missing")),
-      ("maximum-length", maximum.clone(), "selector:plugin-mapper:items=0", Some("boundary:4096-bytes")),
+      ("maximum-length", historical_maximum.clone(), "selector:plugin-mapper:items=0", Some("boundary:4096-bytes")),
+      ("limit-65536", maximum.clone(), "selector:plugin-mapper:items=0", Some("boundary:65536-bytes")),
+      ("over-limit-65537", oversized.clone(), "error:selector_length", Some("boundary:65537-bytes")),
     ] {
       cases.push(SelectorFixtureCase {
         id: fixture_id(profile, suffix),
@@ -343,6 +354,8 @@ fn fixture_id(profile: HashProfile, suffix: &str) -> &'static str {
     (HashProfile::Blake3_256, "mapper-legacy") => "asel-blake3-256-mapper-legacy-valid",
     (HashProfile::Blake3_256, "always-missing") => "asel-blake3-256-always-missing-valid",
     (HashProfile::Blake3_256, "maximum-length") => "asel-blake3-256-maximum-length-valid",
+    (HashProfile::Blake3_256, "limit-65536") => "asel-blake3-256-limit-65536-valid",
+    (HashProfile::Blake3_256, "over-limit-65537") => "asel-blake3-256-over-limit-65537-invalid",
     (HashProfile::Sha512, "metadata-hash") => "asel-sha512-metadata-hash-valid",
     (HashProfile::Sha512, "json-root") => "asel-sha512-json-root-valid",
     (HashProfile::Sha512, "json-mixed") => "asel-sha512-json-mixed-valid",
@@ -350,6 +363,8 @@ fn fixture_id(profile: HashProfile, suffix: &str) -> &'static str {
     (HashProfile::Sha512, "mapper-legacy") => "asel-sha512-mapper-legacy-valid",
     (HashProfile::Sha512, "always-missing") => "asel-sha512-always-missing-valid",
     (HashProfile::Sha512, "maximum-length") => "asel-sha512-maximum-length-valid",
+    (HashProfile::Sha512, "limit-65536") => "asel-sha512-limit-65536-valid",
+    (HashProfile::Sha512, "over-limit-65537") => "asel-sha512-over-limit-65537-invalid",
     _ => unreachable!("fixture suffixes are fixed"),
   }
 }
@@ -443,7 +458,7 @@ mod tests {
 
   #[test]
   fn exact_selector_length_boundary_is_accepted_then_rejected() {
-    let maximum = fixture_cases().remove(6).bytes;
+    let maximum = fixture_cases().into_iter().find(|case| case.id == "asel-blake3-256-limit-65536-valid").unwrap().bytes;
     assert_eq!(maximum.len(), SELECTOR_MAX_LENGTH);
     assert!(decode_selector(&maximum).is_ok());
     let mut oversized = maximum;
@@ -461,10 +476,27 @@ mod tests {
   }
 
   #[test]
-  fn every_selector_fixture_byte_is_structural_or_identity_protected() {
+  fn selector_fixture_framing_and_payload_mutations_are_structural_or_identity_protected() {
     for case in fixture_cases() {
       let original_digest = case.profile.digest(&case.bytes);
-      for index in 0..case.bytes.len() {
+      let offsets: Vec<usize> = if case.bytes.len() <= 4_096 {
+        // Preserve exhaustive mutation of every byte of all original fixtures.
+        (0..case.bytes.len()).collect()
+      } else {
+        // The added large fixtures are UTF-8 mapper arguments. Exhaust every
+        // header/policy byte, then sample payload interiors and end boundaries.
+        // As in the scope oracle, avoid quadratic copies/hashes of large scalars.
+        assert_eq!(read_u16(&case.bytes, 2).unwrap(), 3);
+        let policy_start = case.bytes.len() - POLICY_LENGTH;
+        let mut offsets: Vec<_> = (0..53).collect();
+        offsets.extend(policy_start..case.bytes.len());
+        offsets.extend((53..policy_start).step_by(1_024));
+        offsets.extend([policy_start - 2, policy_start - 1]);
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+      };
+      for index in offsets {
         let mut mutated = case.bytes.clone();
         mutated[index] ^= 1;
         let observed = observe(case.profile, &mutated).0;

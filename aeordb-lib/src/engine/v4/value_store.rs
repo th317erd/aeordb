@@ -11,7 +11,7 @@ const DEFINITION_HEADER_LENGTH: usize = 32;
 const FIXED_BODY_WITHOUT_SCOPE: usize = 80;
 const MAX_DEFINITION_LENGTH: usize = 512 * 1_024;
 const MAX_FIELD_NAME_LENGTH: usize = 4 * 1_024;
-const MAX_SELECTOR_LENGTH: usize = 4 * 1_024;
+const MAX_SELECTOR_LENGTH: usize = 64 * 1_024;
 const MAX_PARSER_PLAN_LENGTH: usize = 128 * 1_024;
 const MAX_DEPENDENCY_TABLE_LENGTH: usize = 256 * 1_024;
 
@@ -51,6 +51,119 @@ pub struct ValueStoreDefinitionV1<'a> {
   pub selector: SourceSelectorV1<'a>,
   pub parser_plan: ParserResolutionPlanV1<'a>,
   pub dependencies: DependencyTableV1<'a>,
+}
+
+/// Canonical inputs only; aliases and dependency compilation belong to the
+/// configuration compiler. Children are complete independently encoded records.
+#[derive(Debug, Clone, Copy)]
+pub struct ValueStoreDefinitionWriteV1<'a> {
+  pub scope_id: &'a [u8],
+  pub field_name: &'a str,
+  pub semantic_family: ValueStoreSemanticFamily,
+  pub max_source_values_per_document: u32,
+  pub max_canonical_source_bytes_per_document: u64,
+  pub max_document_input_bytes: u64,
+  pub max_selector_work_items_per_document: u64,
+  pub max_selector_examined_bytes_per_document: u64,
+  pub selector: &'a [u8],
+  pub parser_plan: &'a [u8],
+  pub dependencies: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedValueStoreDefinitionV1 {
+  pub value_store_id: Vec<u8>,
+  pub value: Vec<u8>,
+}
+
+pub fn encode_value_store_definition(
+  request: ValueStoreDefinitionWriteV1<'_>,
+  hash_algorithm: HashAlgorithm,
+) -> FormatResult<EncodedValueStoreDefinitionV1> {
+  let hash_width = hash_algorithm.hash_length();
+  if request.scope_id.len() != hash_width || request.scope_id.iter().all(|byte| *byte == 0) {
+    return Err(error(MalformedInputClass::IdentityKeyOrGenerationMismatch, "value_store_scope_id", "ScopeId has wrong width or is zero"));
+  }
+  validate_child_length(request.field_name.len(), 1, MAX_FIELD_NAME_LENGTH, "field name")?;
+  validate_child_length(request.selector.len(), 32, MAX_SELECTOR_LENGTH, "source selector")?;
+  validate_child_length(request.parser_plan.len(), 48, MAX_PARSER_PLAN_LENGTH, "parser plan")?;
+  validate_child_length(request.dependencies.len(), 32, MAX_DEPENDENCY_TABLE_LENGTH, "dependency table")?;
+  let fixed = DEFINITION_HEADER_LENGTH + hash_width;
+  let children = [request.field_name.as_bytes(), request.selector, request.parser_plan, request.dependencies];
+  let total_length = children.iter().try_fold(fixed + FIXED_BODY_WITHOUT_SCOPE, |length, child| {
+    length.checked_add(child.len()).ok_or_else(|| length_error("ValueStore writer length overflow"))
+  })?;
+  if total_length > MAX_DEFINITION_LENGTH {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "value_store_exceeds_cap",
+      format!("{total_length} bytes exceeds {MAX_DEFINITION_LENGTH}"),
+    ));
+  }
+  if request.field_name.as_bytes().contains(&0) {
+    return Err(error(MalformedInputClass::InvalidUtf8PathGlobOrNativePath, "value_store_field_name", "field name contains NUL"));
+  }
+  // Cap every child before invoking its reader; validate the entire borrowed
+  // closure before allocating/copying the definition output.
+  let selector = decode_source_selector(request.selector)?;
+  let parser = decode_parser_resolution_plan(request.parser_plan)?;
+  let dependencies = decode_dependency_table(request.dependencies)?;
+  let family = request.semantic_family.id();
+  let metadata_semantics = if selector.kind == SourceSelectorKind::Metadata { family } else { 0 };
+  validate_field_selector_and_limits(
+    request.field_name,
+    request.semantic_family,
+    metadata_semantics,
+    &selector,
+    &parser,
+    request.max_source_values_per_document,
+    request.max_canonical_source_bytes_per_document,
+    request.max_document_input_bytes,
+    request.max_selector_work_items_per_document,
+    request.max_selector_examined_bytes_per_document,
+  )?;
+  validate_dependencies(request.semantic_family, &selector, &parser, &dependencies.records)?;
+
+  let mut value = Vec::new();
+  value.try_reserve_exact(total_length).map_err(|source| {
+    error(
+      MalformedInputClass::AllocationAmplification,
+      "value_store_writer_allocation",
+      format!("cannot reserve {total_length} bytes: {source}"),
+    )
+  })?;
+  value.resize(total_length, 0);
+  value[..4].copy_from_slice(b"AVST");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(DEFINITION_HEADER_LENGTH as u16).to_le_bytes());
+  value[8..12].copy_from_slice(&(total_length as u32).to_le_bytes());
+  value[DEFINITION_HEADER_LENGTH..fixed].copy_from_slice(request.scope_id);
+  for (index, child) in children.iter().enumerate() {
+    let offset = fixed + index * 4;
+    value[offset..offset + 4].copy_from_slice(&(child.len() as u32).to_le_bytes());
+  }
+  for (offset, field) in
+    [(16, family), (18, metadata_semantics), (20, 1), (22, family), (24, 1), (26, family), (28, 1), (30, 1), (32, 1), (34, 1)]
+  {
+    value[fixed + offset..fixed + offset + 2].copy_from_slice(&field.to_le_bytes());
+  }
+  value[fixed + 36..fixed + 40].copy_from_slice(&request.max_source_values_per_document.to_le_bytes());
+  for (offset, field) in [
+    (48, request.max_canonical_source_bytes_per_document),
+    (56, request.max_document_input_bytes),
+    (64, request.max_selector_work_items_per_document),
+    (72, request.max_selector_examined_bytes_per_document),
+  ] {
+    value[fixed + offset..fixed + offset + 8].copy_from_slice(&field.to_le_bytes());
+  }
+  let mut cursor = fixed + FIXED_BODY_WITHOUT_SCOPE;
+  for child in children {
+    let end = cursor + child.len();
+    value[cursor..end].copy_from_slice(child);
+    cursor = end;
+  }
+  let value_store_id = digest_parts(hash_algorithm, &[b"aeordb.index.value-store-definition.v1\0", &value]);
+  Ok(EncodedValueStoreDefinitionV1 { value_store_id, value })
 }
 
 pub fn decode_value_store_definition(value: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<ValueStoreDefinitionV1<'_>> {
@@ -158,13 +271,6 @@ pub fn decode_value_store_definition(value: &[u8], hash_algorithm: HashAlgorithm
       "one or more common semantic IDs are unknown",
     ));
   }
-  if max_source_values_per_document == 0 || max_canonical_source_bytes_per_document == 0 {
-    return Err(error(
-      MalformedInputClass::AllocationAmplification,
-      "value_store_common_limits",
-      "source-value count and canonical-byte limits must be nonzero",
-    ));
-  }
   let semantic_family = match (source_value_codec, null_semantics) {
     (1, 1) => ValueStoreSemanticFamily::CorrectedV1,
     (2, 2) => ValueStoreSemanticFamily::MigrationV0,
@@ -235,6 +341,13 @@ fn validate_field_selector_and_limits(
   max_selector_work: u64,
   max_selector_examined: u64,
 ) -> FormatResult<()> {
+  if max_source_values == 0 || max_canonical_bytes == 0 {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "value_store_common_limits",
+      "source-value count and canonical-byte limits must be nonzero",
+    ));
+  }
   if family == ValueStoreSemanticFamily::CorrectedV1 && (max_source_values == u32::MAX || max_canonical_bytes == u64::MAX) {
     return Err(error(
       MalformedInputClass::AllocationAmplification,
@@ -303,10 +416,9 @@ fn validate_field_selector_and_limits(
     SourceSelectorKind::AlwaysMissingV0 => {
       if family != ValueStoreSemanticFamily::MigrationV0
         || metadata_source_semantics != 0
-        || parser.kind == ParserPlanKind::None
-        || parser.resolution_semantics != 2
+        || parser.kind != ParserPlanKind::None
         || field_name.starts_with('@')
-        || max_document_input == 0
+        || max_document_input != 0
         || max_selector_work != 0
         || max_selector_examined != 0
       {
@@ -421,6 +533,7 @@ fn require_wasm_role(
     || (dependency.executor_profile <= 3 && dependency.executor_profile != expected_executor)
     || dependency.artifact_kind != 1
     || dependency.artifact_length == 0
+    || (family == ValueStoreSemanticFamily::CorrectedV1 && dependency.flags & 3 != 0)
     || (role == 1 && match_semantics != family.id() && match_semantics != 0)
   {
     return Err(closure_error(format!("dependency {} is not the required WASM role", dependency.dependency_id)));

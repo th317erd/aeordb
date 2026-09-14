@@ -111,29 +111,29 @@ fn selector_writer_rejects_empty_keys_and_invalid_regex_without_literal_fallback
 
 #[test]
 fn selector_writer_preflights_combined_lengths_and_counts_before_regex_work() {
-  let maximum_key = "é".repeat((4_096 - 32 - 8) / 2);
+  let maximum_key = "é".repeat((65_536 - 32 - 8) / 2);
   let encoded =
     encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &[JsonPathSegmentV1::ObjectKey(&maximum_key)] }).unwrap();
-  assert_eq!(encoded.len(), 4_096);
+  assert_eq!(encoded.len(), 65_536);
   let oversized_key = format!("{maximum_key}x");
   for segment in
-    [JsonPathSegmentV1::ObjectKey(&oversized_key), JsonPathSegmentV1::Regex { pattern: &"[".repeat(4_097), case_insensitive: false }]
+    [JsonPathSegmentV1::ObjectKey(&oversized_key), JsonPathSegmentV1::Regex { pattern: &"[".repeat(65_537), case_insensitive: false }]
   {
     assert_eq!(
       encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &[segment] }).unwrap_err().class(),
       MalformedInputClass::AllocationAmplification
     );
   }
-  for count in [509, 1_025] {
+  assert_eq!(
+    encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &vec![JsonPathSegmentV1::FanOut; 1_025] }).unwrap_err().class(),
+    MalformedInputClass::AllocationAmplification
+  );
+  for count in [508, 509, 1_024] {
     assert_eq!(
-      encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &vec![JsonPathSegmentV1::FanOut; count] }).unwrap_err().class(),
-      MalformedInputClass::AllocationAmplification
+      encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &vec![JsonPathSegmentV1::FanOut; count] }).unwrap().len(),
+      32 + 8 * count
     );
   }
-  assert_eq!(
-    encode_source_selector(SourceSelectorWriteV1::JsonPath { segments: &vec![JsonPathSegmentV1::FanOut; 508] }).unwrap().len(),
-    4_096
-  );
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn selector_writer_validates_mapper_dependency_contract_policy_and_canonical_arg
 #[test]
 fn selector_writer_mapper_cap_is_combined_not_an_independent_argument_allowance() {
   let pure = policy(InvocationPolicyKind::PureWasm);
-  for (payload_length, should_fit) in [(3_915, true), (3_916, false), (65_536, false)] {
+  for (payload_length, should_fit) in [(3_915, true), (3_916, true), (65_355, true), (65_356, false), (65_536, false)] {
     let arguments = string_argument(payload_length);
     let result = encode_source_selector(SourceSelectorWriteV1::PluginMapper {
       dependency_ordinal: u32::MAX,
@@ -187,7 +187,7 @@ fn selector_writer_mapper_cap_is_combined_not_an_independent_argument_allowance(
     });
     if should_fit {
       let encoded = result.unwrap();
-      assert_eq!(encoded.len(), 4_096);
+      assert_eq!(encoded.len(), payload_length + 181);
       assert_eq!(&encoded[32..36], &u32::MAX.to_le_bytes());
     } else {
       assert_eq!(result.unwrap_err().class(), MalformedInputClass::AllocationAmplification);

@@ -331,10 +331,15 @@ fn every_parser_resolution_plan_fixture_matches_the_independent_oracle() {
 fn every_source_selector_fixture_matches_the_independent_oracle() {
   let root = fixture_root();
   let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "source-selector-v1").collect();
-  assert_eq!(rows.len(), 14);
+  assert_eq!(rows.len(), 18);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();
+    if row.expected == "error:selector_length" {
+      assert_eq!(decode_source_selector(&bytes).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+      assert!(row.canonical_key.is_none());
+      continue;
+    }
     let selector = decode_source_selector(&bytes).unwrap();
     let kind = match selector.kind {
       SourceSelectorKind::Metadata => "metadata",
@@ -350,10 +355,17 @@ fn every_source_selector_fixture_matches_the_independent_oracle() {
 fn every_value_store_definition_fixture_matches_the_independent_oracle() {
   let root = fixture_root();
   let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "value-store-definition-v1").collect();
-  assert_eq!(rows.len(), 14);
+  assert_eq!(rows.len(), 16);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();
+    if row.expected == "error:value_store_always_missing_context" {
+      let error = decode_value_store_definition(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap_err();
+      assert_eq!(error.class(), MalformedInputClass::CrossRecordClosureMismatch);
+      assert_eq!(error.code(), "value_store_closure");
+      assert!(row.canonical_key.is_none());
+      continue;
+    }
     let definition = decode_value_store_definition(&bytes, hash_algorithm(&row.hash_algorithm)).unwrap();
     let selector_kind = match definition.selector.kind {
       SourceSelectorKind::Metadata => 1,
@@ -3157,7 +3169,7 @@ fn source_selector_rejects_amplification_regex_and_mapper_corruption() {
   invalid_arguments[48] = 0xff;
   assert_eq!(decode_source_selector(&invalid_arguments).unwrap_err().class(), MalformedInputClass::UnknownTypeKindOrEnum);
 
-  assert_eq!(decode_source_selector(&vec![0; 4_097]).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+  assert_eq!(decode_source_selector(&vec![0; 65_537]).unwrap_err().class(), MalformedInputClass::AllocationAmplification);
 }
 
 #[test]

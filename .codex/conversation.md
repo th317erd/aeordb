@@ -15922,3 +15922,44 @@ ExecutableDependencyDefinitionId / NativeDependencyDefinitionId. Do not change
 the raw artifact digest, regenerate existing fixtures, or implement the proposed
 catalog-key clarification without the owner's reply. U0 empty-state correction
 and its running regressions are independent of this question.
+
+## Round 16: Owner-approved dependency catalog identity and hash width
+
+**DECIDED (owner, 2026-09-14 UTC):** The owner approves the September 13
+dependency catalog-key recommendation and explicitly requests dynamic width
+to support the database's selected hash type. This ruling supersedes only the
+Round 10 executable/native dependency owner-key rule and its inconsistent
+interpretation; all other frozen contracts remain in force.
+
+The owner's approval:
+
+> I agree with your recommendation here. Let's also fix the width inconsistency (go with the dynamic width option to support any hash type). Let's go for it.
+
+For catalog record kind 6, `owner_key` is exactly the existing
+`ExecutableDependencyDefinitionId`. For kind 7, it is exactly the existing
+`NativeDependencyDefinitionId`. Each is the class-domain-separated hash of
+the complete canonical dependency bytes, including role, ABI, executor
+profile and artifact/conformance identity. The key must agree with the
+binding's recomputed class-specific `semantic_id`; neither a raw module hash
+nor the wrapping immutable object's ID is a substitute.
+
+`H` is the digest width of the selected, registered database hash algorithm.
+Dependency catalog keys and semantic IDs have exactly `H` bytes, obtained from
+that registry rather than a fixed 32-byte type or a special-case 32/64 policy.
+This supports every registered hash type without accepting arbitrary lengths,
+mixed algorithms within a database, or unregistered algorithms. Existing class
+ID domains, catalog lookup domain and catalog framing stay unchanged.
+
+The Round 9 raw WASM artifact and native conformance fingerprints remain
+BLAKE3-256 identities (32 bytes) inside the dependency record. Artifact lookup
+and byte sharing continue to use those fingerprints; two role/runtime bindings
+of one module do not require two copies of its bytes. Only the complete
+dependency definitions receive distinct catalog keys.
+
+Implementation must add independent failing-first identity/width regressions,
+cover every supported hash algorithm, same-artifact parser/mapper and runtime
+variants, malformed/mismatched keys, and repeated definitions. Audit existing
+v4 fixtures and persisted callers explicitly; preserve historical bytes and
+do not silently reinterpret old ambiguous bindings. This approval does not
+authorize production migration, installation, service activation, or changes
+to the retained corrupt FS-Server1 database.

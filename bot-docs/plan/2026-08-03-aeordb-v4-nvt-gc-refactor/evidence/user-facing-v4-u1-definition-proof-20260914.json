@@ -1,0 +1,1690 @@
+{
+  "schemaVersion": 1,
+  "recordedUTC": "2026-09-14T06:09:48.440Z",
+  "sourceBase": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+  "scope": "U1 bounded dependency/ValueStore/converter/field writers; ratified selector and always-missing contracts; parser-free shared evaluator accounting",
+  "unitComplete": true,
+  "semanticProductionU1Complete": false,
+  "fullV4ProductionReady": false,
+  "ordinaryDefaultGate": "Still red: ordinary CLI creates version 3, not 4",
+  "distinctWorkspaceTests": 7649,
+  "existingWorkspaceIgnores": 7,
+  "nestedSubprocessTestsSeparate": 3,
+  "nativeScope": "681 Mac / 678 Windows library tests, 488 affected tests across 27 targets, 158 reference tests and 460 fixtures per native host; not full native workspace",
+  "resourceScope": "Fallible output allocation and no-output shared evaluator admission tests, 16 GiB/no-swap Linux build guard and disk floors; not final 8 GiB production runtime qualification",
+  "remainingBoundaries": [
+    "Owner approved complete dependency-definition catalog keys with database-hash width in Round 16; this writer unit does not implement that separate catalog correction",
+    "Catalog/COW/compiler and atomic semantic producer integration remain U1 work",
+    "Value-producing legacy unlimited execution still needs operational-budget integration",
+    "U2-U7 runtime, complete native service/WASM, maintenance, migration-to-service, v4-default and final qualification remain open",
+    "No production database, service, release, installation or deployment was changed"
+  ],
+  "preservedFailedOrInterruptedStages": [
+    "u1-definition-baseline-* missing writer APIs and behavioral red",
+    "u1-definition-flags-red",
+    "u1-definition-reference-red",
+    "u1-definition-reference-green: scoped TERM, no test pass",
+    "u1-definition-expanded: reference/production error-code adapter failure",
+    "always-missing-evaluator-red: three reproduced shared-runtime failures",
+    "u1-definition-final-workspace: superseded candidate stopped by TERM, not a workspace pass"
+  ],
+  "sourceArchiveSHA256": "1c3b88fc66ac5f5bcece94a1cff761b8b3b81c7c6c23254eab30994bae7664f7",
+  "sourceManifestSHA256": "b852ffeaa85efc290b681ec869ba36049a0adb468db7faee58f884026da65290",
+  "fixtureAudit": {
+    "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-fixture-audit.json",
+    "sha256": "9c6324d79d480d60c4faa14d7f5487a4b4e05fa18c25dd62b8adacdf3bac6f75",
+    "schemaVersion": 1,
+    "recordedUTC": "2026-09-14T03:33:17.914Z",
+    "sourceBase": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+    "scope": "Fixture metadata/bytes audit, not execution or full-v4 readiness proof",
+    "existingBinaryFilesUnchanged": 455,
+    "allCurrentSHA256AndLengthsVerified": 460,
+    "oldManifestRowsUnchanged": 452,
+    "archivalOutcomeUpdatesOnly": [
+      "avst-blake3-256-always-missing-legacy-valid",
+      "avst-sha512-always-missing-legacy-valid"
+    ],
+    "addedCases": [
+      "asel-blake3-256-limit-65536-valid",
+      "asel-blake3-256-over-limit-65537-invalid",
+      "asel-sha512-limit-65536-valid",
+      "asel-sha512-over-limit-65537-invalid",
+      "avst-blake3-256-always-missing-none-valid",
+      "avst-sha512-always-missing-none-valid"
+    ],
+    "registrySHA256": "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19",
+    "manifestSHA256": "1bb1f6567b63e2254045e52bb9760024d2dfa8fa14cb41c8ec23bc63a5ee3c2e",
+    "ledgerSHA256": "bcd931a0d7920f478966d9c50732c9957e8d7200e8f528c9b1edc2aecacf289c",
+    "generatedContractSHA256": "a4d942f7bf9492fe16cfa06937bae8c42b0e4afd4d7a4b242594f8d1939ca712"
+  },
+  "inputs": [
+    {
+      "path": "aeordb-lib/Cargo.toml",
+      "sha256": "cae65fce6183d243d6fb206b6c32cc5cf5f518bb954bb55e04c5dfc332a8e5a5"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_definition_contract_spec.rs",
+      "sha256": "6c9011850caf980dcddeb3723b387ba920ca83b099847d7cbb8080a43ccec18e"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/dependency_table_writer_spec.rs",
+      "sha256": "a5219074473070114c48deacb2270b703511700a9c81910330922f88aff1853d"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/value_store_writer_spec.rs",
+      "sha256": "8c075a7519abf01c2bd1d6b9869686aa1c5cb5f5cac26c3cc87e6fac059f7f8e"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/field_definition_writer_spec.rs",
+      "sha256": "862e61000ededc410037c46d2908d33e4e4da1df72b40c5ceffe32e496926b85"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/dependency.rs",
+      "sha256": "a173747bc815d765589f2bc4f8e0b57874967b51a5213cd7ea8e479f8d6379a5"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/value_store.rs",
+      "sha256": "c41e77a04f67f946df1352aeef5ec92ed31e0176de937e3d1ba470f77a9898f0"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/field_definition.rs",
+      "sha256": "9bb08c5eeb5b3afe625d79c2ee9dbbf52bc3328a3b310c1e2ff93acb84eaa330"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/source_selector.rs",
+      "sha256": "3ca51a6b0d9556e6fc73561c7bad67e9f1b508af01c3607d64db237d6f0f861d"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/contract_generated.rs",
+      "sha256": "a4d942f7bf9492fe16cfa06937bae8c42b0e4afd4d7a4b242594f8d1939ca712"
+    },
+    {
+      "path": "tools/v4-reference/src/dependency.rs",
+      "sha256": "f48577cbf58ba5d34832461c2d2405cb4bd38bc78a1274b2080c1bb883dc2e7b"
+    },
+    {
+      "path": "tools/v4-reference/src/value_store.rs",
+      "sha256": "d91b7e403de1aafbe4621c322815b7721605315bdc435db3e12008186076fbe4"
+    },
+    {
+      "path": "tools/v4-reference/src/selector.rs",
+      "sha256": "7b47be2ce2e3321b4e48c27c88e06f6dc8571f8a3c51406aee354f550d793563"
+    },
+    {
+      "path": "tools/v4-reference/src/main.rs",
+      "sha256": "22507ed302236491987fc22559534e2bde94074fa274067aaee978a49e2491be"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
+      "sha256": "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/format-fixture-manifest.json",
+      "sha256": "1bb1f6567b63e2254045e52bb9760024d2dfa8fa14cb41c8ec23bc63a5ee3c2e"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec"
+    },
+    {
+      "path": "tools/v4-reference/Cargo.lock",
+      "sha256": "38b2314cddbad4b60cac64d5e105f0e7e40f4001a61066e06b8dc2bc7dfdf156"
+    },
+    {
+      "path": "tools/v4-reference/spec/definition_contract_spec.rs",
+      "sha256": "14dbbba2e7963fbeb450ad36c0340d3c5f95ae94c9a8a1ba45de653a2a3357d6"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/source_selector_writer_spec.rs",
+      "sha256": "698e9da1849c87d29828083c7eec7166f9c139729f88318570a52911d78c388e"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/v4_format_fixture_spec.rs",
+      "sha256": "2fedf060c183ecb4723779e158b49eb32372de5806dbbb4089fb7d4aa54939b7"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/semantic_definition_writer_resource_spec.rs",
+      "sha256": "4de3babb051ab85bf9be8ba45fdd8cf7e6f0ccc4f8e5957a3c841cb839facfc8"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/reference-result-ledger.json",
+      "sha256": "bcd931a0d7920f478966d9c50732c9957e8d7200e8f528c9b1edc2aecacf289c"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-blake3-256-limit-65536-valid.bin",
+      "sha256": "9373582c9eb09a6241f87095de0051c4ff15a96ae6ba2dc874b4bd2f15b88cb9"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-blake3-256-limit-65536-valid.hex",
+      "sha256": "f810816dabfad06a7c9c720d7adad6bb1a8d4c33a0dd947895de8a61eee7577d"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-blake3-256-over-limit-65537-invalid.bin",
+      "sha256": "9fd6eac699d9000e91ed72189ae906a93dcf81a47c2c7ab1120fc18c26b67e76"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-blake3-256-over-limit-65537-invalid.hex",
+      "sha256": "ad80910ab7d4d57e24c7ff5aff5a375b43fb7012ef91aa8fff3b5e57a6606e7a"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-always-missing-none-valid.bin",
+      "sha256": "c4d549449d53c86cc456c460f59b75a16720074cf75e0aca21b2052b57d08b73"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-always-missing-none-valid.hex",
+      "sha256": "4d7c8a6030a20c7996b26ddf606ae23b26891fef9b6fcde17ffe0d1797f96d6d"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-blake3-256-always-missing-legacy-valid.hex",
+      "sha256": "d798058ae47e04742677795c65aae930bf99338f1b9178b3f7ab52f50cafcfac"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-sha512-limit-65536-valid.bin",
+      "sha256": "9373582c9eb09a6241f87095de0051c4ff15a96ae6ba2dc874b4bd2f15b88cb9"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-sha512-limit-65536-valid.hex",
+      "sha256": "84d2c2e1d8019da000140d4fecfd6863686814269be644dccabb8584d10215c1"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-sha512-over-limit-65537-invalid.bin",
+      "sha256": "9fd6eac699d9000e91ed72189ae906a93dcf81a47c2c7ab1120fc18c26b67e76"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/source-selector-v1/asel-sha512-over-limit-65537-invalid.hex",
+      "sha256": "b130868a267c238b4ffb87811b4f437c7e7ac98afbdc5c87ef2dfda03e5a1590"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-sha512-always-missing-none-valid.bin",
+      "sha256": "cb9df7e1594f05da3de5780579900c2cadf0732bcf65a92d717250b0cad94567"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-sha512-always-missing-none-valid.hex",
+      "sha256": "82f4b1dd36c68856bb1a7c3312f9cf86c551eb42c335777537b6fb42a54eb017"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/v4/value-store-definition-v1/avst-sha512-always-missing-legacy-valid.hex",
+      "sha256": "d95f112a4147d6b61e5053f9edd5f240caf472ec1e1e185fd5054244f32983aa"
+    },
+    {
+      "path": "aeordb-lib/spec/fixtures/error-squelch-allowlist-v1.json",
+      "sha256": "03e2207359adbfbcb72955aee769a74d655c2bde88face5b6ecfac924fae9264"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/v4_reader_hardening_spec.rs",
+      "sha256": "837d4fb83789829c119a8f1a3f30e33ee07e6b43ac9c51a85eeec06c189b0d28"
+    },
+    {
+      "path": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/p0b-contract-registry-report.json",
+      "sha256": "761dd7011c67e05330be46f42670e81d6f0dca54523f8f4c0af5c3f5d55b07d0"
+    },
+    {
+      "path": "bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/evidence/p0c-machine-contract-report.json",
+      "sha256": "1b8cd9289a20adccfd8e49a1e9451d31cf1101f18187ac2d1b2f1f8ebdae145b"
+    },
+    {
+      "path": "aeordb-lib/src/engine/v4/source_evaluator.rs",
+      "sha256": "1400872fa80f7bdef73b18a8556974ded956c3901c93bedcd3243af67efde1d8"
+    },
+    {
+      "path": "aeordb-lib/spec/engine/always_missing_evaluator_spec.rs",
+      "sha256": "cd5f09045dc3c6d2049203dc3a983b571e445fd8dd99c91a06dd865454d46bff"
+    }
+  ],
+  "testBinaryEvidence": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-linux-test-binaries.json",
+      "sha256": "be048c111ea1cb87d9015955346d24b537780d78faa869cf67011eb243541bc7",
+      "schemaVersion": 1,
+      "recordedUTC": "2026-09-14T04:43:42.219Z",
+      "purpose": "Exact same-host executed test binaries; no binary or database transfer",
+      "sourceManifestSHA256": "b852ffeaa85efc290b681ec869ba36049a0adb468db7faee58f884026da65290",
+      "platform": "linux",
+      "binaries": [
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/always_missing_evaluator_spec-4fa7973974ac3063",
+          "target": "always_missing_evaluator_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 12334696,
+          "sha256": "382dafb283174df76805f72bac86d7ad78316f153e756f624d2d836c24d6a122",
+          "modifiedUTC": "2026-09-14T03:45:59.036Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_availability_spec-231174280f281c68",
+          "target": "dependency_availability_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 13106368,
+          "sha256": "ea1962163afa949edd66841e69a4638c39b0c67a06733c3cbb35bd8dd3af808c",
+          "modifiedUTC": "2026-09-14T03:46:08.444Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/dependency_table_writer_spec-295d7d8a9ab46f0e",
+          "target": "dependency_table_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 5750952,
+          "sha256": "31fe2d47420bd1d2e57dab218c03c9cd4d62b506dc774649474ef9b902eaae43",
+          "modifiedUTC": "2026-09-14T03:45:42.928Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/error_squelch_architecture_spec-b294287edc43f895",
+          "target": "error_squelch_architecture_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 5601504,
+          "sha256": "bd2a616401d5c457654c81ab3a19cbd6a1f58db25acac513db488e6e604cfe8a",
+          "modifiedUTC": "2026-09-14T03:45:59.944Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/field_definition_writer_spec-a602a086de2abd91",
+          "target": "field_definition_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 6204024,
+          "sha256": "5815db50532ec01ba5d2647f63e828b016e9858d352c33c52cfbd4e5ae5cdc8d",
+          "modifiedUTC": "2026-09-14T03:45:52.869Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_resource_spec-23ff3917b4618488",
+          "target": "index_native_parser_resource_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 27337768,
+          "sha256": "e95dea4516ab0abf9973fd4d334b35f728301fbc2e5b407bedfcef69a852cafa",
+          "modifiedUTC": "2026-09-14T03:46:09.673Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_parser_spec-c9ededea143172e8",
+          "target": "index_native_parser_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 27740432,
+          "sha256": "6c7d0a6558450cd67063b28ec682cead234fceef593fea8674ab68da5f0eaffc",
+          "modifiedUTC": "2026-09-14T03:45:44.481Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_semantic_source_spec-3aeb5391d2e0c8b0",
+          "target": "index_native_semantic_source_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 16664888,
+          "sha256": "9d123a6ee16810e0eee97588a10abf7bb34642d8b29a645c6a87c45f491ed792",
+          "modifiedUTC": "2026-09-14T03:46:02.856Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_native_source_spec-026ec8109d498be3",
+          "target": "index_native_source_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 19766592,
+          "sha256": "2499d0724120d3235d7d22113c25de606751590cfb785a75b0aa0ec9956715f1",
+          "modifiedUTC": "2026-09-14T03:45:45.131Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_collector_spec-8e8df08cfb2357a0",
+          "target": "index_producer_collector_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 13719968,
+          "sha256": "439edf809caeb88b8cf2ddb2e66fe0430d491c382f01bb7815c425c9dde16892",
+          "modifiedUTC": "2026-09-14T03:45:48.840Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_source_spec-89af19d52693ca07",
+          "target": "index_producer_source_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 12821288,
+          "sha256": "f8c57ee2a6693f80717449f32a730a7ac8eadc4c1ae40def86ee2de2feb58137",
+          "modifiedUTC": "2026-09-14T03:45:46.639Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_producer_worker_spec-2e02e436beac761d",
+          "target": "index_producer_worker_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 14496864,
+          "sha256": "c35043ca4523efda01f18037cfd600ad8a208e4383805b1509d0632f4e6ffb3a",
+          "modifiedUTC": "2026-09-14T03:45:54.991Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_semantic_source_spec-af18e51dabcb8dcf",
+          "target": "index_semantic_source_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 26174600,
+          "sha256": "ae0dfe2b9b87be8b042109f2454031713a076aea610dcf5ce26c9c28cee966f2",
+          "modifiedUTC": "2026-09-14T03:45:57.101Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/index_v1_reference_spec-3dcc6833a7e18381",
+          "target": "index_v1_reference_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 14235672,
+          "sha256": "6298c0881e99c4cb95c59c53089d82cb2a21c1b655d07ad5782e4d679ab250a9",
+          "modifiedUTC": "2026-09-14T03:45:57.337Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/parser_plan_writer_spec-4dbf0ecfd22754be",
+          "target": "parser_plan_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 5702216,
+          "sha256": "996ba872d13e397c574496cc0e911b17482ebe6b8821f466f3ad42a36fdfb138",
+          "modifiedUTC": "2026-09-14T03:45:48.568Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/scope_definition_writer_spec-03265984c5d11916",
+          "target": "scope_definition_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 6124528,
+          "sha256": "7ddbe97c87e2795334b9c309e97008002d2b31eebd4fee259770b4589bce2225",
+          "modifiedUTC": "2026-09-14T03:45:46.975Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_catalog_reader_spec-85880fc6802f7a9e",
+          "target": "semantic_catalog_reader_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 6258472,
+          "sha256": "1b1da6d3b97a60adda2bf79244671452a646258ba04a9cdbf4523aee335441f1",
+          "modifiedUTC": "2026-09-14T03:46:10.539Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_contract_spec-3af562a005fd2af5",
+          "target": "semantic_definition_contract_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 12069888,
+          "sha256": "f6e8c7409c5248134c7feb65919392d6403ea4cb8d80dbbed97fb317a18884d4",
+          "modifiedUTC": "2026-09-14T03:45:50.350Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/semantic_definition_writer_resource_spec-773fa76f52381a05",
+          "target": "semantic_definition_writer_resource_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 11732048,
+          "sha256": "1c3adb1d568463d19f16788b83a00e545ea11b5e404ee39c9b53b5574c0c644b",
+          "modifiedUTC": "2026-09-14T03:46:06.991Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/source_selector_writer_spec-07372de588b138c5",
+          "target": "source_selector_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 11053312,
+          "sha256": "e51f99629962f9f16aacd4e56db313f9493b9331e8d2610611d19c7bd703ab95",
+          "modifiedUTC": "2026-09-14T03:45:54.758Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_format_fixture_spec-e2f5546085ad17bb",
+          "target": "v4_format_fixture_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 15451144,
+          "sha256": "efd84a97bf4042ed6b92162f880f76dc98de6abad485cc156853f7bc0d3d1039",
+          "modifiedUTC": "2026-09-14T03:45:42.162Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_executor_spec-502b8d7c205779f4",
+          "target": "v4_query_executor_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 15042432,
+          "sha256": "4459a94f317d97a32cd6339aeeaa60ef85a67648453264d78ca309eb2d97d9cd",
+          "modifiedUTC": "2026-09-14T03:45:52.994Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_query_planner_spec-7cd40ec24d2ffd20",
+          "target": "v4_query_planner_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 14156528,
+          "sha256": "237c35bc98440e3e35a089d2c06a8921da269267e5e6504e729f0599258ef238",
+          "modifiedUTC": "2026-09-14T03:45:51.063Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_read_view_native_spec-1efd0524a90bff8b",
+          "target": "v4_read_view_native_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 26494624,
+          "sha256": "2ab517e74672b0e97fd9780cd3e20587c699e862ad643e17080250ef2cac2b25",
+          "modifiedUTC": "2026-09-14T03:46:06.230Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_reader_hardening_spec-02c6cac161b2a015",
+          "target": "v4_reader_hardening_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 14287792,
+          "sha256": "d52d9baee5e53739daa5f4ecaab9f27a8fd40846670b4eda7e33f65723e4cdd9",
+          "modifiedUTC": "2026-09-14T03:46:01.824Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/v4_root_migration_spec-ffda39251cd58244",
+          "target": "v4_root_migration_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 20704952,
+          "sha256": "a1f92240e6817347d830156627deb0253a70a33c130e885796ed106d63d1e05c",
+          "modifiedUTC": "2026-09-14T03:45:59.195Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/value_store_writer_spec-efb104c0dd9b7f92",
+          "target": "value_store_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-narrow.log",
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 11705632,
+          "sha256": "2e18c51a6319a539bfa721d7684b4395e565da7dee7aa722c0f520fc10bf1235",
+          "modifiedUTC": "2026-09-14T03:46:04.741Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/debug/deps/aeordb-4095f627206817b0",
+          "target": "aeordb",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-workspace.log"
+          ],
+          "bytes": 52465168,
+          "sha256": "f50472e7a9d59f1308a783596c94f8f9ec9b746aedc00d4694bc5a522edf9753",
+          "modifiedUTC": "2026-09-14T03:59:06.555Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/always_missing_evaluator_spec-4f981f7fa9e6f4ba",
+          "target": "always_missing_evaluator_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 184176200,
+          "sha256": "4092a41527a31accaf989d5cf3d5c9ad810ca7212a6568bca6793e53451c7ace",
+          "modifiedUTC": "2026-09-14T04:40:59.542Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/dependency_table_writer_spec-e99b9b0777974250",
+          "target": "dependency_table_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 181426552,
+          "sha256": "60587f8f9674729caabe3410689dc2ab56df24420857c6aafc47b02b6aa98088",
+          "modifiedUTC": "2026-09-14T04:41:03.866Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/field_definition_writer_spec-8a9357c623280988",
+          "target": "field_definition_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 181603568,
+          "sha256": "156bc48a5bf588405de1814f3825e607a1ac0786b8aa8507f0b06b1225f85f97",
+          "modifiedUTC": "2026-09-14T04:41:06.220Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/semantic_definition_contract_spec-cba384c1bb1021d1",
+          "target": "semantic_definition_contract_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 184146808,
+          "sha256": "e5dce9cf0ed4cd4cf2fba53977e8c90703387d9a346bdfe32d63e0506ef72bc2",
+          "modifiedUTC": "2026-09-14T04:40:59.310Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/semantic_definition_writer_resource_spec-6f5b5dc2414b6ff9",
+          "target": "semantic_definition_writer_resource_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 183941400,
+          "sha256": "012387c717d318e700d8a7c9e9cc9b38362d25e7cbe011e989f735f860de5d6b",
+          "modifiedUTC": "2026-09-14T04:41:01.537Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/value_store_writer_spec-b05bba59f814b661",
+          "target": "value_store_writer_spec",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-release.log"
+          ],
+          "bytes": 184019024,
+          "sha256": "0b88d16db77949e12adc610164b285400dff6f548b91f3df3f2838833794cafd",
+          "modifiedUTC": "2026-09-14T04:41:02.299Z"
+        },
+        {
+          "path": "/media/Data/AeorDB/Tests/p8-cache-progress-20260909/target-qualification/release/deps/aeordb_v4_reference-905146321bc2fc48",
+          "target": "aeordb_v4_reference",
+          "logs": [
+            "/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-final2-reference.log"
+          ],
+          "bytes": 5384256,
+          "sha256": "626bb4ff029ca34ee5edd8bf92f392b95e49736387d60ea1eed621de0f264ef3",
+          "modifiedUTC": "2026-09-14T04:41:40.499Z"
+        }
+      ]
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-test-binaries.json",
+      "sha256": "f9137e63003aee5f1f0dbddca417f293bd2d447e50c4029196efc53274e459ad",
+      "schemaVersion": 1,
+      "recordedUTC": "2026-09-14T04:02:47.110Z",
+      "purpose": "Exact same-host executed test binaries; no binary or database transfer",
+      "sourceManifestSHA256": "b852ffeaa85efc290b681ec869ba36049a0adb468db7faee58f884026da65290",
+      "platform": "darwin",
+      "binaries": [
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/aeordb-ab6768157100efbd",
+          "target": "aeordb",
+          "logs": [
+            "u1-definition-final2-evidence/library.log"
+          ],
+          "bytes": 46035456,
+          "sha256": "fa0491391c0d4eac6f4cb43cec7f78c51b2b083a0ca99dd74fde6f5c5be58682",
+          "modifiedUTC": "2026-09-14T03:52:20.858Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/always_missing_evaluator_spec-5293e41bfaa8242e",
+          "target": "always_missing_evaluator_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 7680176,
+          "sha256": "e73f2d57d4c367771e429ef590b70c2ad343717f7d84e390bae028b51b6a862c",
+          "modifiedUTC": "2026-09-14T03:53:25.493Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/dependency_availability_spec-8d6feb4a50955314",
+          "target": "dependency_availability_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 8399392,
+          "sha256": "88464cedf412cb70113a1006c401854edb4a7e3fa5006eb4573babf40c2fdcee",
+          "modifiedUTC": "2026-09-14T03:53:32.234Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/dependency_table_writer_spec-06c5780913a47a9e",
+          "target": "dependency_table_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 1978304,
+          "sha256": "e6a6c6d78897dee2497ecd9d3afd4064e1b8d78791c15c00038610e690bbece5",
+          "modifiedUTC": "2026-09-14T03:53:26.558Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/error_squelch_architecture_spec-3dc43a9de3a760fd",
+          "target": "error_squelch_architecture_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 5163712,
+          "sha256": "56581a7c71142803fafdb15e340419dce223936571706e55389e2012bdd0a532",
+          "modifiedUTC": "2026-09-14T03:53:27.977Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/field_definition_writer_spec-911aa68eb7a0ff9b",
+          "target": "field_definition_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 2338128,
+          "sha256": "5d02e45cf2eb50963fcca4a53866e7f1e0ccd88b48d7d9cb12d3bc7807b049fe",
+          "modifiedUTC": "2026-09-14T03:53:30.711Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_native_parser_resource_spec-816306a7f989d18a",
+          "target": "index_native_parser_resource_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 22204224,
+          "sha256": "3ad6c0394c9e5a8fb2a1718a9585e933b4bac4450cd8e4f06249ffa8f327494b",
+          "modifiedUTC": "2026-09-14T03:53:31.896Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_native_parser_spec-056c7775f13e5555",
+          "target": "index_native_parser_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 22598640,
+          "sha256": "4cedf3a6c140c370b29f85ed4cdac81b0b86a8715e923e1d2c0d8908c219d107",
+          "modifiedUTC": "2026-09-14T03:53:32.702Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_native_semantic_source_spec-c620a3416940a8fe",
+          "target": "index_native_semantic_source_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 11816128,
+          "sha256": "375e7d6f37fe87f9333d5be5622e3699007dc27d931bba583b7a640ba95fa41c",
+          "modifiedUTC": "2026-09-14T03:53:29.254Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_native_source_spec-f7c36d4fe595890d",
+          "target": "index_native_source_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 15638240,
+          "sha256": "d38605a47f37f79349c7483b32dcb3c3cbac086ccc8bf87891719e454f70ecfd",
+          "modifiedUTC": "2026-09-14T03:53:31.070Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_producer_collector_spec-a318412d823fc410",
+          "target": "index_producer_collector_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 8961696,
+          "sha256": "62eb880241b05bbdded6512d0b208d666305d90a80eaf1e3e93990a00d2ce374",
+          "modifiedUTC": "2026-09-14T03:53:25.162Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_producer_source_spec-2224494d117cb6e9",
+          "target": "index_producer_source_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 8155216,
+          "sha256": "ed0c8fdfe685f08f1d332c2178c8995d9a8c5c15ed24699705097d4fa86b7a85",
+          "modifiedUTC": "2026-09-14T03:53:24.460Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_producer_worker_spec-6498b1b0bf8b3140",
+          "target": "index_producer_worker_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 9729392,
+          "sha256": "416f99748827fca11c27b657a2ddca64beebcb10e98635232c3032221b3d6554",
+          "modifiedUTC": "2026-09-14T03:53:31.457Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_semantic_source_spec-f587b04ba6a46942",
+          "target": "index_semantic_source_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 21204592,
+          "sha256": "ef89ce1e6f41172033f993f3fc34d0e029200c2be563bf98514c363b942bc196",
+          "modifiedUTC": "2026-09-14T03:53:33.246Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/index_v1_reference_spec-8085fe11290b9c27",
+          "target": "index_v1_reference_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 9395072,
+          "sha256": "a29e2f260d44f7cb4626c7e731abb8956614dc056f94333e1eb58a915385789b",
+          "modifiedUTC": "2026-09-14T03:53:27.106Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/parser_plan_writer_spec-03fa97fc1fd83845",
+          "target": "parser_plan_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 1949968,
+          "sha256": "6e5e67e1955c753279f53a16721adf33868abe8ee323062e4fa2566ca6d972f8",
+          "modifiedUTC": "2026-09-14T03:53:35.119Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/scope_definition_writer_spec-8bb5efb8c3358892",
+          "target": "scope_definition_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 2266048,
+          "sha256": "079a7332755da0b0b1f9988435f047ff20c090d1830a8fa51b4b268e3cd5b671",
+          "modifiedUTC": "2026-09-14T03:53:24.764Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/semantic_catalog_reader_spec-50251da552507579",
+          "target": "semantic_catalog_reader_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 2370208,
+          "sha256": "0d739adf4ddaddf6e14f0191efc95a31dfbfbcbe26039991729e137dd6a05dd5",
+          "modifiedUTC": "2026-09-14T03:53:27.418Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/semantic_definition_contract_spec-d58ade49eb9d841f",
+          "target": "semantic_definition_contract_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 7386112,
+          "sha256": "d3cd6761f0ca5a5cfa93011da68a284ad2ce5a83c4fc63ef7c695489f33e55cf",
+          "modifiedUTC": "2026-09-14T03:53:28.888Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/semantic_definition_writer_resource_spec-0c18d18e6639ec60",
+          "target": "semantic_definition_writer_resource_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 7057152,
+          "sha256": "f23dcb9649f41c67b12eb8ba7ffa4cce53ab3e5aaea58ed3ba9ff75fa2af7ac4",
+          "modifiedUTC": "2026-09-14T03:53:30.397Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/source_selector_writer_spec-bebbd4a692b401a4",
+          "target": "source_selector_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 6498736,
+          "sha256": "55b602b8adab18124579db3839917df2fc73d4f59afa3adbb1b5f2ca10563fe6",
+          "modifiedUTC": "2026-09-14T03:53:27.743Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_format_fixture_spec-2d8e8de9cefadfcb",
+          "target": "v4_format_fixture_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 10337456,
+          "sha256": "bfd5adaa2e49080db12097f71546af76c3ac89972b73aa8b63e05c8212738a75",
+          "modifiedUTC": "2026-09-14T03:53:26.242Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_query_executor_spec-488e6c38a4c21943",
+          "target": "v4_query_executor_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 10302656,
+          "sha256": "a28289be1722dabce68019b6cda37114c98ba7c50080af6fd1d82533bf75794b",
+          "modifiedUTC": "2026-09-14T03:53:28.552Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_query_planner_spec-f1ab524f379dd2f1",
+          "target": "v4_query_planner_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 9384960,
+          "sha256": "976d23e5acf8fd1f9209eb2ec87773e4975b5a076bfebf1ec2b139ad612cc146",
+          "modifiedUTC": "2026-09-14T03:53:29.742Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_read_view_native_spec-a9b184e63b1f080a",
+          "target": "v4_read_view_native_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 20763216,
+          "sha256": "6ad3fee050b8b56788e31e9cd99c794f7567b2a89312bafc81e0754a6c454967",
+          "modifiedUTC": "2026-09-14T03:53:34.805Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_reader_hardening_spec-344e179ca1015014",
+          "target": "v4_reader_hardening_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 9414784,
+          "sha256": "b7c5818bb575b4020df9d9227d604c31da0123eab09d66cdf80a816d2e943c42",
+          "modifiedUTC": "2026-09-14T03:53:33.681Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/v4_root_migration_spec-dfd4cbdc776d3e19",
+          "target": "v4_root_migration_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 16450544,
+          "sha256": "2bd353b95146c96e64b66ade04f936c2c4c23f352b64ad07ffa6b4a7c88aa261",
+          "modifiedUTC": "2026-09-14T03:53:24.064Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/value_store_writer_spec-03a5b8cdde1a9254",
+          "target": "value_store_writer_spec",
+          "logs": [
+            "u1-definition-final2-evidence/affected.log"
+          ],
+          "bytes": 7047120,
+          "sha256": "0c03afe02e117d4f6d6747dd858860bb3a592fb689b599fe2c0fb92d1dd33870",
+          "modifiedUTC": "2026-09-14T03:53:30.072Z"
+        },
+        {
+          "path": "/Users/wyatt/.cache/codex/aeordb-tests/target/debug/deps/aeordb_v4_reference-839830b84db71e22",
+          "target": "aeordb_v4_reference",
+          "logs": [
+            "u1-definition-final2-evidence/reference.log"
+          ],
+          "bytes": 10060064,
+          "sha256": "e804f3839fe14c196b289bf7a7f717432003a65e9d14306c54127c54850704bd",
+          "modifiedUTC": "2026-09-14T03:32:43.973Z"
+        }
+      ]
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-test-binaries.json",
+      "sha256": "246caf50c51fe29ff9c501fb32483344d526ec063fff9cf23c2ec2a510f89a0c",
+      "schemaVersion": 1,
+      "recordedUTC": "2026-09-14T06:08:56.6011587Z",
+      "purpose": "Exact same-host executed test binaries; no binary or database transfer",
+      "sourceManifestSHA256": "b852ffeaa85efc290b681ec869ba36049a0adb468db7faee58f884026da65290",
+      "platform": "win32",
+      "binaries": [
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\aeordb_v4_reference-22df90f616fdcd7a.exe",
+          "target": "aeordb_v4_reference",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\reference.stderr.log"
+          ],
+          "bytes": 7899136,
+          "sha256": "a37e2b3e0b3f3d4526f3ffcc56e28d285fa760250c179d8ec01e90b164d6c157",
+          "modifiedUTC": "2026-09-14T06:07:59.7063456Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\aeordb-c36429484509aac3.exe",
+          "target": "aeordb",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\library.stderr.log"
+          ],
+          "bytes": 36820992,
+          "sha256": "425caa08c5ee90a7b1a2f2d14559a5d6cd7382ac48ce50c25d1c2004de7f99bc",
+          "modifiedUTC": "2026-09-14T05:59:34.2139875Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\always_missing_evaluator_spec-2a1887dc7cd06339.exe",
+          "target": "always_missing_evaluator_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 8760320,
+          "sha256": "d097deeccc95aa1fc2e0c8d5627e9142d0bf7e663dda128fdd5fef46b430686a",
+          "modifiedUTC": "2026-09-14T06:04:59.2636005Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\dependency_availability_spec-fc11dffc0da39c6e.exe",
+          "target": "dependency_availability_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 9275392,
+          "sha256": "f249b0da2696d431aed5e12a8c41ba868a2a6ca164ce8ddcc4b733212ca69e9d",
+          "modifiedUTC": "2026-09-14T06:05:30.2930508Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\dependency_table_writer_spec-2557afb9a4daf80d.exe",
+          "target": "dependency_table_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 4350464,
+          "sha256": "5376c4078e0d9c384512f37a5e8eb21018288dbf4cd68081dd5f2646d8cf2bdc",
+          "modifiedUTC": "2026-09-14T06:05:03.4358209Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\error_squelch_architecture_spec-c94438182abcec5c.exe",
+          "target": "error_squelch_architecture_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 3559936,
+          "sha256": "6fce5a584be2be0caeacfb8b2a3ad49cbfd79a0932e63070cf65fd3011e9442e",
+          "modifiedUTC": "2026-09-14T06:04:41.0845618Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\field_definition_writer_spec-bf1d443f4da8e67f.exe",
+          "target": "field_definition_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 4645376,
+          "sha256": "69a5f1b47a8305f98fca21b04c01219dc059e739e6d3cd8ca8210c0a73ac6e01",
+          "modifiedUTC": "2026-09-14T06:04:48.1518908Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_native_parser_resource_spec-9ca5e53faf5fcbd7.exe",
+          "target": "index_native_parser_resource_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 17799680,
+          "sha256": "92b186c32ff3f46323288b274bb5b3d15fde37405b59f3785efbb368ced1d7cd",
+          "modifiedUTC": "2026-09-14T06:05:18.5336605Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_native_parser_spec-2f7621f4e4d3aa7d.exe",
+          "target": "index_native_parser_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 18170880,
+          "sha256": "2d59bc70d1b138cebb3dd7fcee1f74e93f8082459ffdcddb0023ba682a628901",
+          "modifiedUTC": "2026-09-14T06:05:11.2468250Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_native_semantic_source_spec-6e974fbd7f64e10a.exe",
+          "target": "index_native_semantic_source_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 11666432,
+          "sha256": "b81bead7cd148e76780c6c30209524dfd6b92609576e7edc8b2a83c8ca52b0f2",
+          "modifiedUTC": "2026-09-14T06:05:23.0317700Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_native_source_spec-c8dd5cc1e8ff1e0f.exe",
+          "target": "index_native_source_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 12706304,
+          "sha256": "a0da857734e8ae419db6c32787927590b302f8b6869793094b609e744c3fee3f",
+          "modifiedUTC": "2026-09-14T06:04:39.9087685Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_producer_collector_spec-2da398550aeca247.exe",
+          "target": "index_producer_collector_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 9731584,
+          "sha256": "d616eba27dbe8e488bdc07be15583727e024b1eaeeb6633cb7601993b2dbb1ff",
+          "modifiedUTC": "2026-09-14T06:05:13.5838919Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_producer_source_spec-ca7d88294572c8b1.exe",
+          "target": "index_producer_source_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 9094144,
+          "sha256": "a0b07eb7446052f4adee4723d916ceffb82ce78034764e7c57b718ded7f46411",
+          "modifiedUTC": "2026-09-14T06:05:20.8800831Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_producer_worker_spec-7bc58a6901f3cd04.exe",
+          "target": "index_producer_worker_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 10269696,
+          "sha256": "6971c59bf64aa782a59f92881ad1b1dde03e56e0bf1f6e7deaa0a1c57b227a32",
+          "modifiedUTC": "2026-09-14T06:04:57.2608514Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_semantic_source_spec-ac0e212869bafeec.exe",
+          "target": "index_semantic_source_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 17008640,
+          "sha256": "134bdbbcd921209d50086a8d5214b55d2dae2998f3d0b7828abbe7637ca85b47",
+          "modifiedUTC": "2026-09-14T06:04:51.0156548Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\index_v1_reference_spec-1758e3eba083cd92.exe",
+          "target": "index_v1_reference_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 10102784,
+          "sha256": "943cf499d29db50fcb6f826a53265898d2926cd5fd054572eb924ce3b930c6f5",
+          "modifiedUTC": "2026-09-14T06:05:35.4008149Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\parser_plan_writer_spec-90f8c64bd5668411.exe",
+          "target": "parser_plan_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 4314112,
+          "sha256": "0e052039d811acf9bee948808a4c331129ec8bb9b002d5346a8bb17b8a5234dc",
+          "modifiedUTC": "2026-09-14T06:05:37.4735962Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\scope_definition_writer_spec-a14aa300f4f7e86f.exe",
+          "target": "scope_definition_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 4584448,
+          "sha256": "f3168cc8d81a433e9bdf8eb7de47a827ebb68819d08347ccd3a2211457842dbe",
+          "modifiedUTC": "2026-09-14T06:05:41.5665616Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\semantic_catalog_reader_spec-721abf52d60a4baf.exe",
+          "target": "semantic_catalog_reader_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 4675584,
+          "sha256": "1bd78f88ac615a27c1b6e9205fa09d6505b5ad8b3bb9ab941f44631412dc397f",
+          "modifiedUTC": "2026-09-14T06:04:43.0781184Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\semantic_definition_contract_spec-739d902c6a2dd900.exe",
+          "target": "semantic_definition_contract_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 8608768,
+          "sha256": "2b753cec6951e778d3973caffabce65e047116ad6df0fcd1d88a0336545f0817",
+          "modifiedUTC": "2026-09-14T06:05:39.5863727Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\semantic_definition_writer_resource_spec-5a6672de7e9c3eec.exe",
+          "target": "semantic_definition_writer_resource_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 8355328,
+          "sha256": "7c9109f03b590cf41d1719e65349751fef88bce36c008f988438f02cd9ccb8e1",
+          "modifiedUTC": "2026-09-14T06:05:01.3698651Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\source_selector_writer_spec-f8da546d385f49eb.exe",
+          "target": "source_selector_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 7903232,
+          "sha256": "5cb5d97e83174e4507a4c8e52b3ce208df0ec12eaa51642550bd8daeadb9c0fa",
+          "modifiedUTC": "2026-09-14T06:05:32.4016558Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_format_fixture_spec-09734c14b3a2efe4.exe",
+          "target": "v4_format_fixture_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 11034112,
+          "sha256": "73e1ad1e08d3441ebe0be6f1d4764af9958170b0a47c4892cf6374915251fba9",
+          "modifiedUTC": "2026-09-14T06:04:54.8633883Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_query_executor_spec-05586ee25779dd0b.exe",
+          "target": "v4_query_executor_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 10610176,
+          "sha256": "000e6df5c762c977af6d1d1975863e9f6dd203faaf3d35befc166e89a634479c",
+          "modifiedUTC": "2026-09-14T06:04:45.9912850Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_query_planner_spec-5eabea87c4e6baa6.exe",
+          "target": "v4_query_planner_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 10076672,
+          "sha256": "9781f0c68197b19e672ace2eb05fdb031954e3e42395e8e76418f5ecac2050ff",
+          "modifiedUTC": "2026-09-14T06:05:28.1568731Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_read_view_native_spec-2e28de33ccf013dd.exe",
+          "target": "v4_read_view_native_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 18087936,
+          "sha256": "e229a6d1324df3189cce0018b5c0e62f49b29ab4a417b887dee6a775fa9f060b",
+          "modifiedUTC": "2026-09-14T06:05:08.6947760Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_reader_hardening_spec-0eb1fddebf0ba5e7.exe",
+          "target": "v4_reader_hardening_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 10226176,
+          "sha256": "55292e044c7cb3855f96c4c4fa515a1e3896e56f932e5d7607432bd75ead2392",
+          "modifiedUTC": "2026-09-14T06:05:25.5124176Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\v4_root_migration_spec-32f11eec0b4b3db1.exe",
+          "target": "v4_root_migration_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 13348352,
+          "sha256": "58ef26805bf2c9df266bcc6543931a17fc884c0710077fe13e3fff1d4f247430",
+          "modifiedUTC": "2026-09-14T06:05:16.1021740Z"
+        },
+        {
+          "path": "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\target\\debug\\deps\\value_store_writer_spec-ff09ee116b936e0b.exe",
+          "target": "value_store_writer_spec",
+          "logs": [
+            "C:\\Users\\wyatt\\.cache\\codex\\aeordb-tests\\v4-service-completion-20260913\\u1-definition-final2-evidence\\affected.stderr.log"
+          ],
+          "bytes": 8355328,
+          "sha256": "6f2430d1b21feb869a88d148509c23e24b6328c26b6cbc261b82fe53c909614f",
+          "modifiedUTC": "2026-09-14T06:05:43.6047856Z"
+        }
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-narrow.guard.log",
+      "sha256": "8a8c4e2d33a9b49b29f01127791ee5c1d1808d493fb72f5aad3b988d97eadf63",
+      "command": "cargo test --offline --locked -j 2 -p aeordb --no-fail-fast --test semantic_definition_contract_spec --test dependency_table_writer_spec --test value_store_writer_spec --test field_definition_writer_spec --test semantic_definition_writer_resource_spec --test scope_definition_writer_spec --test parser_plan_writer_spec --test source_selector_writer_spec --test dependency_availability_spec --test index_v1_reference_spec --test index_producer_collector_spec --test index_producer_source_spec --test index_producer_worker_spec --test index_native_source_spec --test index_native_semantic_source_spec --test index_native_parser_spec --test index_native_parser_resource_spec --test index_semantic_source_spec --test semantic_catalog_reader_spec --test v4_root_migration_spec --test v4_read_view_native_spec --test v4_query_planner_spec --test v4_query_executor_spec --test v4_format_fixture_spec --test v4_reader_hardening_spec --test error_squelch_architecture_spec --test always_missing_evaluator_spec ",
+      "diskSamples": 4
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace-clippy.guard.log",
+      "sha256": "ba3348edf565ce8fc8d0a1895553c3133e5c3be173f08c3c16ceb1fd28eb28e8",
+      "command": "cargo clippy --offline --locked -j 2 --workspace --all-targets -- -D warnings ",
+      "diskSamples": 5
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-clippy.guard.log",
+      "sha256": "9a89d8fb5385e4e21d895c331277a066e032bd2bfc58f35bcab4ca1681a8d9d9",
+      "command": "cargo clippy --offline --locked -j 2 --manifest-path tools/v4-reference/Cargo.toml --all-targets -- -D warnings ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-contracts.guard.log",
+      "sha256": "74b211910cbf9b0da8437a0ff9dd893f726f9fdd27eb31c8282dbd1ebbcf20df",
+      "command": "env CARGO_NET_OFFLINE=true bash scripts/plan/check-v4-contracts.sh ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-debt-selftest.guard.log",
+      "sha256": "38e33d58630d4536f8f9e047a3401bb0e2614269f985a9e40f29a4b6c3cc0669",
+      "command": "bash scripts/spec/check-v4-debt-spec.sh ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace.guard.log",
+      "sha256": "262b399b52dddcadda35abe02c90fc450a2e5a5659580294fcad9159468f6133",
+      "command": "env RUST_TEST_THREADS=2 cargo test --offline --locked -j 2 --workspace --all-targets --no-fail-fast -- --skip test_create_at_stage_clamps_to_max --skip test_resize_at_max_stage_returns_error ",
+      "diskSamples": 74
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-clamp.guard.log",
+      "sha256": "5588989f1ccc4ce3ea38ff26f0b198f23936bf05fc7cc6bced0baa7c4b36785b",
+      "command": "env TMPDIR=/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-large-kv-temporary cargo test --offline --locked -j 2 -p aeordb --test disk_kv_store_spec test_create_at_stage_clamps_to_max -- --exact ",
+      "diskSamples": 8
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-resize.guard.log",
+      "sha256": "548b51ec9ef484b458a0269fb6cd41dc5770275194a5933e16d3cdbe9d7e3c9e",
+      "command": "env TMPDIR=/media/Data/AeorDB/Tests/v4-service-completion-20260913/u1-definition-large-kv-temporary cargo test --offline --locked -j 2 -p aeordb --test disk_kv_store_spec test_resize_at_max_stage_returns_error -- --exact ",
+      "diskSamples": 8
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-release.guard.log",
+      "sha256": "77920fa5a97649204f59c95f2a105fa642d4bb8eb2f06980476a01b91f6bb7d4",
+      "command": "cargo test --offline --locked --release -j 2 -p aeordb --test semantic_definition_contract_spec --test dependency_table_writer_spec --test value_store_writer_spec --test field_definition_writer_spec --test semantic_definition_writer_resource_spec --test always_missing_evaluator_spec ",
+      "diskSamples": 7
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference.guard.log",
+      "sha256": "b5202aaea98e9fbbc9a9103a0abe70ae39c42704c8fc9a7e37ad77a900c7b9fc",
+      "command": "cargo test --offline --locked --release -j 2 --manifest-path tools/v4-reference/Cargo.toml ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-verify.guard.log",
+      "sha256": "0f9ab27e2dd9871916b9cbfaaa8297c96afba51b86842e4eda554ebeaa6140f9",
+      "command": "cargo run --offline --locked --release -j 2 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4 ",
+      "diskSamples": 1
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-narrow.log",
+      "sha256": "985528d4e8e9c17a76073df72ae094c7c2215d156701f6f07002e208de72b52a",
+      "passed": 488,
+      "targets": 27,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-release.log",
+      "sha256": "9c9183d7709bec722b2305e289481180aa47911f2450fd4972f65415f91942c1",
+      "passed": 46,
+      "targets": 6,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference.log",
+      "sha256": "823a5d9bb5482e6c30671a9712692df8dccfa628737926c3b8bb3b6dade786d6",
+      "passed": 158,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-verify.log",
+      "sha256": "baace49018104f11ee6481a32b3be5a6ed28eb268e81952eb3d44832db2e6158",
+      "independentFixtures": 460
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-clamp.log",
+      "sha256": "16d4b98c7ddb7ee6c17e02a2acdac47c3c8144749dc1e6e96dd7ffe61b7cbe87",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-resize.log",
+      "sha256": "aa5088a5121803abcfe2bad89c83e600971487c91137e7cb98f078c678ee0dc7",
+      "passed": 1,
+      "targets": 1,
+      "filtered": 62
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace-clippy.log",
+      "sha256": "7631373ad2e262b95dc630acc6ffbf32c782d584a0593ba4ed934ef614471cff",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-clippy.log",
+      "sha256": "fcce12e8e9a3743502ec98eb1888a43a32489c10219b715f931aa40675ed5311",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-contracts.log",
+      "sha256": "dc8fe4df30c136a18765ee74a33233765966eceae0f46e7fc75df0df028122b3",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-debt-selftest.log",
+      "sha256": "943ab360e10b6cb29d8c816f2774fa0e3004569aad6e07dbe2d6f0003fbd35ee",
+      "exitVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace.log",
+      "sha256": "4fcbe29ca77fc6a5f23cfed2bf2dfe28afdba87f5dcbf6690227497ba0a4b089",
+      "summary": "top_level_targets=361 passed=7647 failed=0 ignored=7 filtered=2\nnested_targets=3 passed=3 failed=0"
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/library.log",
+      "sha256": "414464d93de2fa724eb2ecfb843d5dcc02887468a08cf475d9a3c6117ff07c3c",
+      "passed": 681,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/affected.log",
+      "sha256": "f2aa304b56c8fb7da171ee27f4bd9cec0b850c604e09952ee01aef1fa0f8a97a",
+      "passed": 488,
+      "targets": 27,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/reference.log",
+      "sha256": "a296c377030eaa98eaf5d57c74e01cac0ec4285aa4faa2b3fe0e5e824c8f5164",
+      "passed": 158,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/reference-verify.log",
+      "sha256": "1504e39bf745fce6d985ac57fabb15dec53cb9a31312d83ecf2683c35ab35d3f",
+      "independentFixtures": 460
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/library.stdout.log",
+      "sha256": "5344bad63086849879524e0843e8971e43d94d4aed4afb9bd29d9e757b4eba97",
+      "passed": 678,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/affected.stdout.log",
+      "sha256": "d4006fb110e994d54838c4b011cf246a61e2857b7b4b8358d2ce6ba103a8f3a9",
+      "passed": 488,
+      "targets": 27,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/reference.stdout.log",
+      "sha256": "f447a638d0f2db64a13221a3f940293bba7fa6f4425d9e09cbc143e302e1d9f8",
+      "passed": 158,
+      "targets": 1,
+      "filtered": 0
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/reference-verify.stdout.log",
+      "sha256": "3450e872102fe50b51673b9c4f3a984b9dc5fe3212ea00970ea3b5f5708eb8f4",
+      "independentFixtures": 460
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-workspace-format-check.log",
+      "sha256": "5f85b80a8123b31965a26c86f093c75c7246dee1e19818b784387b363a329c43",
+      "formattingVerified": true
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-reference-format-check.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "formattingVerified": true
+    }
+  ],
+  "receipts": [
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-narrow.exit",
+      "sha256": "11e71994c3d4ebcf01253cef3b7fc6f4382812df8e0ecc65af20cd3accfbe58f",
+      "result": {
+        "finished_utc": "2026-09-14T03:46:41Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337691082752",
+        "home_free": "73180590080"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace-clippy.exit",
+      "sha256": "49e1a1be21f52cd40701ae958424d8956eae3d7298fe6e2babcdb2954707d75b",
+      "result": {
+        "finished_utc": "2026-09-14T03:49:12Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337690980352",
+        "home_free": "73180008448"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-clippy.exit",
+      "sha256": "f53ccb68ef900585eb253e2d924cc40816680e214b1ec8dbf3cfbddfea7230ae",
+      "result": {
+        "finished_utc": "2026-09-14T03:49:42Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337690886144",
+        "home_free": "73179873280"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-contracts.exit",
+      "sha256": "7ec8d38dc84edc20e755884da562a3c4de3e165b56a3b6e16488565b44ee3eb1",
+      "result": {
+        "finished_utc": "2026-09-14T03:52:27Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337690796032",
+        "home_free": "73179369472"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-debt-selftest.exit",
+      "sha256": "08dc3ced54343ca32c9d200e98259fd1737330dade4cd93ae88556dfe0a4ca3a",
+      "result": {
+        "finished_utc": "2026-09-14T03:52:57Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337690705920",
+        "home_free": "73178845184"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-workspace.exit",
+      "sha256": "c0dbeac1e62f817c109a1da82ab853982944e69481d4813a3a7c046237610c24",
+      "result": {
+        "finished_utc": "2026-09-14T04:29:58Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337689808896",
+        "home_free": "73172537344"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-clamp.exit",
+      "sha256": "584b6f6c61152aa5db877279ef52c3a184de34422c145c6e215643759b79eb00",
+      "result": {
+        "finished_utc": "2026-09-14T04:33:58Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337689710592",
+        "home_free": "73169469440"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-maximum-stage-resize.exit",
+      "sha256": "b944a5d773cedeac49755acabd7dc1daa5b12f20c291dcfdf3029bd7899c6474",
+      "result": {
+        "finished_utc": "2026-09-14T04:37:58Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "337689616384",
+        "home_free": "73173381120"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-release.exit",
+      "sha256": "7c6effe77145250993580f14f4492cf6882a61051f79d86608db770558ac74cb",
+      "result": {
+        "finished_utc": "2026-09-14T04:41:28Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "336590397440",
+        "home_free": "73172590592"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference.exit",
+      "sha256": "56fa29144225e05c7c97d195bba30ee8ff877f0060a2047b21aa01090bb98993",
+      "result": {
+        "finished_utc": "2026-09-14T04:41:59Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "336590274560",
+        "home_free": "73172082688"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-reference-verify.exit",
+      "sha256": "3e0da06da0159a21070ef0730a5a5b9ca909a1a8e0e4e5c7a54e6dc9cba78305",
+      "result": {
+        "finished_utc": "2026-09-14T04:42:29Z",
+        "exit_status": "0",
+        "termination_reason": "none",
+        "data_free": "336590168064",
+        "home_free": "73172074496"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-evidence/u1-definition-final2-gates.exit",
+      "sha256": "c4af6c1420cb98c2c2e02bee45201ceae43766d37f9ef146af0ef02b96863459",
+      "result": {
+        "exit_status": "0",
+        "last_stage": "complete",
+        "finished_utc": "2026-09-14T04:42:29Z"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/library.exit",
+      "sha256": "a0935038058b0255d255470db8e673c2f4aadc448fafe0bd39ca7aff4ecfaaed",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:52:58Z",
+        "termination_reason": "none",
+        "final_free_bytes": "67716091904",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/affected.exit",
+      "sha256": "7443a50508637abb585ecbce2d1faae7d22129f7081179c645b195adb4908cc0",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:54:28Z",
+        "termination_reason": "none",
+        "final_free_bytes": "67714297856",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/reference.exit",
+      "sha256": "6d32444736cf3a6249083ac90a5a57d50c2bfc8fc8cc1a986303fe232c242f8f",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:54:58Z",
+        "termination_reason": "none",
+        "final_free_bytes": "67712880640",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-macos-evidence/reference-verify.exit",
+      "sha256": "df9f6a102927160d3244fb8b425ef964b769d0cc8744e32aca7133b899dfcae2",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:55:29Z",
+        "termination_reason": "none",
+        "final_free_bytes": "67715596288",
+        "final_secondary_free_bytes": "0"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/library.result.json",
+      "sha256": "f569998974fc77b6e44733077a57bc522f69a0a743eba3739f6c9207a3513821",
+      "result": {
+        "source_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 -p aeordb --lib",
+        "cargo_pid": 5328,
+        "started_utc": "2026-09-14T05:57:25.8755236Z",
+        "completed_utc": "2026-09-14T06:02:27.7929137Z",
+        "elapsed_seconds": 301.1483642,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19127435264,
+        "final_free_bytes": 19215106048
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/affected.result.json",
+      "sha256": "4fc5236cdba449929d448699f3dc65cf8ff81003fe4b8b2c7eef600775a6d48b",
+      "result": {
+        "source_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 -p aeordb --no-fail-fast --test semantic_definition_contract_spec --test dependency_table_writer_spec --test value_store_writer_spec --test field_definition_writer_spec --test semantic_definition_writer_resource_spec --test scope_definition_writer_spec --test parser_plan_writer_spec --test source_selector_writer_spec --test dependency_availability_spec --test index_v1_reference_spec --test index_producer_collector_spec --test index_producer_source_spec --test index_producer_worker_spec --test index_native_source_spec --test index_native_semantic_source_spec --test index_native_parser_spec --test index_native_parser_resource_spec --test index_semantic_source_spec --test semantic_catalog_reader_spec --test v4_root_migration_spec --test v4_read_view_native_spec --test v4_query_planner_spec --test v4_query_executor_spec --test v4_format_fixture_spec --test v4_reader_hardening_spec --test error_squelch_architecture_spec --test always_missing_evaluator_spec",
+        "cargo_pid": 9480,
+        "started_utc": "2026-09-14T06:02:28.7067117Z",
+        "completed_utc": "2026-09-14T06:07:48.3016636Z",
+        "elapsed_seconds": 319.3943503,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19083042816,
+        "final_free_bytes": 19083079680
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/reference.result.json",
+      "sha256": "a4c50614fd43cff1fbb693db51cfeb64c487a3188a7e55636b6f190db17ab2a2",
+      "result": {
+        "source_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo test --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml",
+        "cargo_pid": 4824,
+        "started_utc": "2026-09-14T06:07:48.9633141Z",
+        "completed_utc": "2026-09-14T06:08:13.3145696Z",
+        "elapsed_seconds": 24.1587359,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19082977280,
+        "final_free_bytes": 19082870784
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-windows-evidence/reference-verify.result.json",
+      "sha256": "7fbf42327b15c90b425cd0f38f9d95b045c31bb351d353557865892e12c22d5a",
+      "result": {
+        "source_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+        "lock_sha256": "06e6c7a8eb6dbccf52a0b97a4ee6edeece7297866305b0930314fd47b987faec",
+        "command": "cargo run --offline --locked -j1 --manifest-path tools/v4-reference/Cargo.toml -- verify aeordb-lib/spec/fixtures/v4",
+        "cargo_pid": 1540,
+        "started_utc": "2026-09-14T06:08:13.9868077Z",
+        "completed_utc": "2026-09-14T06:08:28.4222366Z",
+        "elapsed_seconds": 14.2101472,
+        "exit_status": 0,
+        "termination_reason": null,
+        "minimum_sampled_free_bytes": 19082772480,
+        "final_free_bytes": 19082612736
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-workspace-format-check.exit",
+      "sha256": "ac344aca7c4b8b14507fb08595dc9f02cde227df77d2599611e257e213be3e05",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:48:53Z"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-definition-final2-reference-format-check.exit",
+      "sha256": "2ca5df97427f26f5a37f746a2b4eb5af1df6492b369e77128a34b77f2444bc18",
+      "result": {
+        "exit_status": "0",
+        "finished_utc": "2026-09-14T03:48:54Z"
+      }
+    },
+    {
+      "path": "/home/wyatt/.cache/codex/v4-service-completion-20260913/always-missing-evaluator-red/result.exit",
+      "sha256": "ad19a444bcc89f35dffbb75732220f3a40bf6cbfa4516e78430c292c94286f5e",
+      "result": {
+        "stage": "test_complete",
+        "exit_status": "101",
+        "finished_utc": "2026-09-14T03:40:20Z"
+      }
+    }
+  ]
+}

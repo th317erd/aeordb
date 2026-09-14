@@ -3,12 +3,12 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "49b81e7362a7a8e0aab9f6313d6d75019a76ee68499311c250833f11c7330486",
-  "fixture_manifest_sha256": "4a0d2358760354136805ebf346c3a4fc98c2007c519fd2207679d8b88e8c77d0",
+  "source_sha256": "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19",
+  "fixture_manifest_sha256": "1bb1f6567b63e2254045e52bb9760024d2dfa8fa14cb41c8ec23bc63a5ee3c2e",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 24,
-    "fixtures": 454,
+    "fixtures": 460,
     "capability_bits": 24,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,7 +55,27 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 149,
+    "tests_passed": 158,
     "reviewer_status": "pending-owner-review-before-production-writer"
+  },
+  "correction_refresh": {
+    "date_utc": "2026-09-14",
+    "unit": "U1 semantic definition writers",
+    "source_entry_commit": "369cb19943fe1ca8b0595f180c9b3a05d7956d98",
+    "scope": "Ratified 64 KiB selector cap, canonical-none always-missing migration context, and corrected dependency flags; no dependency catalog-key change or service activation.",
+    "previous_live_values": {
+      "source_sha256": "49b81e7362a7a8e0aab9f6313d6d75019a76ee68499311c250833f11c7330486",
+      "fixture_manifest_sha256": "4a0d2358760354136805ebf346c3a4fc98c2007c519fd2207679d8b88e8c77d0",
+      "fixtures": 454,
+      "reference_tests_passed": 149
+    },
+    "reference_test_stage": "u1-definition-reference-bounded-green",
+    "reference_test_finished_utc": "2026-09-14T03:00:04Z",
+    "fixture_stage": "u1-definition-generation",
+    "fixture_finished_utc": "2026-09-14T03:00:36Z",
+    "existing_binary_files_unchanged": 455,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/media/Data/AeorDB/Tests/v4-service-completion-20260913",
+    "production_readiness_claimed": false
   }
 }

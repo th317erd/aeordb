@@ -33,6 +33,10 @@ mod mime_name_initial_spec;
 #[path = "../spec/dependency_availability_spec.rs"]
 mod dependency_availability_spec;
 
+#[cfg(test)]
+#[path = "../spec/definition_contract_spec.rs"]
+mod definition_contract_spec;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;

@@ -2338,6 +2338,18 @@
       "result": "pass"
     },
     {
+      "fixture_id": "asel-blake3-256-limit-65536-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-blake3-256-over-limit-65537-invalid",
+      "expected": "error:selector_length",
+      "observed": "error:selector_length",
+      "result": "pass"
+    },
+    {
       "fixture_id": "asel-sha512-metadata-hash-valid",
       "expected": "selector:metadata:items=0",
       "observed": "selector:metadata:items=0",
@@ -2377,6 +2389,18 @@
       "fixture_id": "asel-sha512-maximum-length-valid",
       "expected": "selector:plugin-mapper:items=0",
       "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-limit-65536-valid",
+      "expected": "selector:plugin-mapper:items=0",
+      "observed": "selector:plugin-mapper:items=0",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "asel-sha512-over-limit-65537-invalid",
+      "expected": "error:selector_length",
+      "observed": "error:selector_length",
       "result": "pass"
     },
     {
@@ -2681,8 +2705,14 @@
     },
     {
       "fixture_id": "avst-blake3-256-always-missing-legacy-valid",
-      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
-      "observed": "value-store:field=legacy_missing:selector=4:dependencies=4",
+      "expected": "error:value_store_always_missing_context",
+      "observed": "error:value_store_always_missing_context",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-blake3-256-always-missing-none-valid",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=0",
+      "observed": "value-store:field=legacy_missing:selector=4:dependencies=0",
       "result": "pass"
     },
     {
@@ -2723,8 +2753,14 @@
     },
     {
       "fixture_id": "avst-sha512-always-missing-legacy-valid",
-      "expected": "value-store:field=legacy_missing:selector=4:dependencies=4",
-      "observed": "value-store:field=legacy_missing:selector=4:dependencies=4",
+      "expected": "error:value_store_always_missing_context",
+      "observed": "error:value_store_always_missing_context",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "avst-sha512-always-missing-none-valid",
+      "expected": "value-store:field=legacy_missing:selector=4:dependencies=0",
+      "observed": "value-store:field=legacy_missing:selector=4:dependencies=0",
       "result": "pass"
     }
   ]

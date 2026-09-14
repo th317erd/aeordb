@@ -141,6 +141,20 @@ fn every_manifest_row_has_one_production_decoder() {
         Ok(()) => panic!("fixture {} should reject as {expected_code}", row.id),
         Err(error) => error,
       };
+      // The independent oracle has its own error vocabulary. Explicitly map
+      // the newly added cases while retaining the production code AND class;
+      // accepting an arbitrary rejection would hide the intended boundary.
+      let expected_code = match (row.format_id.as_str(), expected_code) {
+        ("source-selector-v1", "selector_length") => {
+          assert_eq!(error.class(), aeordb::engine::v4::reader::MalformedInputClass::AllocationAmplification);
+          "selector_exceeds_cap"
+        }
+        ("value-store-definition-v1", "value_store_always_missing_context") => {
+          assert_eq!(error.class(), aeordb::engine::v4::reader::MalformedInputClass::CrossRecordClosureMismatch);
+          "value_store_closure"
+        }
+        _ => expected_code,
+      };
       assert_eq!(error.code(), expected_code, "fixture {}", row.id);
     } else {
       decoded.unwrap_or_else(|error| panic!("fixture {} unexpectedly rejected: {error}", row.id));

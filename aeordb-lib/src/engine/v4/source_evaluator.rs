@@ -15,7 +15,7 @@ use super::index_producer_collector::{
 };
 use super::index_source::{PluginMapperExecutorV1, SourceDocumentV1, SourceExtractionV1, SourceOperationalErrorV1, ValueStoreRuntimeV1};
 use super::parser_plan::{ParserPlanKind, ParserResolutionPlanV1};
-use super::source_selector::{REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT};
+use super::source_selector::{REGEX_COMPILED_SIZE_LIMIT, REGEX_DFA_SIZE_LIMIT, SourceSelectorKind};
 use super::value_store::{ValueStoreDefinitionV1, decode_value_store_definition};
 
 const DEFINITION_DECODE_FIXED_BYTES: u64 = REGEX_COMPILED_SIZE_LIMIT as u64 + REGEX_DFA_SIZE_LIMIT as u64 + 64 * 1_024;
@@ -183,6 +183,12 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
       return Err(AuthoritativeSourceEvaluationErrorV1::Cancelled);
     }
     self.runtime.ensure_selector_execution_supported().map_err(AuthoritativeSourceEvaluationErrorV1::Source)?;
+    // This canonical migration selector cannot produce a value, invoke an
+    // executor, or inspect the document. Its admitted runtime needs no new
+    // workspace reservation; retain the cancellation and identity gates.
+    if self.definition().selector.kind == SourceSelectorKind::AlwaysMissingV0 {
+      return Ok(AuthoritativeSourceEvaluationV1::Missing);
+    }
     let parser_memory = if self.definition().parser_plan.kind == ParserPlanKind::None { None } else { Some(self.reserve_parser()?) };
     let parsed = if self.definition().parser_plan.kind == ParserPlanKind::None {
       None
@@ -259,6 +265,9 @@ impl<'definition> AuthoritativeSourceEvaluatorV1<'definition> {
 }
 
 fn source_outcome_retained_bytes(definition: &ValueStoreDefinitionV1<'_>) -> Result<u64, AuthoritativeSourceEvaluationErrorV1> {
+  if definition.selector.kind == SourceSelectorKind::AlwaysMissingV0 {
+    return Ok(0);
+  }
   let vector_bytes = u64::from(definition.max_source_values_per_document)
     .checked_mul(2)
     .and_then(|count| count.checked_mul(size_of::<Vec<u8>>() as u64))

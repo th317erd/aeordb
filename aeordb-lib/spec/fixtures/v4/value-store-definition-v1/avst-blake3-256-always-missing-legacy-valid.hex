@@ -1,9 +1,8 @@
 # fixture: avst-blake3-256-always-missing-legacy-valid
 # contract: ValueStoreDefinitionV1
 # hash: blake3-256 (32 bytes)
-# expected: value-store:field=legacy_missing:selector=4:dependencies=4
-# canonical key: 233041f13ccad8c65adbd111d03f9f1798128a81a561da232a852ed53ce4601b
-# relation: semantic-family:migration-always-missing-v0
+# expected: error:value_store_always_missing_context
+# relation: archival-rejection:round-9-supersedes-round-8a-parser-pipeline
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AVST canonical-definition envelope
 # definition +0x020 len 32: ScopeId

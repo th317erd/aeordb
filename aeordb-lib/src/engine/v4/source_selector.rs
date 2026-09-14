@@ -7,7 +7,7 @@ const SELECTOR_HEADER_LENGTH: usize = 32;
 const SEGMENT_HEADER_LENGTH: usize = 8;
 const MAPPER_HEADER_LENGTH: usize = 16;
 const POLICY_LENGTH: usize = 128;
-const SELECTOR_MAX_LENGTH: usize = 4 * 1_024;
+const SELECTOR_MAX_LENGTH: usize = 64 * 1_024;
 const MAX_SEGMENTS: usize = 1_024;
 pub(crate) const REGEX_COMPILED_SIZE_LIMIT: usize = 1_024 * 1_024;
 pub(crate) const REGEX_DFA_SIZE_LIMIT: usize = 1_024 * 1_024;
@@ -466,7 +466,7 @@ fn selector_write_length(request: SourceSelectorWriteV1<'_>) -> FormatResult<usi
       format!("{total_length} bytes exceeds {SELECTOR_MAX_LENGTH}"),
     ));
   }
-  // The 4 KiB bound proves all offsets and persisted u32 casts in the writer.
+  // The 64 KiB bound proves all offsets and persisted u32 casts in the writer.
   Ok(total_length)
 }
 

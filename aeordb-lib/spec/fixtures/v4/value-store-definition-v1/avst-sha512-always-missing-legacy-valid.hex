@@ -1,9 +1,8 @@
 # fixture: avst-sha512-always-missing-legacy-valid
 # contract: ValueStoreDefinitionV1
 # hash: sha512 (64 bytes)
-# expected: value-store:field=legacy_missing:selector=4:dependencies=4
-# canonical key: 6b95389982da10b5b12f5ab601fcff0ce59fe5a876009c892f6fa1ad25b37a982730a514a68db8c506cf626687dd82aef2aa1df520c1560ed165d97d90cabe9e
-# relation: semantic-family:migration-always-missing-v0
+# expected: error:value_store_always_missing_context
+# relation: archival-rejection:round-9-supersedes-round-8a-parser-pipeline
 # hex offsets are absolute within this fixture
 # definition +0x000 len 32: AVST canonical-definition envelope
 # definition +0x020 len 64: ScopeId

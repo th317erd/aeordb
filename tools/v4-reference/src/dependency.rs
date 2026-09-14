@@ -278,6 +278,7 @@ fn validate_record_fields(record: &DependencyRecord) -> Result<(), &'static str>
         || record.artifact_kind != 1
         || record.artifact_length == 0
         || !artifact_required
+        || ((matches!(record.abi, 3 | 4) || record.executor_profile == 2) && record.flags != 4)
       {
         return Err("dependency_wasm_contract");
       }

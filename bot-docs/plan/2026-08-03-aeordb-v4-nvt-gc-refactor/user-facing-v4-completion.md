@@ -204,7 +204,17 @@ every meaningful semantic change, irrelevant logging/formatting invariance,
 nearer fieldless scopes, dependency availability, and atomic task activation.
 An encoder/decoder round trip alone does not satisfy those tests.
 
-### U1 dependency-key clarification pending owner review
+### U1 dependency-key clarification — owner approved September 14
+
+The owner has approved complete dependency-definition IDs as keys and dynamic
+database-hash width. The normative append-only ruling is Round 16 in
+`.codex/conversation.md`: kind 6 uses `ExecutableDependencyDefinitionId`, kind
+7 uses `NativeDependencyDefinitionId`, and both have exactly the selected
+registered algorithm's digest width `H`. Artifact/conformance fingerprints
+remain their separate fixed BLAKE3-256 identities. Implement failing-first
+all-algorithm identity/width and same-artifact multi-role/runtime tests; audit
+existing fixtures/callers without silently rewriting historical evidence.
+The pending wording below records the original finding, not current status.
 
 The September 13 audit found a genuine persistent-contract ambiguity, not an
 implementation preference. Round 9 assigns dependency fingerprints a fixed

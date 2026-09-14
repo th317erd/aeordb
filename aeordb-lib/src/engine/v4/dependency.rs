@@ -283,6 +283,7 @@ fn decode_dependency_record(value: &[u8], start: usize) -> FormatResult<(Depende
 }
 
 fn validate_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<()> {
+  validate_record_lengths(record)?;
   if record.flags & !0x07 != 0 {
     return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "dependency_flags", format!("flags {:#010x}", record.flags)));
   }
@@ -319,6 +320,7 @@ fn validate_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<(
         || record.artifact_kind != 1
         || record.artifact_length == 0
         || !artifact_required
+        || ((matches!(record.abi, 3 | 4) || record.executor_profile == 2) && record.flags != 4)
       {
         return Err(error(
           MalformedInputClass::CrossRecordClosureMismatch,
@@ -348,6 +350,108 @@ fn validate_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<(
     }
   }
   Ok(())
+}
+
+fn validate_record_lengths(record: &DependencyRecordV1<'_>) -> FormatResult<usize> {
+  let id_length = record.dependency_id.len();
+  let version_length = record.version.len();
+  if id_length == 0 || id_length > 4_096 || version_length > 256 {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "dependency_record_component_length",
+      format!("ID {id_length}, version {version_length}"),
+    ));
+  }
+  RECORD_HEADER_LENGTH
+    .checked_add(id_length)
+    .and_then(|length| length.checked_add(version_length))
+    .ok_or_else(|| length_error("dependency record length overflow"))
+}
+
+/// Encode one complete dependency identity. This is not its catalog binding
+/// or its artifact fingerprint; those have separate ownership contracts.
+pub fn encode_dependency_record(record: &DependencyRecordV1<'_>) -> FormatResult<Vec<u8>> {
+  validate_dependency_record(record)?;
+  let length = validate_record_lengths(record)?;
+  let mut value = allocate_dependency_bytes(length)?;
+  write_dependency_record(&mut value, record);
+  Ok(value)
+}
+
+/// Encode an already sorted, deduplicated table without changing the ordinals
+/// used by its parser and selector. Validate every record before output allocation.
+pub fn encode_dependency_table(records: &[DependencyRecordV1<'_>]) -> FormatResult<Vec<u8>> {
+  if records.len() > MAX_RECORDS {
+    return Err(error(
+      MalformedInputClass::AllocationAmplification,
+      "dependency_record_count",
+      format!("{} records exceeds {MAX_RECORDS}", records.len()),
+    ));
+  }
+  let mut total_length = TABLE_HEADER_LENGTH;
+  for (index, record) in records.iter().enumerate() {
+    validate_dependency_record(record)?;
+    total_length =
+      total_length.checked_add(validate_record_lengths(record)?).ok_or_else(|| length_error("dependency table length overflow"))?;
+    if total_length > TABLE_MAX_LENGTH {
+      return Err(error(
+        MalformedInputClass::AllocationAmplification,
+        "dependency_table_length",
+        format!("{total_length} bytes exceeds {TABLE_MAX_LENGTH}"),
+      ));
+    }
+    if index > 0 && compare_records(&records[index - 1], record) != Ordering::Less {
+      return Err(error(MalformedInputClass::NoncanonicalOrderOrDuplicate, "dependency_record_order", "records are not strictly ordered"));
+    }
+  }
+  let mut value = allocate_dependency_bytes(total_length)?;
+  value[..4].copy_from_slice(b"ADPT");
+  value[4..6].copy_from_slice(&1u16.to_le_bytes());
+  value[6..8].copy_from_slice(&(TABLE_HEADER_LENGTH as u16).to_le_bytes());
+  value[8..12].copy_from_slice(&(total_length as u32).to_le_bytes());
+  value[16..20].copy_from_slice(&(records.len() as u32).to_le_bytes());
+  value[20..24].copy_from_slice(&((total_length - TABLE_HEADER_LENGTH) as u32).to_le_bytes());
+  let mut cursor = TABLE_HEADER_LENGTH;
+  for record in records {
+    let end = cursor + RECORD_HEADER_LENGTH + record.dependency_id.len() + record.version.len();
+    write_dependency_record(&mut value[cursor..end], record);
+    cursor = end;
+  }
+  Ok(value)
+}
+
+fn allocate_dependency_bytes(length: usize) -> FormatResult<Vec<u8>> {
+  let mut value = Vec::new();
+  value.try_reserve_exact(length).map_err(|source| {
+    error(MalformedInputClass::AllocationAmplification, "dependency_writer_allocation", format!("cannot reserve {length} bytes: {source}"))
+  })?;
+  value.resize(length, 0);
+  Ok(value)
+}
+
+// Only called after complete validation and allocation of the exact, zeroed
+// record span. The component/table caps prove all offsets and persisted casts.
+fn write_dependency_record(value: &mut [u8], record: &DependencyRecordV1<'_>) {
+  let length = value.len() as u32;
+  value[..4].copy_from_slice(&length.to_le_bytes());
+  for (offset, field) in [
+    (4, record.kind),
+    (6, record.role),
+    (12, record.abi),
+    (14, record.executor_profile),
+    (16, record.fingerprint_semantics),
+    (18, record.artifact_kind),
+  ] {
+    value[offset..offset + 2].copy_from_slice(&field.to_le_bytes());
+  }
+  value[8..12].copy_from_slice(&record.flags.to_le_bytes());
+  value[20..24].copy_from_slice(&(record.dependency_id.len() as u32).to_le_bytes());
+  value[24..28].copy_from_slice(&(record.version.len() as u32).to_le_bytes());
+  value[32..40].copy_from_slice(&record.artifact_length.to_le_bytes());
+  value[40..72].copy_from_slice(&record.fingerprint);
+  let id_end = RECORD_HEADER_LENGTH + record.dependency_id.len();
+  value[RECORD_HEADER_LENGTH..id_end].copy_from_slice(record.dependency_id.as_bytes());
+  value[id_end..].copy_from_slice(record.version.as_bytes());
 }
 
 fn compare_records(left: &DependencyRecordV1<'_>, right: &DependencyRecordV1<'_>) -> Ordering {

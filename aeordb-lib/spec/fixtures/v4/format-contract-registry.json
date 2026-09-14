@@ -1545,7 +1545,7 @@
           "offset": 4,
           "length": 4,
           "field": "selector_total_length",
-          "rule": "complete selector bytes, at most 4096"
+          "rule": "complete selector bytes, at most 65536 (Round 8A child cap)"
         },
         {
           "offset": 8,
@@ -1661,7 +1661,7 @@
       "key_domain": "no standalone key; exact bytes participate in the enclosing ValueStoreId",
       "checksum": "no independent checksum; enclosing ValueStoreDefinition identity plus IndexArtifact CRC/hash protect these bytes",
       "body_formula": "metadata 40; json_path 32 + sum(8 + payload); mapper 48 + A + 128; always_missing_v0 32",
-      "hard_cap": 4096,
+      "hard_cap": 65536,
       "canonical_order": "JSON segments retain path order; plugin payload is fixed arguments then policy; always_missing_v0 is one canonical empty form",
       "reserve_zero_ranges": [
         {
@@ -1679,7 +1679,7 @@
       ],
       "malformed_behavior": "reject framing/flags/reserve, unknown/inapplicable kind semantics, wrong metadata ID, segment count/length/tag/flags/UTF-8/regex errors, empty object keys, malformed canonical arguments, zero mapper ordinal, policy length/decoding failure, mapper-policy host-profile mismatch, truncation, and oversize input",
       "trailing_behavior": "selector_total_length and item_count consume the complete payload; nested segment, config, and policy records consume exact bytes",
-      "bounded_decode": "validate the 32-byte header, 4 KiB cap, and 1024-item cap before traversal; validate each checked child length before slicing; nested config is independently bounded, regex compilation has fixed 1 MiB program and DFA limits, and the total selector cap dominates",
+      "bounded_decode": "validate the 32-byte header, 64 KiB cap, and 1024-item cap before traversal; validate each checked child length before slicing; nested config is independently bounded, regex compilation has fixed 1 MiB program and DFA limits, and the total selector cap dominates",
       "producer_owner": "Child 05 ValueStore definition compiler and Child 07 migration through Child 01 codec",
       "consumer_owners": [
         "Child 01 fixture/readers",
@@ -1705,7 +1705,9 @@
         "asel-blake3-256-mapper-corrected-valid",
         "asel-blake3-256-mapper-legacy-valid",
         "asel-blake3-256-always-missing-valid",
-        "asel-blake3-256-maximum-length-valid"
+        "asel-blake3-256-maximum-length-valid",
+        "asel-blake3-256-limit-65536-valid",
+        "asel-blake3-256-over-limit-65537-invalid"
       ],
       "fixture_ids_64": [
         "asel-sha512-metadata-hash-valid",
@@ -1714,7 +1716,9 @@
         "asel-sha512-mapper-corrected-valid",
         "asel-sha512-mapper-legacy-valid",
         "asel-sha512-always-missing-valid",
-        "asel-sha512-maximum-length-valid"
+        "asel-sha512-maximum-length-valid",
+        "asel-sha512-limit-65536-valid",
+        "asel-sha512-over-limit-65537-invalid"
       ]
     },
     {
@@ -1873,7 +1877,9 @@
       ],
       "key_domain": "H('aeordb.index.value-store-definition.v1\\0' || complete canonical ValueStoreDefinitionV1)",
       "checksum": "no independent checksum; enclosing IndexArtifact CRC, immutable artifact hash, and ValueStoreId recomputation protect these bytes",
-      "body_formula": "112 + H + F + S + P + D, with F 1..4096, S at most 4096, P at most 131072, D at most 262144, and total at most 524288",
+      "body_formula": "112 + H + F + S + P + D, with F 1..4096, S at most 65536, P at most 131072, D at most 262144, and total at most 524288",
+      "always_missing_context": "MigrationV0 only; canonical 48-byte none parser, empty dependencies, ordinary non-@ field, zero metadata semantics and document-input/selector-work/examined limits. Round 9 supersedes the older Round 8A parser-pipeline example.",
+      "dependency_identity_flags": "Corrected closures reject migration-only version_absent_v0 and opaque_id_v0 flags, including for unknown ABI/executor profiles. Standalone unknown-executor dependencies remain structurally retainable without proving availability.",
       "hard_cap": 524288,
       "canonical_order": "fixed envelope/scope/lengths/semantics/limits, field name, complete selector, complete parser plan, then canonical dependency table",
       "reserve_zero_ranges": [
@@ -1919,7 +1925,8 @@
         "avst-blake3-256-mapper-corrected-valid",
         "avst-blake3-256-json-legacy-valid",
         "avst-blake3-256-mapper-legacy-valid",
-        "avst-blake3-256-always-missing-legacy-valid"
+        "avst-blake3-256-always-missing-legacy-valid",
+        "avst-blake3-256-always-missing-none-valid"
       ],
       "fixture_ids_64": [
         "avst-sha512-metadata-hash-corrected-valid",
@@ -1928,7 +1935,8 @@
         "avst-sha512-mapper-corrected-valid",
         "avst-sha512-json-legacy-valid",
         "avst-sha512-mapper-legacy-valid",
-        "avst-sha512-always-missing-legacy-valid"
+        "avst-sha512-always-missing-legacy-valid",
+        "avst-sha512-always-missing-none-valid"
       ]
     },
     {
@@ -3741,7 +3749,7 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 24,
-    "fixture_count": 454,
+    "fixture_count": 460,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
     "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, and P6-2d-c3c external index-runtime workspace extensions registered before their first writers"

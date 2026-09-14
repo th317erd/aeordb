@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "49b81e7362a7a8e0aab9f6313d6d75019a76ee68499311c250833f11c7330486";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "3785f431ea8cc060e2446430019f05639223d9688c31eb8e0010f86ca391bb80";
+pub const CONTRACT_REGISTRY_SHA256: &str = "a99fc27de576cb67488a7d6fd378e63f927d3ebd65b60b5ba552566dfc052f19";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "3739ef0ac53e12db176bcd5c4f365ee93ff08283010a0a71ae35f276492e10f0";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -504,7 +504,7 @@ pub const FORMAT_LIMITS: &[FormatLimit] = &[
   FormatLimit { id: "dependency-table-v1", hard_cap: 262144 },
   FormatLimit { id: "invocation-policy-v1", hard_cap: 128 },
   FormatLimit { id: "parser-resolution-plan-v1", hard_cap: 131072 },
-  FormatLimit { id: "source-selector-v1", hard_cap: 4096 },
+  FormatLimit { id: "source-selector-v1", hard_cap: 65536 },
   FormatLimit { id: "value-store-definition-v1", hard_cap: 524288 },
   FormatLimit { id: "canonical-config-value-v1", hard_cap: 262144 },
   FormatLimit { id: "scope-definition-v1", hard_cap: 65536 },
@@ -531,7 +531,7 @@ pub mod format_hard_cap {
   pub const DEPENDENCY_TABLE_V1: u64 = 262144;
   pub const INVOCATION_POLICY_V1: u64 = 128;
   pub const PARSER_RESOLUTION_PLAN_V1: u64 = 131072;
-  pub const SOURCE_SELECTOR_V1: u64 = 4096;
+  pub const SOURCE_SELECTOR_V1: u64 = 65536;
   pub const VALUE_STORE_DEFINITION_V1: u64 = 524288;
   pub const CANONICAL_CONFIG_VALUE_V1: u64 = 262144;
   pub const SCOPE_DEFINITION_V1: u64 = 65536;

@@ -8,7 +8,7 @@ const DEFINITION_HEADER_LENGTH: usize = 32;
 const FIXED_BODY_WITHOUT_SCOPE: usize = 80;
 const MAX_DEFINITION_LENGTH: usize = 512 * 1_024;
 const MAX_FIELD_NAME_LENGTH: usize = 4 * 1_024;
-const MAX_SELECTOR_LENGTH: usize = 4 * 1_024;
+const MAX_SELECTOR_LENGTH: usize = 64 * 1_024;
 const MAX_PARSER_PLAN_LENGTH: usize = 128 * 1_024;
 const MAX_DEPENDENCY_TABLE_LENGTH: usize = 256 * 1_024;
 
@@ -70,17 +70,24 @@ struct DecodedValueStore {
 }
 
 pub fn fixture_cases() -> Vec<ValueStoreFixtureCase> {
-  let mut cases = Vec::with_capacity(14);
+  let mut cases = Vec::with_capacity(16);
   for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
     for (suffix, definition, expected, relation) in fixture_definitions(profile) {
-      let bytes = build_definition(profile, &definition).expect("fixture ValueStore definition must encode");
+      // Preserve the exact original specimen and its historical filename. It
+      // characterized a superseded Round 8A pipeline, not valid Round 9 bytes.
+      let archived = suffix == "always-missing-legacy";
+      let bytes = if archived {
+        encode_definition_bytes(profile, &definition).expect("archival fixture framing must encode")
+      } else {
+        build_definition(profile, &definition).expect("fixture ValueStore definition must encode")
+      };
       cases.push(ValueStoreFixtureCase {
         id: fixture_id(profile, suffix),
         format: ValueStoreFormat::ValueStoreDefinitionV1,
         profile,
         expected,
         relation,
-        canonical_key: Some(value_store_id(profile, &bytes)),
+        canonical_key: if archived { None } else { Some(value_store_id(profile, &bytes)) },
         bytes,
       });
     }
@@ -153,8 +160,14 @@ fn fixture_definitions(profile: HashProfile) -> Vec<(&'static str, ValueStoreDef
     (
       "always-missing-legacy",
       json_definition(profile, true, true),
-      "value-store:field=legacy_missing:selector=4:dependencies=4",
-      Some("semantic-family:migration-always-missing-v0"),
+      "error:value_store_always_missing_context",
+      Some("archival-rejection:round-9-supersedes-round-8a-parser-pipeline"),
+    ),
+    (
+      "always-missing-none",
+      always_missing_definition(profile),
+      "value-store:field=legacy_missing:selector=4:dependencies=0",
+      Some("round-9:always-missing-canonical-none-no-content-input"),
     ),
   ]
 }
@@ -192,6 +205,14 @@ fn metadata_definition(profile: HashProfile, family: u16) -> ValueStoreDefinitio
     max_selector_work_items_per_document: 0,
     max_selector_examined_bytes_per_document: 0,
   }
+}
+
+fn always_missing_definition(profile: HashProfile) -> ValueStoreDefinition {
+  let mut definition = metadata_definition(profile, 2);
+  definition.field_name = "legacy_missing".to_string();
+  definition.metadata_source_semantics = 0;
+  definition.selector = selector::build_always_missing();
+  definition
 }
 
 fn json_definition(profile: HashProfile, legacy: bool, always_missing: bool) -> ValueStoreDefinition {
@@ -370,6 +391,14 @@ fn native_dependency(role: u16, id: &str) -> DependencyRecord {
 }
 
 fn build_definition(profile: HashProfile, definition: &ValueStoreDefinition) -> Result<Vec<u8>, &'static str> {
+  let bytes = encode_definition_bytes(profile, definition)?;
+  decode_definition(profile, &bytes)?;
+  Ok(bytes)
+}
+
+// Framing-only oracle, also used for the explicitly rejected historical
+// specimen above. All ordinary builder callers retain full decoding validation.
+fn encode_definition_bytes(profile: HashProfile, definition: &ValueStoreDefinition) -> Result<Vec<u8>, &'static str> {
   let hash_width = profile.width();
   if definition.scope_id.len() != hash_width || definition.scope_id.iter().all(|byte| *byte == 0) {
     return Err("value_store_scope_id");
@@ -420,7 +449,6 @@ fn build_definition(profile: HashProfile, definition: &ValueStoreDefinition) -> 
   value.extend_from_slice(&definition.selector);
   value.extend_from_slice(&definition.parser_plan);
   value.extend_from_slice(&definition.dependencies);
-  decode_definition(profile, &value)?;
   Ok(value)
 }
 
@@ -590,10 +618,9 @@ fn validate_field_selector_and_limits(
     4 => {
       if family != 2
         || metadata_source_semantics != 0
-        || parser.kind == 1
-        || parser.resolution_semantics != 2
+        || parser.kind != 1
         || field_name.starts_with('@')
-        || max_document_input == 0
+        || max_document_input != 0
         || max_selector_work != 0
         || max_selector_examined != 0
       {
@@ -697,6 +724,7 @@ fn require_wasm_role(dependency: &DependencyRecord, role: u16, family: u16, matc
     || (dependency.executor_profile <= 3 && dependency.executor_profile != if family == 1 { 2 } else { 3 })
     || dependency.artifact_kind != 1
     || dependency.artifact_length == 0
+    || (family == 1 && dependency.flags & 3 != 0)
     || (role == 1 && match_semantics != if family == 1 { 1 } else { 2 } && match_semantics != 0)
   {
     return Err("value_store_wasm_dependency");
@@ -759,6 +787,7 @@ fn fixture_id(profile: HashProfile, suffix: &str) -> &'static str {
     (HashProfile::Blake3_256, "json-legacy") => "avst-blake3-256-json-legacy-valid",
     (HashProfile::Blake3_256, "mapper-legacy") => "avst-blake3-256-mapper-legacy-valid",
     (HashProfile::Blake3_256, "always-missing-legacy") => "avst-blake3-256-always-missing-legacy-valid",
+    (HashProfile::Blake3_256, "always-missing-none") => "avst-blake3-256-always-missing-none-valid",
     (HashProfile::Sha512, "metadata-hash-corrected") => "avst-sha512-metadata-hash-corrected-valid",
     (HashProfile::Sha512, "metadata-created-at-legacy") => "avst-sha512-metadata-created-at-legacy-valid",
     (HashProfile::Sha512, "json-corrected") => "avst-sha512-json-corrected-valid",
@@ -766,6 +795,7 @@ fn fixture_id(profile: HashProfile, suffix: &str) -> &'static str {
     (HashProfile::Sha512, "json-legacy") => "avst-sha512-json-legacy-valid",
     (HashProfile::Sha512, "mapper-legacy") => "avst-sha512-mapper-legacy-valid",
     (HashProfile::Sha512, "always-missing-legacy") => "avst-sha512-always-missing-legacy-valid",
+    (HashProfile::Sha512, "always-missing-none") => "avst-sha512-always-missing-none-valid",
     _ => unreachable!("fixture suffixes are fixed"),
   }
 }

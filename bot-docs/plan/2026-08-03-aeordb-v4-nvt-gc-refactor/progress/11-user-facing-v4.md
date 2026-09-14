@@ -26,6 +26,14 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September 14 owner update: catalog-key clarification is approved, including
+dynamic width from the selected database hash registry; normative Round 16 is
+appended to `.codex/conversation.md`. Windows SSH is restored (verified hostname
+and 19,198,201,856 free bytes, no active Cargo/Rust process). Resume pending
+native qualification of the unchanged 43-input writer candidate first, then
+land it before the separately tested catalog identity/COW integration unit.
+Historical blocked/pending entries below are superseded by this owner update.
+
 - Normal CLI/server creation calls `StorageEngine::create*` →
   `AppendWriter::create` → legacy `FileHeader::new`, whose version is 3.
 - Ordinary service selected-root reads bind `LegacyV3SelectedRootAdapterV1`.
@@ -85,10 +93,15 @@ Native conformance/availability corrections pass final Linux, native and static
 qualification, including the corrected accounting-test binding. Exact-source,
 test-count, binary, receipt and resource evidence is independently audited in
 [the native unit proof](../evidence/user-facing-v4-u1-native-proof-20260914.json).
-Land this green native unit, then install the definition contract regressions
-and remaining four definition-writer targets before production changes.
-Then continue remaining definitions, catalog/COW and compilation. The
-dependency-key clarification remains pending owner review. The original
+The native unit is committed/pushed as `369cb199`. The subsequent definition
+writers and shared-evaluator correction now pass candidate-2 Linux, macOS and
+Windows qualification. The strict complete evidence check passes and its
+[definition unit proof](../evidence/user-facing-v4-u1-definition-proof-20260914.json)
+is included in this landing snapshot. Next: land the green writer unit, then
+install and execute the prepared Round 16 catalog regression targets before
+changing production readers. Do not repeat completed writer tests without a
+source or evidence reason. Catalog/COW and compilation follow under the approved Round 16
+dependency-key and dynamic-width correction. The original
 normal-creation target remains red until actual runtime/default integration;
 neither prerequisite unit completes U1 or the full readiness goal.
 
@@ -1036,3 +1049,425 @@ definition/canonical compiler/catalog work, the pending owner catalog-key
 ruling, actual WASM execution, legacy operational budgets, U2–U7 runtime,
 migration-to-service/default integration and final qualification still stand.
 No production database, service, install, release or default was changed.
+
+## Active landing unit: remaining semantic definition writers
+
+Entry/last green: `369cb19943fe1ca8b0595f180c9b3a05d7956d98`, pushed to
+development with upstream 0/0. Direct integration owner. The prior native
+source/receipts stay preserved; use a fresh detached desktop
+`source-u1-definitions` and same-host build cache only.
+
+Owned: dependency record/table, ValueStore, converter and field definition
+writers; selector/AVST reader cap and always-missing context corrections;
+independent reference, exact corresponding registry/fixture expectations,
+shared source-evaluator correction, targeted consumer regressions, normal Cargo
+targets and this ledger.
+Forbidden in this writer unit: class6/7 catalog changes (the following Round 16
+unit owns those approved corrections), physical/root publishers,
+runtime/default/service activation, production and retained evidence databases.
+
+Test/territory entry: all four existing definition decoders have independent
+fixtures; no corresponding production encoders exist. Writers derive frozen
+semantic fields from typed input and the permanent registry, validate complete
+borrowed children before allocating output, preserve canonical dependency
+ordinals/order, and return domain-separated IDs at the selected database hash.
+No new alias/coercion or catalog-key policy is chosen here.
+
+- [x] Install and execute the ten contract regressions before changing readers;
+  install dependency (nine), ValueStore (five), converter/field (seven) writer
+  tests and record missing-API red compilation separately from behavioral red.
+- [x] Correct the ratified 64 KiB selector cap and parser-free always-missing
+  context in production/reference/registry, preserving old binary artifacts as
+  explicit historical rejections and adding independent canonical examples.
+- [x] Implement bounded dependency/table, ValueStore, converter and field
+  writers against independent exact bytes/IDs, malformed and boundary tests.
+- [x] Expand parent/child closure, allocation preflight, ordering/duplicates,
+  cross-family and changed-input identities; audit every affected consumer.
+- [x] Run narrow, affected, static, independent, full and native gates against
+  the final unit; record actual byte/hash/resource evidence in the coherent
+  writer landing snapshot.
+  Continue catalog/COW/compiler only within the ratified owner-key boundary.
+
+The contract draft has four added adjacent cases beyond the original six-probe
+red packet: independent 1,024-segment count, malformed framing at 64 KiB,
+no-content-work/cancellation for always-missing, and invalid family/limits.
+These additional cases have not yet run. All 100 named converter/field fixture
+paths are checked present; that inventory is not execution proof.
+
+Definition baseline completed **02:28:42 UTC** in the fresh detached checkout.
+The ten behavioral regressions yielded one characterization pass and nine
+intended failures. Each writer target separately failed compilation on its
+missing public API (E0432); those are not behavioral passes. All 18 source/lock
+inputs stayed unchanged and no resource guard fired. Receipts use prefix
+`u1-definition-baseline-` under the existing desktop campaign evidence folder.
+
+The adjacent dependency-flag audit added two more behavioral regressions:
+known corrected ABI/profile records must reject migration-only identity flags;
+a corrected AVST closure must also reject those flags when both executor IDs
+are unknown. Both reproduce on unmodified production at **02:37:09 UTC**,
+exit 101, zero passes/two failures, ten filtered. Explicit migration records
+and standalone unknown-executor retention remain required positive controls.
+Stage `u1-definition-flags-red`, no guard stop, all 18 inputs unchanged.
+
+First production narrow pass: **02:44:31 UTC**, all **33 tests** across the
+four new targets (dependency nine, converter/field seven, contract twelve,
+ValueStore five). All 18 inputs unchanged, no guard termination. The four
+writers now preflight lengths/closure before fallible output allocation;
+ACNV/AFIX derive semantic fields and fingerprints from the permanent registry.
+
+Independent reference red: **02:45:54 UTC**, all five separately written
+contract regressions fail against the original reference readers. The corrected
+reference now has six additional fixture cases planned: two canonical-none
+AVST definitions and both-width selector examples at 65,536/65,537 bytes.
+Old always-missing bytes are preserved as explicit archival rejections, not
+rewritten to make them valid. Fixture generation/verification is still pending.
+
+The initial full reference run (`u1-definition-reference-green`) was deliberately
+terminated with scoped SIGTERM after **6m44s**, not passed. New 64 KiB fixtures
+made its exhaustive per-byte copy/decode/hash loop quadratic. The successor
+uses the scope oracle's established bounded large-fixture approach: retain
+every byte mutation of all original ≤4 KiB examples, cover all added framing
+and invocation-policy bytes, and sample large scalar interiors/end boundaries.
+This changes only new-case mutation enumeration, not any acceptance assertion,
+production limit or old fixture bytes. Full reference and generation must rerun.
+
+Bounded reference rerun completes **03:00:04 UTC**, all **158 tests passing**
+(13.82 seconds execution). Isolated generation then verifies **460 independent
+cases at 03:00:36 UTC**, with all **455 pre-existing binary fixture files**
+byte-identical. The extra binary beyond the 454 format cases is the separate
+SystemFamily fixture. All 22 source/lock inputs remain unchanged; no disk guard
+fires. Final Data/home free bytes: **337,746,141,184 / 73,604,513,792**.
+
+Generated differences are restricted to six new cases and annotations, two
+archival AVST annotation/outcome updates, manifest/result metadata, and generated
+registry identity/selector-cap constants. These exact files are now installed
+locally and in the disposable desktop checkout; no executable or DB was copied.
+New allocation tests measure oversized-input preflight and inject one output
+reservation failure in each encoder. ValueStore tests also cover each child's
+identity, malformed/cross-family closure and parser-free migration-only output.
+The expanded production suite is executing against 39 frozen inputs; no full
+definition-unit, native, runtime/default or production-readiness claim yet.
+
+Expanded production run closes **03:10:36 UTC**, **125 passed / one failed**
+across eight targets, all 39 inputs unchanged, no guard stop. All 40 new
+writer/contract/resource tests pass, as do seven selector-writer tests, all
+77 format tests and the bounded mutation corpus. The sole failure is the
+existing hardening test assuming identical reference/production error names
+for a newly added rejection. Its adapter now maps the two new reference codes
+explicitly and also requires the precise production error class. No production
+acceptance or error code changes. The expanded suite must pass its fresh rerun.
+
+A complete dependency flag matrix was also added (native zero-only; corrected
+WASM artifact-only; explicit migration and unknown standalone profiles retain
+their permitted identity flags). This raises the new-target total to 41 and
+the eight-target narrow total to 127. A serialized narrow → workspace Clippy →
+reference Clippy run is in flight before broader qualification.
+
+The rerun closes **03:14:34 UTC**, all **127 tests across eight targets pass**.
+Workspace Clippy passes **03:17:34 UTC**, independent reference Clippy passes
+**03:18:04 UTC**, both with warnings denied. All 39 frozen inputs are unchanged,
+no disk guard fires; final Data/home free bytes are **337,704,448,000 /
+73,089,830,912**. Actual workspace/reference Cargo format checks also pass
+locally without modifying those inputs. Live P0b/P0c reports now refresh current
+hashes/counts with explicit prior values and exact new stage references;
+historical native-unit proof remains untouched. Next: exact contract/debt gates,
+affected consumers, final-source Linux and native qualification, then review
+and land this definition unit. U1, default cutover and full readiness remain open.
+
+Final-candidate-1 affected consumers pass **03:29:42 UTC**, **483 tests in 26
+targets**; contracts pass **03:30:12 UTC**, debt self-tests **03:30:42 UTC**.
+Mac candidate-1 passes 681 library tests, the same 483 affected tests, 158
+reference tests and 460 fixtures by **03:33:41 UTC**. Its small evidence packet
+and 28 same-host executable digests are mirrored. Windows SSH is refused; an
+owner availability question is pending. These results do not waive Windows.
+
+The final consumer review found an additional shared-runtime defect:
+`AuthoritativeSourceEvaluatorV1` accounts hypothetical output for a canonical
+always-missing selector. An independent three-test probe, linked against the
+qualified Mac library without modifying its source, fails **03:40:20 UTC**:
+4,144 bytes reported instead of zero, legacy unlimited-bound arithmetic
+overflow, and a needless admission failure at memory capacity. All frozen
+source/library checks remain identical. Probe and receipts are preserved in
+the durable `always-missing-evaluator-red` folder; this is an executed defect,
+not an unverified follow-up.
+
+The owned Linux candidate-1 broad run was stopped with scoped SIGTERM at
+**03:41:45 UTC** after 13m03s. It is **not a workspace pass**, despite systemd
+reporting a successful supervisor exit. The explicit interruption report records
+the TERM result, source manifest, earlier completed stages and resource samples;
+no production service was involved. The full candidate must rerun.
+
+Candidate 2 includes the narrow shared-evaluator correction in this same landing
+unit. Always-missing has zero output/workspace and returns Missing after
+validation/admission and cancellation checks, without parser or output
+reservation. It does not alter legacy limits for real value-producing sources.
+The permanent five-test target adds both-width producer/query coverage, legacy
+unlimited values/counts, pressure, cancellation, memory release, metadata output
+and pressure controls, invalid identities/framing and initial admission.
+Source evaluator has no reviewed-suppression location changes. The frozen
+manifest is now **43 inputs**, SHA-256
+`b852ffeaa85efc290b681ec869ba36049a0adb468db7faee58f884026da65290`;
+source2 archive SHA-256
+`1c3b88fc66ac5f5bcece94a1cff761b8b3b81c7c6c23254eab30994bae7664f7`.
+Actual format completed **03:43:44 UTC**. Candidate-2 narrow (488 tests/27
+targets) and static checks are running before full/native requalification.
+
+Candidate-2 focused/affected gate passes **03:46:41 UTC**, all **488 tests in
+27 targets**, including all five shared-evaluator regressions. Workspace and
+reference Clippy pass **03:49:12 / 03:49:42 UTC**; actual format checks pass
+**03:48:53 / 03:48:54 UTC**. All 43 input hashes remain identical. No disk
+guard fires; final Data/home free bytes **337,690,886,144 / 73,179,873,280**.
+Full Linux and native Mac candidate-2 qualification are now running. Windows
+still refuses SSH; no Windows worktree/build has been created for this unit.
+The old fixture audit also independently confirms all 460 SHA-256/lengths,
+452 untouched old manifest rows, exactly two explained archival outcomes, and
+six added cases. No fixture bytes or definition identity rules changed in the
+shared-evaluator correction.
+
+Candidate-2 macOS qualification completes **03:55:29 UTC**: **681 library
+tests, 488 affected tests across 27 targets, 158 independent reference tests,
+and 460 fixtures**, all passing. The 43-input manifests, before/after source
+patches, terminal receipts and exact counts are independently checked after
+mirroring small evidence files. Same-host hashing records 29 executed test
+binaries; none are transferred. Final free space is **67,715,596,288 bytes**.
+Linux contracts/debt gates pass **03:52:27 / 03:52:57 UTC**. At **04:02:45 UTC**
+the full workspace is progressing through storage tests, with zero swap and
+Data/home free bytes **337,690,333,184 / 73,176,702,976**. Full Linux later
+stages and Windows remain outstanding; native Mac success does not waive them.
+
+Final review has inspected the current production writers/shared evaluator,
+all six new test targets, affected adapters, independent reference changes,
+registry/fixture audit and report updates against the ratified contracts. No
+additional candidate defect was identified. A fresh upstream comparison is
+**0/0 at `369cb199`**, and all 43 frozen inputs remain unchanged. At
+**04:07:52 UTC** Linux continues through engine HTTP/fork tests. Windows SSH
+still fails; the desktop's configured forwarding port 22220 has no listener.
+No VM or service configuration was changed. Required Windows qualification and
+the separate catalog-key owner ruling remain explicit outstanding gates.
+
+Candidate-2 Linux full workspace completes **04:29:58 UTC**, exit 0. The
+mirrored log is independently audited: **361 top-level targets, 7,647 passed,
+zero failed, seven existing ignores, two explicitly split maximum-KV cases**.
+Three nested subprocess tests also pass and are counted separately. The exact
+43-input manifest matches. Final workspace Data/home free bytes are
+**337,689,808,896 / 73,172,537,344**. The sequential driver remains active on
+the separate large-KV stages, followed by release/reference gates. Those later
+stages, same-host Linux executable digests and Windows qualification are still
+required; this result alone does not complete the unit or full v4 goal.
+
+### Candidate-2 Linux terminal evidence and outstanding prerequisites
+
+The sequential Linux driver completes **04:42:29 UTC**, exit 0 and
+`last_stage=complete`. Both separately executed maximum-KV cases pass at
+**04:33:58 / 04:37:58 UTC**, giving **7,649 distinct workspace passes** in
+total. Release execution passes **46 tests across six targets at 04:41:28 UTC**;
+the independent reference passes **158 tests at 04:41:59 UTC** and verifies
+**460 fixtures at 04:42:29 UTC**. All stage receipts report no guard termination
+and preserve the identical 43-input manifest. Final Data/home free bytes are
+**336,590,168,064 / 73,172,074,496**.
+
+All small terminal receipts, source identities, logs and guards are mirrored
+under the durable task cache's `u1-definition-evidence/` directory. The Linux
+driver and same-host binary hasher have both exited successfully; no candidate
+Cargo jobs remain. Local digest-packet verification confirms **35 Linux and
+29 macOS executed test binaries**, each covering 29 distinct targets. No binary
+or database was transferred. Packet SHA-256 values:
+
+- `u1-definition-final2-linux-test-binaries.json`:
+  `be048c111ea1cb87d9015955346d24b537780d78faa869cf67011eb243541bc7`.
+- `u1-definition-final2-macos-test-binaries.json`:
+  `f9137e63003aee5f1f0dbddca417f293bd2d447e50c4029196efc53274e459ad`.
+
+The recorded **04:42:00 UTC** cgroup observation has a 16 GiB peak, zero swap,
+335 `max` events and zero OOM/OOM-kill events. The exact snapshot is retained in
+`u1-definition-final2-memory-observation.json`. This is bounded build/test
+evidence, **not** the final 8 GiB actual-v4 production-runtime qualification.
+
+The strict `verify-u1-definition-final2-evidence.mjs` checker successfully
+audits Linux and macOS gate evidence, then exits 1 on the absent Windows
+`u1-definition-final2-windows-evidence/library.result.json`. This is a missing
+required platform run, not a Windows test failure and not a full checker pass.
+No `u1-definition-final2-complete-proof.json` was written. Separately checked
+all 43 current source hashes, both available binary packets and diff hygiene.
+Windows SSH remains refused at **04:50 UTC**; its definition worktree/build
+has not been created. No VM or service configuration was changed.
+
+Required next actions remain Windows qualification of the frozen source2
+candidate, the complete strict evidence check, then final staging review and
+a coherent green commit/push. Catalog-key owner approval is independently
+required before changing class6/7 keys. Neither missing prerequisite is waived;
+the current unit, full U1, runtime/default integration and full v4 production
+readiness remain incomplete. The source changes stay preserved and uncommitted
+at base `369cb199`; no production, installation or real migration was performed.
+
+Blocked audit, **04:52 UTC**: the previous goal turn completed Linux work and
+evidence capture (progress); this continuation finds no additional safe action
+after revalidating the same prerequisites. Windows SSH still refuses forwarding,
+HEAD and all 43 source hashes remain unchanged, and no owner contract ruling
+has arrived. These blockers have recurred across at least three consecutive
+goal turns. Completed Linux/Mac qualification and bounded U2 inventories do not
+waive either gate. The full goal is blocked, not complete; no test reruns, idle
+monitors, source changes or production actions were started in this audit.
+Resume from the Windows qualification or catalog ruling when the corresponding
+prerequisite changes, retaining all remaining U1–U7 obligations.
+
+## September 14 catalog identity entry evidence (next U1 unit)
+
+Owner approval is recorded in Round 16; this inventory does not change the
+currently qualifying writer source. `namespace.rs::decode_catalog_leaf` checks
+database-derived `H` for classes 3–7 but does not require a class6/7 owner to
+equal its semantic ID. `decode_definition` only checks the generic envelope,
+not the class6/7 payload's canonical dependency bytes and domain-separated ID.
+`SemanticCatalogReaderV1::with_definition` checks object/class/stored-ID closure
+but does not validate the owner key when called directly. Existing scope/value/
+field consumers validate their own identities through the shared helper; no
+production complete dependency-catalog emitter or dependency ID-domain use was
+found. Migration destination initialization still emits content-only state.
+
+The independent reference `core.rs` likewise lacks dependency payload identity
+and catalog owner-shape checks. Its fixture profiles cover Blake3-256 and
+SHA-512; production v4 hashing supports all five registered algorithms through
+`v4/hash.rs`, not legacy `HashAlgorithm::compute_hash`. Tests must cover all
+five without making the raw artifact digest database-dependent.
+
+A byte/SHA audit of all ten manifest semantic-object fixtures finds only class2
+definitions/catalog bindings, no class6/7 binding to rewrite. This is a source
+fixture/caller audit, not inspection of any user database. Preserve those
+existing bytes and add explicit new independent fixtures for the corrected
+dependency contract.
+
+Draft `dependency_catalog_identity_spec.rs` in the durable task cache contains
+eight failing-first/positive-control tests: all-algorithm keys, same-artifact
+parser/mapper/runtime distinctions, same-width mismatch, raw-artifact key
+rejection, wrong-width keys, stale/cross-domain IDs, malformed/wrong-class
+dependency payloads, and direct resolver bypass. Draft SHA-256 is
+`17aef88185e15022f96cb8816d5e58362a033105fa0674c9c2613ed23cba7507`.
+It has been formatted but **not executed or installed**. First land the current
+writer candidate after native Windows proof, then install and reproduce these
+failures before implementation. Catalog COW/compiler and U2–U7 remain required.
+
+A separate independent-reference draft has five tests covering positive keys,
+owner/fingerprint disagreement, wrong widths, stale/cross-domain IDs and
+malformed/wrong-class payloads at both fixture profiles. Durable cache file
+`dependency_catalog_contract_spec.rs`, SHA-256
+`0dc3d7bd1b468187a1abdab000bfb390f8d2564b4c061fe0d795476e8e4b1c7d`.
+It also remains unexecuted/uninstalled pending the current landing boundary.
+
+Windows execution resumed **05:57:25 UTC** after source-only transfer and
+creation of a detached `source-u1-definitions` checkout at `369cb199`. All 43
+source hashes pass; previous dirty native checkout remains intact. Library
+stage exits 0 at **06:02:27 UTC**; affected integration tests are running
+(Cargo PID 8576 observed at 06:02). Counts and complete native evidence still
+require the final audit. Free space observed 19,447,435,264 bytes. The prior
+native library already had the Windows-only unused retention-test import
+warning; compare the current mirrored warning before recording it as unchanged.
+
+### Windows completion and writer landing proof
+
+Windows completes all four candidate-2 stages **06:08:28 UTC**: **678 library
+tests**, **488 affected tests across 27 targets**, **158 independent reference
+tests**, and **460 fixtures**, all passing with unchanged source/lock hashes,
+identical before/after patches and no guard termination. Affected execution
+completed 06:07:48; reference completed 06:08:13. Final free bytes are
+**19,082,612,736**. The single Windows-only unused retention-test import warning
+matches the prior native unit; no new warning or suppression was introduced.
+The complete driver has exited 0 and no Cargo jobs remain.
+
+All small native evidence is mirrored under the task cache's
+`u1-definition-final2-windows-evidence/`. Same-host hashing records 29 executed
+binaries; only its JSON packet was transferred. Packet SHA-256:
+`246caf50c51fe29ff9c501fb32483344d526ec063fff9cf23c2ec2a510f89a0c`.
+
+The full strict checker now **passes**, auditing all required Linux/Mac/Windows
+receipts, exact test counts, guards, source identities, fixture history, format
+checks and 35/29/29 executable digest records. It generated
+`evidence/user-facing-v4-u1-definition-proof-20260914.json` only after those
+gates passed. Final source/reference/fixture/report diffs and the unchanged
+43-input candidate have been reviewed. This closes the writer qualification
+unit, not all U1 or v4 runtime readiness. Round 16 approval is recorded in this
+snapshot; catalog behavior changes and their new tests remain the next unit.
+
+## U2 read-only entry refinement: public append-writer guard
+
+Audited against `369cb199` plus the unchanged 43-input U1 candidate while Linux
+qualification runs. This is a bounded caller inventory, **not** completion of
+U2's full backend/producer inventory and not permission to bypass U1 gates.
+No runtime source changes accompany it.
+
+Repository-wide Rust search for `writer_read_lock` finds **12 production call
+sites**, its public definition, and one non-call entry in
+`root_operation.rs::STORAGE_ENGINE_INTERNAL`. The test search finds **nine
+actual calls** plus one architecture assertion containing the method spelling.
+No `writer_write_lock` caller or public counterpart was found.
+
+| Production caller at this revision | Exact dependency | Integration obligation |
+| --- | --- | --- |
+| `configuration_history.rs:53` | Captured v3 KV end/WAL end and file path; backward `EntryHeader` scan | Preserve bounded history/LKG recovery; changing only the lock return type cannot make the scanner understand v4 framing |
+| `verify.rs:411` | Selected header sequence for durability verification | Capture format-correct selected authority and proven hard frontier |
+| `verify.rs:484` | Preverified repair token: path, file metadata, header sequence, hot-tail offset | Preserve exact engine/frontier binding and reject intervening mutation; do not synthesize v3 hot-tail authority for v4 |
+| `verify.rs:690` | Reporting current-WAL scanner with cancellation | Dispatch a bounded format-correct scanner; retain diagnostics and repair cancellation |
+| `verify.rs:779` | Physical KV-end/WAL-end range | Preserve locator-range validation using actual selected layout |
+| `verify.rs:906` | Live WAL end while checking separately decoded v3 hot-tail Voids | Keep v3 hot-tail logic in its versioned owner; v4 reclaim remains receipt/catalog authority |
+| `durability_recovery.rs:92,100` | Before/after selected header sequence around explicit repair flush | Preserve stale-proof rejection and receipt ordering through one format-correct coordinator |
+| `durability_recovery.rs:291` | Fallback selected sequence when seeding a persistent spill incident | Preserve catalog-before-latch publication and restart read-only state |
+| CLI `probe.rs:426` | Reporting WAL scanner for path history | Preserve diagnostic partial/error reporting and bounded framing interpretation |
+| CLI `probe.rs:885` | Current writer offset for growth statistics | Expose real physical frontier, not a guessed header projection |
+| CLI `verify.rs:534` | Current KV byte length before offline expansion | Preserve capacity decision, clean close/reopen and preverified-report reuse |
+
+The method itself currently returns `RwLockReadGuard<AppendWriter>` at
+`storage_engine.rs:5222`; the engine owns concrete `RwLock<AppendWriter>` and
+`Mutex<DiskKVStore>` fields at lines 863–864. U2 must replace that concrete
+backend dependency without creating a second mutable file/KV/header owner.
+Its public-method classification and callers must move together.
+
+Named existing regression inputs for this boundary include
+`configuration_history_internal_spec` (byte/candidate ceilings),
+`config_resolver_spec` (invalid current configuration versus LKG/history),
+`v3_transition_control_store_spec` (catalog-first crash, explicit repair proof,
+intervening mutation, dropped repair and spill identity),
+`verify_progress_internal_spec` (phase/cache progress and interrupted repair),
+CLI `verify_progress_cli_spec` (read-only bytes/mtime, missing/malformed/locked
+source, repair and logging admission), `probe_spec` (growth/checkpoint/tail
+diagnostics), and `embedded_root_operation_spec` (method classification).
+Nine direct test calls additionally inspect hot-tail offsets, KV stage/layout,
+or writer offsets in resilience, KV, route-error, bulk-write and directory
+specs. These are regression inputs to preserve and extend to genuine v4,
+not already-executed v4 runtime proof.
+
+### U2/U6 creation and open-admission refinement
+
+The same source audit identifies six non-test production creation call sites
+outside `StorageEngine` itself: CLI bootstrap `commands/start.rs:1006`, normal
+server construction `server/mod.rs:874`, separate identity-file construction
+`auth/provider.rs:178`, and three backup creators `backup.rs:218,343,1543`
+(version export, full export, patch artifact). The three extra CLI-bin creators
+belong to crash-soak, soak and GC-benchmark harnesses; inline `#[cfg(test)]`
+calls and the crate documentation example are not additional production paths.
+The factory search also checked renamed imports/type aliases; pointer casts and
+server tuple aliases are not constructors.
+
+All four create entry methods currently converge on `create_internal`:
+`create`, `create_with_hot_dir`, `create_with_hot_dir_and_configuration_overrides`,
+and crate-private `create_with_memory_coordinator`. The last one inherits the
+source's memory owner for backup work. CLI bootstrap and server factories each
+choose existing open versus new creation; identity-file bootstrap does so
+independently. A normal-service-only format switch would miss backup and
+identity creation.
+
+Seven open entry methods converge on `open_internal`. Five public entry points
+cover ordinary open, legacy hot-dir compatibility, progress, configuration
+overrides, and import. Two crate-private paths add inherited-memory import and
+offline migration inspection. Ordinary opens reject patch artifacts before
+arming implicit shutdown; import deliberately accepts them. Offline inspection
+passes `allow_mutating_recovery = false` and shares the strict non-mutating source path
+used by public verify, migration preflight and migration execution. U2 must
+preserve those distinctions, configuration validation before mutation, file
+locking, inherited budgets and failed-constructor non-writing Drop behavior.
+Migrating normal service does not authorize automatic in-place source upgrade,
+nor conversion of a retained v3 migration source into a writable v4 engine.
+
+Required later behavioral proof therefore includes ordinary CLI/server and
+embedded creation, separate identity bootstrap, all three backup forms and
+their import/standalone restrictions, strict read-only v3/v4 inspection, and
+existing-source open without automatic migration. These are refreshed entry
+requirements; the current U1 qualification does not prove their v4 behavior.
