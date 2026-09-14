@@ -1,0 +1,51 @@
+{
+  "profile": "semantic-compiler-profile-v1",
+  "hash_algorithms": [[1, 32], [2, 32], [3, 64], [4, 32], [5, 64]],
+  "policy_fields": [
+    "max_request_bytes", "max_response_bytes", "max_linear_memory_bytes", "max_fuel",
+    "max_table_elements", "max_structure_nodes", "max_scalar_bytes", "max_structure_depth",
+    "max_container_members", "max_wasm_instances", "max_wasm_memories", "max_wasm_tables",
+    "max_value_stack_height", "max_recursion_depth"
+  ],
+  "pure_wasm_defaults": [67108864, 16777216, 67108864, 10000000, 65536, 65536, 1048576, 32, 65535, 1, 1, 1, 4096, 256],
+  "native_defaults": [0, 16777216, 0, 0, 0, 65536, 1048576, 32, 65535, 0, 0, 0, 4096, 256],
+  "source_limits": [
+    ["max_source_values_per_document", 1024, 1024],
+    ["max_canonical_source_bytes_per_document", 8388608, 8388608],
+    ["max_document_input_bytes", 67108864, 1073741824],
+    ["max_selector_work_items_per_document", 1000000, 1000000],
+    ["max_selector_examined_bytes_per_document", 67108864, 67108864]
+  ],
+  "converter_limits": [
+    ["max_input_bytes", 1048576, 1048576],
+    ["max_output_values", 65536, 65536],
+    ["max_output_value_bytes", 1048576, 1048576],
+    ["max_total_output_bytes", 4194304, 4194304]
+  ],
+  "field_limits": [
+    ["max_terms_per_document", 65536, 65536],
+    ["max_postings_per_document", 65536, 65536],
+    ["max_canonical_posting_bytes_per_document", 8388608, 8388608],
+    ["max_query_recheck_value_bytes", 8388608, 8388608]
+  ],
+  "equivalence": [
+    "registry MIME case, map order and aliases resolving to the same complete record",
+    "absent registry and explicit empty registry",
+    "source formatting and logging/compression values",
+    "@file_name and @filename",
+    "field/converter set order and exact duplicate rows",
+    "omitted defaults and explicitly equal semantic values",
+    "omitted mapper arguments and typed null",
+    "operational admission budgets large enough to complete"
+  ],
+  "meaningful": [
+    "canonical scope and membership mode",
+    "ordered source segments and argument arrays",
+    "complete captured artifact role, ABI, executor, version and fingerprint",
+    "applicable invocation policy at each concrete call site",
+    "each applicable source, converter and field limit",
+    "converter and strategy semantics"
+  ],
+  "failure_classes": ["InvalidSource", "DependencyUnavailable", "Operational", "Resource", "Cancelled"],
+  "authority": "Compilation never selects a root; retained definitions are not reinterpreted by a new producer profile."
+}

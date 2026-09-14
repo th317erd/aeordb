@@ -909,3 +909,19 @@ fn whole_configuration_admits_before_parsing_and_handles_real_scope_output_refus
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
   }
 }
+
+#[test]
+fn frozen_compiler_profile_lookup_never_allocates_or_reads_runtime_files() {
+  use aeordb::engine::v4::semantic_compiler_profile::semantic_compiler_fingerprint_v1;
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    for fail_size in [1, 32, 64] {
+      let (fingerprint, allocations) = measure(fail_size, || semantic_compiler_fingerprint_v1(algorithm));
+      assert_eq!(fingerprint.len(), algorithm.hash_length());
+      assert_eq!(allocations.total, 0);
+      assert_eq!(allocations.maximum, 0);
+      assert!(!allocations.injected_failure);
+    }
+  }
+}

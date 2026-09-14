@@ -26,12 +26,20 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: whole corrected index configuration compilation passes all ten
+Current landing: the independent compiler profile and selected-H fingerprint
+pass all ten Linux qualification gates. See the
+[strict profile proof](../evidence/user-facing-v4-u1-compiler-profile-proof-20260914.json).
+The frozen corpus covers 109 valid configurations and 340 invalid sources across
+all five registered hashes. Runtime lookup is allocation-free; retained unknown
+producer identities remain admissible. The constructor error-boundary correction
+and staged activation remain next; neither full U1 nor v4 readiness is complete.
+
+Whole corrected index configuration compilation is committed
+and pushed as `5c34d600`; it passes all ten
 Linux qualification gates, including real-file catalog publication/reopen with
 all five hash algorithms and all seven classes. See the
 [strict configuration proof](../evidence/user-facing-v4-u1-index-configuration-proof-20260914.json).
-Compiler-profile conformance/fingerprinting and staged activation are next;
-neither full U1 nor user-facing v4 readiness is complete. The preceding complete
+The preceding complete
 index-definition compiler and eight-metadata/thirteen-index recipe are committed
 and pushed as `b54549a7`; see the
 [strict index-definition proof](../evidence/user-facing-v4-u1-index-definition-proof-20260914.json).
@@ -42,8 +50,7 @@ Parser-context compilation is committed/pushed as c694e64d.
 The preceding parser-registry compilation evidence remains in its
 [strict proof](../evidence/user-facing-v4-u1-parser-registry-proof-20260914.json).
 Definition wrappers and bounded catalog COW are committed and pushed as
-`7eb1a40d` and `19284eea`. Next is parser-plan/default/index compilation and
-staged integration, not a completed full semantic compiler.
+`7eb1a40d` and `19284eea`. Task-backed integration is still outstanding.
 Independent semantic-envelope size admission is committed/pushed as429dc71a.
 See the [envelope proof](../evidence/user-facing-v4-u1-semantic-envelope-proof-20260914.json).
 Owner-key validation is committed/pushed as
@@ -2356,6 +2363,117 @@ remain; this is not U1 or campaign completion. Next is corrected source-selector
 normalization against the existing owner rules, followed by whole-definition
 compilation/integration. The 16-case cache-only draft is preparation, not executed
 evidence or production code.
+
+## U1 completed unit: compiler-profile conformance and fingerprint
+
+Final qualification completed September 14 at 18:14:17 UTC, session 69887 exit 0.
+All ten stages pass: 32 narrow tests (7 profile + 25 resource), one physical
+publication/reopen test, 687 affected tests across 39 targets, 688 library tests,
+175 reference tests, 472 independent fixtures, the unchanged 1503-entry audit,
+formatting, strict workspace Clippy and debt self-test. Elapsed time was
+7m48.381s; CPU time 9m13.745s. The recorded kernel peak was 6,314,512,384 bytes
+under the 6 GiB ceiling with swap disabled; final free space was
+336,016,785,408 bytes on Data and 69,775,138,816 bytes on home.
+All 60 raw stage artifacts, the driver receipt and 45 same-host executable
+digests were captured before any further build. The strict proof verifier passed
+against the source archive, current files, frozen corpus and every recorded gate.
+No production database, root selector, service or installed binary was changed.
+
+Entry5c34d6007ab759daec9972d5eca29de863e4eda2,development/origin equal.
+Directowner; implement+planning-cap. The whole configuration's ten-gate baseline
+is green. Do not repeat that baseline unchanged or activate a root early.
+
+Owned: separate compiler-profile fixture directory, test-only independent byte
+oracle/generator, conformance/fingerprint specs, small production fingerprint
+emitter,manifest/module registration and thisledger/evidence. Forbidden: frozen
+37converter/strategy bundles,existingformatfixtures,nativeidentities,legacyv0
+readers,selectedroot/physicalwriter,services/production/installedbinaries.
+
+Verified territory: source registry/configuration compilers generate class2/1
+projections; child compilers generate scope/value/field/dependency bytes;
+namespaceSemanticStateRoot carries anH-wide producer profile slot. No live
+producer fingerprint owner exists. Native exact identities and SystemFamily
+semantic projection remain separate. Unknown producer profile must not itself
+invalidate retained definitions; no new reader restriction is authorized.
+
+Proof sequence: create independent typed recipes and manually framed golden
+scope/value/field/dependency/projection outputs for allfive hashes; compare actual
+registry/configuration compilers,including all13 definition-limit and14policy
+property offsets/call sites. Freeze four normative files and external expected
+digests before adding the profile emitter. Demonstrate missing-emitter target
+failure,then implement selected-H fingerprinting without combined corpus copy.
+Exercise default/empty/aliases/order/nested sources/pinned roles,strict malformed
+source,nonsemantic invariance,framing/order/mutation sensitivity,retained semantic
+state roundtrip and existing resource regressions. No production serializer may
+generate its expected bytes. Generator implementation does not enter profile
+identity; immutable corpus inputs do. Runtime task activation remains next.
+
+Narrow target will be `semantic_compiler_profile_spec`; independent generation
+is a separate explicit tool under spec/tools, never automatic test golden-update.
+Heavy commands on desktop under existing6GiB/no-swap/two-job/disk-floor guards;
+exact source packets exclude targets.
+
+Test-only oracle/case authoring and explicit generation tool now exist. The
+first comparison ran from7inputs manifest5a33be7c94ae4b1de05c85f7526371353f05b084450626121a04f18dd01a3a9f
+at17:43:03Z,invdb2e218d06534dfe876994dfb1ca6bea:1invalid-source targetPASS,
+2complete-byte targetsFAIL. The oracle omitted ADPT's+20 record-byte-length
+field; production/frozen codecs correctly include it. This is a new oracle
+defect,not a reproduced product defect. Sixrawfiles and1same-host executable
+digest captured before desktopupdates. Correctedonlytheoracle and failure
+diagnostics (first structural field/offset instead of a giant hex dump).
+Oracle2 runs from7inputse56a598724b6d17f879db4e4299642c8cb5dc33501e1b8a42c28fe1ae98288d6.
+LocaldraftSPEC/properties remain unfrozen; no binary corpus or profile emitter
+exists yet. Additional argument/order/default cases are local-only while that
+candidate runs. Preserve every raw run and source packet before next update.
+
+Oracle2 then passes all3targets at17:46:38Z; Oracle3 adds8argument/default/
+unused-parser cases and exercises all malformed sources under allfive hashes,
+passing all3targets at17:50:44Z(inv7c1fb16ebd664bcc88fd9b7e0b55afd1).
+Its isolated test/example strictClippy passes at17:52:18Z. Twelve raw files and
+one same-host test executable digest are mirrored before further changes.
+Independent generation14149closed0 at17:55:00Z emits109valid cases×5algorithms
+and340invalid cases. Generator does not import AeorDB or its encoders. Its
+10inputmanifest260a847376c8e061ae3b977ae497f17a5246573d8556eb1c4c93529c3c55c613
+includes the new draftSPEC/properties and missing-emitter target source.
+Output is the fresh desktopcache/generated-compiler-profile-v1; allfour members
+andexternalfiveexpectedhashes use create-new. The subsequent APIRED is running
+against the same packet before any emitter implementation. No runtime/root
+authority changes have been made.
+
+APIRED finished17:55:46Z withE0432 for both profile/resource test imports and
+zero executed tests (the fingerprint type-inference diagnostic is cascading).
+The independent corpus was frozen17:57:34.684Z before the production emitter:
+109valid cases×5 hashes,340invalid cases,3712 independently recomputed SHA-family
+definition identities. All four file hashes and five expected fingerprints are
+in the freeze receipt. Generation/APIRED twelve raw artifacts and the same-host
+generator executable digest are captured before further remote source changes.
+The emitter now consists only of an exhaustive five-algorithm static slice
+lookup; no allocation, file I/O or embedded multi-megabyte corpus. Seven profile
+and25 resource targets plus existing regression/full gates are the next proof.
+
+Final qualification started September 14 at 18:06:27 UTC from 15 exact inputs
+(`ac1bd4cc8ce868ca582c0b8626d4927e036739147395ed361a2a837f742eff08`).
+The 18:11 monitor observed successful narrow, physical publication/reopen,
+affected, audit and formatting stages. Workspace Clippy and the remaining
+library/reference/contract/debt gates are still outstanding at this observation.
+The source archive, guards and final proof are kept separate from the frozen
+corpus; a passing intermediate stage is not a unit-completion claim.
+
+### Next runtime error-boundary review (read-only)
+
+Before staged task integration, close the already-recorded constructor error
+classification gap. Confirmed call sites are collector ValueStore/field
+construction, predicate and auxiliary query planning, query execution, native
+auxiliary binding and selected read evaluation. The query adapters already map
+`HostFailure` to operational failure. The loss occurs earlier: the definition
+runtime maps source-construction errors to `UnsupportedDefinition`, the source
+evaluator maps them to `InvalidConfiguration`, and both collector construction
+branches degrade every error. Decode allocation failures need the existing
+`FormatError::is_allocation_failure()` distinction too; deterministic malformed
+bytes must keep their old classification. No production edits for this follow-up
+have been made. Add actual admission/allocation failing-first regressions,
+preserve cancellation/dependency distinctions and prove retry after pressure
+clears. This is an existing U1 prerequisite, not an additional format decision.
 
 ## U1 completed compiler unit: whole corrected configuration compilation
 

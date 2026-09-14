@@ -1,0 +1,22 @@
+[
+  {
+    "algorithm": 1,
+    "fingerprint": "45acb7e50770f362432111bdfc2a13799ca99fa08f6a99cfb888abcde8efe5c8"
+  },
+  {
+    "algorithm": 2,
+    "fingerprint": "518dd1cb883f91df7a2db3bad2ed970882e57017c06b193f97527430246fe378"
+  },
+  {
+    "algorithm": 3,
+    "fingerprint": "56bd6bb1af0869735c261d84834c2fbeece86be79ffb5d356d4b1e9e53ba5fad1c5b68bc6da2ddfbc7850a60913ab568928d754c747497889437a31144b361e2"
+  },
+  {
+    "algorithm": 4,
+    "fingerprint": "b19b5894b09c1e45ad90e80a85b09f8173402f76d76464ae9af891074d5ccb6c"
+  },
+  {
+    "algorithm": 5,
+    "fingerprint": "b46edabd43ee0dc9b84acad002638d765be0ce17575a13e7846219c6006a05992a5b7dee38362de6fbf0b8018cde75c21d3d1b9cd53ba013998e7882c4140dc8"
+  }
+]

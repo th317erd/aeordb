@@ -1492,6 +1492,14 @@ path = "spec/engine/index_definition_compiler_spec.rs"
 name = "index_configuration_compiler_spec"
 path = "spec/engine/index_configuration_compiler_spec.rs"
 
+[[test]]
+name = "semantic_compiler_profile_spec"
+path = "spec/engine/semantic_compiler_profile_spec.rs"
+
+[[example]]
+name = "semantic-compiler-profile-fixtures"
+path = "spec/tools/semantic_compiler_profile_fixtures.rs"
+
 
 [lints]
 workspace = true
