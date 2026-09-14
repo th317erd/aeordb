@@ -26,8 +26,12 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: Windows native-path hardening discovered during catalog
-qualification. All final2 Linux, macOS and Windows gates pass, including the
+Current landing: independent catalog owner-key validation before the all-class
+writers. All ten required evidence gates pass, including the separate debt
+self-test; see the [owner-key unit proof](../evidence/user-facing-v4-u1-catalog-owner-proof-20260914.json).
+The preceding Windows native-path fix is committed/pushed as
+`3354ee917266259ab342c087f1a504fbf121d82c`.
+All final2 Linux, macOS and Windows path gates pass, including the
 18 Windows release regressions. The strict source, receipt, test-count,
 binary and resource audit passes; see the
 [native-path unit proof](../evidence/user-facing-v4-u1-windows-path-proof-20260914.json).
@@ -111,8 +115,10 @@ Windows qualification. The strict complete evidence check passes and its
 [definition unit proof](../evidence/user-facing-v4-u1-definition-proof-20260914.json)
 is included in that landing snapshot, committed/pushed as `c222ee29`.
 The subsequent Round16 catalog correction is also landed as `9d3d4b83`.
-Next: land the verified Windows native-path unit, then the all-class catalog
-codec/COW and compilation under that approved rule.
+The Windows native-path unit is committed/pushed as `3354ee91`.
+Next: land the verified independent owner-key correction, then close its
+envelope-cap prerequisite and implement catalog codecs/COW and compilation
+under the approved rule.
 Do not repeat completed writer tests without a source or evidence reason. The original
 normal-creation target remains red until actual runtime/default integration;
 neither prerequisite unit completes U1 or the full readiness goal.
@@ -1777,6 +1783,74 @@ persistent path bytes nor format/default/production-service behavior.
   targets, strict workspace linting, contract/debt gates and Windows release.
 - [x] Preserve original failure evidence and audit exact final source/binaries.
 - [ ] Continue U1 catalog codecs/COW/compiler and U2–U7 integration/qualification.
+
+## Completed U1 prerequisite: independent catalog owner-key validation
+
+Owner: direct execution. Last green3354ee91; upstream is synchronized. Owned:
+reference `core.rs`, dedicated `spec/catalog_owner_contract_spec.rs`, this
+ledger and narrow evidence. No production AeorDB codec, fixture bytes,
+manifest/divergence entries, database or service changes. Round10 already
+requires canonical control-owner paths and exact class3–5 hash widths;
+Round16 retains exact dependency IDs for6/7. This is oracle completeness,
+not a new persistent contract or permission to normalize malformed keys.
+
+Production `namespace.rs::validate_catalog_owner_key` already enforces these
+bounds. The independent checker only enforced6/7. Before any reader correction,
+ran nine independently assembled byte tests in a separate9d3 checkout; the
+current Windows candidate and main source stayed untouched. RED completes
+09:41:32, exit101:4pass/5fail,163existing cases filtered, no ignored tests,
+compile failures or resource termination. Failures are oversized control paths,
+invalid UTF-8, absent kind/path, noncanonical relative paths and empty class3
+owner keys. Raw evidence and test-binary identity are preserved in the campaign
+cache's `u1-catalog-owner-red-linux-*` files. Four frozen input hashes have
+manifestSHA `4be5602f2c759aab24047f69e7a0889b04955d0b0cba2098f5593bc68faca9dc`.
+
+Correction checks control-kind/path byte bounds before path interpretation,
+requires exact selected hash width for every class3–7 key, retains dependency
+owner/semantic-ID agreement and lookup/order checks, and borrows previous keys
+instead of allocating copies. Valid root, Unicode, internal-space and literal
+backslash paths remain valid under the existing logical-path grammar. The
+checker remains independent from AeorDB production code.
+
+- [x] Reproduce the five missing owner-key checks with independent bytes.
+- [x] Pass all nine new cases, all reference tests, strict reference Clippy,
+  formatting, all472 existing independent fixtures and contract/debt gates.
+- [x] Preserve production catalog/format regressions and audit unchanged
+  fixtures, exact source/lock and executable evidence before the green landing.
+- [ ] Continue all-class definition-object/catalog writers, bounded COW/compiler
+  and the remaining U1–U7 runtime/qualification obligations.
+
+The next catalog-writer entry must also examine reference envelope caps:
+`decode_semantic_object` currently lacks the production1MiB hard cap. This
+separate envelope concern is not silently treated as covered by owner-key tests.
+
+Final source4-input manifestSHA
+`8fa42fc3de81591c822654f504665d280c6edf31ec2687dd3e8d760a58080dff`,
+source-only archiveSHA
+`16fe5925905caf8fd2791c3ad3ff601ebae984663fffec0f628ea3887d39d107`.
+The exact RED test bytes are unchanged in the final candidate. Desktop final
+qualification completes10:00:40:9new cases, all172 reference tests, formatting,
+strict reference Clippy,472 fixtures,16 production dependency-catalog and77
+production format tests, contract evidence and normal debt policy all pass.
+The93 production tests reuse exact same-host binaries from3354 qualification
+after checking their hashes and all25 original source inputs; no production
+source changed and no binary crossed hosts. This is not a new native release
+or full-workspace run.
+
+The final driver's `debt-selftest` label was inaccurate: its checker ignores
+`--self-test` and only performs the normal policy scan. Preserve that receipt as
+the policy-check result, never self-test proof. Run the real
+`scripts/spec/check-v4-debt-spec.sh` under a separately named
+`debt-selftest-corrected` receipt; it passes10:02:38. The strict audit requires
+both the original actual command/output and this separate self-test. No source
+or assertion changed for the harness correction.
+
+All61 stage/driver evidence files plus both same-host reference binary digests
+are mirrored. Strict complete proof passes10:08, preserving the4pass/5fail RED
+and its binary identity. Final free bytes: Data336,155,258,880 and
+home70,572,879,872. The user unit enforced4GiB/noSwap; its reported few-MiB peak
+is not credible compiler RSS and is not used as actual-v4 resource proof.
+Full U1 and U2–U7 remain required; no production service/default changed.
 
 ## U2 read-only entry refinement: public append-writer guard
 

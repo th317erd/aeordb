@@ -11,6 +11,10 @@ mod core_empty_semantics_spec;
 #[path = "../spec/dependency_catalog_contract_spec.rs"]
 mod dependency_catalog_contract_spec;
 
+#[cfg(test)]
+#[path = "../spec/catalog_owner_contract_spec.rs"]
+mod catalog_owner_contract_spec;
+
 const ENTITY_MAGIC: u32 = 0x0ae0_12db;
 const MAX_ENTITY_VERSION: u8 = 1;
 const DIRECTORY_ENTRY_TYPE: u8 = 0x03;
@@ -635,7 +639,7 @@ fn decode_catalog_leaf(profile: HashProfile, body: &[u8], item_count: u64) -> Re
     return Err("catalog_leaf_records_length");
   }
   let mut cursor = 16 + profile.width();
-  let mut previous: Option<(u16, Vec<u8>)> = None;
+  let mut previous: Option<(u16, &[u8])> = None;
   for _ in 0..record_count {
     if cursor + 8 + 2 * profile.width() > body.len() {
       return Err("catalog_leaf_record_truncated");
@@ -651,19 +655,25 @@ fn decode_catalog_leaf(profile: HashProfile, body: &[u8], item_count: u64) -> Re
     if body[cursor + 8..cursor + 8 + 2 * profile.width()].chunks(profile.width()).any(|hash| hash.iter().all(|byte| *byte == 0)) {
       return Err("catalog_leaf_zero_hash");
     }
-    let owner_key = body[cursor + 8 + 2 * profile.width()..cursor + record_length].to_vec();
-    if matches!(kind, 6 | 7) {
-      if owner_key.len() != profile.width() {
+    let owner_key = &body[cursor + 8 + 2 * profile.width()..cursor + record_length];
+    if matches!(kind, 1 | 2) {
+      if !(3..=65_537).contains(&owner_key.len()) || read_u16(owner_key, 0)? == 0 {
         return Err("catalog_leaf_owner_key");
       }
-      if owner_key != body[cursor + 8..cursor + 8 + profile.width()] {
-        return Err("catalog_leaf_dependency_identity");
+      let path = std::str::from_utf8(&owner_key[2..]).map_err(|_| "catalog_leaf_owner_key")?;
+      if !crate::definitions::is_canonical_absolute_path(path) {
+        return Err("catalog_leaf_owner_key");
       }
+    } else if owner_key.len() != profile.width() {
+      return Err("catalog_leaf_owner_key");
     }
-    if semantic_catalog_lookup_digest(profile, kind, &owner_key) != lookup_digest {
+    if matches!(kind, 6 | 7) && owner_key != &body[cursor + 8..cursor + 8 + profile.width()] {
+      return Err("catalog_leaf_dependency_identity");
+    }
+    if semantic_catalog_lookup_digest(profile, kind, owner_key) != lookup_digest {
       return Err("catalog_leaf_lookup_digest");
     }
-    if previous.as_ref().is_some_and(|prior| prior >= &(kind, owner_key.clone())) {
+    if previous.is_some_and(|prior| prior >= (kind, owner_key)) {
       return Err("catalog_leaf_order");
     }
     previous = Some((kind, owner_key));
