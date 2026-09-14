@@ -26,11 +26,16 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Current landing: the Round16 dependency catalog identity and dynamic-width
-correction, based on the completed definition writers at
-`c222ee29a0dc3dd6c22d36868f5042dc6ad4621e`. All three host qualifications and
-the [complete catalog proof](../evidence/user-facing-v4-u1-catalog-proof-20260914.json)
-pass; earlier pending statuses below are history, not current blockers.
+Current landing: Windows native-path hardening discovered during catalog
+qualification. All final2 Linux, macOS and Windows gates pass, including the
+18 Windows release regressions. The strict source, receipt, test-count,
+binary and resource audit passes; see the
+[native-path unit proof](../evidence/user-facing-v4-u1-windows-path-proof-20260914.json).
+This unit is complete; full U1 and user-facing v4 readiness are not.
+The preceding Round16 identity/dynamic-width correction is committed/pushed as
+`9d3d4b83c6a3a39198af435eeac29dbb91ca2a04`, with its
+[complete catalog proof](../evidence/user-facing-v4-u1-catalog-proof-20260914.json).
+Earlier pending statuses below are historical records, not current blockers.
 
 September 14 owner update: catalog-key clarification is approved, including
 dynamic width from the selected database hash registry; normative Round 16 is
@@ -104,11 +109,11 @@ The native unit is committed/pushed as `369cb199`. The subsequent definition
 writers and shared-evaluator correction now pass candidate-2 Linux, macOS and
 Windows qualification. The strict complete evidence check passes and its
 [definition unit proof](../evidence/user-facing-v4-u1-definition-proof-20260914.json)
-is included in this landing snapshot. Next: land the green writer unit, then
-install and execute the prepared Round 16 catalog regression targets before
-changing production readers. Do not repeat completed writer tests without a
-source or evidence reason. Catalog/COW and compilation follow under the approved Round 16
-dependency-key and dynamic-width correction. The original
+is included in that landing snapshot, committed/pushed as `c222ee29`.
+The subsequent Round16 catalog correction is also landed as `9d3d4b83`.
+Next: land the verified Windows native-path unit, then the all-class catalog
+codec/COW and compilation under that approved rule.
+Do not repeat completed writer tests without a source or evidence reason. The original
 normal-creation target remains red until actual runtime/default integration;
 neither prerequisite unit completes U1 or the full readiness goal.
 
@@ -1570,7 +1575,50 @@ U1–U7 work. A catalog reader correction is not completion of semantic producti
 or ordinary v4 service/default integration. No production service, database,
 installation or default format was changed by this unit.
 
-### Required next unit: Windows native path boundary
+## Completed U1 prerequisite: Windows native path boundary
+
+Entry and last green:9d3d4b83c6a3a39198af435eeac29dbb91ca2a04, catalog identity
+correction committed and pushed to development. All prior qualification is
+complete. Owner: direct agent. Scope: shared Windows path arguments only,
+unchanged persisted bytes, permission policy, no-follow checks and durability
+ordering. No system settings, production databases or service changes.
+
+- [x] Run8new internal Windows regressions against unchanged raw API behavior:
+  expect long-path and embedded-NUL failures; retain the invalid-path control.
+- [x] Correct the shared raw API boundary and test encoding/normalization,
+  malformed/native UTF-16 paths, and no-mutation error paths.
+- [x] Reproduce all4original catalog-library failures under the longer scratch,
+  then qualify all affected workspace/durability paths and native regressions.
+- [x] Audit exact source/evidence for the coherent green landing; catalog
+  codecs/COW/compiler and remaining campaign work are still required below.
+
+Failing-first baseline launched08:04 UTC on Windows, unified10114. An isolated
+`source-u1-windows-path` checkout at9d3d4b83 imports only the two test-related
+changes and frozen root lock; manifestSHA
+`36baf0c85ff4c5fb44e6ae0a24cf8f138b3812f99f9efcf719075ad317422ce6`.
+No production path handling has changed. Eight targeted tests deliberately use
+non-verbatim paths over320UTF-16 units, plus malformed-NUL source/destination
+names and invalid-path controls. Normal Cargo execution, one job,20minute
+deadline and8GB free-space floor; previous qualified worktrees/evidence retained.
+Results are pending, not yet an executed failing-first proof.
+
+Executed RED completes08:06:24 UTC, unified10114 exits101: **1control passes /
+7required behavior assertions fail**,678existing library cases filtered out.
+Compilation succeeded; no resource/deadline termination. Failures cover all five
+long-path cases and both malformed-NUL namespace-preservation cases. The three
+source inputs/patches remain unchanged. Minimum/final C free bytes18,780,319,744 /
+18,868,432,896. Preserve full raw receipts before changing production behavior.
+
+Candidate1 now runs16focused tests under unified78730: eight native I/O cases
+and eight encoding tests. Shared `native_windows_path` bounds UTF-16 input/output,
+rejects empty/NUL input, normalizes ordinary paths without filesystem access,
+adds drive/UNC prefixes, and preserves native/verbatim names. Both raw API owners
+call this helper; persisted path fingerprints and barriers are unchanged.
+Candidate manifestSHA
+`1ca155c3182087d5e7818d7a8fe95b102d0b743930bb329ac72e2327b03d5c52`
+freezes seven inputs. Full failing-first logs are mirrored; the NUL failures
+showed source-name disappearance, not merely a different error classification.
+No green/final qualification or path-fix completion is claimed yet.
 
 Entry inventory finds exactly four raw path API calls in library production:
 `CreateDirectoryW` and `SetFileSecurityW` in `v4/private_workspace.rs`, plus
@@ -1595,6 +1643,140 @@ Do not change persistent path identity/fingerprint serialization. Re-run the fou
 observed library failures and all affected Windows targets under the **longer**
 scratch, plus Linux/macOS regression guards, before this defect is called fixed.
 This unit follows catalog landing, not concurrent edits to its frozen candidate.
+
+Windows path qualification update (September 14, 08:37 UTC): native RED executed
+eight cases: seven failed behaviorally and the invalid/missing-path control
+passed. Candidate 1 passes sixteen path cases; the final candidate expands this
+to eighteen and passes the Windows narrow gate at 08:32:29. The same final
+ten source/lock inputs are frozen on Linux, macOS and Windows; source manifest
+SHA-256 `59129f82e0fa652dbe68f16149864e9cc9bfa44eccd8495d8bce4d295cecd653`.
+Linux formatting and strict workspace Clippy pass; full library and 28 affected
+targets are in progress. Windows has advanced to affected targets after the
+library gate (counts not yet audited). macOS formatting passes; Clippy stopped
+before compilation because the toolchain component was absent. Install that
+user-owned component and resume under a separately named `clippy-component`
+receipt; preserve the failed original gate. No source or assertion changes are
+needed for this environmental prerequisite. Full qualification remains pending.
+
+At 08:41, Linux finishes all six planned gates successfully; full library has
+681 passing tests. Windows full library exits0 at08:35:28 under the longer
+scratch; affected tests continue. macOS's missing Clippy component was installed
+successfully, then `clippy-component` exits101 at08:38:32 on ten lint errors:
+three descending-sort closures, five EXIF match guards, one spill-path match
+guard, and the macOS identity helper's redundant `st_dev() as u64` cast.
+All ten source expressions predate this unit; the path candidate adds none.
+Keep both failed macOS receipts. A behavior-preserving native lint prerequisite
+is required before landing, without allowances or changing toolchain versions.
+Do not mutate the frozen ten inputs while Windows qualification is running.
+Preserve completed first-candidate evidence; requalify changed final source.
+Add directory/index/rule/parser regression targets for any corresponding edits;
+existing platform, spill, format and library suites cover the other owners.
+
+Windows affected gate exits101 at08:44:46: only
+`backup_task_spec::test_backup_task_unwritable_dir_fails` fails. Its old fixture
+uses `/proc/fake/deeply/nested/backup`, which is a valid writable Windows path;
+the task correctly completes. Replace this nonportable fixture with a regular
+file blocking a child destination inside its own TempDir, and prove the sentinel
+survives unchanged. Do not disable the negative test or change backup behavior.
+The accidental 70,528-byte test backup was moved recoverably from `C:\proc` to
+the Windows campaign's `retained-unintended-backup/`; no ancestor directories
+or unrelated data were removed. All original logs and the 696-pass Windows
+library are retained. Separate non-strict native Clippy runs now inventory all
+diagnostics; they are explicitly **not** qualification passes or warning waivers.
+
+macOS diagnostic inventory closes0 at08:45:53: fourteen unique warnings, ten
+production expressions plus two test `while let` opportunities, one explicit
+test counter and one test sorting closure. Local corrections preserve stable
+ordering, scalar types, match fallback behavior and test iteration bounds.
+The source inventory grows by nine files (five production owners, four specs);
+add `directory_ops_spec`, `index_store_spec`, `rules_spec`, `native_parsers_spec`,
+`index_v1_cow_spec` and `index_producer_coordinator_spec` to the affected gate
+(34 total). The original 28 already include migration-base clone and backup
+tasks. All1,503 reviewed error entries remain identical except eight line
+positions: four native-durability offsets and four EXIF offsets. IDs, patterns,
+columns, review decisions and ceilings are unchanged.
+
+Windows diagnostic initially stops before execution because Clippy is missing;
+component installation succeeds and `clippy-inventory-component` now runs on
+the preserved old ten-input remote candidate. Local corrections are not synced
+into that running worktree. Original first-candidate archives/logs/digests remain
+immutable evidence; the next qualification uses a new source manifest and new
+`final2` receipt paths. No lint-inventory success will be labeled a strict pass.
+
+Windows full inventory closes0 at08:59:30 (15 unique warnings). Its additional
+findings are Windows-only expression simplifications in durability error
+classification, spill native-byte length validation, memory observation, journal
+lock classification, private-path separator parsing, build arguments and a
+Unix-only test variable. These are corrected without warning allowances,
+changing toolchain versions or disabling tests. The build argument borrow removal
+changes one scanner fingerprint (`cc4cb823618f6ea36076` →
+`0c86e9f2efd70ea3d1f4`) and shifts two columns. The expression still panics on
+process-launch failure; classify its refreshed entry as `fatal-build-boundary`,
+not the old inaccurate optional-data label. No default value or extra suppression
+was added. Local scanner check passes all1,503 occurrences; fresh remote
+architecture checks remain required. Persisted path encoding is unchanged.
+
+Final2 launches09:05 UTC: Linux29333, Mac24089, Windows12478. Its25 exact
+source/lock inputs have manifestSHA
+`65d1722a34ecb2c36528a120edb6d69a16f322dc3a903b7f83cb8615033bf4fe`;
+source-only archiveSHA
+`4fa84a65eb0734a80f1b674d668019053eba99924d571db2634d7fd5318b53d7`.
+All original first-candidate evidence is retained. Expand to36 affected targets
+with RSS sampling and portal packaging checks; full library, strict workspace
+Clippy and formatting run on native Unix, plus Linux contract/debt gates.
+Windows runs18narrow cases, strict workspace Clippy, full library,36affected
+targets and18release path cases. Same disk floors and one Cargo per host;
+Linux buildcap16GiB/noSwap is not the final actual-v4 runtime8GiB gate.
+Do not edit frozen source or call this unit complete before terminal evidence.
+
+Final2 macOS completes09:12:12: formatting, strict workspace Clippy,
+681library tests and983top-level integration tests across36targets all pass.
+The three named index-store child-process reruns pass separately; do not add
+them to the distinct count or treat their42filtered parent cases as skips.
+All25inputs remain unchanged; minimum/final resource samples stay above the
+30GB floor. Same-host37binary digests and raw evidence are mirrored locally.
+Windows strict Clippy and696library cases pass by09:14:23; its36affected
+targets andrelease cases remain in progress. Linux has reached the end of
+affected tests; terminal contract/debt receipts remain outstanding. These
+intermediate successes do not authorize landing or full-v4 readiness claims.
+
+Final2 Linux completes09:16:51: formatting, strict workspace Clippy,
+681library and984top-level integration tests across36targets, all472 reference
+fixtures and debt self-tests pass. Three index-store child reruns are recorded
+separately. Runtime11m33, CPU9m36, peak5,312,196,608bytes/noSwap;
+final Data336,186,953,728 and home71,912,964,096bytes free. All raw logs,
+driver receipt and37 same-host binary digests are mirrored. Windows affected
+36targets complete0 at09:25:20; aggregate count awaits the final audit.
+Its release gate started09:25:21 and is compiling at09:32. No source changes,
+staging or landing while this last qualification gate remains outstanding.
+
+Completed Windows log audit confirms968top-level passes across36targets, plus
+three named index-store child reruns. Those children each filter41 tests, not
+Unix's42: the existing disk-write-failure test is Unix-only, making the parent
+target42 tests on Windows and43 on Unix. Corrected the evidence accounting to
+require platform-exact child counts and names; no tests changed or skipped.
+The first accounting assertion was a checker failure, not a failed native test.
+The28 completed Windows log/receipt/manifest/patch files are mirrored; live
+release output remains outside the final evidence packet until completion.
+
+Final2 Windows release completes0 at09:45:40: all18 path regressions pass,
+678 unrelated library cases filtered by the named narrow selector. Compilation
+and execution took20m19; minimum sampled Cfree16,839,917,568bytes and final
+16,836,980,736bytes remain above8GB. All25 source/lock inputs are unchanged.
+All35 Windows evidence files and38 same-host executed binary digests are now
+mirrored; no executable or database crossed hosts. The strict complete proof
+check passes, including original7-failure RED, 16-case candidate, native
+prerequisite failures, portable backup correction and unchanged audit ceiling.
+Linux/macOS each contribute37 binary identities. Upstream development matches
+the9d3 entry snapshot before landing. The path correction changes neither
+persistent path bytes nor format/default/production-service behavior.
+
+- [x] Reproduce the native long-path and NUL mutation failures before fixing.
+- [x] Share bounded native path encoding across all four affected Win32 APIs.
+- [x] Prove original/adjacent failures, native full libraries,36 affected
+  targets, strict workspace linting, contract/debt gates and Windows release.
+- [x] Preserve original failure evidence and audit exact final source/binaries.
+- [ ] Continue U1 catalog codecs/COW/compiler and U2–U7 integration/qualification.
 
 ## U2 read-only entry refinement: public append-writer guard
 

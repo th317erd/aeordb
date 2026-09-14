@@ -318,14 +318,21 @@ fn test_backup_task_unwritable_dir_fails() {
 
   populate_engine(&engine);
 
-  // Use /proc/fake as an unwritable directory.
-  let task = queue.enqueue("backup", serde_json::json!({"backup_dir": "/proc/fake/deeply/nested/backup"})).unwrap();
+  // A regular file cannot be a parent directory on any supported platform.
+  // Keep failure fixtures inside this test's temporary directory: /proc is not
+  // special on Windows and can otherwise create files at the drive root.
+  let blocked_parent = _temp.path().join("not-a-directory");
+  std::fs::write(&blocked_parent, b"unchanged sentinel").unwrap();
+  let backup_dir = blocked_parent.join("backup");
+  let task = queue.enqueue("backup", serde_json::json!({"backup_dir": backup_dir.to_str().unwrap()})).unwrap();
 
   process_next_task(&queue, &engine, &plugin_manager, &event_bus).unwrap();
 
   let finished = queue.get_task(&task.id).unwrap().expect("task should exist");
   assert_eq!(finished.status, TaskStatus::Failed);
   assert!(finished.error.is_some());
+  assert_eq!(std::fs::read(&blocked_parent).unwrap(), b"unchanged sentinel");
+  assert!(!backup_dir.exists(), "unusable destination must not create an artifact");
 }
 
 #[test]

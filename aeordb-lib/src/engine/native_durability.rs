@@ -727,14 +727,23 @@ fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<Na
 
 #[cfg(windows)]
 fn durable_replace_platform(from: &Path, to: &Path) -> NativeDurabilityResult<NativeDurabilityMechanism> {
-  use std::os::windows::ffi::OsStrExt;
   use std::os::windows::fs::OpenOptionsExt;
+  use super::native_windows_path::encode_native_windows_path;
   use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
   };
 
-  let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-  let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+  let encode_path = |path: &Path| {
+    encode_native_windows_path(path).map_err(|source| {
+      if source.kind() == io::ErrorKind::InvalidInput {
+        NativeDurabilityError::invalid(NativeDurabilityOperation::DurableReplace, source.to_string())
+      } else {
+        NativeDurabilityError::operation_io(NativeDurabilityOperation::DurableReplace, source)
+      }
+    })
+  };
+  let from_wide = encode_path(from)?;
+  let to_wide = encode_path(to)?;
   let (result, mechanism) = unsafe {
     if to.exists() {
       (
@@ -817,7 +826,7 @@ fn unix_file_identity(file: &File) -> NativeDurabilityResult<PlatformFileIdentit
 
   let metadata = file.metadata().map_err(|error| NativeDurabilityError::io(NativeDurabilityOperation::FileIdentity, error))?;
   let stat = macos_statfs(file.as_raw_fd(), NativeDurabilityOperation::FileIdentity)?;
-  let volume_identity = volume_identity(metadata.st_dev() as u64, fsid_bytes(&stat.f_fsid)?);
+  let volume_identity = volume_identity(metadata.st_dev(), fsid_bytes(&stat.f_fsid)?);
   let mut file_identity = [0u8; 16];
   file_identity[..8].copy_from_slice(&metadata.st_ino().to_le_bytes());
   let mut birth_identity = [0u8; 16];
@@ -1000,3 +1009,7 @@ fn is_unsupported_io(error: &io::Error) -> bool {
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("AeorDB native durability probes require an explicit platform implementation");
+
+#[cfg(all(test, windows))]
+#[path = "../../spec/engine/native_windows_path_internal_spec.rs"]
+mod native_windows_path_internal_spec;

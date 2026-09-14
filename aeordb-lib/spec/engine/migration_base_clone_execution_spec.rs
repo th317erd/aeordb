@@ -443,7 +443,7 @@ impl MigrationBaseCloneEntrySourceV1 for FakeSource {
 
 fn fake_source_fingerprint(source: &FakeSource) -> [u8; 32] {
   let mut entries = source.entries.iter().collect::<Vec<_>>();
-  entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+  entries.sort_by_key(|(key, _)| *key);
   let mut hasher = blake3::Hasher::new();
   for (map_key, (header, stored_key, value)) in entries {
     hasher.update(&(map_key.len() as u64).to_le_bytes());

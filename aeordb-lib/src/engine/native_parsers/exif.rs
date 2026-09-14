@@ -191,11 +191,9 @@ fn parse_ifd(
         }
       }
       // DateTime (0x0132)
-      0x0132 => {
-        if exif.date_taken.is_none() {
-          if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8) {
-            exif.date_taken = Some(value);
-          }
+      0x0132 if exif.date_taken.is_none() => {
+        if let Some(value) = read_ifd_string(data, data_type, count, value_offset_raw as usize, position + 8) {
+          exif.date_taken = Some(value);
         }
       }
       // Artist (0x013B) — NEW
@@ -266,34 +264,26 @@ fn parse_gps_ifd(data: &[u8], offset: usize, little_endian: bool, exif: &mut Exi
 
     match tag {
       // GPSLatitudeRef (1)
-      1 => {
-        if data_type == 2 && count >= 1 {
-          let char_offset = if count <= 4 { position + 8 } else { value_offset };
-          if char_offset < data.len() {
-            latitude_ref = Some(data[char_offset] as char);
-          }
+      1 if data_type == 2 && count >= 1 => {
+        let char_offset = if count <= 4 { position + 8 } else { value_offset };
+        if char_offset < data.len() {
+          latitude_ref = Some(data[char_offset] as char);
         }
       }
       // GPSLatitude (2)
-      2 => {
-        if data_type == 5 && count == 3 {
-          latitude_values = read_gps_rational_triple(data, value_offset, little_endian);
-        }
+      2 if data_type == 5 && count == 3 => {
+        latitude_values = read_gps_rational_triple(data, value_offset, little_endian);
       }
       // GPSLongitudeRef (3)
-      3 => {
-        if data_type == 2 && count >= 1 {
-          let char_offset = if count <= 4 { position + 8 } else { value_offset };
-          if char_offset < data.len() {
-            longitude_ref = Some(data[char_offset] as char);
-          }
+      3 if data_type == 2 && count >= 1 => {
+        let char_offset = if count <= 4 { position + 8 } else { value_offset };
+        if char_offset < data.len() {
+          longitude_ref = Some(data[char_offset] as char);
         }
       }
       // GPSLongitude (4)
-      4 => {
-        if data_type == 5 && count == 3 {
-          longitude_values = read_gps_rational_triple(data, value_offset, little_endian);
-        }
+      4 if data_type == 5 && count == 3 => {
+        longitude_values = read_gps_rational_triple(data, value_offset, little_endian);
       }
       _ => {}
     }

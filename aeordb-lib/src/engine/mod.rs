@@ -75,6 +75,8 @@ pub mod metrics_pulse;
 pub mod namespace_mutation;
 pub mod native_durability;
 pub mod native_parsers;
+#[cfg(windows)]
+pub(crate) mod native_windows_path;
 pub mod nvt;
 pub mod nvt_ops;
 pub(crate) mod operation_memory;

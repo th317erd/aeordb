@@ -191,7 +191,7 @@ fn create_directory_link(link_path: &Path, target: &Path, name: &str) {
   // Windows, run `cargo build` once and the junction will be
   // recreated against the new absolute target.
   let status = std::process::Command::new("cmd")
-    .args(&["/C", "mklink", "/J", link_path.to_str().expect("link path is UTF-8"), target.to_str().expect("target path is UTF-8")])
+    .args(["/C", "mklink", "/J", link_path.to_str().expect("link path is UTF-8"), target.to_str().expect("target path is UTF-8")])
     .status()
     .unwrap_or_else(|e| panic!("failed to invoke mklink for `{}`: {}", name, e));
   if !status.success() {

@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use super::enforce_backup_retention;
 
 #[cfg(unix)]

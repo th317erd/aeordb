@@ -36,7 +36,7 @@ impl<'a> RuleEngine<'a> {
     }
 
     // Sort by depth descending (most specific first).
-    applicable.sort_by(|a, b| b.0.cmp(&a.0));
+    applicable.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
 
     Ok(applicable.into_iter().map(|(_, path)| path).collect())
   }

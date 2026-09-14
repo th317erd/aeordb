@@ -47,7 +47,7 @@ pub(crate) fn is_canonical_lexical_absolute_utf8_path(path: &Path) -> bool {
   #[cfg(windows)]
   {
     let path_text = path.to_str().expect("UTF-8 path checked above");
-    if path_text.split(|character| character == '\\' || character == '/').any(|segment| segment == "." || segment == "..") {
+    if path_text.split(['\\', '/']).any(|segment| segment == "." || segment == "..") {
       return false;
     }
   }
@@ -497,13 +497,13 @@ impl Drop for WindowsLocalAllocation {
 
 #[cfg(windows)]
 fn windows_path(path: &Path) -> Result<Vec<u16>, PrivateWorkspaceErrorV1> {
-  use std::os::windows::ffi::OsStrExt;
-  let mut encoded: Vec<u16> = path.as_os_str().encode_wide().collect();
-  if encoded.contains(&0) {
-    return Err(PrivateWorkspaceErrorV1::Path("Windows workspace path contains NUL".to_string()));
-  }
-  encoded.push(0);
-  Ok(encoded)
+  crate::engine::native_windows_path::encode_native_windows_path(path).map_err(|source| {
+    if source.kind() == std::io::ErrorKind::InvalidInput {
+      PrivateWorkspaceErrorV1::Path(source.to_string())
+    } else {
+      PrivateWorkspaceErrorV1::Io { operation: "Windows private-path normalization", source }
+    }
+  })
 }
 
 pub(crate) fn ensure_capacity(path: &Path, additional_bytes: u64, minimum_free_bytes: u64) -> Result<(), PrivateWorkspaceErrorV1> {

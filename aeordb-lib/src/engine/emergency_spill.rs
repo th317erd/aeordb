@@ -1564,7 +1564,7 @@ fn path_from_native_bytes(encoding: u16, bytes: &[u8]) -> EngineResult<PathBuf> 
   if bytes.is_empty() {
     return Err(EngineError::InvalidInput("emergency spill database path is empty".to_string()));
   }
-  if encoding != 2 || bytes.len() % 2 != 0 {
+  if encoding != 2 || !bytes.len().is_multiple_of(2) {
     return Err(EngineError::InvalidInput(format!("native Windows repair cannot interpret emergency spill path encoding {encoding}")));
   }
   let words = bytes.chunks_exact(2).map(|word| u16::from_le_bytes([word[0], word[1]])).collect::<Vec<_>>();

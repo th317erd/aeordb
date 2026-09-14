@@ -292,7 +292,6 @@ fn platform_file_identity_compares_stable_native_identity_separately_from_birth_
 fn platform_file_identity_from_open_file_is_bound_to_the_open_physical_file() {
   let temp = tempfile::tempdir().unwrap();
   let path = temp.path().join("identity.bin");
-  let moved = temp.path().join("identity-moved.bin");
   let file = OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
   let open_identity = platform_file_identity_from_file(&file).unwrap();
 
@@ -300,6 +299,7 @@ fn platform_file_identity_from_open_file_is_bound_to_the_open_physical_file() {
 
   #[cfg(unix)]
   {
+    let moved = temp.path().join("identity-moved.bin");
     fs::rename(&path, &moved).unwrap();
     fs::write(&path, b"replacement").unwrap();
     assert_eq!(open_identity, platform_file_identity_from_file(&file).unwrap());

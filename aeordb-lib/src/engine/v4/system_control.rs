@@ -1464,10 +1464,8 @@ fn validate_spill_catalog(body: &[u8], algorithm: HashAlgorithm) -> FormatResult
     }
     let path = &body[row_fixed_end..row_end];
     match u16_at(row, 4)? {
-      1 => {
-        if path.is_empty() || path.contains(&0) {
-          return Err(path_error("spill_catalog_unix_path", "Unix spill path is empty or contains NUL"));
-        }
+      1 if path.is_empty() || path.contains(&0) => {
+        return Err(path_error("spill_catalog_unix_path", "Unix spill path is empty or contains NUL"));
       }
       2 => {
         if !path.len().is_multiple_of(2) {

@@ -1256,8 +1256,7 @@ fn every_producer_kind_uses_the_same_leased_path() {
       .admit(task(operation_id, kind, ordinal as u64 + 1, task_before, task_after, &semantic, (journal, scope)), ordinal as u64)
       .unwrap();
   }
-  let mut now = 100u64;
-  for expected in 1u8..=9 {
+  for (now, expected) in (100u64..).zip(1u8..=9) {
     let lease = producer.lease_next(now, false).unwrap().unwrap();
     assert_eq!(lease.operation_id(), [expected; 16]);
     producer.cancel(&lease).unwrap();
@@ -1268,7 +1267,6 @@ fn every_producer_kind_uses_the_same_leased_path() {
       .complete(&lease, IndexProducerReportV1 { outcomes: Vec::new() }, &mut mutations, now + 1, false, &mut SpillStore::default())
       .unwrap();
     assert!(matches!(completion, IndexProducerCompletionV1::Completed { .. }));
-    now += 1;
   }
   assert_eq!(producer.snapshot().pending_tasks, 0);
 }

@@ -62,7 +62,7 @@ pub fn try_read_process_memory() -> io::Result<ProcessMemory> {
   }
   #[cfg(target_os = "windows")]
   {
-    read_windows_process_memory().ok_or_else(|| io::Error::last_os_error())
+    read_windows_process_memory().ok_or_else(io::Error::last_os_error)
   }
   #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
   {

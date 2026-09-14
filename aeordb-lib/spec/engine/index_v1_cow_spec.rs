@@ -3049,10 +3049,7 @@ fn cow_randomized_mutations_splits_compaction_and_merges_match_an_independent_mo
     }
 
     let mut saw_retirement = false;
-    loop {
-      let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) else {
-        break;
-      };
+    while let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) {
       let source = decode_ordered_page(&pages[page_index], hash_algorithm).unwrap();
       let proof_page_keys = [source.key.as_slice()];
       let source_pages = [pages[page_index].as_slice()];
@@ -3130,10 +3127,7 @@ fn cow_randomized_mutations_splits_compaction_and_merges_match_an_independent_mo
       property_assert_model(&pages, hash_algorithm, &expected_live);
       generation += 1;
     }
-    loop {
-      let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) else {
-        break;
-      };
+    while let Some(page_index) = pages.iter().position(|page| decode_ordered_page(page, hash_algorithm).unwrap().tombstone_count > 0) {
       let source = decode_ordered_page(&pages[page_index], hash_algorithm).unwrap();
       let proof_page_keys = [source.key.as_slice()];
       let source_pages = [pages[page_index].as_slice()];

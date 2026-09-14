@@ -3916,7 +3916,7 @@ impl<'a> DirectoryOps<'a> {
     }
 
     // Sort by deleted_at descending (most recent first)
-    results.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    results.sort_by_key(|record| std::cmp::Reverse(record.deleted_at));
     // Deduplicate by path (keep most recent deletion)
     let mut seen = std::collections::HashSet::new();
     results.retain(|r| seen.insert(r.path.clone()));

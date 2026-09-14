@@ -607,7 +607,7 @@ fn is_journal_lock_contention(error: &std::io::Error) -> bool {
   {
     // Windows reports byte-range lock contention as ERROR_SHARING_VIOLATION
     // or ERROR_LOCK_VIOLATION without mapping either value to WouldBlock.
-    return matches!(error.raw_os_error(), Some(32 | 33));
+    matches!(error.raw_os_error(), Some(32 | 33))
   }
   #[cfg(not(windows))]
   false

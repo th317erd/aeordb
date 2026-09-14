@@ -446,7 +446,7 @@ impl SharedIndexWriteBuffer {
         last_access_age_ms: self.last_access.get(key).map(|instant| now.saturating_duration_since(*instant).as_millis() as u64),
       })
       .collect();
-    top_cached_indexes.sort_by(|left, right| right.estimated_bytes.cmp(&left.estimated_bytes));
+    top_cached_indexes.sort_by_key(|index| std::cmp::Reverse(index.estimated_bytes));
     top_cached_indexes.truncate(8);
 
     let entries = self.indexes.values().map(|index| index.entries.len()).sum();

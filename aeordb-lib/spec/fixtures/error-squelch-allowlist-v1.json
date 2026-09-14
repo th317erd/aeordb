@@ -1664,20 +1664,20 @@
       "review": "fatal-build-boundary"
     },
     {
-      "id": "esq-v1-cc4cb823618f6ea36076-00",
+      "id": "esq-v1-0c86e9f2efd70ea3d1f4-00",
       "file": "aeordb-lib/build.rs",
       "line": 193,
       "column": 16,
       "enclosing_item": "create_directory_link",
       "kind": "default_on_error",
-      "pattern": "std :: process :: Command :: new (\"cmd\") . args (& [\"/C\" , \"mklink\" , \"/J\" , link_path . to_str () . expect (\"link path is UTF-8\") , target . to_str () . expect (\"target path is UTF-8\")]) . status () . unwrap_or_else (| e | panic ! (\"fai...",
-      "review": "optional-data-default"
+      "pattern": "std :: process :: Command :: new (\"cmd\") . args ([\"/C\" , \"mklink\" , \"/J\" , link_path . to_str () . expect (\"link path is UTF-8\") , target . to_str () . expect (\"target path is UTF-8\")]) . status () . unwrap_or_else (| e | panic ! (\"faile...",
+      "review": "fatal-build-boundary"
     },
     {
       "id": "esq-v1-d47e7b8d95c27bb67cfe-00",
       "file": "aeordb-lib/build.rs",
       "line": 194,
-      "column": 35,
+      "column": 34,
       "enclosing_item": "create_directory_link",
       "kind": "panic_method",
       "pattern": "link_path . to_str () . expect (\"link path is UTF-8\")",
@@ -1687,7 +1687,7 @@
       "id": "esq-v1-fa856021f75e4da5dbb3-00",
       "file": "aeordb-lib/build.rs",
       "line": 194,
-      "column": 84,
+      "column": 83,
       "enclosing_item": "create_directory_link",
       "kind": "panic_method",
       "pattern": "target . to_str () . expect (\"target path is UTF-8\")",
@@ -5826,7 +5826,7 @@
     {
       "id": "esq-v1-9525d4e93a60d8251120-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 889,
+      "line": 898,
       "column": 13,
       "enclosing_item": "native_filesystem_info",
       "kind": "default_on_error",
@@ -5836,7 +5836,7 @@
     {
       "id": "esq-v1-044e3b0b8782c67d62bc-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 925,
+      "line": 934,
       "column": 13,
       "enclosing_item": "native_filesystem_info",
       "kind": "default_on_error",
@@ -5846,7 +5846,7 @@
     {
       "id": "esq-v1-5a8ebed145b661415a47-00",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 979,
+      "line": 988,
       "column": 22,
       "enclosing_item": "encode_system_time",
       "kind": "default_on_error",
@@ -5856,7 +5856,7 @@
     {
       "id": "esq-v1-5a8ebed145b661415a47-01",
       "file": "aeordb-lib/src/engine/native_durability.rs",
-      "line": 982,
+      "line": 991,
       "column": 9,
       "enclosing_item": "encode_system_time",
       "kind": "default_on_error",
@@ -5896,7 +5896,7 @@
     {
       "id": "esq-v1-dadd50ab547906bc36ef-00",
       "file": "aeordb-lib/src/engine/native_parsers/exif.rs",
-      "line": 341,
+      "line": 331,
       "column": 3,
       "enclosing_item": "read_ifd_string",
       "kind": "result_to_option",
@@ -5906,7 +5906,7 @@
     {
       "id": "esq-v1-9c3460310254f2b8d1c7-00",
       "file": "aeordb-lib/src/engine/native_parsers/exif.rs",
-      "line": 364,
+      "line": 354,
       "column": 17,
       "enclosing_item": "read_user_comment",
       "kind": "default_on_error",
@@ -5916,7 +5916,7 @@
     {
       "id": "esq-v1-961b361ee35b06046320-00",
       "file": "aeordb-lib/src/engine/native_parsers/exif.rs",
-      "line": 371,
+      "line": 361,
       "column": 5,
       "enclosing_item": "read_user_comment",
       "kind": "result_to_option",
@@ -5926,7 +5926,7 @@
     {
       "id": "esq-v1-961b361ee35b06046320-01",
       "file": "aeordb-lib/src/engine/native_parsers/exif.rs",
-      "line": 387,
+      "line": 377,
       "column": 5,
       "enclosing_item": "read_user_comment",
       "kind": "result_to_option",

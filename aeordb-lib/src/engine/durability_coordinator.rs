@@ -321,7 +321,7 @@ fn classify_raw_os_error(raw: Option<i32>) -> Option<DurabilityFailureDispositio
       ERROR_SEM_TIMEOUT => DurabilityFailureDisposition::uncertain(OsErrorClass::TimeoutUnknown),
       _ => return None,
     };
-    return Some(disposition);
+    Some(disposition)
   }
 }
 
