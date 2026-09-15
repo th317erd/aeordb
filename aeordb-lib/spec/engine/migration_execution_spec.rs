@@ -2066,11 +2066,74 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
       reader.with_record(&catalog_root, bounds, 1, b"\x01\x00/missing/.aeordb-config/indexes.json", &|| false, |_| Ok(())).unwrap(),
       None
     );
+    // Incrementally remove both configurations through the reopened physical
+    // owner, then reopen again. Both the base and candidate remain readable;
+    // neither operation has permission to select a namespace HEAD.
+    use aeordb::engine::v4::semantic_catalog_compiler::{
+      SemanticCatalogConfigurationMutationV1, SemanticCatalogUpdateRequestV1, update_semantic_catalog_v1,
+    };
+    let mut store = store;
+    let update = update_semantic_catalog_v1(
+      SemanticCatalogUpdateRequestV1 {
+        compilation: SemanticCatalogCompilationRequestV1 { expected_configuration_count: 0, ..request },
+        expected_mutation_count: 2,
+      },
+      &result,
+      &registry,
+      ["/", "/nested"].into_iter().map(|owner| Ok(SemanticCatalogConfigurationMutationV1::Remove(owner.into()))),
+      &mut store,
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    let empty = compile_semantic_catalog_v1(
+      SemanticCatalogCompilationRequestV1 { expected_configuration_count: 0, ..request },
+      &registry,
+      std::iter::empty(),
+      &mut store,
+      &memory,
+      &|| false,
+    )
+    .unwrap();
+    assert_eq!(update.semantic_state(), empty.semantic_state());
+    let updated_observation = reopened.observe().unwrap();
+    assert_eq!(updated_observation.selected.header.head_hash, before.selected.header.head_hash);
+    drop(reopened);
+    let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
+    assert_eq!(reopened.observe().unwrap(), updated_observation);
+    for candidate in [&result, &update] {
+      assert_eq!(
+        reopened.load_semantic_object(1, &candidate.semantic_state().object_id).unwrap().unwrap(),
+        candidate.semantic_state().value
+      );
+      let state = decode_semantic_object(&candidate.semantic_state().value, algorithm).unwrap().semantic_state.unwrap();
+      let SemanticAvailabilityV1::Complete { catalog_root, catalog_record_count, catalog_node_count, .. } = state.availability else {
+        panic!("complete");
+      };
+      let source = NativeSemanticCatalogStagingStoreV1::new(
+        &reopened,
+        before.selected.header.database_id,
+        before.selected.header.updated_at_ms + 1,
+        &cancellation,
+      )
+      .unwrap();
+      let reader = SemanticCatalogReaderV1::new(algorithm, &source);
+      reader
+        .walk_catalog(
+          &catalog_root,
+          SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap(),
+          &|| false,
+          |record| reader.with_definition(record, &|| false, |_| Ok(())),
+        )
+        .unwrap();
+    }
+    drop(empty);
+    drop(update);
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, [0; 16], 1, &cancellation).is_err());
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 0, &cancellation).is_err());
     cancellation.cancel();
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 1, &cancellation).is_err());
-    assert_eq!(reopened.observe().unwrap(), after);
+    assert_eq!(reopened.observe().unwrap(), updated_observation);
     drop(result);
     drop(registry);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);

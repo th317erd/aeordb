@@ -26,6 +26,19 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+Incremental compilation is qualified through all eleven Linux gates; see the
+[strict incremental proof](../evidence/user-facing-v4-u1-catalog-incremental-proof-20260915.json).
+It preserves the base while producing an unselected updated catalog, prunes
+unused dependencies, avoids whole-catalog scans for unchanged dependencies,
+and returns typed failures for the two formerly aborting semantic-state buffers.
+Persisted base admission and task capture/activation remain outstanding. The
+next activation work requires the owner's still-pending decision on dedicated
+semantic-mutation task/checkpoint definitions; frozen formats are unchanged.
+Full U1 and user-facing production readiness are not complete.
+
+Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
+Incremental compilation entered from that exact green revision.
+
 Borrowed canonical projection reads pass all ten Linux gates; see the
 [strict borrowed-reader proof](../evidence/user-facing-v4-u1-canonical-borrowed-proof-20260914.json).
 Dense 256 KiB values validate and iterate with zero heap allocation. Existing
@@ -2744,6 +2757,184 @@ counts, resource guards and the four individually reviewed audit replacements.
 No selected write path, production service, original damaged database, or
 sealed release evidence was changed. This completes this bounded read-error
 unit, not complete U1, universal allocator/I/O recovery or user-facing readiness.
+
+## U1 completed compiler unit: incremental changes to compiler-produced catalogs
+
+Final2 session29577 exited0 at2026-09-15T00:47:38Z, elapsed10m20.102s,
+CPU11m32.009s. All eleven gates PASS:86narrow (39compiler+47resource),
+1physical-reopen/21filtered,939affected across54targets,71state-consumer tests
+across3targets,713library,175reference,472independent fixtures,1503reviewed audit
+occurrences,format,strict workspace Clippy anddebt self-test. The physical and
+compiler tests also appear in affected; these are not disjoint total counts.
+Kernel memory peak6442450944bytes under the6GiB cap, swap disabled, CPU200%.
+Final freeData335976054784/home69292101632bytes exceed both enforced floors.
+
+All66raw stage files, driver and62same-host executed binary hashes were captured
+in67661closed0 before any source rebuild. Strict verifierd49c68 PASS binds
+the exact12inputs/archive, commands/counts/resource samples, original tests,
+independent oracle, all failed-first history and the preexisting architecture
+guard correction. The resulting proof is immutable; do not rerun its wx writer.
+No format/profile/fixture changes, new authority owner, task activation,
+production operation or retained-database mutation occurred. This unit has
+Linux and native-file-owner proof, not final macOS/Windows/service/soak proof.
+
+Next required owner gate: authorize dedicated versioned semantic-mutation
+task/checkpoint definitions without changing existing IDs/layouts. The existing
+11-kind TaskPin registry excludes semantic mutation, and the completed soft
+mutation journal is not an unfinished-task checkpoint. Do not repurpose it or
+the derived IndexArtifact attachment contract. The earlier asynchronous owner
+question remains unanswered; no new persistent IDs or bytes were selected.
+After that ruling, freeze independent reader fixtures and the crash/pin/source-
+capture contract, then continue persisted admission and task-backed activation
+before U2–U7. The full campaign remains unfinished.
+
+Final2 full eleven-gate qualification started September15 00:37:18UTC,
+session29577, invocation16eb0a66ade9409faaf3693f6e6495cb. Twelve exact inputs:
+manifest a7adf5d8bc98aa3deb76f27e48503f9e559d64ee2aac839cb29ab7e7ec0272d1;
+archive 7c3c1cc1afec8f7379f4cce2802d560e3345d45dbd6672e5f849184e71e2c6be.
+Candidate4 finished101 at00:24:48Z: the unchanged-dependency replacement read
+487 versus1562 records for32 versus128 configurations, exceeding2x+32. Allsix
+raw files and one executed-binary digest were preserved before final2 sync.
+The correction removes each replacement's known-live dependencies from the
+auxiliary candidate tree; subsequent removal nominates them again. The separate
+all-five-hash replacement-then-removal regression protects that ordering.
+No format/profile changes. Expected86narrow,939affected/54targets,71state/3,
+713library and existing independent gates. Full qualification/proof remain pending.
+At00:44UTC the firstsix stages pass (through format); Clippy and remaining
+library/reference/contracts/debt gates are pending. Desktop free bytes remain
+335976239104 Data /69293842432 home, above the enforced floors.
+
+Restart-admission review while final2 runs: a persisted compiler fingerprint
+alone is not proof that an arbitrary catalog is safe to turn into the opaque
+incremental base. Restore must establish exact projection ownership, reference
+closure and counts, or recompile the immutable captured controls and compare
+the complete semantic state. The latter can reuse the existing bounded compiler,
+but must not silently recreate missing base objects and call that admission.
+Neither approach replaces the required durable capture/source-identity and
+staging-pin contract. Do not add an unchecked deserialization constructor just
+to get past the still-unanswered semantic task/checkpoint format decision.
+U2's start gate still requires complete U1; that decision is needed before
+task-backed configuration activation and the subsequent runtime cutover.
+
+Firstfinal35234 exited101 at00:17:46Z after84narrow1physical937affected54
+targets and54migration-caller tests pass. The root-architecture assertion
+expects five state-encoder occurrences but sees seven. Baselinegitgrep at
+fcd7416c (f0fb49) confirms allseven alreadyexisted: codecdefinition plus import/
+call pairs in destination, offline runner and the previouslylanded compiler.
+This staleguard predatesincremental changes. All24raw+driver+58samehostbinary
+digests preserved85887closed0 before anydesktop updates. Strengthen theguard
+by namingthe compileras the specific reviewed stagingowner (exactlytwo state
+references andzero namespace/admissionencoders), plus explicit forbidden
+StorageEngine/DirectoryOps/physicalpublisher/HEAD mutation checks. Otherexpected
+counts and allcodec/migration isolation checks remain. This is not a blanket
+increase in permitted callers. No productionchange was needed for thisfinding.
+
+Replacementscaling REDcandidate4 nowrunning17283 launched00:24:43UTC,
+inved234d1038f74f308d94947dcc3c4982; nextordinarymonitor00:29:45UTC.
+Stage replacement-red, one named test only. Preserve6raw+1binary before
+source changes. Local optimization stillnotwritten. Final2 willinclude12inputs
+(adds v4_root_migration_spec guard) and39compiler+47resource,939affected,
+71stateconsumers and713library expected. Strictproof must include failedfirst
+final/driverhistory plus actualperformanceRED before final2 canland.
+
+Firstfinal35234 running, launched00:11:53Z; monitor00:17:17 confirms84narrow,
+1physical and affected54targets passed; state-consumers now running. Remaining
+static/library/reference gates stillpending. Nextordinarymonitor00:22:25UTC.
+Do not sync/rebuild before terminal rawlogs and exactexecutedbinary capture.
+
+Adversarialperformance refinement: replacing a field while keeping the same
+four dependencies can still cause the final reference scan, despite the new
+configuration already proving those dependencies live. A new32vs128native-base
+scaling guard is prepared in candidate4, NOT run and no optimization applied.
+Eleveninputmanifest7df6ea9523053d19ea35235e572aa34ae9bdefeafe1eb75be0e3b17546ab7ca8,
+archive785d57325cacee72965b9a94c38c589f383a328bcedd4722e443bc9165989da8.
+After capturingfirstfinal, execute only replacement_with_unchanged_dependencies_does_not_scan_unrelated_definitions
+against that snapshot to establish whether the concern is real. The proposed
+bounded correction removes proven newly-live dependencies from the auxiliary
+candidate set after eachUpsert; a laterRemove re-adds them. A separateall5hash
+replacement-then-removal regression is now added locally (not incandidate4).
+Currentrepository compiler39tests; firstfinalsnapshot37 andcandidate4snapshot38.
+Even a greenfirstfinal does not finish thisunit until thisperformance finding
+is resolved and the finalsource is requalified. All originalRED testbodies
+remain intact after standardedition2021 formatting.
+
+Neighboring-body RED4312 exited101 at00:06:42Z with208-byte allocation abort,
+confirming both infallible state buffers. Correction replaces exactly those
+two expressions with a fallible helper appended after existing code; all audit
+positions and persistent bytes remain unchanged. Scope audit finds only three
+production state-writer callers: compiler, destination preparation before file
+creation, and offline migration authority templating. Both migration adapters
+already propagate failure without producing a negative index/document state.
+Their38+16tests and17root/semantic tests are added as an eleventh final gate.
+One new present-read matrix tests all four fault classes at every present read
+through removal/pruning/retry. Final expected37compiler+47resource=84narrow,
+1physical,937affected54targets,71state-consumers3targets,713library175reference,
+472fixtures1503audit/fmtClippydebt. Eleveninputfinalmanifest
+96cb9e222900c9d5b1fd8f0b71adbfa8efec0198401ed954da045a735cb188c2,
+archiveffe721b372ecbdd5ca7c014a9120ea9802ab5fcf2457b985a201bd0ffa4cce60.
+Final driver/strict verifier prepared and syntaxchecked, not yet run; proof
+output absent. Expected66raw+driver+62samehostbinaries before source changes.
+
+Candidate1 passed34compiler tests20334closed0 at23:52:32Z; sixinputs
+118ef705323ef7f129ad5c670598a2053b9fe5dc06418db42fc12f0076773c16,
+archive4d04ee2eb9ff740c2ad65122d6f367055f620ffccf31c7bc7d27cd1fc9a465cb.
+Sixraw+oneexecutedbinary preserved47100closed0. Candidate2 passed36compiler
+tests including unique-dependency growth and every publication boundary's
+before/after failure or admission loss, but the new actualallocator test aborts
+on244bytes in semantic-state output. 93150closed101 at23:59:26Z; nineinputs
+bee64c32d414c687fac718cd8a1ee49490aa892e2fb96ddef34e3a17bc95c9c4,
+archivebb5fe29227caebce454c20e05e7f7f6f7ec65cfdece9999a225cba90841775fc.
+Allsixraw+twoexecutedbinaries preserved29770closed0 before remote changes.
+
+Actual source: namespace::encode_semantic_state_object allocates both its
+bounded body and output with infallible vec!. This is an existing writer gap,
+not corruption and not an accepted test failure. Scope extends only to making
+those two allocations typed operational failures without changing bytes or
+audit locations; existing reference/codec/migration gates remain mandatory.
+Before correction, candidate3 is running focused neighboring-buffer RED4312,
+launched00:05:30UTC, nextordinarymonitor00:10:31UTC. Eleveninputs
+42d132aaea6674428865c5728903b17edc2fc93f83a2b1730efe1310fe557c7d,
+archive249af8c48073f4f447b7dcfb1e67679b884db67af85b7827a636dcef994740f7.
+Expected abort208body bytes; currentnamespace source stillunchanged. Capture
+sixraw+onebinary before remote updates. Local privateprojection tests added;
+finalphysicaltest now removes configs afterreopen, reopensagain and validates
+bothold/newclosure withoutHEADchange. Currenttarget36compiler/47resource;
+two new private tests, library expected713. Fullfinalgates/proofnotrunyet.
+
+API RED71840 exited101 at23:37:11Z: missing all three incremental imports,
+zero executed tests. Six raw files mirrored1a7f68 before source changes.
+Fetch63928 closed0 confirms unchanged fcd7416c HEAD/origin. Four additional
+tests extend the initial ten with affected read faults/retry, malformed owner
+paths, glob/rename closure and wrong-hash base admission. Initial bodies remain.
+Candidate implementation now shares Compiler admission, COW planning, physical
+publication/readback and final state emission; store borrows are method-scoped.
+The incremental child validates affected projection/Scope/ValueStore/Index
+ownership and uses an auxiliary immutable candidate-only dependency tree plus
+one final reference scan. No whole-world resident set or per-candidate fullscan.
+It accepts only opaque successful compiler results, not arbitrary reopened
+roots. Persisted admission and the unanswered task/checkpoint decision remain
+outstanding. Candidate testing, resource/physical perimeter and full proof are
+still pending; no green incremental result is claimed.
+
+Entry `fcd7416c`, matching pushed origin; direct owner, no tracked unrelated WIP.
+Own `semantic_catalog_compiler` and its focused incremental child, the existing
+compiler test owner plus `semantic_catalog_update_spec`, bounded resource and
+physical integration tests as required. Reuse the sole COW planner and native
+physical publisher. Do not change frozen formats/profiles, task registries,
+authority activation, services, retained databases, or old test expectations.
+
+The ten-case draft is installed under the existing compiler target, which has
+20 original tests. Narrow command: `cargo test --offline --locked -j 2 -p aeordb
+--test semantic_catalog_compiler_spec`. First run must demonstrate absent API,
+not claim behavioral execution. Then implement the counted ordered mutation
+stream over an opaque compiler-produced base, same registry, bounded COW and
+candidate-only shared-dependency pruning described below. Retain one admitted
+compiled item at a time, prior closure and exact counts; validate/readback all
+new objects before returning an unselected candidate. Add affected read faults,
+invalid owner paths/hash/limits, rename/glob changes, distinct-dependency I/O
+bounds, actual allocation and physical reopen proof before landing. Full final
+gates and source-bound evidence remain required. Persisted admission and task
+checkpoint/activation are separate outstanding integration prerequisites.
 
 ## U1 completed unit: bounded borrowed canonical projection reads
 

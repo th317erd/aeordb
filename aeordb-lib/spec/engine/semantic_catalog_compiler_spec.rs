@@ -699,3 +699,6 @@ fn scope_limit_precedes_the_larger_catalog_control_owner_limit() {
     }
   }
 }
+
+#[path = "semantic_catalog_update_spec.rs"]
+mod update_spec;

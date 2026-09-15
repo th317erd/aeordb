@@ -75,3 +75,6 @@ fn actual_definition_wrapper_allocation_refusal_is_recoverable_before_catalog_st
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, before);
   }
 }
+
+#[path = "semantic_catalog_update_resource_spec.rs"]
+mod update_resource;

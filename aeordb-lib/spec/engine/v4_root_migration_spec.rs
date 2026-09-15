@@ -792,6 +792,12 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
   let migration_destination = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_destination.rs")).unwrap();
   let migration_root_map_owner = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_root_map_owner.rs")).unwrap();
   let migration_offline_run = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/migration_offline_run.rs")).unwrap();
+  let semantic_catalog_compiler = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/semantic_catalog_compiler.rs")).unwrap();
+  for forbidden in
+    ["StorageEngine", "DirectoryOps", "V4FirstAuthorityPublisher", "update_head", "publish_namespace_root", "admit_v4_header"]
+  {
+    assert!(!semantic_catalog_compiler.contains(forbidden), "catalog staging acquired namespace authority: {forbidden}");
+  }
   let template_start = migration_offline_run.find("fn authority_template(").unwrap();
   let template_end = migration_offline_run[template_start..].find("\nfn open_root_map").unwrap() + template_start;
   let template = &migration_offline_run[template_start..template_end];
@@ -806,16 +812,17 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
     expected_migration_destination_occurrences,
     expected_migration_root_map_owner_occurrences,
     expected_migration_offline_run_occurrences,
+    expected_semantic_catalog_compiler_occurrences,
   ) in [
-    ("encode_namespace_root", 8, 2, 2, 0, 3, 0),
-    ("encode_semantic_state_object", 5, 0, 0, 2, 0, 2),
-    ("encode_root_publication_prepare_control", 5, 4, 0, 0, 0, 0),
-    ("encode_root_admission_commit_control", 5, 4, 0, 0, 0, 0),
+    ("encode_namespace_root", 8, 2, 2, 0, 3, 0, 0),
+    ("encode_semantic_state_object", 7, 0, 0, 2, 0, 2, 2),
+    ("encode_root_publication_prepare_control", 5, 4, 0, 0, 0, 0, 0),
+    ("encode_root_admission_commit_control", 5, 4, 0, 0, 0, 0, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
       expected_production_occurrences,
-      "P3b root encoder {encoder} escaped its reviewed codec, first-authority, and migration-destination owners"
+      "root encoder {encoder} escaped its reviewed codec, authority, migration, and semantic-staging owners"
     );
     assert_eq!(
       first_authority.matches(encoder).count(),
@@ -841,6 +848,11 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
       migration_offline_run.matches(encoder).count(),
       expected_migration_offline_run_occurrences,
       "P3b root encoder {encoder} has an unexpected offline-migration adapter call shape"
+    );
+    assert_eq!(
+      semantic_catalog_compiler.matches(encoder).count(),
+      expected_semantic_catalog_compiler_occurrences,
+      "root encoder {encoder} has an unexpected semantic-staging call shape"
     );
   }
 

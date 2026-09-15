@@ -370,7 +370,7 @@ pub fn encode_semantic_state_object(
   }
 
   let mut item_count = 0u64;
-  let mut body = vec![0u8; body_length];
+  let mut body = allocate_semantic_state_bytes(body_length)?;
   body[4..36].copy_from_slice(&request.required_capabilities);
   put_u16(&mut body, 36, 1);
   put_u16(&mut body, 38, 1);
@@ -418,7 +418,7 @@ pub fn encode_semantic_state_object(
     }
   }
 
-  let mut value = vec![0u8; total_length];
+  let mut value = allocate_semantic_state_bytes(total_length)?;
   value[..4].copy_from_slice(b"ASEM");
   put_u16(&mut value, 4, 1);
   put_u16(&mut value, 6, 1);
@@ -1321,4 +1321,13 @@ fn length_error(context: impl Into<String>) -> FormatError {
 
 fn error(class: MalformedInputClass, code: &'static str, context: impl Into<String>) -> FormatError {
   FormatError::new(class, code, context)
+}
+
+fn allocate_semantic_state_bytes(length: usize) -> FormatResult<Vec<u8>> {
+  let mut bytes = Vec::new();
+  bytes
+    .try_reserve_exact(length)
+    .map_err(|source| FormatError::allocation_failure("semantic_state_allocation", format!("cannot reserve {length} bytes: {source}")))?;
+  bytes.resize(length, 0);
+  Ok(bytes)
 }
