@@ -196,3 +196,59 @@ audit protected transfer policy and v3 refusal, then qualify byte writers. Next
 prove each actual file publication boundary, restart/takeover, GC retention,
 semantic races, ordinary rebase, mixed-batch invisibility and commit-wins-cancel.
 Full Linux and native-platform gates remain required; codec green is not U1 done.
+
+## Byte-writer qualification slice — September16
+
+Entry candidate `d19109f7`; production writer behavior starts after the
+outstanding native Windows reader/probe gate, not on its launch. Independent
+test-only drafts may be prepared while qualification runs. This slice only
+produces bytes.
+Use the existing borrowed `SemanticMutationTaskV1` and
+`SemanticMutationCheckpointV1` as typed inputs; generation takes the database
+identity and explicit nonzero sequence. Checkpoint envelope sequence is always1.
+Do not add a scheduler, second control owner, task publication route or capability
+advertisement. Native `first_authority` and both `control_store` adapters must
+continue refusing these controls before I/O.
+
+The existing SystemControl framing encoder has twelve call sites across
+`system_control`, `root_authority`, `migration_control`, `migration_root_map`,
+`migration_cutover_control` and `index_operation_control`. Add fallible exact
+output allocation at that owner and a bounded body-fill entry used by the new
+typed writers; retain the existing slice encoder as its delegating adapter.
+This shares the framing/CRC/round-trip owner instead of duplicating its bytes.
+Validate identifier/hash widths and cursor caps before copying; reject a present
+optional hash containing only zero bytes rather than silently encoding absence.
+No allocation may scale with claimed catalog/source counts. Encoding does not
+prove closure, current ownership or task/checkpoint selection.
+
+The new byte APIs preserve `FormatError::is_allocation_failure`; this is not a
+claim that every legacy engine adapter preserves operational classifications.
+Inspection found the existing configuration/durability `format_error` adapters
+collapse format failures into `EngineError::InvalidInput`, and index recovery
+uses a generic `native_index_format` code. First-authority/root-map wrappers
+retain the nested `FormatError`. Preserve fail-closed behavior and carry the
+legacy adapter classification review into U2/U5; do not label those existing
+runtime adapters resource-qualified merely because the byte encoder is.
+
+Falsifying test order:
+
+1. Add callable refusing scaffolds and independent positive targets; preserve
+   the actual failing run before implementing behavior. Compare output to frozen
+   reference fixtures and independent hand-built envelopes, not self-generated
+   goldens. Exercise all five algorithms, nine task states, five checkpoint
+   phases, both cursor types, all optional hash slots and nontrivial counters.
+2. Require typed rejection for every short/long/zero identity, wrong hash width,
+   absent-vs-present-zero confusion, zero sequences/fences/counts, timestamp and
+   phase mismatch, excessive/invalid cursor, overflow and partial ready state.
+   Recheck A/B selection and paired checkpoint digest/state binding on output.
+3. Measure exact output and bounded identity allocations, inject their failure
+   independently, and retry successfully. Maximum cursor must require only one
+   output buffer plus the decoder's bounded24-byte identity, not a second body
+   allocation. Failed encoding must not publish or change any source input.
+4. Run existing control, admission, root publication, migration and configuration
+   regressions (all shared framing callers), resource specs, independent reference
+   fixtures, static contracts, debt audit, full library and strict Clippy. Qualify
+   final writer source on Linux, macOS and native Windows with bounded runners and
+   exact source/lock/executable evidence. Existing reader/publisher refusal tests
+   remain mandatory. This byte-only API has no live service surface to exercise;
+   native file publication/reopen remains owed by the following runtime slice.

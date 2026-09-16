@@ -41,6 +41,43 @@ Full U1 and user-facing production readiness are not complete.
 
 ## Active next unit: semantic-mutation durable task contract
 
+September16 native Windows continuation: VM restored using the owner's standing
+launch permission. Fresh detached `source-u1-semantic-readers` at
+`d19109f7d51bbee73d27adbe29e172ab8c149cd8`; prior dirty worktrees are untouched.
+Frozen input manifest covers all2396 tracked files plus the ignored root lock,
+SHA256 `11274d45d993ef02d0d3a70b8adff5967cda3cab4cc5754d10736b832c61cf7f`.
+The preparation's final sibling Git check failed because the portal assets are
+existing source snapshots, not Git checkouts; main source/lock verification
+already passed. The runner instead records every portal asset hash before and
+after each stage. No source, binary or database substitution is involved.
+Detached native runner PID9940 launched~22:43UTC, one Cargo job,8GB free-space
+floor,90-minute per-stage watchdog. New immutable evidence directory is
+`u1-semantic-readers-windows-final1-evidence` within the existing Windows campaign
+cache. Gates: nine narrow/native targets,37 affected targets, full library,
+strict workspace Clippy, independent reference tests/496 fixtures and format.
+Exact executed test binaries are hashed on Windows before each following stage.
+Native qualification is now complete; see the
+[strict Windows proof](../evidence/user-facing-v4-u1-semantic-readers-windows-proof-20260916.json).
+Passed235 narrow tests (including23 native platform probes),792 affected tests,
+728 library tests,181 independent-reference tests,496 fixture cases and strict
+workspace Clippy. All test runs have zero failures/ignored/filtered cases.
+The original driver ended23:06:46UTC at formatting: rustfmt was missing. After
+installing that component in the existing user toolchain, the whole-workspace
+invocation hit Windows command-line limit206. Both failures remain intact.
+Equivalent rustfmt checks over all379 Cargo-listed target roots then passed in
+batches of16, without omitting roots or changing source. The strict verifier
+checks exact metadata/formatter root equality and every child exit status.
+Evidence was sealed23:15:42UTC; final free space17,982,951,424bytes. No target
+binaries or databases were copied between platforms. Raw logs, exact
+same-host test/fixture-verifier hashes and source manifests are retained locally
+and on Windows before the next build. The immutable proof verifier executed PASS.
+This clears the native reader prerequisite, not full U1 or runtime readiness.
+
+The following byte-writer slice uses the existing borrowed task/checkpoint
+types and shared SystemControl framing owner. Its test plan is appended to the
+additive contract. It does not relax native/v3 publication refusal or advertise
+capability25. Actual capture, pinning, recovery and activation remain later gates.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.
@@ -55,8 +92,9 @@ within that scope. Production/service/retained-database gates remain separate.
 - [x] Hand-author independent valid/malformed fixtures and failing-first reader
       target; prove registered-hash widths, bounded decode and legacy stability.
 - [x] Implement shared readers, publication refusal and Linux contract gates.
-- [ ] Finish native Windows reader/probe qualification, then qualify byte-exact
-      writers; keep actual task publication disabled until runtime proof.
+- [x] Finish native Windows reader/probe qualification.
+- [ ] Qualify byte-exact writers; keep actual task publication disabled until
+      runtime proof.
 - [ ] Integrate durable capture/pins, checkpoint resume, persisted base admission,
       short guarded activation/rebase, cancellation and post-HEAD recovery.
 - [ ] Prove each publish/recovery fault boundary, native-file reopen and resource
