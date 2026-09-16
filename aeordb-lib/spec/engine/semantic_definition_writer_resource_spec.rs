@@ -146,6 +146,62 @@ fn fixture(family: &str, filename: &str) -> Vec<u8> {
   std::fs::read(format!("{}/spec/fixtures/v4/{family}/{filename}.bin", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
+#[test]
+fn dependency_metadata_validation_borrows_long_canonical_versions_without_heap_work() {
+  use aeordb::engine::v4::dependency::decode_dependency_record_bytes;
+  use aeordb::engine::v4::native_semantics::NativeSemanticComponentV1;
+  for version in ["1.0.0".to_string(), format!("1.0.0-{}+{}", "a".repeat(120), "b".repeat(120))] {
+    let mut record = NativeSemanticComponentV1::RawJson.dependency_record();
+    record.version = &version;
+    let bytes = encode_dependency_record(&record).unwrap();
+    let (result, allocations) = measure(0, || decode_dependency_record_bytes(&bytes));
+    let decoded = result.unwrap();
+    assert_eq!(decoded.version, version);
+    assert_eq!(allocations.total, 0, "borrowed metadata allocated: {allocations:?}");
+  }
+}
+
+#[test]
+fn plugin_metadata_readers_borrow_maximum_fields_without_heap_work() {
+  use aeordb::engine::v4::plugin_identity::{decode_plugin_alias_v1, decode_plugin_manifest_payload_v1};
+  for profile in ["blake3-256", "sha512"] {
+    for (case, alias) in [("corrected", "parse/é".to_string()), ("legacy", "old".to_string()), ("maximum", "a".repeat(4096))] {
+      let bytes = fixture("plugin-alias-record-v1", &format!("apal-{profile}-{case}"));
+      let path = format!("/.aeordb-system/plugin-aliases/{}", blake3::hash(alias.as_bytes()).to_hex());
+      let (result, allocations) = measure(0, || decode_plugin_alias_v1(&bytes, &path));
+      assert_eq!(result.unwrap().alias, alias);
+      assert_eq!(allocations.total, 0, "alias {case}: {allocations:?}");
+    }
+    for case in ["parser", "mapper", "both", "maximum"] {
+      let bytes = fixture("plugin-manifest-v1", &format!("apwm-{profile}-{case}"));
+      let (result, allocations) = measure(0, || decode_plugin_manifest_payload_v1(&bytes).map(|manifest| manifest.roles().count()));
+      assert_eq!(result.unwrap(), if matches!(case, "both" | "maximum") { 2 } else { 1 });
+      assert_eq!(allocations.total, 0, "manifest {case}: {allocations:?}");
+    }
+  }
+}
+
+#[test]
+fn plugin_metadata_rejects_amplified_counts_before_input_sized_allocation() {
+  use aeordb::engine::v4::plugin_identity::{decode_plugin_alias_v1, decode_plugin_manifest_payload_v1};
+  let alias = fixture("plugin-alias-record-v1", "apal-blake3-256-corrected");
+  for offset in [16, 20, 24, 28, 32] {
+    let mut bytes = alias.clone();
+    bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let (result, allocations) = measure(0, || decode_plugin_alias_v1(&bytes, ""));
+    assert_eq!(result.unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+    assert!(allocations.total <= 256, "{allocations:?}");
+  }
+  let manifest = fixture("plugin-manifest-v1", "apwm-blake3-256-both");
+  for (offset, length) in [(16, 4), (20, 4), (24, 4), (28, 4), (32, 2)] {
+    let mut bytes = manifest.clone();
+    bytes[offset..offset + length].fill(0xff);
+    let (result, allocations) = measure(0, || decode_plugin_manifest_payload_v1(&bytes));
+    assert_eq!(result.unwrap_err().class(), MalformedInputClass::AllocationAmplification);
+    assert!(allocations.total <= 256, "{allocations:?}");
+  }
+}
+
 fn metadata_request(bytes: &[u8]) -> ValueStoreDefinitionWriteV1<'_> {
   assert_eq!(&bytes[144..149], b"@hash");
   assert_eq!(bytes.len(), 269);

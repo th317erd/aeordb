@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
-  "tool_revision": "u1-round16-dependency-catalog-identity",
+  "tool_revision": "u1-round9-plugin-identity-readers",
   "results": [
     {
       "fixture_id": "header-blake3-256-valid-ab",
@@ -2365,6 +2365,114 @@
       "fixture_id": "aprp-sha512-automatic-legacy-valid",
       "expected": "parser-plan:automatic:candidates=3",
       "observed": "parser-plan:automatic:candidates=3",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-blake3-256-corrected",
+      "expected": "plugin-alias:flags=0:artifact-bytes=8",
+      "observed": "plugin-alias:flags=0:artifact-bytes=8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-blake3-256-legacy",
+      "expected": "plugin-alias:flags=7:artifact-bytes=8",
+      "observed": "plugin-alias:flags=7:artifact-bytes=8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-blake3-256-maximum",
+      "expected": "plugin-alias:flags=0:artifact-bytes=67108864",
+      "observed": "plugin-alias:flags=0:artifact-bytes=67108864",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-blake3-256-crc-invalid",
+      "expected": "error:plugin_alias_crc",
+      "observed": "error:plugin_alias_crc",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-blake3-256-parser",
+      "expected": "plugin-manifest:roles=1",
+      "observed": "plugin-manifest:roles=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-blake3-256-mapper",
+      "expected": "plugin-manifest:roles=1",
+      "observed": "plugin-manifest:roles=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-blake3-256-both",
+      "expected": "plugin-manifest:roles=2",
+      "observed": "plugin-manifest:roles=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-blake3-256-maximum",
+      "expected": "plugin-manifest:roles=2",
+      "observed": "plugin-manifest:roles=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-blake3-256-role-invalid",
+      "expected": "error:plugin_manifest_role",
+      "observed": "error:plugin_manifest_role",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-sha512-corrected",
+      "expected": "plugin-alias:flags=0:artifact-bytes=8",
+      "observed": "plugin-alias:flags=0:artifact-bytes=8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-sha512-legacy",
+      "expected": "plugin-alias:flags=7:artifact-bytes=8",
+      "observed": "plugin-alias:flags=7:artifact-bytes=8",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-sha512-maximum",
+      "expected": "plugin-alias:flags=0:artifact-bytes=67108864",
+      "observed": "plugin-alias:flags=0:artifact-bytes=67108864",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apal-sha512-crc-invalid",
+      "expected": "error:plugin_alias_crc",
+      "observed": "error:plugin_alias_crc",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-sha512-parser",
+      "expected": "plugin-manifest:roles=1",
+      "observed": "plugin-manifest:roles=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-sha512-mapper",
+      "expected": "plugin-manifest:roles=1",
+      "observed": "plugin-manifest:roles=1",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-sha512-both",
+      "expected": "plugin-manifest:roles=2",
+      "observed": "plugin-manifest:roles=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-sha512-maximum",
+      "expected": "plugin-manifest:roles=2",
+      "observed": "plugin-manifest:roles=2",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "apwm-sha512-role-invalid",
+      "expected": "error:plugin_manifest_role",
+      "observed": "error:plugin_manifest_role",
       "result": "pass"
     },
     {

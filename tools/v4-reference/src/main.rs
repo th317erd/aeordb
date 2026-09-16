@@ -16,6 +16,7 @@ mod index_runtime_workspace;
 mod index_tasks;
 mod migration_capture;
 mod parser;
+mod plugin_identity;
 mod policy;
 mod position;
 mod selector;
@@ -57,6 +58,7 @@ use index::IndexFormat;
 use index_runtime_workspace::IndexRuntimeWorkspaceFormat;
 use migration_capture::MigrationCaptureFormat;
 use parser::ParserFormat;
+use plugin_identity::PluginIdentityFormat;
 use policy::PolicyFormat;
 use position::PositionFormat;
 use selector::SelectorFormat;
@@ -65,7 +67,7 @@ use system_family::SystemFamilyFormat;
 use value_store::ValueStoreFormat;
 
 const CAMPAIGN_ID: &str = "aeordb-v4-nvt-gc-2026-08-03";
-const TOOL_REVISION: &str = "u1-round16-dependency-catalog-identity";
+const TOOL_REVISION: &str = "u1-round9-plugin-identity-readers";
 const FIXTURE_STAGE: &str = "p6-3b-tombstone-only-manifests";
 const SLOT_LENGTH: usize = 1_024;
 const HEADER_REGION_LENGTH: usize = SLOT_LENGTH * 2;
@@ -90,6 +92,7 @@ enum FixtureFormat {
   IndexRuntimeWorkspace(IndexRuntimeWorkspaceFormat),
   MigrationCapture(MigrationCaptureFormat),
   Parser(ParserFormat),
+  PluginIdentity(PluginIdentityFormat),
   Policy(PolicyFormat),
   Position(PositionFormat),
   Selector(SelectorFormat),
@@ -112,6 +115,7 @@ impl FixtureFormat {
       Self::IndexRuntimeWorkspace(format) => format.id(),
       Self::MigrationCapture(format) => format.id(),
       Self::Parser(format) => format.id(),
+      Self::PluginIdentity(format) => format.id(),
       Self::Policy(format) => format.id(),
       Self::Position(format) => format.id(),
       Self::Selector(format) => format.id(),
@@ -134,6 +138,7 @@ impl FixtureFormat {
       Self::IndexRuntimeWorkspace(format) => format.family(),
       Self::MigrationCapture(format) => format.family(),
       Self::Parser(format) => format.family(),
+      Self::PluginIdentity(format) => format.family(),
       Self::Policy(format) => format.family(),
       Self::Position(format) => format.family(),
       Self::Selector(format) => format.family(),
@@ -630,6 +635,15 @@ fn fixture_cases() -> Vec<FixtureCase> {
     canonical_key: case.canonical_key,
     bytes: case.bytes,
   }));
+  cases.extend(plugin_identity::fixture_cases().into_iter().map(|case| FixtureCase {
+    id: case.id,
+    format: FixtureFormat::PluginIdentity(case.format),
+    profile: case.profile,
+    expected: case.expected,
+    relation: None,
+    canonical_key: case.canonical_key,
+    bytes: case.bytes,
+  }));
   cases.extend(selector::fixture_cases().into_iter().map(|case| FixtureCase {
     id: case.id,
     format: FixtureFormat::Selector(case.format),
@@ -830,6 +844,7 @@ fn observed_result(case: &FixtureCase, bytes: &[u8]) -> (String, Option<String>)
     FixtureFormat::IndexRuntimeWorkspace(format) => index_runtime_workspace::observe(format, case.profile, bytes),
     FixtureFormat::MigrationCapture(_) => migration_capture::observe(case.profile, bytes),
     FixtureFormat::Parser(_) => parser::observe(case.profile, bytes),
+    FixtureFormat::PluginIdentity(format) => plugin_identity::observe(format, bytes),
     FixtureFormat::Policy(_) => policy::observe(case.profile, bytes),
     FixtureFormat::Position(_) => position::observe(case.profile, bytes),
     FixtureFormat::Selector(_) => selector::observe(case.profile, bytes),
@@ -854,6 +869,7 @@ fn annotated_hex(case: &FixtureCase) -> String {
     | FixtureFormat::IndexRuntimeWorkspace(_)
     | FixtureFormat::MigrationCapture(_)
     | FixtureFormat::Parser(_)
+    | FixtureFormat::PluginIdentity(_)
     | FixtureFormat::Policy(_)
     | FixtureFormat::Position(_)
     | FixtureFormat::Selector(_)
@@ -948,6 +964,12 @@ fn annotated_hex(case: &FixtureCase) -> String {
     FixtureFormat::Parser(_) => {
       output.push_str("# hex offsets are absolute within this fixture\n");
       for line in parser::annotation_lines(&case.bytes) {
+        output.push_str(&format!("# {line}\n"));
+      }
+    }
+    FixtureFormat::PluginIdentity(format) => {
+      output.push_str("# hex offsets are absolute within this fixture\n");
+      for line in plugin_identity::annotation_lines(format) {
         output.push_str(&format!("# {line}\n"));
       }
     }

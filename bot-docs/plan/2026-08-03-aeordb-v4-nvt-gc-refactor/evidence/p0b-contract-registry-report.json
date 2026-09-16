@@ -3,12 +3,12 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "306869b9d2375f8982935741fa70aba0d2944a02e6252f2555603ad443ca27bf",
-  "fixture_manifest_sha256": "f2b677a2c5d7d4e0f4b26c9d7dcee9a751ab2838e57f878701154deb88bac1df",
+  "source_sha256": "4806133706407a5f8f3f5b0a56fcaa85af5a1223af0d6390128272a4004a24a8",
+  "fixture_manifest_sha256": "58319c06e066ee750293b7e4d6bb538629f5714e7b70c20a3d4f5bbfa6125afd",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
-    "formats": 24,
-    "fixtures": 478,
+    "formats": 26,
+    "fixtures": 496,
     "capability_bits": 25,
     "entry_types": 10,
     "kv_tags": 12,
@@ -55,8 +55,26 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 178,
+    "tests_passed": 181,
     "reviewer_status": "pending-owner-review-before-production-writer"
+  },
+  "plugin_identity_reader_refresh": {
+    "date_utc": "2026-09-16",
+    "source_entry_commit": "4a04be77838c12875435f1105e39b22a463236a2",
+    "scope": "Round9 APAL/APWM payload readers; no module binding, publication, execution or capability advertisement changes.",
+    "previous_live_values": {
+      "source_sha256": "306869b9d2375f8982935741fa70aba0d2944a02e6252f2555603ad443ca27bf",
+      "fixture_manifest_sha256": "f2b677a2c5d7d4e0f4b26c9d7dcee9a751ab2838e57f878701154deb88bac1df",
+      "formats": 24,
+      "fixtures": 478,
+      "reference_tests_passed": 178
+    },
+    "reference_test_and_fixture_stage": "plugin-identity-candidate2",
+    "finished_utc": "2026-09-16T07:53:01Z",
+    "added_binary_fixtures": 18,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-plugin-identity-evidence",
+    "production_readiness_claimed": false
   },
   "semantic_task_reader_refresh": {
     "date_utc": "2026-09-16",

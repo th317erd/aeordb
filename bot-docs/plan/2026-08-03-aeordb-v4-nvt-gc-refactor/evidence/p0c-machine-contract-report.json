@@ -4,8 +4,8 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "12527ad1cf19db8a582e62b6a47d3e02b9ae339e60e38fd18fcb097514c03b4e",
-  "generated_rust_bytes": 62165,
+  "generated_rust_sha256": "3069e0f1d31e5dc6b9939761cbdd55f6b0420c911ccd9a861f773774e888fe44",
+  "generated_rust_bytes": 62385,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,
@@ -15,11 +15,11 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 178,
+    "reference_tests_passed": 181,
     "production_tests_passed": 17,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 478,
+    "fixture_cases_verified": 496,
     "route_registrations_inventoried": 95,
     "documentation_pages_inventoried": 39,
     "v4_writers_activated": false
@@ -34,6 +34,24 @@
     "cleanup result without behavior or debt owner",
     "semantic bundle collision, noncanonical order, or malformed fingerprint"
   ],
+  "plugin_identity_reader_refresh": {
+    "date_utc": "2026-09-16",
+    "source_entry_commit": "4a04be77838c12875435f1105e39b22a463236a2",
+    "previous_live_values": {
+      "generated_rust_sha256": "12527ad1cf19db8a582e62b6a47d3e02b9ae339e60e38fd18fcb097514c03b4e",
+      "generated_rust_bytes": 62165,
+      "reference_tests_passed": 178,
+      "fixture_cases_verified": 478
+    },
+    "generated_change": "Registry identity and two plugin metadata format caps only; architecture, capability assignments and advertisement are unchanged.",
+    "reference_test_generation_and_strict_clippy_stage": "plugin-identity-candidate2",
+    "finished_utc": "2026-09-16T07:53:01Z",
+    "historical_production_tests_passed_retained": true,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-plugin-identity-evidence",
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
+  },
   "semantic_task_reader_refresh": {
     "date_utc": "2026-09-16",
     "source_entry_commit": "716cf3d649699df0658084f01d0aeae0472ad566",

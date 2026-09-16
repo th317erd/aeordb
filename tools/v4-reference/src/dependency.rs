@@ -348,15 +348,7 @@ fn is_canonical_dependency_id(value: &str) -> bool {
 }
 
 fn is_canonical_semver(value: &str) -> bool {
-  let core = value.split_once(['-', '+']).map_or(value, |(core, _)| core);
-  let mut parts = core.split('.');
-  let valid_number =
-    |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) && (part == "0" || !part.starts_with('0'));
-  valid_number(parts.next().unwrap_or(""))
-    && valid_number(parts.next().unwrap_or(""))
-    && valid_number(parts.next().unwrap_or(""))
-    && parts.next().is_none()
-    && !value.ends_with(['-', '+', '.'])
+  semver::Version::parse(value).is_ok_and(|version| version.to_string() == value)
 }
 
 pub(crate) fn digest32(value: &[u8]) -> [u8; 32] {

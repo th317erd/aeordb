@@ -501,7 +501,7 @@ pub(crate) fn compare_records(left: &DependencyRecordV1<'_>, right: &DependencyR
     ))
 }
 
-fn is_canonical_dependency_id(value: &str) -> bool {
+pub(super) fn is_canonical_dependency_id(value: &str) -> bool {
   value.starts_with('/')
     && value.len() <= 4_096
     && value.split('/').skip(1).all(|segment| {
@@ -509,8 +509,44 @@ fn is_canonical_dependency_id(value: &str) -> bool {
     })
 }
 
-fn is_canonical_semver(value: &str) -> bool {
-  semver::Version::parse(value).is_ok_and(|version| version.to_string() == value)
+/// The same canonical set as Version::parse followed by exact display equality,
+/// without allocating prerelease/build strings or a formatted version. Callers
+/// enforce their field byte ceiling before entering this borrowed validator.
+pub(super) fn is_canonical_semver(value: &str) -> bool {
+  let (version, build) = value.split_once('+').map_or((value, None), |(version, build)| (version, Some(build)));
+  if build.is_some_and(|build| !valid_semver_identifiers(build, false)) {
+    return false;
+  }
+  let (core, prerelease) = version.split_once('-').map_or((version, None), |(core, prerelease)| (core, Some(prerelease)));
+  if prerelease.is_some_and(|prerelease| !valid_semver_identifiers(prerelease, true)) {
+    return false;
+  }
+  let mut components = core.split('.');
+  for _ in 0..3 {
+    let Some(component) = components.next() else { return false };
+    if component.is_empty() || (component.len() > 1 && component.starts_with('0')) {
+      return false;
+    }
+    let mut number = 0u64;
+    for byte in component.bytes() {
+      if !byte.is_ascii_digit() {
+        return false;
+      }
+      let Some(next) = number.checked_mul(10).and_then(|number| number.checked_add(u64::from(byte - b'0'))) else {
+        return false;
+      };
+      number = next;
+    }
+  }
+  components.next().is_none()
+}
+
+fn valid_semver_identifiers(value: &str, prerelease: bool) -> bool {
+  value.split('.').all(|part| {
+    !part.is_empty()
+      && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+      && !(prerelease && part.len() > 1 && part.starts_with('0') && part.bytes().all(|byte| byte.is_ascii_digit()))
+  })
 }
 
 fn u16_at(bytes: &[u8], offset: usize) -> u16 {

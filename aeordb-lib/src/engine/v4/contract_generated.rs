@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "306869b9d2375f8982935741fa70aba0d2944a02e6252f2555603ad443ca27bf";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "f2b4b3ea856dee1071022e7ec6aa372ec30d970fe335193152fd74fbec15c7e4";
+pub const CONTRACT_REGISTRY_SHA256: &str = "4806133706407a5f8f3f5b0a56fcaa85af5a1223af0d6390128272a4004a24a8";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "e1c404ec3f27a5805b0d17eb6e0c1dfd2e5f762bbab1f7f63d7ebba906d0ebbd";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -525,6 +525,8 @@ pub const FORMAT_LIMITS: &[FormatLimit] = &[
   FormatLimit { id: "migration-capture-v1", hard_cap: 724 },
   FormatLimit { id: "logical-position-v1", hard_cap: 1048576 },
   FormatLimit { id: "system-family-registry-v1", hard_cap: 1048576 },
+  FormatLimit { id: "plugin-alias-record-v1", hard_cap: 16772 },
+  FormatLimit { id: "plugin-manifest-v1", hard_cap: 12672 },
 ];
 
 pub mod format_hard_cap {
@@ -552,6 +554,8 @@ pub mod format_hard_cap {
   pub const MIGRATION_CAPTURE_V1: u64 = 724;
   pub const LOGICAL_POSITION_V1: u64 = 1048576;
   pub const SYSTEM_FAMILY_REGISTRY_V1: u64 = 1048576;
+  pub const PLUGIN_ALIAS_RECORD_V1: u64 = 16772;
+  pub const PLUGIN_MANIFEST_V1: u64 = 12672;
 }
 
 pub const SEMANTIC_BUNDLES: &[SemanticBundleContract] = &[

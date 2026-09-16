@@ -323,6 +323,86 @@ non-HEAD control capture/retention explicitly; existing namespace paging restart
 from the root and is not proof of a scalable, complete ordered source union.
 These are next prerequisites, not work completed by this fingerprint helper.
 
+Fingerprint unit landed/pushed as `4a04be77838c12875435f1105e39b22a463236a2`.
+Next entry is the [missing Round9 plugin identity reader prerequisite](../plugin-identity-reader-contract.md):
+bounded APAL alias and APWM manifest-payload readers, shared canonical metadata
+validation and independent reference/fixture coverage. No production writer or
+runtime capability is enabled. Module-section extraction, exact archived module
+binding, complete captured-source enumeration and non-HEAD retention are explicit
+following owners, not implied by a payload decoder. Initial code/tests have not
+yet been changed; start with actual behavioral REDs against the bounded scope.
+
+Plugin identity actual RED completed07:25:58Z:four positive reader cases fail
+against the scaffold (two malformed-input cases already fail closed), a borrowed
+dependency read allocates8bytes even for1.0.0, and the independent reference
+incorrectly accepts1.0.0-01. Preserve all three executed failures, source archive
+and executable hashes before implementation. Candidate1 now implements bounded
+borrowed APAL/APWM payload readers and one shared borrowed production SemVer
+validator, with ASCII-edit/numeric-boundary comparison against semver1.0.27.
+The independent reference uses the pinned semver crate instead of its weaker
+handwritten suffix check. Its lock changes only by the new package/reference
+dependency; root lock is unchanged. Candidate1 qualification is running; fixture
+registry expansion, native proof and full gates are still outstanding.
+
+Candidate1 passed10 reader/54 resource/10 dependency-writer tests and179 reference
+tests, then failed audit on three discarded conversion errors plus three moved
+dependency helper locations. The reader now preserves the fingerprint conversion
+error and decodes signed timestamps from already-bounded bytes; the allowlist
+only moves those three old locations, retaining every ID/review and the1503 cap.
+Candidate2 passed181 independent tests, strict reference Clippy,496 generated
+fixtures and audit at07:53:01Z. The18 new APAL/APWM cases cover database hash
+profiles of32/64 bytes, not a change to fixed32-byte module
+fingerprints. All478 old manifest records and960 old binary/hex files retain
+their exact bytes/meaning. Generated constants change only registry identity
+and the two new format caps; no capability assignment/advertisement changes.
+
+Full Linux final1 (invocation1c12541116c3435c89c86df3249098f1) and matching native
+Mac run from59 frozen inputs. First Linux stage passed145 tests at07:59:45Z:
+10 reader,56 resource and79 format. Nine Linux gates include28 affected targets,
+audit,format,strict workspace Clippy,library,reference,contracts and debt selftest.
+Two additional review tests are local-only after that snapshot; final2 must
+qualify those exact additions on both hosts before landing. Windows forwarding
+still refuses the connection; no new runtime task writer is authorized by this
+reader-only milestone. Raw failed/passing stages and same-host binaries are
+captured before rebuild. The first preservation-helper attempt parsed its blob
+list as git-ls-tree rather than the actual hash/path format; corrected check
+explicitly passed all960 entries, without altering any fixture.
+
+Final1 passed all28 affected targets, audit, format and strict workspace Clippy;
+its library stage ended08:04:40Z with712 pass/1 fail because the generated-format
+inventory still expected24 rather than26 families. Preserve that actual failure.
+The correction updates the test-only count and asserts unique format IDs and both
+new caps. Final2 therefore differs in exactly two test inputs (module inventory
+assertion and added reader cases), with production bytes unchanged. It reruns
+all nine Linux gates, invocation94bcdb38753946f6b99b67722ad52342. Mac final1
+passed its eight production targets,181 reference tests, strict reference Clippy,
+reference format,496 fixtures and generated constants at08:00:24Z; final2 runs
+the12 expanded reader cases plus the one exact inventory assertion and format.
+Matching frozen inputs and raw/binary captures are required before landing.
+
+Plugin identity reader qualification is now green; the executed
+[source-bound proof](../evidence/user-facing-v4-u1-plugin-identity-proof-20260916.json)
+binds the final59 inputs, both pinned locks, archived source, same-host executable
+identities and all raw outcomes. Final2 completed08:13:13Z with147 narrow tests,
+463 affected tests/28 targets,713 library tests,181 independent tests,496 fixtures,
+audit1503,format,strict workspace Clippy,contracts and debt selftest. Mac final1
+passed219 production plus181 reference tests; the test-only final2 delta passed
+12 reader tests and the exact inventory assertion (712 other library tests
+explicitly filtered, not represented as run). Both hosts preserve all actual
+RED/audit/inventory failures before rebuilding. Linux peak6,144,651,264bytes,
+home minimum68,868,628,480bytes and Data minimum335,932,932,096bytes satisfy the
+existing6GiB/no-swap and disk guards.
+
+Adversarial review covered complete byte consumption before slices, per-field
+limits and UTF-8, fixed artifact-vs-dynamic database identity, legacy flags,
+SemVer boundaries, borrowed-role iteration and non-normalized display/time
+bytes. This completes only the payload-reader prerequisite. Windows qualification,
+whole-module/alias binding, executor availability, durable source capture and
+non-HEAD retention remain outstanding. The existing native executor explicitly
+refuses WASM dependencies; metadata readers do not change that behavior. Next
+entry must bind actual archived module bytes without claiming service readiness
+or enabling task publication.
+
 Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
 Incremental compilation entered from that exact green revision.
 

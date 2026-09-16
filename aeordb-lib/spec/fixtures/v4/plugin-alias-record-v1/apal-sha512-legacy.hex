@@ -1,0 +1,18 @@
+# fixture: apal-sha512-legacy
+# contract: PluginAliasRecordV1
+# hash: sha512 (64 bytes)
+# expected: plugin-alias:flags=7:artifact-bytes=8
+# canonical key: /.aeordb-system/plugin-aliases/96a4257289f9ebcbc94bfc49276f89ed87f8c951e3fa832d44dceb9b220520a5
+# hex offsets are absolute within this fixture
+# APAL: 128-byte header, alias/ID/name/version/author, trailing CRC32
+# raw-module fingerprint at40 is fixed BLAKE3-256, not a database-H FileRecord identity
+00000000: 4150414c010080009600000007000000
+00000010: 03000000090000000600000000000000
+00000020: 00000000010001000d66d411a21e80d9
+00000030: 3afa1487b002a1867432c04ba1d08dc7
+00000040: 90d259639f6a69c40800000000000000
+00000050: f9ffffffffffffff0d00000000000000
+00000060: 00000000000000000000000000000000
+00000070: 00000000000000000000000000000000
+00000080: 6f6c646c65676163792d69644c656761
+00000090: 6379190eec8f

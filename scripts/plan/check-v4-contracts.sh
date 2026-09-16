@@ -273,6 +273,30 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
 ' "$contract_registry" >/dev/null || fail "P0b-2 core format contract registry is incomplete"
 
 jq -e '
+  (.normative_source.rounds | index(9)) != null and
+  (.formats[] | select(.id == "plugin-alias-record-v1")) as $alias |
+  (.formats[] | select(.id == "plugin-manifest-v1")) as $manifest |
+  $alias.magic_ascii == "APAL" and $alias.version == 1 and
+  $alias.header_length == 128 and $alias.hard_cap == 16772 and
+  $alias.body_formula == "128 + A + I + N + V + U + 4" and
+  any($alias.layout[]; .field == "artifact_fingerprint" and .offset == 40 and .length == 32) and
+  any($alias.layout[]; .field == "artifact_length" and .offset == 72 and .length == 8) and
+  $alias.reserve_zero_ranges == [{"start":96,"length":32}] and
+  ($alias.capability | startswith("no standalone capability assigned;")) and
+  ($alias.typed_hash_roles | length) == 2 and
+  ($alias.fixture_ids_32 | length) == 4 and ($alias.fixture_ids_64 | length) == 4 and
+  $manifest.magic_ascii == "APWM" and $manifest.version == 1 and
+  $manifest.header_length == 64 and $manifest.hard_cap == 12672 and
+  $manifest.body_formula == "64 + I + N + V + A + 8R" and
+  any($manifest.layout[]; .field == "role_count" and .offset == 32 and .length == 2) and
+  any($manifest.layout[]; .field == "roles" and .length_formula == "8R") and
+  ($manifest.checksum | startswith("none in payload;")) and
+  ($manifest.capability | startswith("no standalone capability assigned;")) and
+  ($manifest.typed_hash_roles | length) == 1 and
+  ($manifest.fixture_ids_32 | length) == 5 and ($manifest.fixture_ids_64 | length) == 5
+' "$contract_registry" >/dev/null || fail "Round9 plugin identity payload contracts drifted"
+
+jq -e '
   (.persistent_registries.entry_type_v1 | length) == 10 and
   ([.persistent_registries.entry_type_v1[].id] | unique | length) == 10 and
   ([.persistent_registries.entry_type_v1[].name] | unique | length) == 10 and

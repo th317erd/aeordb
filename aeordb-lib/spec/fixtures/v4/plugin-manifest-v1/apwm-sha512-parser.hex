@@ -1,0 +1,14 @@
+# fixture: apwm-sha512-parser
+# contract: AeorPluginManifestV1
+# hash: sha512 (64 bytes)
+# expected: plugin-manifest:roles=1
+# hex offsets are absolute within this fixture
+# APWM: 64-byte header, ID/name/version/author, sorted 8-byte role records
+# custom-section payload only; no module-framing, archive or execution authority
+00000000: 4150574d010040006700000000000000
+00000010: 13000000070000000500000000000000
+00000020: 01000000000000000000000000000000
+00000030: 00000000000000000000000000000000
+00000040: 2f6f72672f6578616d706c652f706172
+00000050: 73657246697874757265312e302e3001
+00000060: 00030000000000

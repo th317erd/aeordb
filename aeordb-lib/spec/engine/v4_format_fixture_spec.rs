@@ -37,6 +37,7 @@ use aeordb::engine::v4::index_nvt::{coordinate_cell, decode_nvt_tile, verified_p
 use aeordb::engine::v4::dependency::{decode_dependency_table, decode_invocation_policy};
 use aeordb::engine::v4::namespace::{SemanticObjectKind, decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::{ParserPlanKind, decode_parser_resolution_plan};
+use aeordb::engine::v4::plugin_identity::{decode_plugin_alias_v1, decode_plugin_manifest_payload_v1};
 use aeordb::engine::v4::position::{PositionContextV1, PositionRouteV1, decode_logical_position, validate_position_context};
 use aeordb::engine::v4::reader::{BoundedReader, MalformedInputClass};
 use aeordb::engine::v4::scope::{
@@ -113,6 +114,41 @@ fn fixture_root() -> PathBuf {
 
 fn manifest() -> FixtureManifest {
   serde_json::from_slice(&fs::read(fixture_root().join("format-fixture-manifest.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn every_plugin_alias_fixture_matches_the_independent_oracle() {
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "plugin-alias-record-v1").collect();
+  assert_eq!(rows.len(), 8);
+  for row in rows {
+    let bytes = fs::read(fixture_root().join(row.binary)).unwrap();
+    // The invalid-CRC fixture deliberately has no admitted canonical key.
+    let path = row.canonical_key.as_deref().unwrap_or("");
+    let observed = match decode_plugin_alias_v1(&bytes, path) {
+      Ok(alias) => {
+        assert_eq!(alias.artifact_fingerprint.len(), 32);
+        assert_eq!(path, format!("/.aeordb-system/plugin-aliases/{}", blake3::hash(alias.alias.as_bytes()).to_hex()));
+        format!("plugin-alias:flags={}:artifact-bytes={}", alias.flags, alias.artifact_length)
+      }
+      Err(error) => format!("error:{}", error.code()),
+    };
+    assert_eq!(observed, row.expected, "{}", row.id);
+  }
+}
+
+#[test]
+fn every_plugin_manifest_fixture_matches_the_independent_oracle() {
+  let rows: Vec<_> = manifest().fixtures.into_iter().filter(|row| row.format_id == "plugin-manifest-v1").collect();
+  assert_eq!(rows.len(), 10);
+  for row in rows {
+    let bytes = fs::read(fixture_root().join(row.binary)).unwrap();
+    let observed = match decode_plugin_manifest_payload_v1(&bytes) {
+      Ok(manifest) => format!("plugin-manifest:roles={}", manifest.roles().len()),
+      Err(error) => format!("error:{}", error.code()),
+    };
+    assert_eq!(observed, row.expected, "{}", row.id);
+    assert!(row.canonical_key.is_none());
+  }
 }
 
 #[test]

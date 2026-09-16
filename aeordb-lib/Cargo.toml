@@ -1516,6 +1516,9 @@ path = "spec/engine/semantic_catalog_lookup_spec.rs"
 name = "canonical_value_borrowed_spec"
 path = "spec/engine/canonical_value_borrowed_spec.rs"
 
+[[test]]
+name = "plugin_identity_reader_spec"
+path = "spec/engine/plugin_identity_reader_spec.rs"
 
 [lints]
 workspace = true

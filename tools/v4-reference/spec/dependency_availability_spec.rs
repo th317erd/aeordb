@@ -10,6 +10,22 @@ fn u32_at(bytes: &[u8], offset: usize) -> usize {
 }
 
 #[test]
+fn independent_dependency_versions_reject_invalid_prerelease_and_build_identifiers() {
+  let original = fixture("dependency-table-v1", "adpt-blake3-256-wasm-mapper-valid");
+  let strings_end = 32 + 96 + u32_at(&original, 52);
+  for version in ["1.0.0-01", "1.0.0-a..b", "1.0.0+one+two", "1.0.0-α", "18446744073709551616.0.0"] {
+    let mut bytes = original[..strings_end].to_vec();
+    bytes.extend_from_slice(version.as_bytes());
+    let total = bytes.len() as u32;
+    bytes[8..12].copy_from_slice(&total.to_le_bytes());
+    bytes[20..24].copy_from_slice(&(total - 32).to_le_bytes());
+    bytes[32..36].copy_from_slice(&(total - 32).to_le_bytes());
+    bytes[56..60].copy_from_slice(&(version.len() as u32).to_le_bytes());
+    assert_eq!(dependency::observe(HashProfile::Blake3_256, &bytes).0, "error:dependency_version", "{version}");
+  }
+}
+
+#[test]
 fn independent_dependency_reader_retains_unknown_executors_but_not_invalid_kinds() {
   for (profile, name) in [(HashProfile::Blake3_256, "blake3-256"), (HashProfile::Sha512, "sha512")] {
     for suffix in ["native-parser-resolution", "wasm-mapper"] {

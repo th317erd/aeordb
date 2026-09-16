@@ -8494,7 +8494,7 @@
     {
       "id": "esq-v1-a504d3dbd52671c07ae9-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 517,
+      "line": 553,
       "column": 22,
       "enclosing_item": "u16_at",
       "kind": "panic_method",
@@ -8504,7 +8504,7 @@
     {
       "id": "esq-v1-02a65f8ef7df6b993ae0-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 521,
+      "line": 557,
       "column": 22,
       "enclosing_item": "u32_at",
       "kind": "panic_method",
@@ -8514,7 +8514,7 @@
     {
       "id": "esq-v1-4bb056ba769db5421f33-00",
       "file": "aeordb-lib/src/engine/v4/dependency.rs",
-      "line": 525,
+      "line": 561,
       "column": 22,
       "enclosing_item": "u64_at",
       "kind": "panic_method",
