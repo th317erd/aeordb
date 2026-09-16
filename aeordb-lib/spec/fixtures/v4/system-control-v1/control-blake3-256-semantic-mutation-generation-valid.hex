@@ -1,0 +1,21 @@
+# fixture: control-blake3-256-semantic-mutation-generation-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:semantic-mutation-generation:sequence=7:body=16
+# canonical key: /.aeordb-system/controls/v1/0046/8e96a844d10731b7b14e09379e01375d474936e3d9c9c566dd330050c2ca2e44/a.ctrl
+# relation: slot:mutable-a
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 16: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 41534d47010020003400000000000000
+00000010: 07000000000000001000000000000000
+00000020: 01010101010101010101010101010101
+00000030: 4f181cde

@@ -585,7 +585,7 @@ fn decode_manifest(profile: HashProfile, value: &[u8]) -> Result<DecodedManifest
 }
 
 fn validate_capabilities(bytes: &[u8]) -> Result<(), &'static str> {
-  if bytes.len() != 32 || bytes[3..].iter().any(|byte| *byte != 0) {
+  if !crate::core::capabilities_are_known(bytes) {
     return Err("index_manifest_capability");
   }
   Ok(())

@@ -73,6 +73,7 @@ pub(crate) struct V3ControlPublicationContextV0<'a> {
 
 impl<'a> V3ControlPublicationContextV0<'a> {
   fn new(engine: &'a StorageEngine, kind: SystemControlKindV1, identity: &[u8]) -> EngineResult<Self> {
+    reject_unqualified_semantic_control_writer(kind)?;
     if kind.is_immutable() {
       return Err(EngineError::InvalidInput("v3 transition ControlStore only publishes mutable A/B controls".to_string()));
     }
@@ -104,6 +105,7 @@ pub(crate) struct V4ControlPublicationContextV1<'a> {
 
 impl<'a> V4ControlPublicationContextV1<'a> {
   fn new(engine: &'a StorageEngine, kind: SystemControlKindV1, identity: &[u8]) -> EngineResult<Self> {
+    reject_unqualified_semantic_control_writer(kind)?;
     let default_slot = if kind.is_immutable() { SystemControlSlotV1::Immutable } else { SystemControlSlotV1::A };
     system_control_path(kind, identity, default_slot).map_err(format_error)?;
     let authority = engine.namespace_write_guard()?;
@@ -144,6 +146,9 @@ impl<'a> V3TransitionControlStore<'a> {
   }
 
   pub fn discover_mutable(&self, kind: SystemControlKindV1, identity: &[u8]) -> EngineResult<Option<LoadedMutableControlV1>> {
+    if kind.is_semantic_mutation() {
+      return Err(EngineError::InvalidInput("semantic mutation controls have no v3 transition representation".to_string()));
+    }
     if kind.is_immutable() {
       return Err(EngineError::InvalidInput("v3 transition ControlStore only publishes mutable A/B controls".to_string()));
     }
@@ -209,6 +214,13 @@ impl<'a> V3TransitionControlStore<'a> {
 /// caller; later capability activation owns that separate start gate.
 pub struct V4ControlStore<'a> {
   engine: &'a StorageEngine,
+}
+
+fn reject_unqualified_semantic_control_writer(kind: SystemControlKindV1) -> EngineResult<()> {
+  if kind.is_semantic_mutation() {
+    return Err(EngineError::InvalidInput("semantic_task_writer_not_qualified: semantic task publication remains disabled".to_string()));
+  }
+  Ok(())
 }
 
 impl<'a> V4ControlStore<'a> {

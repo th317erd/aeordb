@@ -104,6 +104,12 @@ fn render(registry_path: &Path, system_family_manifest_path: &Path, architecture
 
   let capabilities = array_at(&registry, &["capability_bits"])?;
   render_registry_values(&mut output, "CAPABILITY_BITS", "capability_bit", capabilities, "bit")?;
+  let mut capability_mask = [0u8; 32];
+  for capability in capabilities {
+    let bit = u64_field(capability, "bit")? as usize;
+    capability_mask[bit / 8] |= 1 << (bit % 8);
+  }
+  output.push_str(&format!("pub const KNOWN_CAPABILITY_MASK: [u8; 32] = {capability_mask:?};\n\n"));
 
   let entry_types = array_at(&registry, &["persistent_registries", "entry_type_v1"])?;
   output.push_str("pub const ENTRY_TYPES: &[EntryTypeValue] = &[\n");
@@ -271,8 +277,11 @@ fn validate(registry: &Value, system_family: &Value) -> DynResult<()> {
   let capabilities = array_at(registry, &["capability_bits"])?;
   validate_unique(capabilities, "bit", "name")?;
   let bits: Vec<_> = capabilities.iter().map(|row| u64_field(row, "bit")).collect::<Result<_, _>>()?;
-  if bits != (0..24).collect::<Vec<_>>() {
-    return Err("capability bits must be the exact contiguous 0..23 registry".into());
+  if bits != (0..24).chain([25]).collect::<Vec<_>>() {
+    return Err("capability bits must preserve 0..23 and assign25, leaving24 unassigned".into());
+  }
+  if registry.get("unassigned_capability_bits") != Some(&serde_json::json!([24])) {
+    return Err("bit24 must remain unassigned to preserve the frozen malformed-capability fixtures".into());
   }
 
   let entry_types = array_at(registry, &["persistent_registries", "entry_type_v1"])?;

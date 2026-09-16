@@ -613,11 +613,11 @@ fn validate_capabilities(value: &[u8]) -> FormatResult<()> {
   if value.len() != CAPABILITY_WIDTH {
     return Err(truncated_error("manifest capability bitset is not 32 bytes"));
   }
-  if value[3..].iter().any(|byte| *byte != 0) {
+  if !super::database_header::capabilities_are_known(value) {
     return Err(error(
       MalformedInputClass::UnknownRequiredCapability,
       "index_manifest_unknown_capability",
-      "capability bit 24 or later is not recognized",
+      "an unassigned capability bit is set",
     ));
   }
   Ok(())

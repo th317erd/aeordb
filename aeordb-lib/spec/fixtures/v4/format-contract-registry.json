@@ -152,8 +152,13 @@
     {
       "bit": 23,
       "name": "DurableTaskPinV1"
+    },
+    {
+      "bit": 25,
+      "name": "SemanticMutationTaskV1"
     }
   ],
+  "unassigned_capability_bits": [24],
   "persistent_registries": {
     "entry_type_v1": [
       { "id": 1, "name": "Chunk", "kv_tag": 0 },
@@ -3410,6 +3415,7 @@
         "0x0020": "ARTK", "0x0021": "APWL",
         "0x0030": "AMLE", "0x0031": "AMPR", "0x0032": "ALRM", "0x0033": "ALRP",
         "0x0040": "ATPN", "0x0041": "ASMJ", "0x0042": "ARTX", "0x0043": "ARAC",
+        "0x0044": "ASMT", "0x0045": "ASMC", "0x0046": "ASMG",
         "0x0050": "ADLT", "0x0051": "ASPC", "0x0052": "ACUT"
       },
       "kind_registry": {
@@ -3418,6 +3424,7 @@
         "0x0020": "RepairTicket", "0x0021": "PathWriteLatch",
         "0x0030": "MigrationLease", "0x0031": "MigrationProgress", "0x0032": "LegacyRootMapControl", "0x0033": "LegacyRootMapPage",
         "0x0040": "TaskPin", "0x0041": "SemanticMutationSegment", "0x0042": "RootPublicationPrepare", "0x0043": "RootAdmissionCommit",
+        "0x0044": "SemanticMutationTask", "0x0045": "SemanticMutationCheckpoint", "0x0046": "SemanticMutationGeneration",
         "0x0050": "DurabilityLatch", "0x0051": "EmergencySpillCatalog", "0x0052": "SideBySideCutoverControl"
       },
       "body_contracts": {
@@ -3438,6 +3445,18 @@
         "0x0041": { "identity": "segment_ordinal u64", "formula": "48 + H + N*(32 + 7H)", "cap": 67108864 },
         "0x0042": { "identity": "transaction_id[16]", "formula": "64 + 5H + authority_identity_length", "cap": 1048576 },
         "0x0043": { "identity": "NamespaceRoot hash H", "formula": "64 + 4H", "cap": 1048576 },
+        "0x0044": {
+          "identity": "task_id[16]", "formula": "112 + H", "cap": 1048576,
+          "contract": "semantic-mutation-task-contract.md, Round17; ASMT task fence, selected ASMC payload identity and explicit pin release; capability25"
+        },
+        "0x0045": {
+          "identity": "task_id[16] || checkpoint_sequence u64", "formula": "168 + 9H + cursor_length", "cap": 1048576,
+          "contract": "semantic-mutation-task-contract.md, Round17; ASMC captured authority, unselected typed staged roots, counts and bounded cursor; capability25"
+        },
+        "0x0046": {
+          "identity": "singleton", "formula": "16", "cap": 1048576,
+          "contract": "semantic-mutation-task-contract.md, Round17; ASMG database_id body, envelope sequence is the semantic generation; capability25"
+        },
         "0x0050": { "identity": "singleton", "formula": "88 + 2H + diagnostic_length", "cap": 1048576 },
         "0x0051": { "identity": "singleton", "formula": "44 + H + sum(72 + path_length)", "cap": 1048576 },
         "0x0052": {
@@ -3475,7 +3494,7 @@
           "stable_file_identity_hash": "HASH('aeordb.side-by-side-cutover.stable-file-identity.v1\\0' || artifact_role u8 || database_id[16] || physical_instance_id[16] || platform_file_identity_descriptor[56] || format u16 LE || selected_header_sequence u64 LE || selected_header_BLAKE3[32] || file_size u64 LE) using the selected database hash algorithm"
         }
       },
-      "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043"],
+      "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043", "0x0045"],
       "pending_body_fixture_kinds": [],
       "identity_length_cap": 4096,
       "body_formula": "36 + kind-specific body B",
@@ -3511,6 +3530,7 @@
         "control-blake3-256-repair-ticket-valid", "control-blake3-256-path-write-latch-valid",
         "control-blake3-256-migration-lease-valid", "control-blake3-256-migration-progress-valid", "control-blake3-256-legacy-root-map-valid", "control-blake3-256-legacy-root-map-page-valid",
         "control-blake3-256-task-pin-valid", "control-blake3-256-semantic-mutation-segment-valid", "control-blake3-256-root-publication-prepare-valid", "control-blake3-256-root-admission-commit-valid",
+        "control-blake3-256-semantic-mutation-task-valid", "control-blake3-256-semantic-mutation-checkpoint-valid", "control-blake3-256-semantic-mutation-generation-valid",
         "control-blake3-256-durability-latch-valid", "control-blake3-256-emergency-spill-catalog-valid", "control-blake3-256-side-by-side-cutover-valid"
       ],
       "fixture_ids_64": [
@@ -3519,6 +3539,7 @@
         "control-sha512-repair-ticket-valid", "control-sha512-path-write-latch-valid",
         "control-sha512-migration-lease-valid", "control-sha512-migration-progress-valid", "control-sha512-legacy-root-map-valid", "control-sha512-legacy-root-map-page-valid",
         "control-sha512-task-pin-valid", "control-sha512-semantic-mutation-segment-valid", "control-sha512-root-publication-prepare-valid", "control-sha512-root-admission-commit-valid",
+        "control-sha512-semantic-mutation-task-valid", "control-sha512-semantic-mutation-checkpoint-valid", "control-sha512-semantic-mutation-generation-valid",
         "control-sha512-durability-latch-valid", "control-sha512-emergency-spill-catalog-valid", "control-sha512-side-by-side-cutover-valid"
       ]
     },
@@ -3770,9 +3791,9 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 24,
-    "fixture_count": 472,
+    "fixture_count": 478,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
-    "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, and P6-2d-c3c external index-runtime workspace extensions registered before their first writers"
+    "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, P6-2d-c3c external index-runtime workspace, and Round17 ASMT/ASMC/ASMG reader-first extensions registered before their first writers"
   }
 }

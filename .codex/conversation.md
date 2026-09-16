@@ -16138,3 +16138,51 @@ Compilation itself grants no service/physical mutation authority. Stage complete
 definitions under shared admission, preserve strict conflict/error classes,
 and leave root selection/task activation to the existing coordinated owner.
 The full bridge's U2–U7 obligations remain unchanged and outstanding.
+
+## Round 17: Semantic-mutation task and checkpoint extension
+
+**Owner direction (2026-09-15 America/Phoenix; 2026-09-16 UTC):** In direct
+reply to the request to add dedicated, versioned semantic-mutation task and
+checkpoint definitions while preserving existing IDs and layouts, the owner
+said:
+
+> please continue
+
+This authorizes that additive contract work and implementation. It does not
+authorize reusing existing task kinds for another meaning, modifying existing
+encoded layouts, weakening Round10's atomic activation/recovery rules, or
+production operations. The complete user-facing v4 goal remains unchanged.
+
+The new exact schema, capability admission, typed GC edges, source capture,
+fencing and checkpoint selection must be specified and independently tested
+before their production writers are enabled. The generic task queue's JSON
+checkpoint string is storage, not a substitute for that contract. Round15's
+completed semantic mutation journal remains recoverable post-commit soft state.
+The existing eight derived-index checkpoint kinds remain unchanged.
+
+Technical design and verification are tracked in active ledger11. This initial
+authorization records no new numeric IDs or byte layouts; those require the
+format-owner inventory and executable contract pass next.
+
+### Round 17 implementation contract (September 16 UTC)
+
+The additive technical contract is recorded in
+`bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/semantic-mutation-task-contract.md`.
+It assigns SystemControl kinds0x0044/ASMT (task),0x0045/ASMC (immutable
+checkpoint),0x0046/ASMG (semantic-generation singleton), and capability25.
+ASMG uses its existing envelope sequence as the captured semantic generation;
+it adds no second counter. This is necessary to enforce Round10's generation
+precondition across a change-and-change-back race. Existing TaskPin kinds1..11,
+derived IndexTask kinds1..8 and all old bytes remain unchanged.
+
+Independent reader targets are written before production changes. Capability
+assignment must remain distinct from runtime advertisement. In-flight task GC,
+source identity enumeration, transfer/adoption, checkpoint takeover and atomic
+activation are explicit later gates; writing the contract does not prove them.
+
+The reader-wave capability audit found that the old frozen unknown-capability
+fixture specifically sets bit24. Preserve its bytes AND rejection by keeping
+24 unassigned and assigning25, with sparse-mask tests rather than assuming
+every bit below the maximum is known. The initial unimplemented test draft
+used24; its launch stopped before compilation because the fresh worktree lacked
+the ignored lockfile. The actual failing-first target uses25.

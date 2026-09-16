@@ -201,6 +201,47 @@ fn publish_lease(
   publish_lease_guarded(publisher, retirement, &MIGRATION_ID, expected, &[], bytes, timestamp)
 }
 
+#[test]
+fn semantic_task_reader_wave_refuses_task_and_generation_publication_before_any_file_change() {
+  for kind in [SystemControlKindV1::SemanticMutationTask, SystemControlKindV1::SemanticMutationGeneration] {
+    let (_directory, path, publisher) = create_publisher();
+    let cancellation = CancellationToken::new();
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(32 << 20, 64 << 20, 1, 8 << 20).unwrap());
+    let mut retirement = retirement_owner(&cancellation, &memory);
+    let mut bytes = std::fs::read(format!(
+      "{}/spec/fixtures/v4/system-control-v1/control-blake3-256-{}-valid.bin",
+      env!("CARGO_MANIFEST_DIR"),
+      kind.slug()
+    ))
+    .unwrap();
+    bytes[16..24].copy_from_slice(&1u64.to_le_bytes());
+    bytes[32..48].copy_from_slice(&DATABASE_ID);
+    if kind == SystemControlKindV1::SemanticMutationTask {
+      bytes[64..80].copy_from_slice(&[0x51; 16]);
+    }
+    let crc_offset = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..crc_offset]);
+    bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+    let control = aeordb::engine::v4::system_control::decode_system_control(&bytes, ALGORITHM).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result = publisher.publish_mutable_system_control(
+      MutableSystemControlPublicationRequestV1 {
+        database_id: &DATABASE_ID,
+        kind,
+        identity: &control.identity,
+        expected: None,
+        guards: &[],
+        encoded_control: &bytes,
+        publication_timestamp_ms: 1_700_000_000_300,
+        monotonic_now_ms: 10_000,
+      },
+      &mut retirement,
+    );
+    assert_eq!(result.unwrap_err().code(), "semantic_task_writer_not_qualified");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+  }
+}
+
 fn publish_lease_guarded(
   publisher: &V4FirstAuthorityPublisher,
   retirement: &mut RetirementJournalOwnerV1,

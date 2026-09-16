@@ -2578,6 +2578,24 @@
       "result": "pass"
     },
     {
+      "fixture_id": "control-blake3-256-semantic-mutation-task-valid",
+      "expected": "control:semantic-mutation-task:sequence=7:body=144",
+      "observed": "control:semantic-mutation-task:sequence=7:body=144",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-semantic-mutation-checkpoint-valid",
+      "expected": "control:semantic-mutation-checkpoint:sequence=1:body=456",
+      "observed": "control:semantic-mutation-checkpoint:sequence=1:body=456",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-semantic-mutation-generation-valid",
+      "expected": "control:semantic-mutation-generation:sequence=7:body=16",
+      "observed": "control:semantic-mutation-generation:sequence=7:body=16",
+      "result": "pass"
+    },
+    {
       "fixture_id": "control-blake3-256-durability-latch-valid",
       "expected": "control:durability-latch:sequence=7:body=227",
       "observed": "control:durability-latch:sequence=7:body=227",
@@ -2701,6 +2719,24 @@
       "fixture_id": "control-sha512-root-admission-commit-valid",
       "expected": "control:root-admission-commit:sequence=1:body=320",
       "observed": "control:root-admission-commit:sequence=1:body=320",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-mutation-task-valid",
+      "expected": "control:semantic-mutation-task:sequence=7:body=176",
+      "observed": "control:semantic-mutation-task:sequence=7:body=176",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-mutation-checkpoint-valid",
+      "expected": "control:semantic-mutation-checkpoint:sequence=1:body=744",
+      "observed": "control:semantic-mutation-checkpoint:sequence=1:body=744",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-mutation-generation-valid",
+      "expected": "control:semantic-mutation-generation:sequence=7:body=16",
+      "observed": "control:semantic-mutation-generation:sequence=7:body=16",
       "result": "pass"
     },
     {

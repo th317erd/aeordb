@@ -69,7 +69,7 @@ where
 }
 
 #[test]
-fn v4_control_store_publishes_every_control_kind_as_a_v1_system_file_record() {
+fn v4_control_store_publishes_qualified_kinds_and_refuses_reader_only_semantic_tasks() {
   let temporary = tempfile::tempdir().unwrap();
   let database_path = temporary.path().join("all-control-kinds.aeordb");
   let engine = StorageEngine::create(database_path.to_str().unwrap()).unwrap();
@@ -79,6 +79,30 @@ fn v4_control_store_publishes_every_control_kind_as_a_v1_system_file_record() {
     let bytes = fixture(kind);
     let (database_id, identity) = decoded_identity(&bytes);
     let durability_before = engine.durability_snapshot().unwrap().next_sequence;
+    if matches!(
+      kind,
+      SystemControlKindV1::SemanticMutationTask
+        | SystemControlKindV1::SemanticMutationCheckpoint
+        | SystemControlKindV1::SemanticMutationGeneration
+    ) {
+      let error = if kind.is_immutable() {
+        store.publish_immutable(kind, database_id, &identity, &bytes).unwrap_err()
+      } else {
+        store.publish_mutable(kind, database_id, &identity, &bytes).unwrap_err()
+      };
+      assert!(error.to_string().contains("semantic_task_writer_not_qualified"));
+      let transition_error = V3TransitionControlStore::new(&engine).publish_mutable(kind, database_id, &identity, &bytes).unwrap_err();
+      let expected_transition_error =
+        if kind.is_immutable() { "only publishes mutable A/B controls" } else { "semantic_task_writer_not_qualified" };
+      assert!(transition_error.to_string().contains(expected_transition_error));
+      assert_eq!(engine.durability_snapshot().unwrap().next_sequence, durability_before);
+      assert!(V3TransitionControlStore::new(&engine)
+        .discover_mutable(kind, &identity)
+        .unwrap_err()
+        .to_string()
+        .contains("no v3 transition representation"));
+      continue;
+    }
     let selected_slot = if kind.is_immutable() {
       let loaded = store.publish_immutable(kind, database_id, &identity, &bytes).unwrap();
       assert_eq!(loaded.bytes, bytes);

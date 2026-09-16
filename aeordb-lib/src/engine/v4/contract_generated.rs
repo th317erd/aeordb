@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "b510d31bcaad611897f76adc7c3b577b62f2bea8da751424e2d861e10b806d5b";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "b8d61c5110839623e36add90b5e3621472c89e0caa6b725d27a5f498c7918f4e";
+pub const CONTRACT_REGISTRY_SHA256: &str = "306869b9d2375f8982935741fa70aba0d2944a02e6252f2555603ad443ca27bf";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "f2b4b3ea856dee1071022e7ec6aa372ec30d970fe335193152fd74fbec15c7e4";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -65,6 +65,7 @@ pub const CAPABILITY_BITS: &[RegistryValue] = &[
   RegistryValue { id: 21, name: "SideBySideMigrationV1" },
   RegistryValue { id: 22, name: "DurabilityLatchSpillV1" },
   RegistryValue { id: 23, name: "DurableTaskPinV1" },
+  RegistryValue { id: 25, name: "SemanticMutationTaskV1" },
 ];
 
 pub mod capability_bit {
@@ -92,7 +93,10 @@ pub mod capability_bit {
   pub const SIDE_BY_SIDE_MIGRATION_V1: u16 = 21;
   pub const DURABILITY_LATCH_SPILL_V1: u16 = 22;
   pub const DURABLE_TASK_PIN_V1: u16 = 23;
+  pub const SEMANTIC_MUTATION_TASK_V1: u16 = 25;
 }
+
+pub const KNOWN_CAPABILITY_MASK: [u8; 32] = [255, 255, 255, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 pub const ENTRY_TYPES: &[EntryTypeValue] = &[
   EntryTypeValue { id: 1, name: "Chunk", kv_tag: 0 },

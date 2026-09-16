@@ -4,8 +4,8 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "0ea78c72f491b0ebf695420490a5ac57af5a3342e26fe6a8717b6019778621ca",
-  "generated_rust_bytes": 61907,
+  "generated_rust_sha256": "12527ad1cf19db8a582e62b6a47d3e02b9ae339e60e38fd18fcb097514c03b4e",
+  "generated_rust_bytes": 62165,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,
@@ -15,11 +15,11 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 163,
-    "production_tests_passed": 5,
+    "reference_tests_passed": 178,
+    "production_tests_passed": 17,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 472,
+    "fixture_cases_verified": 478,
     "route_registrations_inventoried": 95,
     "documentation_pages_inventoried": 39,
     "v4_writers_activated": false
@@ -34,6 +34,31 @@
     "cleanup result without behavior or debt owner",
     "semantic bundle collision, noncanonical order, or malformed fingerprint"
   ],
+  "semantic_task_reader_refresh": {
+    "date_utc": "2026-09-16",
+    "source_entry_commit": "716cf3d649699df0658084f01d0aeae0472ad566",
+    "previous_live_values": {
+      "generated_rust_sha256": "0ea78c72f491b0ebf695420490a5ac57af5a3342e26fe6a8717b6019778621ca",
+      "generated_rust_bytes": 61907,
+      "reference_tests_passed": 163,
+      "production_tests_passed": 5,
+      "fixture_cases_verified": 472
+    },
+    "generated_change": "Registry identity, capability25 constant and sparse known capability mask; architecture registry unchanged.",
+    "reference_test_stage": "reader-candidate2",
+    "production_stage": "reader-candidate2",
+    "production_reader_tests_passed": 17,
+    "production_format_tests_passed": 77,
+    "production_finished_utc": "2026-09-16T04:54:25Z",
+    "strict_reference_clippy_stage": "preflight",
+    "format_stage": "preflight",
+    "resource_tests_passed": 3,
+    "preflight_note": "Resource tests, workspace/reference format, strict reference Clippy and 478 fixtures passed; subsequent audit failed on relocated metadata. This is not a whole-stage green claim.",
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-task-evidence",
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
+  },
   "catalog_identity_refresh": {
     "date_utc": "2026-09-14",
     "source_entry_commit": "c222ee29a0dc3dd6c22d36868f5042dc6ad4621e",

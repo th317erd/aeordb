@@ -37,13 +37,16 @@ pub enum SystemControlKindV1 {
   SemanticMutationSegment = 0x0041,
   RootPublicationPrepare = 0x0042,
   RootAdmissionCommit = 0x0043,
+  SemanticMutationTask = 0x0044,
+  SemanticMutationCheckpoint = 0x0045,
+  SemanticMutationGeneration = 0x0046,
   DurabilityLatch = 0x0050,
   EmergencySpillCatalog = 0x0051,
   SideBySideCutover = 0x0052,
 }
 
 impl SystemControlKindV1 {
-  pub const ALL: [Self; 20] = [
+  pub const ALL: [Self; 23] = [
     Self::IndexRegistry,
     Self::IndexOperation,
     Self::IndexDegraded,
@@ -61,6 +64,9 @@ impl SystemControlKindV1 {
     Self::SemanticMutationSegment,
     Self::RootPublicationPrepare,
     Self::RootAdmissionCommit,
+    Self::SemanticMutationTask,
+    Self::SemanticMutationCheckpoint,
+    Self::SemanticMutationGeneration,
     Self::DurabilityLatch,
     Self::EmergencySpillCatalog,
     Self::SideBySideCutover,
@@ -93,6 +99,9 @@ impl SystemControlKindV1 {
       Self::SemanticMutationSegment => b"ASMJ",
       Self::RootPublicationPrepare => b"ARTX",
       Self::RootAdmissionCommit => b"ARAC",
+      Self::SemanticMutationTask => b"ASMT",
+      Self::SemanticMutationCheckpoint => b"ASMC",
+      Self::SemanticMutationGeneration => b"ASMG",
       Self::DurabilityLatch => b"ADLT",
       Self::EmergencySpillCatalog => b"ASPC",
       Self::SideBySideCutover => b"ACUT",
@@ -118,6 +127,9 @@ impl SystemControlKindV1 {
       Self::SemanticMutationSegment => "semantic-mutation-segment",
       Self::RootPublicationPrepare => "root-publication-prepare",
       Self::RootAdmissionCommit => "root-admission-commit",
+      Self::SemanticMutationTask => "semantic-mutation-task",
+      Self::SemanticMutationCheckpoint => "semantic-mutation-checkpoint",
+      Self::SemanticMutationGeneration => "semantic-mutation-generation",
       Self::DurabilityLatch => "durability-latch",
       Self::EmergencySpillCatalog => "emergency-spill-catalog",
       Self::SideBySideCutover => "side-by-side-cutover",
@@ -125,7 +137,19 @@ impl SystemControlKindV1 {
   }
 
   pub fn is_immutable(self) -> bool {
-    matches!(self, Self::LegacyRootMapPage | Self::SemanticMutationSegment | Self::RootPublicationPrepare | Self::RootAdmissionCommit)
+    matches!(
+      self,
+      Self::LegacyRootMapPage
+        | Self::SemanticMutationSegment
+        | Self::RootPublicationPrepare
+        | Self::RootAdmissionCommit
+        | Self::SemanticMutationCheckpoint
+    )
+  }
+
+  /// Reader qualification does not enable the task runtime's publication path.
+  pub(crate) fn is_semantic_mutation(self) -> bool {
+    matches!(self, Self::SemanticMutationTask | Self::SemanticMutationCheckpoint | Self::SemanticMutationGeneration)
   }
 
   pub fn body_cap(self) -> usize {
@@ -828,6 +852,9 @@ fn validate_body(kind: SystemControlKindV1, body: &[u8], algorithm: HashAlgorith
     SystemControlKindV1::SemanticMutationSegment => validate_mutation_segment(body, algorithm),
     SystemControlKindV1::RootPublicationPrepare => validate_root_prepare(body, algorithm),
     SystemControlKindV1::RootAdmissionCommit => validate_root_commit(body, algorithm),
+    SystemControlKindV1::SemanticMutationTask
+    | SystemControlKindV1::SemanticMutationCheckpoint
+    | SystemControlKindV1::SemanticMutationGeneration => super::semantic_mutation_control::validate_body(kind, body, algorithm),
     SystemControlKindV1::DurabilityLatch => validate_durability_latch(body, algorithm),
     SystemControlKindV1::EmergencySpillCatalog => validate_spill_catalog(body, algorithm),
     SystemControlKindV1::SideBySideCutover => validate_cutover(body, algorithm),

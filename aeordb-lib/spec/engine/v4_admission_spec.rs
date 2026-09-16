@@ -200,7 +200,22 @@ fn only_the_disconnected_read_view_service_consumes_production_admission() {
     .collect();
   admission_owners.sort();
   assert_eq!(admission_owners, [PathBuf::from("engine/v4/admission.rs"), PathBuf::from("engine/v4/read_view.rs")]);
-  assert_eq!(sources.iter().map(|(_, source)| source.matches("BinaryCapabilityProfileV1::current(").count()).sum::<usize>(), 0);
+  let mut profile_owners: Vec<_> = sources
+    .iter()
+    .filter_map(|(path, source)| {
+      let count = source.matches("BinaryCapabilityProfileV1::current(").count();
+      (count != 0).then(|| (path.strip_prefix(&source_root).unwrap().to_path_buf(), count))
+    })
+    .collect();
+  profile_owners.sort();
+  // The already-landed compiler rejects unsupported input requirements. It
+  // does not use the profile to admit a database or acquire write authority.
+  assert_eq!(profile_owners, [(PathBuf::from("engine/v4/semantic_catalog_compiler.rs"), 1)]);
+  let compiler = sources.iter().find(|(path, _)| path.ends_with("engine/v4/semantic_catalog_compiler.rs")).unwrap();
+  assert!(compiler.1.contains("BinaryCapabilityProfileV1::current().supported_reader_capabilities"));
+  for forbidden in ["admit_v4_header(", "namespace_write_guard(", "publish_namespace_root(", "StorageEngine"] {
+    assert!(!compiler.1.contains(forbidden), "compiler unexpectedly acquired {forbidden}");
+  }
 }
 
 #[test]

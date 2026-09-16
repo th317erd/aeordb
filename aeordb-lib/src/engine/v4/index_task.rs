@@ -814,7 +814,7 @@ fn validate_checkpoint_write(request: &IndexTaskCheckpointWriteV1<'_>) -> Format
   if request.task_kind.phase_name(request.phase).is_none() {
     return Err(error(MalformedInputClass::UnknownTypeKindOrEnum, "index_checkpoint_phase", "checkpoint phase is unknown for task kind"));
   }
-  if request.required_capabilities[3..].iter().any(|byte| *byte != 0) {
+  if !super::database_header::capabilities_are_known(request.required_capabilities) {
     return Err(error(
       MalformedInputClass::UnknownRequiredCapability,
       "index_checkpoint_capabilities",
@@ -1217,7 +1217,7 @@ pub fn decode_index_task_checkpoint(value: &[u8], hash_algorithm: HashAlgorithm)
     error(MalformedInputClass::UnknownTypeKindOrEnum, "index_checkpoint_phase", "checkpoint phase is unknown for task kind")
   })?;
   let required_capabilities = &body[12..44];
-  if required_capabilities[3..].iter().any(|byte| *byte != 0) {
+  if !super::database_header::capabilities_are_known(required_capabilities) {
     return Err(error(
       MalformedInputClass::UnknownRequiredCapability,
       "index_checkpoint_capabilities",

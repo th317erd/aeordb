@@ -346,7 +346,7 @@ fn generate(fixture_root: &Path) -> DynResult<()> {
       name: "aeordb-v4-reference".to_string(),
       revision: TOOL_REVISION.to_string(),
       production_dependencies: Vec::new(),
-      provenance: "Independent implementation of ratified decision-log Rounds 7-16; no AeorDB crate dependency".to_string(),
+      provenance: "Independent implementation of ratified decision-log Rounds 7-17; no AeorDB crate dependency".to_string(),
       reviewer_status: "pending-owner-review-before-production-writer".to_string(),
     },
     contract_registry: "format-contract-registry.json".to_string(),
@@ -784,7 +784,7 @@ fn decode_slot(slot: &[u8]) -> Result<SelectedSlot, &'static str> {
     0x0003 | 0x0005 => 64,
     _ => return Err("hash_algorithm"),
   };
-  if slot[58 + 3..90].iter().any(|byte| *byte != 0) || slot[352 + 3..384].iter().any(|byte| *byte != 0) {
+  if !core::capabilities_are_known(&slot[58..90]) || !core::capabilities_are_known(&slot[352..384]) {
     return Err("unsupported_required_capability");
   }
   if slot[108] > 1 {

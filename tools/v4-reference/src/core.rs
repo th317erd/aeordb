@@ -28,6 +28,12 @@ const INITIAL_CAPABILITIES: &[u8; 32] = &[
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+// Round17 deliberately leaves bit24 unassigned: existing negative fixtures
+// exercise it. Runtime support is separate from structural format recognition.
+pub(crate) fn capabilities_are_known(bytes: &[u8]) -> bool {
+  bytes.len() == 32 && bytes[3] & !0x02 == 0 && bytes[4..].iter().all(|byte| *byte == 0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashProfile {
   Blake3_256,
@@ -381,8 +387,7 @@ fn decode_directory(profile: HashProfile, value: &[u8]) -> Result<(String, Optio
     return Err("directory_lengths_or_reserved");
   }
   verify_trailing_crc(value)?;
-  if read_u32(value, 32)? != 0 || value[36 + 3..68].iter().any(|byte| *byte != 0) || read_u16(value, 68)? != 1 || read_u16(value, 70)? != 1
-  {
+  if read_u32(value, 32)? != 0 || !capabilities_are_known(&value[36..68]) || read_u16(value, 68)? != 1 || read_u16(value, 70)? != 1 {
     return Err("namespace_root_metadata");
   }
   if value[72..72 + profile.width()].iter().all(|byte| *byte == 0)
@@ -552,7 +557,7 @@ fn decode_semantic_state(profile: HashProfile, body: &[u8], item_count: u64) -> 
   }
   let flags = read_u32(body, 0)?;
   if flags & !1 != 0
-    || body[4 + 3..36].iter().any(|byte| *byte != 0)
+    || !capabilities_are_known(&body[4..36])
     || read_u16(body, 36)? != 1
     || read_u16(body, 38)? != 1
     || read_u16(body, 40)? != 1

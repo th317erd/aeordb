@@ -2,6 +2,9 @@ use crate::config;
 use crate::core::HashProfile;
 use crate::gc::{decode_physical_incarnation, encode_physical_incarnation, PhysicalIncarnationId};
 
+#[path = "semantic_mutation_controls.rs"]
+mod semantic_mutation_controls;
+
 const HEADER_LENGTH: usize = 32;
 const CRC_LENGTH: usize = 4;
 const IDENTITY_LENGTH_CAP: usize = 4_096;
@@ -62,13 +65,16 @@ enum ControlKind {
   SemanticMutationSegment,
   RootPublicationPrepare,
   RootAdmissionCommit,
+  SemanticMutationTask,
+  SemanticMutationCheckpoint,
+  SemanticMutationGeneration,
   DurabilityLatch,
   EmergencySpillCatalog,
   SideBySideCutover,
 }
 
 impl ControlKind {
-  const ALL: [Self; 20] = [
+  const ALL: [Self; 23] = [
     Self::IndexRegistry,
     Self::IndexOperation,
     Self::IndexDegraded,
@@ -86,6 +92,9 @@ impl ControlKind {
     Self::SemanticMutationSegment,
     Self::RootPublicationPrepare,
     Self::RootAdmissionCommit,
+    Self::SemanticMutationTask,
+    Self::SemanticMutationCheckpoint,
+    Self::SemanticMutationGeneration,
     Self::DurabilityLatch,
     Self::EmergencySpillCatalog,
     Self::SideBySideCutover,
@@ -110,6 +119,9 @@ impl ControlKind {
       Self::SemanticMutationSegment => 0x0041,
       Self::RootPublicationPrepare => 0x0042,
       Self::RootAdmissionCommit => 0x0043,
+      Self::SemanticMutationTask => 0x0044,
+      Self::SemanticMutationCheckpoint => 0x0045,
+      Self::SemanticMutationGeneration => 0x0046,
       Self::DurabilityLatch => 0x0050,
       Self::EmergencySpillCatalog => 0x0051,
       Self::SideBySideCutover => 0x0052,
@@ -140,6 +152,9 @@ impl ControlKind {
       Self::SemanticMutationSegment => *b"ASMJ",
       Self::RootPublicationPrepare => *b"ARTX",
       Self::RootAdmissionCommit => *b"ARAC",
+      Self::SemanticMutationTask => *b"ASMT",
+      Self::SemanticMutationCheckpoint => *b"ASMC",
+      Self::SemanticMutationGeneration => *b"ASMG",
       Self::DurabilityLatch => *b"ADLT",
       Self::EmergencySpillCatalog => *b"ASPC",
       Self::SideBySideCutover => *b"ACUT",
@@ -165,6 +180,9 @@ impl ControlKind {
       Self::SemanticMutationSegment => "semantic-mutation-segment",
       Self::RootPublicationPrepare => "root-publication-prepare",
       Self::RootAdmissionCommit => "root-admission-commit",
+      Self::SemanticMutationTask => "semantic-mutation-task",
+      Self::SemanticMutationCheckpoint => "semantic-mutation-checkpoint",
+      Self::SemanticMutationGeneration => "semantic-mutation-generation",
       Self::DurabilityLatch => "durability-latch",
       Self::EmergencySpillCatalog => "emergency-spill-catalog",
       Self::SideBySideCutover => "side-by-side-cutover",
@@ -172,7 +190,14 @@ impl ControlKind {
   }
 
   fn immutable(self) -> bool {
-    matches!(self, Self::LegacyRootMapPage | Self::SemanticMutationSegment | Self::RootPublicationPrepare | Self::RootAdmissionCommit)
+    matches!(
+      self,
+      Self::LegacyRootMapPage
+        | Self::SemanticMutationSegment
+        | Self::RootPublicationPrepare
+        | Self::RootAdmissionCommit
+        | Self::SemanticMutationCheckpoint
+    )
   }
 
   fn body_cap(self) -> usize {
@@ -364,6 +389,9 @@ fn build_body(profile: HashProfile, kind: ControlKind) -> Vec<u8> {
     ControlKind::SemanticMutationSegment => build_mutation_segment(profile),
     ControlKind::RootPublicationPrepare => build_root_prepare(profile),
     ControlKind::RootAdmissionCommit => build_root_commit(profile),
+    ControlKind::SemanticMutationTask | ControlKind::SemanticMutationCheckpoint | ControlKind::SemanticMutationGeneration => {
+      semantic_mutation_controls::body(profile, kind.id())
+    }
     ControlKind::DurabilityLatch => build_durability_latch(profile),
     ControlKind::EmergencySpillCatalog => build_spill_catalog(profile),
     ControlKind::SideBySideCutover => build_cutover(profile),
@@ -815,6 +843,9 @@ fn validate_body(profile: HashProfile, kind: ControlKind, body: &[u8]) -> Result
     ControlKind::SemanticMutationSegment => validate_mutation_segment(profile, body),
     ControlKind::RootPublicationPrepare => validate_root_prepare(profile, body),
     ControlKind::RootAdmissionCommit => validate_root_commit(profile, body),
+    ControlKind::SemanticMutationTask | ControlKind::SemanticMutationCheckpoint | ControlKind::SemanticMutationGeneration => {
+      semantic_mutation_controls::validate(profile, kind.id(), body)
+    }
     ControlKind::DurabilityLatch => validate_durability_latch(profile, body),
     ControlKind::EmergencySpillCatalog => validate_spill_catalog(profile, body),
     ControlKind::SideBySideCutover => validate_cutover(profile, body),
@@ -1547,7 +1578,7 @@ mod tests {
 
   #[test]
   fn permanent_registry_is_complete_unique_and_matches_magic() {
-    assert_eq!(ControlKind::ALL.len(), 20);
+    assert_eq!(ControlKind::ALL.len(), 23);
     let mut ids = ControlKind::ALL.map(ControlKind::id).to_vec();
     ids.sort_unstable();
     ids.dedup();
@@ -1559,7 +1590,7 @@ mod tests {
     for kind in ControlKind::ALL {
       assert_eq!(ControlKind::from_id(kind.id()), Some(kind));
     }
-    for unknown in [0, 0x0004, 0x000f, 0x0014, 0x0022, 0x0034, 0x0044, 0x0053, u16::MAX] {
+    for unknown in [0, 0x0004, 0x000f, 0x0014, 0x0022, 0x0034, 0x0047, 0x0053, u16::MAX] {
       assert_eq!(ControlKind::from_id(unknown), None);
     }
   }

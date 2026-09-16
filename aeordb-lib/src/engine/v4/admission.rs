@@ -7,7 +7,6 @@ use super::system_family::{SystemFamilyRegistryV1, embedded_system_family_regist
 use crate::engine::HashAlgorithm;
 
 const CAPABILITY_WIDTH: usize = 32;
-const KNOWN_CAPABILITY_COUNT: u16 = 24;
 const SYSTEM_FAMILY_REGISTRY_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +27,7 @@ impl CapabilitySetV1 {
   pub fn from_bits(bits: impl IntoIterator<Item = u16>) -> Result<Self, V4AdmissionError> {
     let mut set = Self::empty();
     for bit in bits {
-      if bit >= KNOWN_CAPABILITY_COUNT {
+      if !CAPABILITY_BITS.iter().any(|entry| entry.id == bit) {
         return Err(V4AdmissionError::new("unknown_capability_bit", format!("capability bit {bit} is not assigned")));
       }
       set.0[usize::from(bit / 8)] |= 1 << (bit % 8);
@@ -37,8 +36,8 @@ impl CapabilitySetV1 {
   }
 
   pub fn from_bytes(bytes: [u8; CAPABILITY_WIDTH]) -> Result<Self, V4AdmissionError> {
-    if bytes[usize::from(KNOWN_CAPABILITY_COUNT / 8)..].iter().any(|byte| *byte != 0) {
-      return Err(V4AdmissionError::new("unknown_capability_bit", format!("capability bit {KNOWN_CAPABILITY_COUNT} or greater is set")));
+    if !super::database_header::capabilities_are_known(&bytes) {
+      return Err(V4AdmissionError::new("unknown_capability_bit", "an unassigned capability bit is set"));
     }
     Ok(Self(bytes))
   }
@@ -48,7 +47,7 @@ impl CapabilitySetV1 {
   }
 
   pub fn contains(self, bit: u16) -> bool {
-    bit < KNOWN_CAPABILITY_COUNT && self.0[usize::from(bit / 8)] & (1 << (bit % 8)) != 0
+    bit < 256 && self.0[usize::from(bit / 8)] & (1 << (bit % 8)) != 0
   }
 
   pub fn union(self, other: Self) -> Self {
@@ -72,7 +71,7 @@ impl CapabilitySetV1 {
   }
 
   pub fn bits(self) -> Vec<u16> {
-    (0..KNOWN_CAPABILITY_COUNT).filter(|bit| self.contains(*bit)).collect()
+    CAPABILITY_BITS.iter().map(|entry| entry.id).filter(|bit| self.contains(*bit)).collect()
   }
 
   const fn with_known_bit(mut self, bit: u16) -> Self {

@@ -13,7 +13,6 @@ pub const DATABASE_HEADER_V4_SLOT_LENGTH: usize = 1_024;
 pub const DATABASE_HEADER_V4_REGION_LENGTH: usize = DATABASE_HEADER_V4_SLOT_LENGTH * 2;
 pub const DATABASE_HEADER_V4_DATA_OFFSET: u64 = DATABASE_HEADER_V4_REGION_LENGTH as u64;
 const CRC_OFFSET: usize = 1_020;
-const KNOWN_CAPABILITY_BYTES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseHeaderVersion {
@@ -416,14 +415,19 @@ fn decode_slot(slot: &[u8]) -> FormatResult<DatabaseHeaderV4> {
 }
 
 pub(crate) fn validate_capabilities(capabilities: &[u8; 32], role: &str) -> FormatResult<()> {
-  if capabilities[KNOWN_CAPABILITY_BYTES..].iter().any(|byte| *byte != 0) {
+  if !capabilities_are_known(capabilities) {
     return Err(error(
       MalformedInputClass::UnknownRequiredCapability,
       "unsupported_required_capability",
-      format!("{role} capability bit 24 or greater is set"),
+      format!("{role} has an unassigned capability bit"),
     ));
   }
   Ok(())
+}
+
+pub(crate) fn capabilities_are_known(capabilities: &[u8]) -> bool {
+  capabilities.len() == 32
+    && capabilities.iter().zip(super::contract_generated::KNOWN_CAPABILITY_MASK).all(|(required, known)| required & !known == 0)
 }
 
 fn hash_at(slot: &[u8], offset: usize, width: usize) -> FormatResult<Vec<u8>> {

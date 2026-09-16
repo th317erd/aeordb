@@ -3768,6 +3768,12 @@ impl V4FirstAuthorityPublisher {
     retirement_owner: &mut RetirementJournalOwnerV1,
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+    if request.kind.is_semantic_mutation() {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "semantic_task_writer_not_qualified",
+        "semantic-mutation controls are reader-only until task publication, retention, and recovery are qualified",
+      ));
+    }
     if request.publication_timestamp_ms == 0 || request.monotonic_now_ms == 0 {
       return Err(MutableSystemControlPublicationErrorV1::invalid(
         "mutable_control_publication_time",
@@ -4665,6 +4671,12 @@ impl V4FirstAuthorityPublisher {
       return Err(ImmutableSystemControlPublicationErrorV1::invalid(
         "immutable_system_control_count",
         format!("immutable system-control count {} is outside 1..={maximum_controls}", request.controls.len()),
+      ));
+    }
+    if request.controls.iter().any(|control| control.kind.is_semantic_mutation()) {
+      return Err(ImmutableSystemControlPublicationErrorV1::invalid(
+        "semantic_task_writer_not_qualified",
+        "semantic-mutation controls are reader-only until task publication, retention, and recovery are qualified",
       ));
     }
 

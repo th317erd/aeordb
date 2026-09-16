@@ -837,7 +837,7 @@ fn decode_checkpoint(profile: HashProfile, bytes: &[u8]) -> Result<DecodedCheckp
 }
 
 fn validate_capabilities(bytes: &[u8]) -> Result<(), &'static str> {
-  if bytes.len() != 32 || bytes[3..].iter().any(|byte| *byte != 0) {
+  if !crate::core::capabilities_are_known(bytes) {
     return Err("index_checkpoint_capabilities");
   }
   Ok(())

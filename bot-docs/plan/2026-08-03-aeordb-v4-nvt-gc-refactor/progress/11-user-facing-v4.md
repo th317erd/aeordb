@@ -32,9 +32,138 @@ It preserves the base while producing an unselected updated catalog, prunes
 unused dependencies, avoids whole-catalog scans for unchanged dependencies,
 and returns typed failures for the two formerly aborting semantic-state buffers.
 Persisted base admission and task capture/activation remain outstanding. The
-next activation work requires the owner's still-pending decision on dedicated
-semantic-mutation task/checkpoint definitions; frozen formats are unchanged.
+owner has now authorized dedicated versioned semantic-mutation task/checkpoint
+definitions (Round17, September16 UTC), preserving existing IDs/layouts. The
+format inventory, independent contracts/readers and crash-safe integration are
+the active next unit; prior pending-approval notes below are historical.
 Full U1 and user-facing production readiness are not complete.
+
+## Active next unit: semantic-mutation durable task contract
+
+Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
+unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
+existing control, namespace publication, task, semantic compiler and GC owners.
+The owner approved the additive versioned contract work in direct response to
+the previous gate; no further approval is needed for ordinary implementation
+within that scope. Production/service/retained-database gates remain separate.
+
+- [ ] Trace all format/control/capability/discovery/GC/transfer/task consumers,
+      source-identity and staged mixed-batch producers, plus independent tools.
+- [x] Specify exact additive task/checkpoint bytes, capability and typed edges;
+      preserve existing layouts and append the technical contract to Round17.
+- [x] Hand-author independent valid/malformed fixtures and failing-first reader
+      target; prove registered-hash widths, bounded decode and legacy stability.
+- [x] Implement shared readers, publication refusal and Linux contract gates.
+- [ ] Finish native Windows reader/probe qualification, then qualify byte-exact
+      writers; keep actual task publication disabled until runtime proof.
+- [ ] Integrate durable capture/pins, checkpoint resume, persisted base admission,
+      short guarded activation/rebase, cancellation and post-HEAD recovery.
+- [ ] Prove each publish/recovery fault boundary, native-file reopen and resource
+      bounds; land coherent verified units, then continue U2–U7.
+
+The [additive contract](../semantic-mutation-task-contract.md) now specifies
+three dedicated controls and known-but-unadvertised capability25; Round17 links
+the technical decisions. Source inventory193 grep hits was retained at
+`~/.cache/codex/v4-service-completion-20260913/semantic-task-consumers-20260916.txt`;
+it is a candidate inventory, not193 verified runtime consumers. The contract
+records reader-wave owners and outstanding runtime wiring explicitly.
+
+First independent target: `timeout 30m cargo test --offline --locked -j 2
+-p aeordb --test semantic_mutation_control_spec`. Eight tests use hand-built
+envelopes with independent CRCs, all five hashes, old TaskPin bytes and the
+256-bit capability boundary. No production codec has been changed yet. The
+first positive task/checkpoint/generation/capability tests must fail against
+716cf3d6. New desktop detached worktree is `source-u1-semantic-task` under the
+existing campaign cache; target directory remains the existing Data-disk
+qualification cache. No target or database bytes are transferred. This is a
+format prerequisite, not actual resumable user-facing activation.
+
+Capability audit found old negative fixtures hard-code bit24. Keep24 unassigned
+and use25. Initial launch exited before compilation (missing ignored Cargo.lock);
+preserve the unit journal, transfer the matching pinned lock and run the corrected
+sparse-mask target before any production implementation. Readers needing coordinated updates are
+header/namespace, admission, index manifest/checkpoint, and their independent
+reference counterparts. Current runtime support mask remains0..23.
+
+Reader RED completed04:20:24UTC:4passed/4expectedfail (new magic and capability
+unknown), exit101. Candidate1 completed04:37:46UTC:12passed/0failed; all five
+hashes, typed borrowed fields, malformed closure, bounded cursors and terminal
+pin release. Raw receipts, exact source packets and same-host binary digests
+are retained under the common cache's `u1-semantic-task-evidence/` before
+rebuild. Independent reference built successfully and generated478 fixtures;
+all old binary/hex files remain unchanged, with six new controls added.
+Paired checkpoint identity/digest/phase checks and explicit staged-vs-admitted
+reference roles are now local additions awaiting the next candidate test.
+Native publication-refusal RED completed04:42:03Z (both tests failed because
+the unguarded native publishers accepted the new controls). Captured raw logs,
+source packet and exact executable identities before rebuilding. Early guards
+now reject the three reader-only controls before retirement flush or file I/O.
+Candidate2 completed04:54:25Z:17 reader,14 native publisher,10 ControlStore and
+77 format tests passed, plus178 independent-reference tests. The17 include all
+225 state/phase/hash combinations and selected checkpoint digest/identity/fence
+and timestamp mismatches; no task execution or GC integration is implied.
+
+Preflight completed04:58:57Z:3 allocation/resource tests, workspace/reference
+format, strict reference Clippy and478 independent fixture cases passed. Its
+final audit failed on relocated metadata, not new occurrences. Refresh changed
+only71 line locations; every ID/pattern/review and the1503 maximum remain
+unchanged. The refreshed live P0b/P0c reports retain prior values and explicitly
+identify partial-stage evidence. All474 pre-existing binary and474 annotated
+hex files remain byte-identical (the manifest previously covered472 cases).
+
+Final1 Linux qualification launched05:04UTC, unit
+`aeordb-v4-semantic-task-final1-20260916`, invocation
+`199dd91e646b4fdd9e98103334610e5e`, against47 hashed source/fixture/report inputs.
+Nine stages cover narrow/resource,37 affected targets, audit, format, strict
+workspace Clippy, library, independent reference, contracts and debt self-test.
+Native Mac uses the same input manifest in a fresh isolated716cf3d6 worktree
+under `/home/wyatt/.cache/codex/v4-service-completion-20260916/`; its former test
+cache is absent, so it is a cold one-job build. The dirty Mac checkout is not
+modified. Windows SSH currently refuses; owner notified asynchronously. Native
+platform and final landing remain pending, and no new service writer is enabled.
+
+Final1 stopped05:08:39Z on the inherited admission-profile inventory: it still
+expected zero `BinaryCapabilityProfileV1::current` callers, although716cf3d6
+already contains one compiler preflight check. Native Mac reproduced the same
+assertion. The correction names exactly that compiler/count and prohibits it
+from admitting headers or acquiring namespace/StorageEngine authority; the
+separate admission-owner inventory is unchanged. V3 publication refusal is
+also now exercised explicitly for all three new kinds, preserving the older
+immutable-control error contract. No compiler/runtime behavior changed.
+
+Final2 Linux launched~05:12UTC with48 inputs, invocation
+`0569f43618c14ccab1f037425fcfce9d`; narrow passed and affected is in progress.
+Matching native Mac completed05:12:58Z with227/227 tests acrossnine targets,
+including all23 platform probes,77 format tests,17 semantic reader tests and
+50 allocation/resource tests. Raw evidence and exact executable hashes were
+captured before its independent-reference qualification began. Windows remains
+unavailable; no final native/reader-unit completion or production readiness is
+claimed. Failed first runs remain preserved, not overwritten by retries.
+
+Reader-only qualification is now green on Linux and macOS; see the
+[source-bound proof](../evidence/user-facing-v4-u1-semantic-task-reader-linux-proof-20260916.json).
+Final2 passed168 narrow/resource tests,794 affected tests across37 targets,
+713 library tests,178 independent-reference tests, formatting, strict workspace
+Clippy and the1503-entry audit. Its contracts stage found the old20-kind checker
+inventory; the correction requires exactly23 kinds and the new body identities
+and formulas. A strengthened test isolates invalid-phase failures and accepts a
+newer owning epoch. Those are the only two changed inputs. Final3 passed the
+17-test supplement, formatting/targeted strict Clippy,478 independent fixtures,
+full contracts and debt self-test at05:26:55Z. Production/reference/fixture bytes
+match final2 exactly; no unnecessary broad rerun was used. Peak Linux memory
+was6,382,362,624bytes under the6GiB/no-swap guard; both disk floors held.
+Mac additionally passed178 reference tests, strict reference Clippy,478 fixtures,
+generated-constant verification and the17 strengthened reader tests. Raw receipts,
+source packets and same-host executable hashes were captured before rebuilds.
+
+This is a P0/P1a reader landing, not completion of P1c or permission for runtime
+writers. Native Windows is still pending (SSH refused; owner notified). Child01
+allows separate reader landing before the native-probe unit; writers remain
+gated on all P0/P1 requirements. Persisted catalog admission can proceed as an
+independent read-only prerequisite while Windows is unavailable. It must prove
+the stored compiler/registry identities, complete typed ownership/reference
+closure and actual counts under bounded memory/cancellation before constructing
+an opaque compiler base. Checkpoint counts/fingerprints alone are not admission.
 
 Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
 Incremental compilation entered from that exact green revision.

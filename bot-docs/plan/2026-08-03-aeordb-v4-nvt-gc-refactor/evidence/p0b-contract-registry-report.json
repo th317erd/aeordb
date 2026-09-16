@@ -3,13 +3,13 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "b510d31bcaad611897f76adc7c3b577b62f2bea8da751424e2d861e10b806d5b",
-  "fixture_manifest_sha256": "7d05abdc174b398ec42af6c3440d27e797b43cd3cf42d4c5f05dde7c6a0e6749",
+  "source_sha256": "306869b9d2375f8982935741fa70aba0d2944a02e6252f2555603ad443ca27bf",
+  "fixture_manifest_sha256": "f2b677a2c5d7d4e0f4b26c9d7dcee9a751ab2838e57f878701154deb88bac1df",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 24,
-    "fixtures": 472,
-    "capability_bits": 24,
+    "fixtures": 478,
+    "capability_bits": 25,
     "entry_types": 10,
     "kv_tags": 12,
     "shared_enum_scopes": 13,
@@ -55,8 +55,32 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 163,
+    "tests_passed": 178,
     "reviewer_status": "pending-owner-review-before-production-writer"
+  },
+  "semantic_task_reader_refresh": {
+    "date_utc": "2026-09-16",
+    "source_entry_commit": "716cf3d649699df0658084f01d0aeae0472ad566",
+    "scope": "Round17 ASMT/ASMC/ASMG readers, independent fixtures and sparse known capability25; bit24 remains unassigned and runtime advertisement is unchanged.",
+    "previous_live_values": {
+      "source_sha256": "b510d31bcaad611897f76adc7c3b577b62f2bea8da751424e2d861e10b806d5b",
+      "fixture_manifest_sha256": "7d05abdc174b398ec42af6c3440d27e797b43cd3cf42d4c5f05dde7c6a0e6749",
+      "fixtures": 472,
+      "capability_bits": 24,
+      "reference_tests_passed": 163
+    },
+    "reference_test_stage": "reader-candidate2",
+    "reference_test_finished_utc": "2026-09-16T04:54:25Z",
+    "fixture_stage": "preflight",
+    "fixture_stage_note": "478 independent fixture cases passed before this stage failed on stale audit locations; the whole preflight stage is not claimed green.",
+    "existing_binary_files_unchanged": 474,
+    "existing_hex_files_unchanged": 474,
+    "added_binary_fixtures": 6,
+    "production_hash_algorithms_tested": 5,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-task-evidence",
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
   },
   "catalog_identity_refresh": {
     "date_utc": "2026-09-14",

@@ -709,6 +709,10 @@ name = "v4_format_fixture_spec"
 path = "spec/engine/v4_format_fixture_spec.rs"
 
 [[test]]
+name = "semantic_mutation_control_spec"
+path = "spec/engine/semantic_mutation_control_spec.rs"
+
+[[test]]
 name = "v4_writer_fixture_spec"
 path = "spec/engine/v4_writer_fixture_spec.rs"
 
