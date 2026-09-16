@@ -46,6 +46,24 @@ impl IncrementalDigestV1 {
       Self::Sha3_512(hasher) => hasher.finalize().to_vec(),
     }
   }
+
+  /// Finalize without an infallible allocation for the owned digest. Existing
+  /// callers retain their original API; bounded owners can report refusal.
+  pub(crate) fn try_finalize(self) -> Result<Vec<u8>, std::collections::TryReserveError> {
+    fn copy_digest(bytes: &[u8]) -> Result<Vec<u8>, std::collections::TryReserveError> {
+      let mut output = Vec::new();
+      output.try_reserve_exact(bytes.len())?;
+      output.extend_from_slice(bytes);
+      Ok(output)
+    }
+    match self {
+      Self::Blake3(hasher) => copy_digest(hasher.finalize().as_bytes()),
+      Self::Sha256(hasher) => copy_digest(&hasher.finalize()),
+      Self::Sha512(hasher) => copy_digest(&hasher.finalize()),
+      Self::Sha3_256(hasher) => copy_digest(&hasher.finalize()),
+      Self::Sha3_512(hasher) => copy_digest(&hasher.finalize()),
+    }
+  }
 }
 
 pub fn digest_parts(algorithm: HashAlgorithm, parts: &[&[u8]]) -> Vec<u8> {

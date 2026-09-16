@@ -1,4 +1,11 @@
 //! Borrowed Round 17 readers. Decoding confers no publication or GC authority.
+#[path = "semantic_mutation_sources.rs"]
+mod sources;
+pub use sources::{
+  SemanticMutationSourceFingerprintRequestV1, SemanticMutationSourceIdentityV1, SemanticMutationSourceFingerprintV1,
+  fingerprint_semantic_mutation_sources_v1,
+};
+
 use crate::engine::HashAlgorithm;
 
 use super::reader::{FormatError, FormatResult, MalformedInputClass};

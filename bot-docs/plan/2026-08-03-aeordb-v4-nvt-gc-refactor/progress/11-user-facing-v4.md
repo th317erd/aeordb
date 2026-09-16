@@ -31,7 +31,8 @@ Incremental compilation is qualified through all eleven Linux gates; see the
 It preserves the base while producing an unselected updated catalog, prunes
 unused dependencies, avoids whole-catalog scans for unchanged dependencies,
 and returns typed failures for the two formerly aborting semantic-state buffers.
-Persisted base admission and task capture/activation remain outstanding. The
+Persisted base admission is now qualified and landed as `28e6a202`; durable task
+capture/activation remain outstanding. The
 owner has now authorized dedicated versioned semantic-mutation task/checkpoint
 definitions (Round17, September16 UTC), preserving existing IDs/layouts. The
 format inventory, independent contracts/readers and crash-safe integration are
@@ -236,6 +237,91 @@ production implementation. The existing selected namespace page reader restarts
 traversal to find a resume path; it must not be used as an unqualified large
 capture loop that repeatedly scans earlier files. These are follow-on entry
 findings, not claims that the source owner or its ordered fingerprint is done.
+
+Admission landed/pushed as `28e6a20285eab8cd25c49cca896f3a8717e5d4cf`.
+Next independent read-only prerequisite is Round17's source identity digest,
+whose normative preimage already appears in the task contract. Own a compiler
+child module, its tests, and an additive fallible incremental-hash finalizer;
+do not change existing digest callers, control bytes, capability advertisement,
+native publication, or service routes. Accept a counted ordered stream of
+canonical paths and exact H-wide FileRecord identities, with typed explicit
+absence. Check uniqueness/order, framing bounds and count; preserve caller
+errors/cancellation and charge bounded current/previous-path/hash workspace.
+Never sort or retain the entire stream. The returned digest is only a comparison
+aid: it does not certify the source owner's complete union, acquire a pin or
+resolve live aliases. That owner and actual retained-tree enumeration remain
+required follow-on integration.
+
+Before implementation, run independent fixed-preimage/all-five-hash tests
+against a fail-closed scaffold. Also cover empty input, absent versus omitted,
+same bytes at another path, wrong width/zero-present IDs, malformed paths,
+duplicate/out-of-order records, early/excess counts, source failure, cancellation
+at boundaries, budget refusal before iteration, actual output allocation failure
+and bounded-memory stream growth. Existing query/migration incremental-digest
+consumers join the regression matrix. Native Windows reader qualification stays
+open; this helper does not bypass the new task-writer gate.
+
+Source-fingerprint failing-first evidence: initial `sources-red` stopped on a
+child-module import error and is **not** behavioral RED. Corrected
+`sources-red2` completed06:40:36Z with all ten expected behavioral failures
+(eight fingerprint tests plus two allocation/stream tests) against the fail-closed
+scaffold. Source archives, raw stage receipts and same-host executable hashes
+were captured before rebuilding. Candidate1 passed53 resource and25 task/source
+tests at06:51:08Z. The stream-allocation test excludes diagnostic snapshot
+allocations from its measured loop; its4096-byte maximum allocation and
+64-bytes-per-record cumulative ceilings were not weakened. Review added
+pre-IntoIterator refusal and enormous-count/extra-read-bound checks.
+
+Final1 is frozen at eight inputs including both pinned locks. Linux runs the
+80-test narrow target,18 affected targets (including every existing incremental
+hash consumer), full library/reference tests, format, strict workspace Clippy,
+unchanged audit/contracts and debt self-test. Mac runs matching inputs through
+the two narrow suites plus migration clone/execution and query planning.
+The return lease charges exactly H bytes after scratch is dropped. No namespace,
+pin, persistent-control, compiler-profile or existing hash-call behavior changes.
+
+Final1 narrow/affected passed but the audit correctly rejected `.is_err()` losing
+the path-bound conversion error; replaced with explicit propagation, not an
+allowlist exception. Mac final1 aborted at64-byte fault injection in the output
+allocation test. Final2 measures cold shared-coordinator initialization without
+denial before injecting the digest failure; native allocation metrics must
+confirm the suspected platform first-lock allocation and the original digest
+refusal/retry assertions must still pass. All failed receipts and same-host
+executable identities were captured before either host was rebuilt. Final2
+reruns the exact nine Linux gates and five native Mac targets on matching inputs.
+
+Mac final2 completed07:04:40Z with135 tests passing:13 clone,22 migration,
+53 resource,27 task/source and20 query-planner cases. Native measurement shows
+exactly64 allocated bytes in first-use shared-coordinator initialization,
+including one matching allocation for each64-byte algorithm. Isolating that
+setup leaves all five actual digest-refusal/retry/release checks passing.
+Raw receipts and same-host executable hashes are captured before further builds.
+Linux final2 has passed80 narrow tests,18 affected targets, unchanged1503 audit,
+formatting and strict workspace Clippy; final remaining gates are still pending.
+
+Final2 completed07:09:34Z, all nine Linux gates green:80 narrow/resource tests,
+476 affected tests across18 targets,713 library tests,178 independent-reference
+tests,478 fixtures/contracts, unchanged1503 audit, formatting, strict workspace
+Clippy and debt self-test. Kernel peak6,064,054,272bytes stayed below6GiB with
+swap disabled. Final home68,937,863,168 andData335,964,024,832bytes were above
+their floors. The [source-bound proof](../evidence/user-facing-v4-u1-semantic-sources-proof-20260916.json)
+was generated by an executed strict verifier, binding eight inputs, both locks,
+source archives, raw receipts, actual failed-first tests, corrected qualification
+failures and same-host Linux/Mac executable identities. No ignored/filtered tests
+in the final suites. This completes the comparison helper, not source capture,
+new task writers, native Windows qualification, full U1 or ordinary-v4 readiness.
+
+Following capture-owner entry review has confirmed a missing dependency, not
+permission to substitute legacy behavior: the current production plugin manager
+still serializes/deserializes JSON PluginRecord, while Round9 freezes a distinct
+APAL PluginAliasRecordV1 and raw-module archive. Full production/reference-source
+search plus the24-family machine registry found no APAL codec/fixture family.
+The SystemFamily registry reserves alias/artifact paths but is not their decoder
+or captured snapshot. Add the already-ratified bounded alias/manifest readers and
+independent fixtures before resolving production compiler aliases. Also audit
+non-HEAD control capture/retention explicitly; existing namespace paging restarts
+from the root and is not proof of a scalable, complete ordered source union.
+These are next prerequisites, not work completed by this fingerprint helper.
 
 Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
 Incremental compilation entered from that exact green revision.

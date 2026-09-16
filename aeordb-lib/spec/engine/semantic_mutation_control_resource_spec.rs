@@ -1,4 +1,4 @@
-use super::{fixture, measure};
+use super::{fixture, measure, measure_nth};
 use aeordb::engine::v4::reader::MalformedInputClass;
 use aeordb::engine::v4::semantic_mutation_control::{decode_semantic_mutation_checkpoint, decode_semantic_mutation_selection};
 use aeordb::engine::v4::system_control::decode_system_control;
@@ -73,5 +73,95 @@ fn semantic_task_selected_digest_allocation_failure_is_not_corruption_or_abort()
     let error = result.unwrap_err();
     assert_eq!(error.code(), "semantic_task_digest_allocation");
     assert!(error.is_allocation_failure());
+  }
+}
+
+#[test]
+fn source_fingerprint_output_allocation_refusal_releases_memory_and_retries() {
+  use aeordb::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryPolicy};
+  use aeordb::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
+  use aeordb::engine::v4::semantic_mutation_control::{SemanticMutationSourceFingerprintRequestV1, fingerprint_semantic_mutation_sources_v1};
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    // The shared coordinator is an established engine owner, not the digest
+    // output. Some platforms allocate its mutex lazily at the same byte size
+    // as a hash. Measure that initialization without denying it, then inject
+    // refusal into the fingerprint's actual fallible output allocation.
+    let (initialization, allocations) =
+      measure_nth(algorithm.hash_length(), usize::MAX, || memory.reserve(MemoryOwner::Task, 0, AdmissionClass::Workload).unwrap());
+    assert!(!allocations.injected_failure);
+    eprintln!("{algorithm:?} shared coordinator initialization: {allocations:?}");
+    drop(initialization);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    let request = SemanticMutationSourceFingerprintRequestV1 {
+      hash_algorithm: algorithm,
+      expected_record_count: 0,
+      maximum_path_bytes: 4096,
+      maximum_workspace_bytes: 1 << 20,
+    };
+    let (result, allocations) =
+      measure(algorithm.hash_length(), || fingerprint_semantic_mutation_sources_v1(request, std::iter::empty(), &memory, &|| false));
+    assert!(allocations.injected_failure);
+    let error = match result {
+      Err(error) => error,
+      Ok(_) => panic!("refused digest returned a result"),
+    };
+    assert!(matches!(error, SemanticCompilationErrorV1::Resource { .. }), "{error}");
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    let fingerprint = fingerprint_semantic_mutation_sources_v1(request, std::iter::empty(), &memory, &|| false).unwrap();
+    assert_eq!(fingerprint.digest().len(), algorithm.hash_length());
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, algorithm.hash_length() as u64);
+    drop(fingerprint);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+#[test]
+fn source_fingerprint_stream_does_not_allocate_a_whole_input_container() {
+  use std::cell::Cell;
+  use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
+  use aeordb::engine::v4::semantic_mutation_control::{
+    SemanticMutationSourceFingerprintRequestV1, SemanticMutationSourceIdentityV1, fingerprint_semantic_mutation_sources_v1,
+  };
+  for count in [32, 8192] {
+    let memory = MemoryCoordinator::new(MemoryPolicy::new(16 << 20, 32 << 20, 1, 1 << 20).unwrap());
+    let request = SemanticMutationSourceFingerprintRequestV1 {
+      hash_algorithm: HashAlgorithm::Blake3_256,
+      expected_record_count: count,
+      maximum_path_bytes: 16,
+      maximum_workspace_bytes: 8192,
+    };
+    let observed_reservation = Cell::new(None);
+    let source = |observe| {
+      let memory = &memory;
+      let observed_reservation = &observed_reservation;
+      (0..count).map(move |index| {
+        if observe {
+          let retained = memory.snapshot().unwrap().reserved_bytes;
+          assert!(retained <= 8192);
+          match observed_reservation.get() {
+            Some(previous) => assert_eq!(retained, previous),
+            None => observed_reservation.set(Some(retained)),
+          }
+        }
+        Ok(SemanticMutationSourceIdentityV1 { path: format!("/s/{index:08}"), file_record_id: None })
+      })
+    };
+    // Snapshot diagnostics themselves allocate their owner vector. Check
+    // reservation stability separately so the allocator measurement below
+    // covers production plus the small streaming input buffers, not diagnostics.
+    let baseline = fingerprint_semantic_mutation_sources_v1(request, source(true), &memory, &|| false).unwrap();
+    let expected = baseline.digest().to_vec();
+    drop(baseline);
+    let (result, allocations) = measure(0, || fingerprint_semantic_mutation_sources_v1(request, source(false), &memory, &|| false));
+    let fingerprint = result.unwrap();
+    assert_eq!(fingerprint.digest(), expected);
+    assert_eq!(fingerprint.record_count(), count);
+    assert!(allocations.maximum <= 4096, "whole-input allocation: {allocations:?}");
+    assert!(allocations.total <= count as usize * 64 + 4096, "unexpected input copying: {allocations:?}");
+    drop(fingerprint);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }
 }

@@ -1,4 +1,6 @@
 //! Independent Round 17 bodies: no production encoder supplies these bytes.
+#[path = "semantic_mutation_sources_spec.rs"]
+mod source_fingerprint;
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::semantic_mutation_control::{
