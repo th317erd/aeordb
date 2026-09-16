@@ -41,6 +41,9 @@ mod canonical_value_borrowed_resource_spec;
 #[path = "semantic_mutation_control_resource_spec.rs"]
 mod semantic_mutation_control_resource_spec;
 
+#[path = "plugin_artifact_identity_resource_spec.rs"]
+mod plugin_artifact_identity_resource_spec;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Allocations {
   total: usize,

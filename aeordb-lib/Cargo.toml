@@ -49,6 +49,7 @@ sha3 = "0.10"
 
 # Plugins
 wasmi = "0.42"
+wasmparser = { version = "=0.227.1", default-features = false }
 libloading = "0.8"
 aeordb-plugin-sdk = { path = "../aeordb-plugin-sdk" }
 
@@ -1519,6 +1520,10 @@ path = "spec/engine/canonical_value_borrowed_spec.rs"
 [[test]]
 name = "plugin_identity_reader_spec"
 path = "spec/engine/plugin_identity_reader_spec.rs"
+
+[[test]]
+name = "plugin_artifact_identity_spec"
+path = "spec/engine/plugin_artifact_identity_spec.rs"
 
 [lints]
 workspace = true

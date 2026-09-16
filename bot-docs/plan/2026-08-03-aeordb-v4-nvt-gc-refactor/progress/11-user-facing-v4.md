@@ -403,6 +403,78 @@ refuses WASM dependencies; metadata readers do not change that behavior. Next
 entry must bind actual archived module bytes without claiming service readiness
 or enabling task publication.
 
+Payload readers landed/pushed77e15019. Next direct unit is
+[captured artifact identity](../plugin-artifact-identity-contract.md): exact raw
+digest/length/protected path, unique named section and copied metadata binding.
+The pinned parser returns lazy core readers, so this explicitly does not claim
+bytecode/executor admission or provide a compiler snapshot implementation. Those
+remain mandatory following owners. Start with independent whole-module tests
+against a fail-closed scaffold before production behavior changes.
+
+Artifact identity RED completed08:27:22Z with4passes/3failures (positive borrowed
+identity, operational error classification and changed opaque-section identity),
+exit101. Raw logs, six-input source archive and same-host executable digest were
+captured before implementation. Candidate1 passed08:37:27Z:11 identity and58
+resource tests, then audit1503 unchanged. Successful inspection allocates no heap
+for small/1MiB/20,000-section fixtures, uses a16KiB workspace lease, and retains
+only a fixed result charge. Cancellation/current admission is checked at every
+hash chunk and parser event; failures release the lease and retry cleanly.
+
+Final1 adds one diagnostic-propagation test and strengthens mismatch isolation;
+only that test file differs from candidate1. Linux unit
+`aeordb-v4-plugin-artifact-final1-20260916`, invocation
+`2f76b6cc079d4ed485599017f45457eb`, runs nine bounded gates against nine hashed
+inputs. Native Mac pid52964 uses the identical manifest, including both locks,
+with12 matching production targets and the independent reference. Both isolated
+sources are now based on77e15019; original dirty checkouts remain untouched.
+The sole root-lock change adds the already-selected wasmparser0.227.1 edge.
+No native Windows proof or runtime/bytecode availability is implied. Final
+outcomes and strict source-bound evidence remain pending.
+
+Final1 narrow161PASS at08:41:31Z, but the newly included legacy plugin end-to-end
+target found26 missing echo-WASM fixture failures on both hosts. These are
+missing build prerequisites, not identity regressions; preserve both actual
+failed runs and binary receipts. Build the unchanged checked-in echo source on
+each host, never transfer compiled artifacts. Its ignored lock is mechanically
+anchored to exact root dependency blocks and verified with offline/locked
+metadata; initial latest-cache resolution is retained separately. macOS also
+needs the matching WASM rustup target in its user toolchain.
+
+Final2 starts from the same nine final1 source hashes plus that fixture lock.
+Linux unit `aeordb-v4-plugin-artifact-final2-20260916`, invocation
+`f9986763fd14456097c78649103b9f04`, resumes with fixture build,31 affected targets
+and remaining static/library/reference gates. Keep the identical-source passed
+final1 narrow evidence rather than reclassifying or discarding it. Mac pid53458
+builds its own fixture and reruns the matching production/reference matrix.
+Windows SSH retry08:51 is still refused; native writer gate remains in place.
+
+Artifact identity qualification is now green on Linux and macOS. The executed
+[strict source-bound proof](../evidence/user-facing-v4-u1-plugin-artifact-proof-20260916.json)
+preserves actual RED and missing-fixture failures, validates the archived ten
+inputs and unchanged final1 production/test bytes, and binds all same-host test
+and echo-WASM digests. Final2 finished08:55:14Z:161 narrow tests from final1,
+520 affected tests across31 targets,713 library tests,181 independent reference
+tests,496 fixtures, unchanged1503 audit,format,strict workspace Clippy,contracts
+and debt self-test. Mac completed08:50:36Z with292 production plus181 reference
+tests,format,496 fixtures and generated contracts. No test was ignored/filtered
+in those completed gates. Linux peak5,550,284,800bytes; minimumhome68,863,442,944
+and Data334,905,806,848bytes remain above their floors with swap disabled.
+
+Final review confirms no full-bytecode or availability claim, compiler snapshot
+implementation, persistent writer, capability/fixture change, service action or
+retained-database mutation. The private result only binds exact borrowed bytes;
+operational admission, legacy-adapter refusal, complete outer framing, optional
+metadata equality, error details, cancellation, release/retry and64MiB boundary
+are covered. All previous fixture/reference/codec/audit files remain unchanged.
+This completes the read-only identity prerequisite, not U1 or production-ready
+v4. Full profile2 execution, durable capture/GC retention and activation remain.
+
+Next start gate is still native Windows qualification of the additive semantic
+task readers/probes before their byte writers. Latest SSH/config/listener check
+confirms `win11vm` resolves through `wyatt-desktop:22220`, with no listening
+socket. No VM/service/forwarding configuration was changed. Resume the prepared
+native qualification when the owner restores that connection; do not waive it.
+
 Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
 Incremental compilation entered from that exact green revision.
 
