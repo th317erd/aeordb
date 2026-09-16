@@ -338,6 +338,21 @@ impl SemanticCatalogReaderV1<'_> {
     is_cancelled: &dyn Fn() -> bool,
     inspect: impl FnOnce(SemanticCatalogRecordV1<'_>) -> Result<T, SemanticCatalogReadErrorV1>,
   ) -> Result<Option<T>, SemanticCatalogReadErrorV1> {
+    self.with_record_ordinal(catalog_root, bounds, record_kind, owner_key, is_cancelled, |_, record| inspect(record))
+  }
+
+  /// Like `with_record`, also returning its zero-based canonical traversal
+  /// ordinal. Counts/untouched subtrees require the same prior validation.
+  /// This position belongs to this exact tree, never a persistent identity.
+  pub fn with_record_ordinal<T>(
+    &self,
+    catalog_root: &[u8],
+    bounds: SemanticCatalogTraversalBoundsV1,
+    record_kind: u16,
+    owner_key: &[u8],
+    is_cancelled: &dyn Fn() -> bool,
+    inspect: impl FnOnce(u64, SemanticCatalogRecordV1<'_>) -> Result<T, SemanticCatalogReadErrorV1>,
+  ) -> Result<Option<T>, SemanticCatalogReadErrorV1> {
     check_cancelled(is_cancelled)?;
     let width = self.hash_algorithm.hash_length();
     if catalog_root.len() != width || catalog_root.iter().all(|byte| *byte == 0) {
@@ -356,6 +371,7 @@ impl SemanticCatalogReaderV1<'_> {
       .map_err(|error| SemanticCatalogReadErrorV1::resource("semantic_catalog_allocation", error.to_string()))?;
     let mut expected_records = bounds.expected_records;
     let mut visited = 0u64;
+    let mut ordinal = 0u64;
     loop {
       check_cancelled(is_cancelled)?;
       if visited >= bounds.expected_nodes || visited > width as u64 {
@@ -374,10 +390,11 @@ impl SemanticCatalogReaderV1<'_> {
               check_cancelled(is_cancelled)?;
               let record = record.map_err(format_error)?;
               if record.record_kind == record_kind && record.owner_key == owner_key {
-                let result = inspect(record)?;
+                let result = inspect(ordinal, record)?;
                 check_cancelled(is_cancelled)?;
                 return Ok(Some(result));
               }
+              ordinal = checked_catalog_ordinal(ordinal, 1, bounds.expected_records)?;
             }
           }
           check_cancelled(is_cancelled)?;
@@ -403,6 +420,7 @@ impl SemanticCatalogReaderV1<'_> {
               selected = Some(child);
               break;
             }
+            ordinal = checked_catalog_ordinal(ordinal, child.record_count, bounds.expected_records)?;
           }
           let Some(child) = selected else {
             check_cancelled(is_cancelled)?;
@@ -458,6 +476,13 @@ impl SemanticCatalogReaderV1<'_> {
     check_cancelled(is_cancelled)?;
     Ok(result)
   }
+}
+
+fn checked_catalog_ordinal(current: u64, count: u64, total: u64) -> Result<u64, SemanticCatalogReadErrorV1> {
+  current
+    .checked_add(count)
+    .filter(|ordinal| *ordinal <= total)
+    .ok_or_else(|| SemanticCatalogReadErrorV1::corrupt("semantic_catalog_ordinal", "record ordinal exceeds the exact catalog count"))
 }
 
 fn decode_catalog_node<'a>(

@@ -76,6 +76,26 @@ fn fixture(algorithm: HashAlgorithm, count: usize) -> (Store, Vec<Binding>, Vec<
 }
 
 #[test]
+fn ordinal_lookup_matches_independent_digest_order_without_scanning_siblings() {
+  for algorithm in ALGORITHMS {
+    let (store, mut bindings, root, bounds) = fixture(algorithm, 96);
+    bindings.sort_by_key(|binding| lookup(algorithm, binding));
+    let reader = SemanticCatalogReaderV1::new(algorithm, &store);
+    for (ordinal, binding) in bindings.iter().enumerate() {
+      store.reads.borrow_mut().clear();
+      let actual = reader
+        .with_record_ordinal(&root, bounds, binding.kind, &binding.owner, &|| false, |position, record| {
+          assert_eq!(record.semantic_id, binding.semantic);
+          Ok(position)
+        })
+        .unwrap();
+      assert_eq!(actual, Some(ordinal as u64));
+      assert!(store.reads.borrow().len() <= 2 * (algorithm.hash_length() + 1));
+    }
+  }
+}
+
+#[test]
 fn point_lookup_returns_exact_full_keys_through_one_bounded_path_for_all_hashes() {
   for algorithm in ALGORITHMS {
     let (store, bindings, root, bounds) = fixture(algorithm, 96);

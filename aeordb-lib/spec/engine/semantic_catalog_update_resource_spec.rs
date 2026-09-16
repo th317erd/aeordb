@@ -60,6 +60,52 @@ impl SemanticCatalogStagingStoreV1 for Objects {
 }
 
 #[test]
+fn admission_bitmap_allocation_refusal_releases_the_charge_and_allows_retry() {
+  use aeordb::engine::v4::semantic_catalog_compiler::admit_semantic_catalog_v1;
+  let algorithm = HashAlgorithm::Blake3_256;
+  let memory = MemoryCoordinator::new(MemoryPolicy::new(128 << 20, 192 << 20, 1, 8 << 20).unwrap());
+  let registry = compile_parser_registry_v1(
+    ParserRegistryCompilationRequestV1 {
+      source: None,
+      hash_algorithm: algorithm,
+      maximum_source_bytes: 1 << 20,
+      maximum_workspace_bytes: 64 << 20,
+    },
+    &NoAliases,
+    &memory,
+    &|| false,
+  )
+  .unwrap();
+  let request = SemanticCatalogCompilationRequestV1 {
+    hash_algorithm: algorithm,
+    expected_configuration_count: 0,
+    required_capabilities: [0; 32],
+    maximum_workspace_bytes: 64 << 20,
+  };
+  let mut store = Objects::default();
+  let state =
+    compile_semantic_catalog_v1(request, &registry, std::iter::empty(), &mut store, &memory, &|| false).unwrap().semantic_state().clone();
+  let before = memory.snapshot().unwrap().reserved_bytes;
+  let writes = store.writes;
+  // A registry-only tree has exactly one record, so its reachability bitmap
+  // requests one byte. No source/test allocation of this size occurs here.
+  let (result, allocations) = measure(1, || admit_semantic_catalog_v1(request, &state.object_id, &registry, &store, &memory, &|| false));
+  assert!(allocations.injected_failure);
+  let error = match result {
+    Err(error) => error,
+    Ok(_) => panic!("refused bitmap returned an admitted base"),
+  };
+  assert!(matches!(error, SemanticCatalogCompilationErrorV1::Catalog(error)
+    if error.class() == SemanticCatalogReadErrorClassV1::ResourceLimit && error.code() == "semantic_catalog_reachability_memory"));
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, before);
+  let admitted = admit_semantic_catalog_v1(request, &state.object_id, &registry, &store, &memory, &|| false).unwrap();
+  assert_eq!(admitted.semantic_state(), &state);
+  drop(admitted);
+  assert_eq!(store.writes, writes);
+  assert_eq!(memory.snapshot().unwrap().reserved_bytes, before);
+}
+
+#[test]
 fn refused_base_root_projection_copy_and_result_buffers_return_resource_without_leaks() {
   let algorithm = HashAlgorithm::Blake3_256;
   let memory = MemoryCoordinator::new(MemoryPolicy::new(384 << 20, 512 << 20, 1, 32 << 20).unwrap());

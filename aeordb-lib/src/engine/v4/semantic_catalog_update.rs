@@ -314,7 +314,7 @@ impl DependencyCandidates {
   }
 }
 
-fn visit_dependencies(
+pub(super) fn visit_dependencies(
   class: u16,
   bytes: &[u8],
   algorithm: HashAlgorithm,
@@ -344,7 +344,7 @@ fn visit_dependencies(
   Ok(())
 }
 
-fn two_members<'a>(
+pub(super) fn two_members<'a>(
   value: BorrowedCanonicalValueV1<'a>,
   first: &str,
   second: &str,
@@ -368,7 +368,7 @@ fn two_members<'a>(
   }
 }
 
-fn identifier(value: BorrowedCanonicalValueV1<'_>, algorithm: HashAlgorithm) -> Result<&[u8]> {
+pub(super) fn identifier(value: BorrowedCanonicalValueV1<'_>, algorithm: HashAlgorithm) -> Result<&[u8]> {
   let bytes = value.as_bytes().ok_or_else(|| corrupt("semantic_catalog_projection_schema", "projection ID is not Bytes"))?;
   if bytes.len() != algorithm.hash_length() || bytes.iter().all(|byte| *byte == 0) {
     return Err(corrupt("semantic_catalog_projection_schema", "projection ID is zero or has the wrong width"));

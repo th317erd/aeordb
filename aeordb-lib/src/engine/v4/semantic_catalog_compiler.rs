@@ -462,3 +462,7 @@ mod boundary_tests;
 #[path = "semantic_catalog_update.rs"]
 mod update;
 pub use update::{SemanticCatalogConfigurationMutationV1, SemanticCatalogUpdateRequestV1, update_semantic_catalog_v1};
+
+#[path = "semantic_catalog_admission.rs"]
+mod admission;
+pub use admission::admit_semantic_catalog_v1;

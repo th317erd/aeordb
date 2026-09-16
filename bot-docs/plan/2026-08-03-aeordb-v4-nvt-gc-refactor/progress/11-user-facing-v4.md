@@ -165,6 +165,78 @@ the stored compiler/registry identities, complete typed ownership/reference
 closure and actual counts under bounded memory/cancellation before constructing
 an opaque compiler base. Checkpoint counts/fingerprints alone are not admission.
 
+Reader milestone landed/pushed `f3e9bb9692a3b142e375e9981b7906b546a4d25c`.
+Next admission unit owns `semantic_catalog.rs`, compiler/admission internals,
+their specs and source-bound evidence. Existing stored bytes and service/native
+publication owners remain unchanged. Design: validate the exact state/profile,
+walk and validate actual bindings/counts, then traverse typed configuration and
+registry edges. Canonical record ordinals support a compact reachability bitmap:
+one bit per validated binding, with checked geometry, full pre-allocation memory
+admission and a caller ceiling. No full-definition map, repeated catalog scans,
+new disk workspace or persistent format is introduced. Budget exhaustion is an
+explicit resource failure; the bitmap is temporary and confers no GC authority.
+Reject orphan scope/value/index/dependency definitions and mismatched owner,
+registry, compiler or capability closure before issuing an opaque update base.
+The owner still must pin the immutable snapshot and capture exact source inputs;
+this API does not acquire namespace authority or validate live aliases/artifacts.
+
+Falsifying tests precede implementation: ordinal lookup versus independent
+digest order, all-hash persisted reopen followed by incremental update, shared
+default dependencies, foreign profiles/counts, cancellation and resource refusal
+before storage access. Add adversarial missing/orphan/cross-owner/registry tests,
+typed I/O and final-callback cancellation, memory pressure, actual native reopen
+and lookup/read-count bounds before landing. Linux commands are bounded by the
+existing30-minute build/run wrapper; individual test bodies use tiny fixtures.
+
+Admission baseline RED completed05:46:40Z101 (ordinal lookup and four admission
+cases failed against a fail-closed scaffold). Candidate1 passed46 compiler and
+12 lookup tests. Review RED completed06:01:51Z101: a structurally valid native
+RawJson/NativeSuite ordinal swap was admitted, and an impossible bitmap claim
+reached catalog reads. Both now fail closed, with the original tests retained.
+The bitmap's checked caller-bound preflight precedes traversal; actual count
+validation still precedes allocation and its shared-memory charge.
+
+Candidate2 stopped at a test-only moved-value compile error after moving the
+original compiled result's Drop before native reopen. Candidate3 corrected that
+cleanup and completed06:12:23Z0:53 compiler,12 lookup,51 resource and22 migration
+tests. Native-file admission checks unchanged bytes and authority, then feeds
+the recovered base to an incremental update across all five registered hashes.
+Additional coverage includes exact captured registry, projection schema/field/
+index ownership, missing/orphan definitions, checkpoint-by-checkpoint cancel/
+host pressure, actual bitmap allocator refusal/retry, source error classes and
+read-count scaling. No live alias, module execution or GC pin proof is implied.
+
+Static preflight found one new result-to-option suppression in checked bitmap
+geometry. Replaced it with explicit typed conversion failure; no audit allowance
+or ceiling changed. Frozen11-input final1 now runs the narrow, physical, affected,
+state-consumer, audit, format, strict workspace Clippy, library, reference,
+contracts and debt gates. NativeMac runs the same11 inputs. All previous source
+packets, six-file stage receipts and actual executed-binary digests were captured
+before rebuilds. Windows still refuses SSH; nativeWindows and all task writers
+remain gated.
+
+Admission final1 completed06:25:24Z0 with all eleven gates green:116 narrow,
+one all-hash native-file reopen/update,578 affected tests across30 targets,
+71 state-consumer tests,713 library,178 reference,478 independent fixtures,
+formatting, strict workspace Clippy, unchanged1503-entry audit and debt self-test.
+NativeMac passed138 tests on the identical11-input snapshot. Linux peak was
+6,316,027,904bytes within6GiB/no-swap; finalhome68,932,730,880 and
+Data335,964,975,104bytes remained above their floors. Source and binary identities
+were captured before rebuilding. The strict verifier executed PASS and produced
+the immutable [admission proof](../evidence/user-facing-v4-u1-catalog-admission-proof-20260916.json).
+
+This closes the read-only persisted compiler-base admission unit, not U1,
+Windows qualification, capture/pins, task resume, namespace activation or
+ordinary-v4 service readiness. No production state or sealed failure evidence
+changed. The next source-owner integration must capture the exact controls,
+aliases and module FileRecord identities from pinned base/request trees; a
+fingerprint alone cannot prove complete enumeration. Repository-wide source
+search confirms the two compiler alias-snapshot traits currently have no
+production implementation. The existing selected namespace page reader restarts
+traversal to find a resume path; it must not be used as an unqualified large
+capture loop that repeatedly scans earlier files. These are follow-on entry
+findings, not claims that the source owner or its ordered fingerprint is done.
+
 Borrowed-reader unit committed/pushed as `fcd7416c249f7a8f9633b2058347ff703941e9db`.
 Incremental compilation entered from that exact green revision.
 

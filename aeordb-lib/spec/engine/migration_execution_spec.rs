@@ -1919,7 +1919,9 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     ParserAliasSnapshotV1, ParserRegistryCompilationRequestV1, SemanticCompilationErrorV1, compile_parser_registry_v1,
   };
   use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1};
-  use aeordb::engine::v4::semantic_catalog_compiler::{SemanticCatalogCompilationRequestV1, compile_semantic_catalog_v1};
+  use aeordb::engine::v4::semantic_catalog_compiler::{
+    SemanticCatalogCompilationRequestV1, admit_semantic_catalog_v1, compile_semantic_catalog_v1,
+  };
   use aeordb::engine::v4::semantic_catalog_native::NativeSemanticCatalogStagingStoreV1;
   use tokio_util::sync::CancellationToken;
 
@@ -1999,13 +2001,13 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     assert!(after.selected.header.write_sequence_high_water > before.selected.header.write_sequence_high_water);
     assert_eq!(compile(&publisher).semantic_state(), result.semantic_state());
     assert_eq!(publisher.observe().unwrap(), after, "idempotent staging changed physical authority");
+    let stored_state = result.semantic_state().clone();
+    drop(result);
     drop(publisher);
     let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
     assert_eq!(reopened.observe().unwrap(), after);
-    assert_eq!(compile(&reopened).semantic_state(), result.semantic_state());
-    assert_eq!(reopened.observe().unwrap(), after);
-    assert_eq!(reopened.load_semantic_object(1, &result.semantic_state().object_id).unwrap().unwrap(), result.semantic_state().value);
-    let state = decode_semantic_object(&result.semantic_state().value, algorithm).unwrap().semantic_state.unwrap();
+    assert_eq!(reopened.load_semantic_object(1, &stored_state.object_id).unwrap().unwrap(), stored_state.value);
+    let state = decode_semantic_object(&stored_state.value, algorithm).unwrap().semantic_state.unwrap();
     let SemanticAvailabilityV1::Complete {
       catalog_root, catalog_record_count, catalog_node_count, definition_count, dependency_count, ..
     } = state.availability
@@ -2020,6 +2022,15 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
       &cancellation,
     )
     .unwrap();
+    let file_before_admission = std::fs::read(directory.path().join("migration-execution.aeordb")).unwrap();
+    let admitted =
+      admit_semantic_catalog_v1(request, &stored_state.object_id, &registry, &store, &memory, &|| cancellation.is_cancelled()).unwrap();
+    assert_eq!(admitted.semantic_state(), &stored_state);
+    assert_eq!(admitted.configuration_count(), 2);
+    assert_eq!(reopened.observe().unwrap(), after);
+    assert_eq!(std::fs::read(directory.path().join("migration-execution.aeordb")).unwrap(), file_before_admission);
+    assert_eq!(compile(&reopened).semantic_state(), &stored_state);
+    assert_eq!(reopened.observe().unwrap(), after);
     let reader = SemanticCatalogReaderV1::new(algorithm, &store);
     let bounds = SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap();
     let stats = reader
@@ -2078,7 +2089,7 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
         compilation: SemanticCatalogCompilationRequestV1 { expected_configuration_count: 0, ..request },
         expected_mutation_count: 2,
       },
-      &result,
+      &admitted,
       &registry,
       ["/", "/nested"].into_iter().map(|owner| Ok(SemanticCatalogConfigurationMutationV1::Remove(owner.into()))),
       &mut store,
@@ -2101,7 +2112,7 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     drop(reopened);
     let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
     assert_eq!(reopened.observe().unwrap(), updated_observation);
-    for candidate in [&result, &update] {
+    for candidate in [&admitted, &update] {
       assert_eq!(
         reopened.load_semantic_object(1, &candidate.semantic_state().object_id).unwrap().unwrap(),
         candidate.semantic_state().value
@@ -2134,7 +2145,7 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     cancellation.cancel();
     assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 1, &cancellation).is_err());
     assert_eq!(reopened.observe().unwrap(), updated_observation);
-    drop(result);
+    drop(admitted);
     drop(registry);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }

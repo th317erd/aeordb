@@ -1,4 +1,6 @@
 //! Streaming composition of complete configurations, never namespace activation.
+#[path = "semantic_catalog_admission_spec.rs"]
+mod admission_spec;
 #[path = "../helpers/semantic_catalog_oracle.rs"]
 mod catalog_oracle;
 
