@@ -7,6 +7,177 @@ mod inventory_spec;
 use allocation_probe::measure;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationPhaseV1, SemanticMutationTaskStateV1};
 
+#[test]
+fn canonical_system_file_valid_empty_and_exact_bodies_remain_fallibly_loaded() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, _coordinator, publisher) =
+      create_environment_for_algorithm_at_kv_stage("canonical-length-valid", None, [1; 16], algorithm, 0);
+    let control_path = "/.aeordb-system/reader-fixture.bin";
+    let content_type = "application/octet-stream";
+    for body in [Vec::new(), vec![0x53; 131_071]] {
+      seed_files(&publisher, &[(control_path.to_string(), content_type, &body)]);
+      let before = fs::read(&path).unwrap();
+      let header = publisher.observe().unwrap().selected.header;
+      let kv = publisher.lock_kv().unwrap();
+      let load = || load_canonical_system_file_at_path(&publisher.file, &*kv, &header, control_path, content_type, body.len());
+      assert_eq!(load().unwrap().unwrap().body, body);
+      if !body.is_empty() {
+        let (result, allocations) = measure(body.len(), load);
+        assert!(allocations.injected_failure, "{allocations:?}");
+        assert_eq!(allocations.matching_requests, 1);
+        assert_eq!(result.err().expect("output allocation must fail").code(), "first_authority_system_file_allocation");
+      }
+      assert_eq!(load().unwrap().unwrap().body, body);
+      assert_eq!(fs::read(&path).unwrap(), before);
+      assert_eq!(publisher.observe().unwrap().selected.header, header);
+    }
+  }
+}
+
+#[test]
+fn canonical_system_file_captured_output_allocation_failure_releases_visit_and_retries() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, _coordinator, publisher) =
+      create_environment_for_algorithm_at_kv_stage("canonical-captured-allocation", None, [1; 16], algorithm, 0);
+    let (task, checkpoint) = largest_checkpoint_pair(algorithm);
+    populate(&publisher, &task, Some(&checkpoint), Some(&frozen(algorithm, "generation")));
+    let before = fs::read(&path).unwrap();
+    let memory = observation_memory();
+    let cancellation = CancellationToken::new();
+    let protection = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+    let captured = protection
+      .capture_semantic_mutation_inventory(
+        NativeSemanticMutationInventoryBoundsV1 {
+          maximum_work: 4096,
+          maximum_entity_bytes: 1024 * 1024,
+          maximum_read_bytes: 64 * 1024 * 1024,
+        },
+        &memory,
+        &cancellation,
+      )
+      .unwrap();
+    assert!(captured.visit(|_| Ok(true)).unwrap().complete);
+    let retained = memory.snapshot().unwrap().reserved_bytes;
+    let mut callbacks = 0;
+    let (result, allocations) = measure(checkpoint.len(), || {
+      captured.visit(|_| {
+        callbacks += 1;
+        Ok(true)
+      })
+    });
+    assert!(allocations.injected_failure, "{allocations:?}");
+    assert_eq!(allocations.matching_requests, 1);
+    assert_eq!(result.unwrap_err().code(), "first_authority_system_file_allocation");
+    assert_eq!(callbacks, 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, retained);
+    let retried = captured.visit(|_| Ok(true)).unwrap();
+    assert!(retried.complete);
+    assert_eq!(retried.tasks, 1);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, retained);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    drop(captured);
+    drop(protection);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  }
+}
+
+fn replace_test_file_declared_size(publisher: &V4FirstAuthorityPublisher, path: &str, declared_size: u64) {
+  let header = publisher.observe().unwrap().selected.header;
+  let key = first_authority_file_path_hash(path, header.hash_algorithm);
+  let kv = publisher.lock_kv().unwrap();
+  let locator = kv.get(&key).unwrap().unwrap();
+  let bytes = read_entity_bounded(&publisher.file, &*kv, &key, FIRST_AUTHORITY_CONTROL_ENTITY_CAP, header.write_sequence_high_water)
+    .unwrap()
+    .unwrap();
+  let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water).unwrap();
+  let mut record = FileRecord::deserialize(entity.stored_value, header.hash_algorithm.hash_length(), 1).unwrap();
+  record.total_size = declared_size;
+  let body = record.serialize(header.hash_algorithm.hash_length()).unwrap();
+  let replacement = encode_entity(
+    entity.entity_version,
+    entity.entry_type,
+    entity.flags,
+    header.hash_algorithm,
+    EntityPublicationOrder { timestamp_ms: entity.timestamp_ms, write_sequence: entity.write_sequence },
+    entity.key,
+    &body,
+  )
+  .unwrap();
+  assert_eq!(replacement.len(), bytes.len());
+  write_file_at_native(&publisher.file, locator.offset, &replacement).unwrap();
+}
+
+#[test]
+fn canonical_system_file_length_mismatch_refuses_before_output_allocation() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, _coordinator, publisher) =
+      create_environment_for_algorithm_at_kv_stage("canonical-length-before-copy", None, [1; 16], algorithm, 0);
+    let (task, checkpoint) = largest_checkpoint_pair(algorithm);
+    populate(&publisher, &task, Some(&checkpoint), Some(&frozen(algorithm, "generation")));
+    let control_path =
+      system_control_path(SystemControlKindV1::SemanticMutationCheckpoint, &checkpoint_identity(), SystemControlSlotV1::Immutable).unwrap();
+    let memory = observation_memory();
+    let cancellation = CancellationToken::new();
+    drop(observe(&publisher, &memory, &cancellation).unwrap());
+    for declared in [0, 1, checkpoint.len() - 1, checkpoint.len() + 1] {
+      replace_test_file_declared_size(&publisher, &control_path, declared as u64);
+      let before = fs::read(&path).unwrap();
+      let allocation_size = if declared == 0 { checkpoint.len() } else { declared };
+      // Count the allocation without aborting the test process on the old
+      // infallible growth path. Refusal injection follows only after this RED.
+      let (result, allocations) =
+        allocation_probe::measure_nth(allocation_size, usize::MAX, || observe(&publisher, &memory, &cancellation));
+      assert_eq!(result.unwrap_err().code(), "first_authority_system_file_content");
+      assert_eq!(allocations.matching_requests, 0, "declared={declared}, {allocations:?}");
+      assert_eq!(memory.snapshot().unwrap().owner(MemoryOwner::Task).unwrap().reserved_bytes, 0);
+      assert_eq!(fs::read(&path).unwrap(), before);
+      replace_test_file_declared_size(&publisher, &control_path, checkpoint.len() as u64);
+      drop(observe(&publisher, &memory, &cancellation).unwrap());
+    }
+  }
+}
+
+#[test]
+fn canonical_system_file_length_mismatch_blocks_captured_task_completion() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, _coordinator, publisher) =
+      create_environment_for_algorithm_at_kv_stage("canonical-captured-length", None, [1; 16], algorithm, 0);
+    let (task, checkpoint) = largest_checkpoint_pair(algorithm);
+    populate(&publisher, &task, Some(&checkpoint), Some(&frozen(algorithm, "generation")));
+    let control_path =
+      system_control_path(SystemControlKindV1::SemanticMutationCheckpoint, &checkpoint_identity(), SystemControlSlotV1::Immutable).unwrap();
+    replace_test_file_declared_size(&publisher, &control_path, 0);
+    let before = fs::read(&path).unwrap();
+    let memory = observation_memory();
+    let cancellation = CancellationToken::new();
+    let protection = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+    let captured = protection
+      .capture_semantic_mutation_inventory(
+        NativeSemanticMutationInventoryBoundsV1 {
+          maximum_work: 4096,
+          maximum_entity_bytes: 1024 * 1024,
+          maximum_read_bytes: 64 * 1024 * 1024,
+        },
+        &memory,
+        &cancellation,
+      )
+      .unwrap();
+    let retained = memory.snapshot().unwrap().reserved_bytes;
+    let mut callbacks = 0;
+    let (result, allocations) = allocation_probe::measure_nth(checkpoint.len(), usize::MAX, || {
+      captured.visit(|_| {
+        callbacks += 1;
+        Ok(true)
+      })
+    });
+    assert_eq!(result.unwrap_err().code(), "first_authority_system_file_content");
+    assert_eq!(allocations.matching_requests, 0, "{allocations:?}");
+    assert_eq!(callbacks, 0);
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, retained);
+    assert_eq!(fs::read(&path).unwrap(), before);
+  }
+}
+
 fn observation_memory() -> MemoryCoordinator {
   MemoryCoordinator::new(MemoryPolicy::new(64 * 1024 * 1024, 96 * 1024 * 1024, 1, 16 * 1024 * 1024).unwrap())
 }

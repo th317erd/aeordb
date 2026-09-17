@@ -26,6 +26,12 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,13:29UTC: the shared canonical loader's declared-length allocation
+boundary is qualified on Linux, macOS and native Windows; see its
+[immutable proof](../evidence/user-facing-v4-u1-canonical-system-length-proof-20260917.json).
+Malformed sizes now refuse before output allocation. Native protected-source
+capture and durable typed closure are next; their test drafts are not implemented.
+
 September17,12:28UTC: ASCM/ASCN structural readers and exact checkpoint binding
 are qualified on all three native platforms; see the
 [immutable reader proof](../evidence/user-facing-v4-u1-semantic-source-capture-readers-proof-20260917.json).
@@ -972,6 +978,102 @@ unchanged audit/contract/debt and independent reference gates; matching native
 macOS/Windows final-source proof. Existing helper/property/allocation tests stay
 enabled. Native-file tests are the meaningful current boundary; they do not
 claim ordinary v4 HTTP service activation, which remains later work.
+
+### Canonical system-file allocation boundary — entry35ff6acf
+
+The preceding capture-reader unit landed/pushed35ff6acf with strict native
+proof. Direct owner, no delegation; preserve unrelated WIP and all prior seals.
+This slice owns the shared loader, its existing observation test child, audit
+line metadata and dated evidence. No new wire format, publication permission,
+physical owner, production action or service/default change is intended.
+
+`map_territory`: searched all direct calls to
+`load_canonical_system_file_at_path`: eight in first_authority plus three in
+captured inventory. They cover immutable publication readback, selected and
+successor semantic state, current/captured semantic objects and canonical
+control slots. Other searched body-length reservations belong to independent
+encoders; no other `extend_from_slice(chunk.stored_value)` site was found.
+The semantic catalog adapter preserves system-file allocation errors as
+Resource; mismatch remains the existing content error. Canonical wrapper
+policy stays version1/one SYSTEM chunk/empty metadata/no compression.
+
+`test_protocol`: current tests already cover native task observation/reopen,
+captured inventory, cancellation/read refusal, exact-body allocator failure,
+shared memory release and retry. Hypothesis: malformed declared length must
+be rejected before allocating a copied output body. Given a valid independently
+framed checkpoint with zero/smaller/larger declared size, observation must reject
+without that output allocation; given the same mismatch in captured inventory,
+no callback or complete inventory is allowed; given valid empty/exact bodies,
+shared loading must still succeed with fallible allocation and unchanged bytes.
+Native-file/allocator tests prove the real owner; reference fixtures are inputs,
+not regenerated goldens. Later affected native/static gates protect all consumers.
+An HTTP test would not reach this not-yet-integrated service boundary. No network,
+wait loop or callback race is needed in the small new regression fixtures.
+
+`test_check`: two falsifying tests installed before runtime edits. Desktop RED1
+launched12:33UTC, unit aeordb-v4-canonical-length-red1-20260917, invocation
+ebb7e0c47c4d49dbafe86aa1dc9711ce. Four-input manifest SHA256
+670880082279b96980fcb11db5b823567d3ac54ea7d87a7ad5a3a2e7d53e88c6.
+Command `cargo test --offline --locked -j 2 -p aeordb --lib
+canonical_system_file_length_mismatch`; existing30-minute/6GiB/no-swap/CPU200%
+and disk-floor guard. Measure allocation attempts without failure injection on
+the suspected infallible path. Preserve the actual result before correction;
+source inspection alone is not an executed failure.
+
+RED1 finished12:34:01UTC:0passed/2failed/763filtered, both actual allocation
+assertions (one matching body allocation instead of zero), no compile/setup
+failure or injected allocation abort. All seven raw artifacts and the executed
+binary digest were local before implementation. The correction compares the
+decoded chunk length with the declared length before output reservation/copy;
+content/chunk hash validation and all error codes remain unchanged.
+
+Candidate1 passed12:39:39UTC:36observation/inventory tests,731filtered, including
+all four new length/empty/exact/allocation/retry regressions at both hash widths.
+Preflight format12:39:45 and strictworkspaceClippy12:42:09 PASS; audit refresh
+12:42:39 found1501unchanged entries, zero moved locations and no changed reviews.
+All raw receipts are local. Candidate four-input manifest
+76bfbfa239bb74a6f83868eaa6d09b0e024eb1cfe92bae8d9190ce988b8efdef.
+Final1 adds the unchanged audit inventory: five-input manifest
+99f3d2847264112709cd0bcb03ad579cfa468286f1cfa0c446282cb043145d98.
+
+Final native qualification launched12:44UTC: Linuxunit
+aeordb-v4-canonical-length-final1-20260917 invocation
+32f27b0a3cc8405ea0c3c620d40e3f22/MainPID1609438; Macdriver99110; Windowsdriver1696.
+Same two Rust inputs as the green candidate; all prior sources/evidence were
+sealed before updates. Mac/Windows preceding reader overlays are retained in
+scoped stashes4236eb0a/c707f9f9. No target tree transfer or resource reconfiguration.
+Final library expectations767Unix/782Windows include the four regressions;
+the unchanged five integration targets/118affected targets and all platform,
+static/reference gates remain required. No current-unit proof or landing yet.
+
+Linux final1 completed12:56:39UTC and macOS12:56:51UTC: all nine gates PASS
+on each,212narrow/1880affected across118targets/767library/185reference,
+502independent fixtures, audit1501, format, strictworkspaceClippy and debt
+self-test. Both sealed12:57:15–16; all raw receipts, source patches and exact
+same-host binary/tool identities are local before any next build. The strict
+verifier validates every Unix/history/source gate and stops at the missing
+Windows driver receipt. Windows is still running affected tests at12:56:54,
+with C43,485,401,088/D44,824,838,144/freeRAM12,186,046,464bytes. No Windows
+completion, current-unit landing, source-copy implementation or U1 readiness
+is inferred from the Unix passes. Frozen source remains unchanged.
+
+Windows final1 completed13:25:48UTC, all seven gates PASS:212narrow,
+1873affected across118targets,782library,185reference,502independent fixtures,
+strict workspace Clippy and all379format roots. Sealed13:29:23; all raw evidence
+is local before further builds. Final C43,482,099,712/D51,421,532,160bytes.
+The strict verifier passes the actual behavioral RED, candidate/preflight,
+unchanged1501-entry audit, frozen five-input archives, every final platform
+gate and executable/guard receipt. The
+[immutable qualification proof](../evidence/user-facing-v4-u1-canonical-system-length-proof-20260917.json)
+is generated only after that pass.
+
+`test_check`: the original two allocation failures are retained; four new native
+tests pass on every platform, including exact/empty bodies, both hash widths,
+captured-task failure without callbacks, reservation release and successful retry.
+`thorough_review`: the implementation changes only preallocation validation;
+existing content/chunk identity checks, bounded canonical-wrapper policy, errors,
+publication refusal and bytes remain unchanged. No production/VM changes or
+additional cleanup were needed. This closes this correction, not full U1.
 
 ### Durable protected source capture — reader entry091d0666
 

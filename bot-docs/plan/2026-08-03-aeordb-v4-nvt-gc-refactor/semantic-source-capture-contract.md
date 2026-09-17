@@ -416,3 +416,58 @@ the complete native observer/inventory, semantic compiler/store, current control
 root/publication and migration consumers plus final platform/static/reference
 gates before landing. No encoded bytes, error policy, writer capability or
 production database changes follow from this allocation-order correction.
+
+Qualified September17,13:29UTC on Linux, macOS and Windows in the
+[canonical-length proof](evidence/user-facing-v4-u1-canonical-system-length-proof-20260917.json).
+The actual two failing-first allocation assertions and four final native
+regressions are preserved. Native protected-source integration may now begin;
+this loader correction does not implement that capture or enable its writers.
+
+### Native protected-source integration: refreshed read-only perimeter
+
+September17, during frozen loader qualification; no new source implementation
+or qualified capture API is implied by these findings.
+
+The concrete source families are root index config0x0001, parser config0x0003,
+plugin aliases0x0031 and plugin artifacts0x0032. The registry distinguishes
+descendant index config0x0002 (namespace-resident) and legacy plugins0x0030
+(semantic roleNone, quarantine/manual migration); do not silently admit either
+as a corrected non-HEAD source. Missing module or alias inputs may be represented
+in the capture union but cannot satisfy required dependency closure/execution.
+
+`semantic_mutation_inventory` owns the existing settled snapshot and bounded
+lookup under `NativeStagingProtection`. Share that capture owner for source
+reads rather than independently capturing task controls and protected inputs.
+Callbacks must remain outside root/KV locks, with separate scratch admission
+for nested or simultaneous operations. No live path lookup may substitute for
+the captured locator. Inspect exact current-path records and retained `filec:`
+records through the same typed FileRecord/chunk validation, not separate parsers.
+
+Actual representation producers checked: `append_system_file` emits version0
+SYSTEM chunks under `system::` and version1 SYSTEM FileRecords; legacy buffered
+DirectoryOps computes `chunk:` identities even for protected flags. Migration
+`copy_chunk` admits its explicit legacy domain, then normalizes output to ordinary
+`chunk:` bytes. That ingress normalization is not permission to rewrite an
+already-native captured source. FileRecord v0 has no stored whole-content hash;
+v1 does. Preserve original version, metadata, path, flags and exact serialized
+body when deriving/reusing `filec:`. A same-ID flag/version/body disagreement
+must still refuse through the existing exact immutable readback owner.
+
+Native capture must not add a third FileRecord parser. The ordinary decoder is
+`file_record.rs`; the existing migration-only borrowed reader additionally lives
+in `migration_base_clone_execution.rs`. Reusing/factoring a borrowed projection
+requires parity/malformed tests and retained migration error behavior; a new
+parallel decoder is not an acceptable shortcut. Large raw modules can reach
+64MiB while individual FileRecord entities retain the4MiB operational bound.
+Do not reserve every source at the module maximum or assemble whole catalogs.
+Use bounded chunks and the existing all-profile `IncrementalDigestV1` for content
+validation; its fallible finalizer is available. Any decompression scratch must
+be admitted/bounded too, without inferring universal allocation recovery from
+the current `decompress_bounded` helper's use of infallible Vec growth.
+
+The private `publish_immutable_entity_batch_with_validation_locked` already
+provides dependency/header ordering and exact collision checks to specialized
+owners. A future captured-source entry must validate an unforgeable same-owner
+capture before entering that path. Keep public GenericContent SYSTEM refusal;
+do not turn a caller-supplied descriptor or reader view into a copy/GC permit.
+Actual source replacement, restart, typed closure and release tests remain owed.

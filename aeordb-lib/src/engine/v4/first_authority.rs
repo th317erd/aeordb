@@ -14268,6 +14268,14 @@ fn load_canonical_system_file_at_path(
       format!("{path} references a noncanonical system chunk"),
     ));
   }
+  // Validate the actual copy length before reserving: an understated record
+  // must not make extend_from_slice grow past the fallible reservation.
+  if chunk.stored_value.len() != body_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "first_authority_system_file_content",
+      format!("{path} content does not match its FileRecord"),
+    ));
+  }
   let mut body = Vec::new();
   body.try_reserve_exact(body_length).map_err(|error| {
     FirstAuthorityPublicationErrorV1::invalid(
@@ -14276,7 +14284,7 @@ fn load_canonical_system_file_at_path(
     )
   })?;
   body.extend_from_slice(chunk.stored_value);
-  if body.len() as u64 != record.total_size || first_authority_content_hash(&body, header.hash_algorithm) != record.content_hash {
+  if first_authority_content_hash(&body, header.hash_algorithm) != record.content_hash {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "first_authority_system_file_content",
       format!("{path} content does not match its FileRecord"),
