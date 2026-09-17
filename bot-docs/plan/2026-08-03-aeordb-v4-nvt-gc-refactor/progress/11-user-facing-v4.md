@@ -213,6 +213,124 @@ binary digest were captured before implementation; unit invocation
 `dd832dfc5e6043588fce0dc68abb3576`. This is the following unit's failing baseline,
 not part of the selector's final source or a completed runtime observation.
 
+**Native observation in qualification, September17.** Selector landed/pushed
+as `1eac04a89151f12519f8131b81c1c5a0fcab5034`. A second refusing snapshot
+failed all9 observation cases01:02:47UTC; its implementation-only successor
+passed all9 at01:07:10UTC. Candidate4 passed all13 native cases01:20:18UTC,
+including both hash widths, actual file reopen/read failure, cancelled and
+missing authority, one-lock selection, retained accounting and real allocator
+refusal/retry. The shared test allocation probe was moved unchanged; its first
+resource consumer compile found missing aliases/visibility. That failed run is
+retained; the corrected candidate passed12 native and63 resource tests before
+the thirteenth native case was added. No production publication is enabled.
+
+Final1's nine-input Linux gate stopped01:24:01UTC at the64GiB home safety
+floor, before any test executable ran. Mac passed237 narrow tests, then failed
+the existing exact reviewed-owner inventory01:27:03UTC: the new private
+observation child was not listed. Its code was reviewed as read-only and the
+inventory now includes explicit no-write/no-publication checks. Both original
+receipts/logs/source and executed binary hashes are retained before rebuilding.
+Windows final1 remains separately running until its driver finishes; its source
+must not be overwritten in flight.
+
+Final2 adds only that architecture-test file to final1's nine unchanged inputs,
+manifest SHA256
+`cbd7f6ddf27f6f7db15ab4b0bc9c398cbff6baec4a31262bbc0e66491e74e045`.
+Mac final2 launched~01:38UTC (PID47717). Linux awaits restored home headroom;
+four old successfully verified, cleanly shut-down resource-test directories
+are being relocated intact to the designated Data test area, with complete
+before/after hashes and original-path links. This preserves every database and
+log; no production or retained FS-Server1 data is involved. Full source-bound
+qualification and the observation milestone remain pending.
+
+Final2 Linux completed all nine gates01:47:47UTC; Mac completed01:47:05UTC.
+Both source/lock/test/tool identities and all raw evidence were sealed/copied
+before further builds. The strict verifier passes history and both final Unix
+waves, but correctly refuses to seal a completed proof while Windows is red.
+Each Unix wave passed237 narrow,819 affected,726 library and181 independent
+reference tests, plus strict Clippy, formatting,1501-entry audit,496 fixtures
+and contract/debt gates. No full U1 readiness is implied.
+
+Windows final2 finished01:46:15UTC with15 failures confined to the existing
+`migration_offline_run_spec`; all are preflight memory refusals, before their
+intended migration milestones. The corrected authority inventory passes.
+Read-only resource evidence at01:49:55 shows1,653,989,376bytes available RAM;
+WebView PID10992 holds11,354,865,664bytes and its parent PID10452 another
+1,035,292,672bytes. Their owning application is `xenocept.exe` PID9716, not an
+AeorDB qualification process. Its application/parent identities are retained
+in `memory-pressure.environment.json`. No unrelated process was stopped.
+Owner approval to close that application was requested; alternatively the
+owner can free memory. Preserve this run and perform an isolated failing-target
+rerun, then affected/remaining Windows gates on the unchanged final2 source
+once memory is available. Do not lower admission bounds, reset the VM, or
+claim the observation milestone green before that qualification succeeds.
+
+Owner approved closing Xenocept and necessary changes to the development-only
+VM, provided the desktop host retains adequate resources. At02:48:54UTC the
+exact Xenocept application tree was terminated after normal window-close was
+unavailable. No VM configuration or files changed. Resumed qualification
+PID6296 uses the unchanged final2 ten-input snapshot and a new evidence
+directory, `u1-semantic-observation-windows-final2-resumed-evidence`. It first
+reruns the16-test failing migration target in isolation, then repeats narrow
+and all40 affected targets before the remaining library/static/reference/format
+gates. Each stage requires at least4GiB available RAM and records memory samples;
+the8GB disk floor, one Cargo job and deadlines remain. Original failures stay
+immutable; completion is still pending this resumed qualification.
+
+The isolated migration target passed all16 tests02:53:33UTC after memory
+recovery, with the identical previously failing executable SHA256. Available
+RAM began at14,237,708,288bytes and never sampled below14,179,196,928bytes.
+The narrow suite then passed249 tests02:53:43UTC; the broader gates continue.
+This confirms environmental memory contention for the original preflight
+refusals without changing source, test assertions or admission policy.
+
+**Observation qualification complete, September17.** The resumed Windows driver
+finished03:09:42UTC with all eight gates passing:16 isolated migration tests,
+249 narrow tests,814 affected tests across40targets,741 library tests, strict
+workspace Clippy,181 independent reference tests,496 independent fixtures and
+formatting of all379 Cargo target roots. The Windows environment was sealed
+03:13:17UTC, then all raw receipts/source and executable digests were copied
+locally. Sampled free RAM stayed at least10,958,225,408bytes and free disk at
+least10,483,654,656bytes; no admission floor or test assertion was relaxed.
+
+The strict verifier passed and wrote the immutable
+[observation proof](../evidence/user-facing-v4-u1-semantic-observation-proof-20260917.json),
+binding all ten final inputs, Linux/macOS/Windows results, the original failing
+tests and every qualification failure/recovery. It independently checks that
+the formerly failing Windows migration executable is byte-identical to its
+successful isolated rerun. The native operation's thirteen tests pass on all
+three platforms. Final diff review confirms one existing root/header/KV owner,
+read-only observation, retained8,978,720-byte task reservation and unchanged
+production publication refusals/capability advertisement. Borrowed outputs
+are observations only, not GC, resume or activation permission. This finishes
+this coherent U1 prerequisite, not full U1 or the user-facing v4 refactor.
+
+Resource-fixture relocation finished01:36:42UTC: all four complete directories
+and their logs matched before/after hashes, with symlinks at the original paths.
+Home/Data free space afterward was75,408,551,936/327,227,109,376bytes. No file
+contents were deleted. This is retained development evidence only.
+
+Next-unit read-only traversal inventory: `read_view_native::scan_files` starts
+its DFS at the requested scope for every page, discarding rows until it sees
+the resume path. `query_native_source` has the only production call site and
+repeats that operation for its full authoritative field partition. The existing
+maintenance scanner in `index_native_source` already implements full-path
+ordering (including directory names that prefix punctuation-bearing siblings)
+and B-tree lower-bound/successor seeks. Its sole production construction is
+`index_runtime_installation`; its native revision adapter has additional parser
+consumers. Reuse must not move the whole revision adapter unnecessarily.
+
+Existing `index_native_scan_spec` protects sorted mixed-tree pagination and a
+late600-file B-tree seek with128work steps. The selected-root reader lacks that
+late-page proof; a separate cached draft now targets the last pages of two
+canonical40-entry leaves at both hash widths with64work steps. It is NOT yet
+executed or included in this observation's frozen source. Preserve selected
+scope authorization, exact captured root/pins, missing-resume errors, memory
+leases and fail-closed incomplete scans. Also preserve the explicit v0 flat
+directory sorting adapter: v4's canonical reader must not gain that permissive
+legacy behavior. This inventory does not yet settle the shared traversal API,
+prove complete semantic-source capture, or authorize task publication.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.

@@ -192,6 +192,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let migration_root_map_owner_path = source_root.join("engine/v4/migration_root_map_owner.rs");
   let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
   let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
+  let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -226,6 +227,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &migration_root_map_owner_path,
       &read_view_native_path,
       &semantic_catalog_native_path,
+      &semantic_mutation_observation_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
@@ -250,6 +252,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &migration_root_map_owner_path,
     &read_view_native_path,
     &semantic_catalog_native_path,
+    &semantic_mutation_observation_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
     for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {
@@ -282,6 +285,21 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       for forbidden in ["StorageEngine", "DiskKVStore", "FirstAuthorityPublicationRequestV1", "publish_successor_authority", ".publish("] {
         assert!(!compact.contains(forbidden), "semantic staging gained authority or physical ownership: {forbidden}");
       }
+    } else if owner_path == &semantic_mutation_observation_path {
+      // This private child implements a read-only operation on the existing
+      // owner; inventory it without allowing another writer or authority.
+      let compact: String = owner_source.split_whitespace().collect();
+      let calls: Vec<_> = compact.split("self.").skip(1).map(|call| call.split('(').next().unwrap()).collect();
+      let owner_calls: Vec<_> = calls.into_iter().filter(|call| !call.contains('.') && !call.contains(':')).collect();
+      for required in ["selected_semantic_authority_guard", "observe", "lock_kv"] {
+        assert!(owner_calls.contains(&required), "task observation lost its shared native boundary: {required}");
+      }
+      for forbidden in ["StorageEngine", "DiskKVStore", "publish_", "write_file", "sync_file", "implCloneforSemanticMutationObservationV1"]
+      {
+        assert!(!compact.contains(forbidden), "read-only task observation gained authority or detached ownership: {forbidden}");
+      }
+      assert!(compact.contains("_memory:MemoryReservation"));
+      assert!(compact.contains("decode_semantic_mutation_selection("));
     } else {
       assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");
     }

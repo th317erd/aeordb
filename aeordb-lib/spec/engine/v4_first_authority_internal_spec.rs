@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "semantic_mutation_observation_spec.rs"]
+mod semantic_mutation_observation_spec;
+
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

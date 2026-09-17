@@ -305,7 +305,9 @@ lookups. Reuse existing native file/entity validation instead of a mock-only
 store; fault tests may supplement that actual file path.
 
 Before coding, complete the exact helper/error/fixture consumer inventory and
-freeze the bounded request/result types. That entry check remains outstanding.
+freeze the bounded request/result types. The follow-up inventory below supplies
+that entry check for this observation only; capture/retention ownership remains
+outstanding.
 The September17 helper audit found an additional prerequisite: shared
 `select_system_control_pair` currently classifies **every** decode error as a
 bad slot, although the new semantic task identity decoder can fail allocation.
@@ -360,7 +362,12 @@ task/generation reads retain prior outputs. Reserve a conservative envelope of
 `8 * (largest_control_encoded_cap + 64KiB) + 64KiB` before header/body loading,
 under `MemoryOwner::Task`, and retain that charge with the result. Prove measured
 peak ownership fits this bound. Existing KV cache/page allocations retain their
-existing coordinator, not a second task charge. Cancellation is checked before
+existing owner, not a second task charge. The inspected native fixture uses the
+KV bootstrap coordinator, separately from the request's task coordinator;
+configured bounded pages can later attach the runtime coordinator through
+`DiskKVStore::activate_bounded_pages`. This slice does not prove that the whole
+runtime shares one coordinator: that binding remains U2's obligation.
+Cancellation is checked before
 admission, after acquiring the guard and between bounded reads.
 
 The transitive audit also found small infallible path/header/hash allocations,
@@ -382,3 +389,20 @@ all existing binding failures, physical/history differences without ownership,
 cancellation, budget refusal/retry and reservation lifetime. A controlled writer
 attempt during observation must remain blocked until the complete observation
 has been assembled. No production publisher refusal is relaxed for fixtures.
+
+The implementation is a private child of `first_authority`, with public types
+reexported by that existing owner. Its source must be included in
+`v4_first_authority_spec`'s exact reviewed-owner inventory, with additional
+read-only/no-publication checks. The broader native Mac gate exposed the missing
+inventory entry after the thirteen new native cases passed. Keep that failure
+and rerun all platform gates on the corrected test inventory; this is not an
+exception allowing another physical writer.
+
+September17 qualification is complete in the source-bound
+[observation proof](evidence/user-facing-v4-u1-semantic-observation-proof-20260917.json).
+All thirteen native observation cases pass on Linux, macOS and Windows, with
+affected suites, library, static and independent-reference gates. The Windows
+memory-pressure failure and identical-executable isolated recovery are retained.
+The operation satisfies this read-only slice; complete source enumeration,
+durable closure retention, checkpoint publication/resume and atomic activation
+remain separate required runtime work.

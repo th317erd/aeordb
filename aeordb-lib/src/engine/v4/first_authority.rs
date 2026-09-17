@@ -1,5 +1,12 @@
 //! Atomic first-authority publication for a disconnected v4 database.
 
+#[path = "semantic_mutation_observation.rs"]
+mod semantic_mutation_observation;
+pub use semantic_mutation_observation::{
+  SemanticMutationObservationDispositionV1, SemanticMutationObservationErrorV1, SemanticMutationObservationRequestV1,
+  SemanticMutationObservationV1,
+};
+
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
