@@ -26,6 +26,15 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,15:48UTC: ASCM/ASCN byte writers are qualified on Linux, macOS and
+Windows; see the
+[immutable proof](../evidence/user-facing-v4-u1-source-capture-writers-proof-20260917.json).
+Fourteen new independent-byte/allocation regressions passed on every platform.
+Shared framing, existing fixtures, publication refusals and capability masks
+are unchanged. Next is the coupled retained-source/native catalog reader unit,
+whose first three behavioral REDs are preserved below. Durable publication,
+complete task/GC closure and activation are still owed.
+
 September17,14:49UTC: native protected-source reads are qualified on Linux,
 macOS and Windows; see the
 [immutable proof](../evidence/user-facing-v4-u1-native-protected-source-proof-20260917.json).
@@ -80,6 +89,99 @@ disabled, and U2–U7 are still required. No production deployment, service acti
 or retained FS-Server1 database mutation is authorized by these test results.
 
 ## Active next unit: semantic-mutation durable task contract
+
+### Current continuation: capture byte writers — entry71b30f49
+
+The captured-source reader landed/pushed71b30f49 with all three native gates
+and sealed local receipts. Upstream matches. Isolated native sources advanced
+only after scoped preservation; the separate RED specimen remains unchanged.
+The source-capture contract's byte-writer perimeter applies: one shared framing
+owner, existing borrowed inputs, immutable sequence1, bounded preallocation
+validation, no publisher/capability or default change. Direct owner, no agents.
+
+Actual RED1 control4pass/4fail and resource0pass/1fail, then RED2 resource
+0pass/3fail, are preserved and strictly verified with exact archives/binaries.
+The refusing scaffold produced every positive behavioral failure. Install those
+eight functional and three allocation tests before replacing the scaffold.
+Current source/control callers have been searched: common framing/body dispatch,
+task companion binding, native immutable publication refusal, both ControlStore
+adapters, reference and capability registry. No runtime producer calls the new
+byte APIs. Keep those consumers and all native libraries/static/reference gates;
+the complete runtime/restart/GC/activation proof remains following U1 work.
+
+Candidate1 eight-input packetb02476ada6298f17ae796ba13c963056b007dbfbc51555f676bf60eb5aa14c43
+passed130control/resource tests at15:04:34UTC. All seven raw artifacts and
+same-host binary hashes were copied locally before the next build. Runtime
+implementation remains unchanged since that candidate: three encoders reuse
+the common one-output framing/readback owner and existing capture views.
+
+Three additional regressions now cover exact1MiB versus next-byte node capacity,
+late internal-edge/identity/separator failures, and malformed requests refusing
+before output allocation. Candidate2 packetf2ac47c25876bb5e36430182d69c07de2412c52d32bc8b88b6ca0158842be074
+passed133control/resource plus4ownership tests, then stopped at formatting:
+direct rustfmt's2024 style differed from the Cargo target's expected assertion
+layout. All21stage artifacts and the driver failure are preserved locally.
+No behavior or assertion was weakened. Cargo formatting produced candidate3
+packet9a856683eea60b268308dcde993d20bbb675a93b4cca09d41830a376c49678d7,
+changing only that test's formatting. Preflight2 reran133+4 tests, formatting
+and strict workspace Clippy successfully by15:12:49UTC; audit refresh follows.
+
+Final affected inventory is39integration targets, separate from five narrow
+targets and full native libraries: control/admission/header/SystemFamily,
+both ControlStore adapters, emergency recovery/configuration/index controls,
+read-view/transfer/root authority, migration controls/owners/reconciliation/
+rehearsal, GC lineage/model, architecture, child01entry/file/backup/system/
+restart floors, reader hardening and native platform probes. Shared framing,
+registry/support masks, GC algorithms and ordinary service code are unchanged.
+The earlier118-target native-reader wave is immutable prior evidence, not
+reused as current-source results. Full final-runtime gates remain mandatory.
+
+Preflight2 completed15:13:21UTC, all gates PASS; audit remains byte-identical
+at1501reviewed occurrences. All raw receipts were copied locally. Final1 began
+on all three platforms at15:18 with nine frozen inputs, manifest SHA256
+63b5aee000e8964f7d17c8ad6d60deded1c53a9ad41d362a7d2152f536391b47.
+Linux invocationc7db5a8c164a491f8e92351474e82635/MainPID1757367;
+Mac driver45152; Windows driver1524. Resource guards remain unchanged.
+No candidate code may change while these gates run. The strict verifier already
+validates the full RED/candidate/preflight/audit history and frozen packet, then
+correctly refuses missing final results. No final proof or readiness claim yet.
+
+Final1 Linux completed all nine gates15:23:56UTC, sealed15:25:20; macOS
+completed all nine15:28:55, sealed15:30:01. All raw evidence is local, and the
+strict verifier passes both Unix histories/final candidates before correctly
+stopping for the still-running Windows driver. Unix counts226narrow,
+780affected across39targets,782library,185reference and502fixtures.
+The current byte-writer runtime/tests remain frozen and uncommitted.
+
+Productive parallel test preparation uses a different detached desktop worktree,
+`source-u1-native-source-catalog`, at71b30f49 with a refusing retained-read
+scaffold only. The active native candidates are unchanged. Three initial
+retained-revision tests failed behaviorally at15:33:04UTC (0pass/3fail,
+782filtered), each identifying the explicit unimplemented path. Five-input
+manifest SHAa4f429ccbc00f007243213aef6964e044df86061162ec897dd531518a1f80f75.
+All seven raw artifacts and the executed binary hash are local; no retained
+read behavior or native catalog/publisher implementation has started.
+
+Final1 Windows completed all seven gates15:46:03UTC, sealed15:48:19; all raw
+evidence is local before advancing any build. Windows226narrow/775affected/
+797library/185reference/502fixtures and all379Cargo target formatting roots
+passed; its five fewer affected cases are existing Unix-only spill/root-map
+tests, not skipped failures. Unix counts above are unchanged. The strict
+verifier passed, generated the create-new immutable proof, then passed again
+against that proof. Source/runtime packet remained unchanged. Fetch at15:48
+confirmed no upstream drift.
+
+`test_check` before landing: independently expected framing/CRC, exact1MiB
+capacity, malformed node rejection and output/identity allocation refusal/retry
+are green with the actual all-platform receipts, not inferred from roundtrips.
+`thorough_review`: full six-file Rust diff and all consumers were searched again;
+there are no runtime callers of these byte APIs, no persistent/publication edits,
+and no support-mask change. Width/copy arithmetic is bounded before node output;
+fixed-size manifests defer scalar checks to the sole shared decoder. Error
+causes and absence versus zero remain explicit. Audit stays1501byte-identical.
+No service E2E is claimed for a byte-only API; complete U1 and U2–U7 remain open.
+Land this nine-file revert unit, preserve remote overlays and advance isolated
+sources, then implement the next read-only unit without stopping at this milestone.
 
 ### Current continuation: captured protected inputs — entry3589b88a
 

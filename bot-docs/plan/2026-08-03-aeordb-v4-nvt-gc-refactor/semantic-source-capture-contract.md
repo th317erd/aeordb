@@ -1,6 +1,6 @@
 # Durable protected semantic sources — U1 reader contract
 
-Status: structural readers qualified on Linux, macOS and Windows, September17.
+Status: structural readers and byte-only writers qualified on Linux, macOS and Windows, September17.
 The [immutable reader proof](evidence/user-facing-v4-u1-semantic-source-capture-readers-proof-20260917.json)
 does not qualify source-copy publication, complete closure, restart or activation.
 Writer enablement remains refused. Continue the
@@ -580,3 +580,148 @@ platform stages remain outer watchdogs; deterministic codec cases require no
 network or blocking callbacks. Run narrow control/resource targets, all framing
 consumers, libraries, architecture/static/reference and all native platforms
 before landing. No production or VM reconfiguration is required by this slice.
+
+Qualified September17,15:48UTC on Linux, macOS and native Windows in the
+[immutable byte-writer proof](evidence/user-facing-v4-u1-source-capture-writers-proof-20260917.json).
+All fourteen new functional/resource regressions and the final native/static/
+reference gates passed. No physical source-copy publication, capability
+advertisement, durable task retention or default-format change was enabled.
+
+### Following native catalog observation — read-only design review
+
+September17, during frozen byte-writer qualification. This records the next
+coupled reader integration, not an enabled publisher or completed task closure.
+Executable behavior begins after the byte-writer landing. Independent tests may
+be drafted separately; no changes to the frozen candidate are permitted.
+A refusing test scaffold may execute in a separate disposable checkout after
+the preceding Linux evidence is sealed and copied; it enables no read behavior
+or publisher and cannot replace the active platform candidate.
+
+`map_territory` — what changes and who owns it? Extend the existing captured
+inventory with retained `filec:` source reads and native ASCM/ASCN catalog
+observation. Native sources still use `semantic_source_native` and the sole
+FileRecord/chunk/whole-entity decoders. Canonical controls still use
+`load_immutable_system_control_file` and its shared physical/key/body checks.
+A private catalog child of the same inventory may project validated ASCN into
+the existing accounted BTreeNode/ChildEntry view for `namespace_seek`.
+That projection is temporary, never serialized as a DirectoryIndex or admitted
+as an ordinary namespace. Absolute catalog paths use the direct shared seek,
+not directory-component suffix ordering. Reuse shared inherited child bounds.
+
+What other paths consume this? Existing current-path source reads, known-task
+observation and captured inventory must keep their prior semantics and tests.
+The inspected retained-read gap is real: the only current source method computes
+`file:` from the path. There is no retained `filec:` read entry. Factor its
+record/chunk body validation once; never duplicate its parser or call the live
+current-path reader as a fallback. Both APIs preserve original v0/v1 metadata,
+flags and admitted compression. A supplied retained revision must equal the
+selected-H digest of the exact encoded FileRecord and name the expected path.
+Missing retained records/chunks are errors, not explicit absent catalog rows.
+
+Bounds belong to one complete operation, not each recursive/source call.
+Share captured lookup and cumulative physical read/work admission across all
+nodes and sources. Retained node frames, projections, bound strings, raw source
+bodies and simultaneous base/request reads require separate coordinator charges.
+The source reader's existing chunk scratch and operational body/entity caps
+remain intact. The shared seek's inherited owned clones remain accounted;
+do not claim universal allocator recovery from a fallible outer reservation.
+
+Paired catalog validation needs two bounded ordered cursors. Retain ancestors
+and the current leaf, visit each node once, and compare paths as rows emerge.
+No whole-world map/set, repeated root seek per row, or declared-count allocation.
+Check inherited half-open ranges, ordering, depth, cycles, actual node/path
+counts and paired path equality. Point lookup remains a bounded root-to-leaf
+operation and is explicitly weaker than complete paired traversal. Preserve
+three outcomes: unlisted path, listed explicit absence, and listed present
+immutable source. A missing dependency never becomes either absence outcome.
+
+Read ASCM at the requested task/checkpoint identity and bind the complete ASMC
+envelope through the existing binding decoder. This diagnostic observation does
+not select the current ASMT, acquire ownership, or validate all task roots.
+Stored capability declarations and database identity must match the known
+control requirements. Do not reject historical retained bytes merely because
+their captured physical ID, fence or semantic generation differs from today's:
+the existing observer deliberately preserves those bytes for retention/takeover
+inspection. Resume and activation must perform their separate current-owner checks.
+
+Actual paired path/count validation is not proof that the compiler captured
+every relevant input. The source fingerprint also includes namespace-resident
+configuration, so protected-only traversal cannot recompute it partially and
+claim equality. Full base/request union capture, namespace closure, compiled
+objects, native publication, durable task retention/recovery and activation
+remain following coupled obligations. No new read result grants those permits.
+
+`test_protocol` — what is already tested? Structural ASCM/ASCN binding, captured
+raw current sources, task selection/inventory, native directory ordering and
+shared seek bounds have independent proofs. None proves retained revision lookup
+or the complete native protected-source pair. Hypothesis: exact old inputs remain
+readable by content identity after replacement/reopen, with linear complete
+traversal and no latest-state substitution.
+
+Three initial falsifiers, before implementation: given an archived v0/v1 source
+and a newer current path, retained lookup returns the exact old record/body;
+given a same-path current file but missing archived revision, it refuses;
+given differently shaped base/request catalogs with equal paths, paired traversal
+visits those paths in order, while a missing/different path refuses completion.
+Use actual bounded native files and independent expected revision/body values.
+
+How can tests give false confidence? A mocked current alias, matching declared
+counts, re-encoding the expected FileRecord, or a self-generated malformed graph
+with an already-invalid hash would not prove the intended edge. Separate actual
+native identity/corruption tests from defensive graph-model cycle/range tests.
+Cover all five hashes, empty/absent/missing/duplicate rows, malformed framing,
+database/identity mismatch, depth/work/read limits, per-node read counts, allocator
+and memory pressure, late cancellation/visitor failure, nested calls and retry.
+
+Unit/property tests compare seeks and ordered paired rows against an independent
+small ordered map. Native integration replaces paths and reopens real files;
+resource tests measure charges and releases at callbacks, including the final
+callback. Service E2E/GC/resume permissions cannot be claimed by these reader
+tests. Keep deterministic fixtures small; every process has the established
+30/50/90-minute platform watchdog, with bounded coordination waits in race tests.
+Run actual RED first, then retained/source/catalog tests, all affected native
+consumers and final platform/static/reference gates. Review the finalized API
+and exact consumer/target inventory before writing its production behavior.
+
+#### Reader API and budget refinement
+
+The same captured inventory owns three operations: retained source read by
+original path plus revision; point lookup by task/checkpoint, base-or-requested
+catalog and path; and paired ordered visitation by task/checkpoint. Point
+lookup returns a typed unlisted/explicit-absence/present result. Present results
+borrow the capture and retain source accounting. The paired callback receives
+one path and borrowed optional base/requested sources; returning false yields an
+explicit incomplete summary, never closure success. Successful full traversal
+reports actual paths and each catalog's actual node count. It additionally
+requires the root index and parser paths; this is still not compiler-union proof.
+
+Catalog bounds name maximum depth, total work, total entity-read bytes and the
+existing per-source body/chunk limits. Depth is operationally capped at256, not
+a persisted-format limit. Each operation creates one shared lookup/budget for
+ASCM, ASMC, all ASCN nodes and retained FileRecords/chunks. Work charges physical
+entity reads, loaded catalog nodes and yielded rows; byte accounting measures
+entity reads, not underlying KV-page traffic. No nested per-source budget reset.
+Standalone current/retained source methods keep their own existing bounded read
+operation. Factor their common implementation over the existing lookup trait.
+
+Node loading reserves shared-control decode scratch, then retains separately
+charged bounded BTreeNode projections. Point lookup uses the shared direct seek;
+paired cursors retain one internal ancestor per level plus one leaf each and
+reuse shared child bounds. No catalog-sized map, repeated root seek or claim
+that inherited owned-clone allocation is universally recoverable is allowed.
+Capability25 and27 declarations are required for native capture controls but
+remain unadvertised by ordinary binaries. Missing requested ASCM/ASMC is an
+error; stale captured physical/fence/generation fields remain diagnostic data.
+
+`test_check`: the three retained-source RED failures are real and preserved.
+Add a paired-catalog falsifier against a refusing scaffold before implementing
+catalog behavior. Independently expect ordered paths and old/new bodies from
+differently shaped native trees; then mismatch the last path or declared count.
+Property cases compare point and paired traversal with an independent small
+ordered map. Resource cases exhaust cumulative reads/work across individually
+admissible sources, and check final-callback cancellation, visitor failure,
+nested visits, retained charges and retries. Existing native source, inventory,
+observation and selected-directory tests remain regression gates. The native
+loader/compiler/control/migration/GC consumer inventory and architecture owner
+test must be refreshed together before final platform qualification. The same
+bounded native runners apply; no service/network dependency enters these tests.

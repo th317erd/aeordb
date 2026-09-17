@@ -1,4 +1,6 @@
 //! Independent capture bodies, with no production encoder or identity helper.
+#[path = "semantic_source_writer_spec.rs"]
+mod writers;
 use super::{ALGORITHMS, checkpoint_body, count, envelope, word};
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};

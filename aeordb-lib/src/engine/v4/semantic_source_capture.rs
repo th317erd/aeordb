@@ -1,4 +1,8 @@
 //! Structural capture records only; these views are not resume or retention permits.
+#[path = "semantic_source_writer.rs"]
+mod writer;
+pub use writer::{encode_semantic_source_capture_v1, encode_semantic_source_internal_v1, encode_semantic_source_leaf_v1};
+
 use super::hash::try_digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass, fixed_array_at};
 use super::scope::validate_canonical_absolute_path;

@@ -1,3 +1,5 @@
+#[path = "semantic_source_writer_resource_spec.rs"]
+mod writers;
 use super::{fixture, measure, measure_nth};
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::semantic_source_capture::{
