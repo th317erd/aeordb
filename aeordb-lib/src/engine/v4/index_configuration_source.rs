@@ -21,6 +21,16 @@ pub(super) struct ConfigurationSource {
   pub rows: Vec<FieldSource>,
 }
 
+impl ConfigurationSource {
+  pub(super) fn used_parser_alias(&self) -> Option<&str> {
+    if self.rows.iter().any(|row| !matches!(row.source, SelectorSource::Metadata)) {
+      self.parser.as_deref()
+    } else {
+      None
+    }
+  }
+}
+
 pub(super) struct FieldSource {
   pub name: String,
   pub source: SelectorSource,

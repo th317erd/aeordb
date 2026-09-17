@@ -104,13 +104,7 @@ pub fn compile_index_configuration_v1(
   // Owner normalization also holds a growable vector of borrowed path segments,
   // a NUL-stripped copy and joined output; charge32x its raw bytes before work.
   // Generic serde/BTreeMap allocations are not claimed universally fallible.
-  let workspace = request
-    .source
-    .len()
-    .checked_mul(768)
-    .and_then(|bytes| bytes.checked_add(request.owner_path.len().checked_mul(32)?))
-    .and_then(|bytes| bytes.checked_add(FIXED_WORKSPACE))
-    .ok_or_else(|| resource("source workspace overflow"))?;
+  let workspace = configuration_source_workspace_bytes(request.source.len(), request.owner_path.len())?;
   if workspace > request.maximum_workspace_bytes {
     return Err(resource("source workspace exceeds its operational limit"));
   }
@@ -133,11 +127,8 @@ pub fn compile_index_configuration_v1(
   // Sorted canonical names allow one compact output per field, without a
   // whole-world catalog load or quadratic search through earlier field rows.
   source.rows.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
-  let parser = if source.rows.iter().any(|row| !matches!(row.source, SelectorSource::Metadata)) {
-    source.parser.as_deref().map(|alias| snapshot.resolve_parser_alias(alias)?.ok_or_else(|| unavailable(alias))).transpose()?
-  } else {
-    None
-  };
+  let parser =
+    source.used_parser_alias().map(|alias| snapshot.resolve_parser_alias(alias)?.ok_or_else(|| unavailable(alias))).transpose()?;
   check(&reservation, is_cancelled)?;
   let mut mappers: BTreeMap<&str, DependencyRecordV1<'_>> = BTreeMap::new();
   let mut fields: Vec<CompiledConfigurationFieldV1> = allocate(source.rows.len())?;
@@ -379,6 +370,14 @@ fn remaining_workspace(reservation: &MemoryReservation, maximum: usize, transien
   let used = reservation.bytes().checked_add(transient_bytes).ok_or_else(|| resource("compiler workspace accounting overflow"))?;
   let used = usize::try_from(used).map_err(|error| resource(error.to_string()))?;
   maximum.checked_sub(used).ok_or_else(|| resource("overlapping compiler workspaces exceed the operational limit"))
+}
+
+pub(super) fn configuration_source_workspace_bytes(source_length: usize, owner_path_length: usize) -> Result<usize> {
+  source_length
+    .checked_mul(768)
+    .and_then(|bytes| bytes.checked_add(owner_path_length.checked_mul(32)?))
+    .and_then(|bytes| bytes.checked_add(FIXED_WORKSPACE))
+    .ok_or_else(|| resource("source workspace overflow"))
 }
 
 pub(super) fn allocate<T>(count: usize) -> Result<Vec<T>> {

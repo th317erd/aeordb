@@ -282,6 +282,39 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   ] {
     assert!(!assembly.contains(forbidden), "source catalog assembly gained another owner or unchecked collection: {forbidden}");
   }
+  let alias_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_aliases.rs")).unwrap();
+  let aliases: String = alias_source.split_whitespace().collect();
+  for required in [
+    "parse_registry_source(request.source)?",
+    "index_configuration_source::parse(bytes)?",
+    "source.used_parser_alias()",
+    "registry_source_workspace_bytes(source_length)?",
+    "configuration_source_workspace_bytes(source_length,0)?",
+    "maximum_alias_occurrences",
+    "maximum_source_bytes",
+    "MemoryReservation",
+    "visitor(role,alias)?;check(&reservation,is_cancelled)?;",
+  ] {
+    assert!(aliases.contains(required), "source alias discovery lost shared schema/admission: {required}");
+  }
+  for forbidden in [
+    "serde_json",
+    "Deserialize",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "OpenOptions",
+    "File::",
+    "publish_",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!aliases.contains(forbidden), "source alias discovery gained another parser/owner: {forbidden}");
+  }
   let source_staging_path = source_root.join("engine/v4/semantic_source_staging.rs");
   let source_staging = std::fs::read_to_string(&source_staging_path).unwrap();
   let staging: String = source_staging.split_whitespace().collect();

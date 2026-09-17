@@ -1038,3 +1038,32 @@ Use actual bounded native files, not a mocked mutable alias lookup. These tests
 perform no network calls or module execution; native stage deadlines and small
 fixtures bound them. Later service/plugin lifecycle and durable restart/GC
 tests remain required rather than being inferred from this local read edge.
+
+September17 candidate refinement: the native pair reserves32KiB for at most two
+bounded dependency records, short canonical paths and metadata, plus the existing
+identity inspector's16KiB temporary workspace. Thus its workspace admission is
+48KiB; source bodies/physical decoding remain separately charged through the
+existing reader. The module cap must be1..64MiB even for absent aliases. Chunk
+ceilings are per source, while the physical read-byte budget is cumulative across
+both records and every referenced chunk. An independently summed locator test
+must pass at the exact total and refuse one byte below it.
+
+The observed three REDs are retained. Candidate1 adds six native tests covering
+all admission bounds/Unicode names, malformed or missing identity/dependencies,
+exact paired read/workspace/body limits, final cancellation/pressure for both
+presence and absence, actual path/body/record allocation failures and retry, and
+identity versus invalid core bytecode. Each uses an actual disposable native file
+and compares database bytes before/after read-only work. Existing protected-source
+tests cover physical corruption, compressed chunks and captured-reader bounds;
+artifact tests retain APAL/APWM framing and metadata checks. Those component
+passes do not replace the candidate's actual paired integration tests.
+
+Test-protocol review: unit tests are useful for pure framing, but native captured
+integration is the decisive proof of this boundary. Independent role bytes and
+physical locator sums avoid writer/reader self-agreement. Existing all-hash
+compiler parity and malformed-fixture suites supply bounded property coverage;
+manual inspection alone is insufficient. No network, stdin or external service
+exists in these cases; small fixtures should finish in seconds under the native
+stage deadline. Full service E2E remains owed at runtime integration, rather than
+fabricated here. Candidate files and RED evidence are isolated from the frozen
+alias-discovery qualification; no production or retained database is involved.

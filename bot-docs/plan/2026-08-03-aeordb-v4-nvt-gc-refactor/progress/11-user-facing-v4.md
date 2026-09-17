@@ -26,6 +26,64 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,21:03UTC: shared-schema alias discovery is qualified on Linux,
+macOS and native Windows. Windows completed all seven stages20:55:33UTC;
+its evidence was sealed21:00:47UTC and copied locally. The final verifier
+generated and independently rechecked the
+[immutable proof](../evidence/user-facing-v4-u1-source-alias-discovery-proof-20260917.json).
+All platforms passed253narrow tests,118affected targets and the complete native
+libraries (823Unix/838Windows), plus applicable architecture, formatting, strict
+Clippy, reference and audit/debt gates. Twelve new tests preserve compiler
+behavior and prove bounded provisional discovery; no complete-union or task
+authority is implied.
+
+The isolated native plugin-pair preflight completed20:52UTC: architecture4,
+formatting, strict Clippy and all1,501reviewed audit identities passed. All29raw
+artifacts are local and the strict preflight verifier passes. Its runtime remains
+the candidate2 implementation, with candidate3's five additional tests and
+candidate4's architecture checks. Integrate only after landing alias discovery,
+then qualify the exact native packet on all three hosts. Ordinary creation is
+stillv3; the complete captured-source union, durable tasks andU2–U7 remain owed.
+
+September17,20:47UTC: Windows alias final1 passed all118affected targets at
+20:45:10UTC and is running its library stage. Unix evidence remains sealed/local.
+The native plugin-pair candidate2 passed all nine focused tests20:37:10UTC;
+candidate3 adds five tests without changing runtime and passed all1,072tests
+(837library plus235across seven targets)20:45:37UTC. Both raw sets are local and
+strictly verified. Candidate3 manifest:
+`5adea5565b44c4bda6b271edeed425bd1231427b6876c3d05c5beb174b7646fc`.
+Candidate4 adds architecture assertions and excludes the audit file for a reviewed
+location refresh;32-input manifest:
+`5b481c1ce6a110f0ba78ab7b4ccf52b4e4b3a5663b279b370cd097b1de40019f`.
+Its architecture/format/Clippy/audit preflight is starting. This native unit remains
+isolated; main alias qualification and ordinary-format behavior are unchanged.
+
+September17,20:36UTC: alias final1 Linux completed all nine stages20:31:54UTC,
+macOS all nine20:29:20UTC. Both evidence sets are sealed/local. The strict final
+verifier passes history, frozen input, both Unix execution/resource bindings and
+correctly refuses the still-missing Windows terminal receipt. Windows continues
+the migration portion of its118-target affected stage. No final proof or commit.
+
+The next native plugin-pair candidate2 started in a separate desktop worktree
+after preserving all Linux raw artifacts. Its32-input manifest is
+`45f09c0629cb5c2f93de65b3eb40816a212625e18f514081db79a52f85bec746`.
+Candidate1 was archived/transferred but never launched: prelaunch review caught
+standalone rustfmt using default settings. Candidate2 is mechanically identical
+under the repository's explicit formatting configuration; the verifier checks
+that transformation and preserves the three original RED test bodies exactly.
+Nine candidate tests are pending. Five additional boundary tests remain isolated
+drafts, not passing evidence. Main qualification sources are unchanged.
+
+September17,20:15UTC: catalog assembly landed as `c1145450`. The following
+shared-schema alias discovery is integrated as twelve Rust inputs, frozen with
+audit/locks in a15-input final packet (`780d479344eaed9fb2f0f734b3a557d4fff0fd5b595982b36a83bb78ee8e224b`).
+Linux, macOS and Windows final qualification started20:14UTC after verifying
+all three predecessor snapshots and preserving their local overlays. Runners
+agree on118affected targets. Results are pending; this is not final qualification.
+The following native captured alias/module pair has three observed behavioral
+REDs (19:59:38UTC), all raw results local and strictly checked; no implementation
+has started for that pair. Ordinary creation and task authority remain unchanged.
+
 September17,20:04UTC: paired ordered source-catalog assembly is qualified on
 Linux, macOS and native Windows; see its
 [immutable proof](../evidence/user-facing-v4-u1-source-catalog-build-proof-20260917.json).

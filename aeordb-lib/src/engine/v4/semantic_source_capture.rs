@@ -1,4 +1,7 @@
 //! Structural capture records only; these views are not resume or retention permits.
+#[path = "semantic_source_aliases.rs"]
+mod aliases;
+pub use aliases::{visit_semantic_source_aliases_v1, SemanticSourceAliasKindV1, SemanticSourceAliasRequestV1, SemanticSourceAliasRoleV1};
 #[path = "semantic_source_catalog_build.rs"]
 mod build;
 pub use build::{

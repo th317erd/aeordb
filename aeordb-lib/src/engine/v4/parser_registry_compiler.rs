@@ -101,40 +101,19 @@ pub fn compile_parser_registry_v1(
   // Decoding scratch scales only with the admitted source, never the database.
   // Fixed allowance covers 512 aliases + maximum-size dependency records,
   // bounded maps/metadata, canonical output and its enclosing semantic object.
-  let workspace = source_length
-    .checked_mul(4)
-    .and_then(|bytes| bytes.checked_add(FIXED_WORKSPACE))
-    .ok_or_else(|| resource("registry workspace overflow"))?;
+  let workspace = registry_source_workspace_bytes(source_length)?;
   if workspace > request.maximum_workspace_bytes {
     return Err(resource("registry workspace exceeds the caller's limit"));
   }
   let reservation = memory
     .reserve(MemoryOwner::Task, u64::try_from(workspace).map_err(|error| resource(error.to_string()))?, AdmissionClass::Workload)
     .map_err(|error| resource(error.to_string()))?;
-  let source = match request.source {
-    Some(bytes) => {
-      let source: RegistrySource = serde_json::from_slice(bytes).map_err(|error| {
-        let message = error.to_string();
-        // serde's generic visitor error cannot carry our typed operational
-        // error. Only this visitor emits this prefix; JSON/schema errors do not.
-        if message.starts_with(ALLOCATION_ERROR_PREFIX) {
-          resource(message)
-        } else {
-          invalid(message)
-        }
-      })?;
-      if source.version != 1 {
-        return Err(invalid("corrected registry requires integer $v: 1; legacy maps require the migration adapter"));
-      }
-      source.parsers
-    }
-    None => RegistryEntries(Vec::new()),
-  };
+  let source = parse_registry_source(request.source)?;
   check(&reservation, is_cancelled)?;
   let mut entries = Vec::new();
-  entries.try_reserve_exact(source.0.len()).map_err(|error| resource(error.to_string()))?;
+  entries.try_reserve_exact(source.len()).map_err(|error| resource(error.to_string()))?;
   let mut projection_length = 9usize; // canonical map frame and member count
-  for (essence, alias) in source.0 {
+  for (essence, alias) in source {
     check(&reservation, is_cancelled)?;
     let dependency = snapshot
       .resolve_parser_alias(&alias)?
@@ -165,6 +144,29 @@ pub fn compile_parser_registry_v1(
   let projection = encode_semantic_definition_object(2, &bytes, request.hash_algorithm).map_err(|error| resource(error.to_string()))?;
   check(&reservation, is_cancelled)?;
   Ok(CompiledParserRegistryV1 { entries, projection, _memory: reservation })
+}
+
+pub(super) fn registry_source_workspace_bytes(source_length: usize) -> Result<usize, SemanticCompilationErrorV1> {
+  source_length.checked_mul(4).and_then(|bytes| bytes.checked_add(FIXED_WORKSPACE)).ok_or_else(|| resource("registry workspace overflow"))
+}
+
+// Both consumers admit the source/AST workspace before entering this owner.
+pub(super) fn parse_registry_source(source: Option<&[u8]>) -> Result<Vec<(String, String)>, SemanticCompilationErrorV1> {
+  let Some(bytes) = source else { return Ok(Vec::new()) };
+  let source: RegistrySource = serde_json::from_slice(bytes).map_err(|error| {
+    let message = error.to_string();
+    // serde's generic visitor error cannot carry our typed operational
+    // error. Only this visitor emits this prefix; JSON/schema errors do not.
+    if message.starts_with(ALLOCATION_ERROR_PREFIX) {
+      resource(message)
+    } else {
+      invalid(message)
+    }
+  })?;
+  if source.version != 1 {
+    return Err(invalid("corrected registry requires integer $v: 1; legacy maps require the migration adapter"));
+  }
+  Ok(source.parsers.0)
 }
 
 #[derive(Deserialize)]

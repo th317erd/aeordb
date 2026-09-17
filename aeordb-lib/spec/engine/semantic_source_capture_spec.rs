@@ -1,4 +1,6 @@
 //! Independent capture bodies, with no production encoder or identity helper.
+#[path = "semantic_source_aliases_spec.rs"]
+mod aliases;
 #[path = "semantic_source_catalog_build_spec.rs"]
 mod assembly;
 #[path = "semantic_source_writer_spec.rs"]

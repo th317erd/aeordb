@@ -1,3 +1,5 @@
+#[path = "semantic_source_aliases_resource_spec.rs"]
+mod aliases;
 #[path = "semantic_source_catalog_build_resource_spec.rs"]
 mod assembly;
 #[path = "semantic_source_writer_resource_spec.rs"]
