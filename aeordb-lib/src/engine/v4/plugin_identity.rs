@@ -1,12 +1,38 @@
 //! Structural Round9 metadata only; never deployment or execution authority.
-use super::reader::{FormatError, FormatResult, MalformedInputClass};
 use super::dependency::{is_canonical_dependency_id, is_canonical_semver};
+use super::reader::{FormatError, FormatResult, MalformedInputClass};
 
 const ALIAS_HEADER_LENGTH: usize = 128;
-const ALIAS_MAX_LENGTH: usize = 16_772;
+pub(crate) const ALIAS_MAX_LENGTH: usize = 16_772;
 const MANIFEST_HEADER_LENGTH: usize = 64;
 const MANIFEST_MAX_LENGTH: usize = 12_672;
 const ALIAS_PREFIX: &str = "/.aeordb-system/plugin-aliases/";
+
+/// Canonical lookup path for an exact alias name, not a live alias resolution.
+pub(crate) fn plugin_alias_path_v1(alias: &str) -> FormatResult<String> {
+  if alias.is_empty() || alias.len() > 4096 || alias.chars().any(char::is_control) {
+    return Err(error(
+      MalformedInputClass::InvalidUtf8PathGlobOrNativePath,
+      "plugin_alias_name",
+      "alias requires 1..4096 UTF-8 bytes without controls",
+    ));
+  }
+  plugin_identity_path_v1(ALIAS_PREFIX, blake3::hash(alias.as_bytes()).as_bytes())
+}
+
+pub(super) fn plugin_identity_path_v1(prefix: &str, fingerprint: &[u8; 32]) -> FormatResult<String> {
+  let mut path = String::new();
+  path
+    .try_reserve_exact(prefix.len() + 64)
+    .map_err(|source| error(MalformedInputClass::AllocationAmplification, "plugin_identity_path_allocation", source.to_string()))?;
+  path.push_str(prefix);
+  let hex = b"0123456789abcdef";
+  for byte in fingerprint {
+    path.push(char::from(hex[usize::from(byte >> 4)]));
+    path.push(char::from(hex[usize::from(byte & 15)]));
+  }
+  Ok(path)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginAliasRecordV1<'a> {

@@ -26,6 +26,65 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,21:51UTC: native plugin-pair final1 is qualified on all three hosts.
+Windows completed all seven stages21:47:03UTC; its seal21:50:01UTC and every
+raw artifact are local. The final verifier generated and rechecked the
+[source-bound proof](../evidence/user-facing-v4-u1-native-plugin-source-proof-20260917.json).
+Fourteen new native cases preserve the observed REDs and cover independent
+32/64-byte role records, old/fresh captures, exact cumulative physical budgets,
+malformed/missing sources, real allocation failures, cancellation and pressure.
+Each platform passed253narrow tests and118affected targets; complete libraries
+passed837Unix/852Windows, plus strict static/reference/fixture gates. Reviewed
+audit identities remain1,501. Physical publication, execution availability,
+ordinary format selection and production data are unchanged.
+
+The isolated snapshot preflight1 passed1,085regressions, architecture4, format
+and strict Clippy, then correctly refused a new discarded binary-search error
+detail under the unchanged audit ceiling. All raw failure artifacts are local.
+Candidate3 preserves the insertion position in its operational diagnostic; no
+test or audit limit was weakened. Its17-input manifest is
+`f16b0fdc13656d620f7ffdb3437fa2272feb54749237c17107851a29aaa2bc6e`.
+Preflight2 is running the same complete gates. This isolated follow-up is not
+part of the qualified plugin-pair commit, and fullU1/U2–U7 remain unfinished.
+
+September17,21:47UTC: native plugin-pair Windows final1 passed all118affected
+targets21:36:37UTC and852library tests21:44:03UTC; static/reference/fixture
+checks remain pending. Both Unix evidence sets remain sealed and local.
+
+The prepared alias snapshot's three actual behavioral REDs and all raw receipts
+were preserved before implementation. Candidate1 then passed1,083tests
+(848library plus235across seven complete consumer targets)21:35:07UTC;
+its strict history verifier passes. Candidate2 changes tests/architecture only,
+adding exact retained-byte and empty-source admission checks. Its17-input packet
+is`2c20d38f43360f83cfe279707b8f7636683850f845d7506f7c374a66222173be`.
+The isolated preflight is running regression, architecture, formatting, strict
+Clippy and reviewed-audit gates. Main qualification inputs remain unchanged;
+neither a complete source union nor durable task integration is claimed.
+
+September17,21:24UTC: native plugin-pair final1 completed all nine stages on
+Linux21:21:53UTC and macOS21:20:07UTC. Both66-file evidence sets are sealed
+and local; the strict verifier passes both platforms and stops at the expected
+missing Windows terminal receipt. Windows continues its affected stage. The
+verifier's unchanged-validator comparison explicitly accounts for formatter-only
+import reordering and the inserted helper's blank line; no runtime or historical
+evidence was altered. Final qualification and landing remain pending.
+
+After preserving Linux evidence, the isolated prepared-alias snapshot RED1 was
+launched from the same15-input foundation plus two new files. Its17-input packet
+is`51b2769b130e66f1521ec5129a58b2b03af313d05aa7bc604a44a62238b4461b`.
+Three native compiler/capture/absence tests target a refusing scaffold. Six more
+boundary tests are unregistered drafts; no snapshot implementation exists yet.
+
+September17,21:11UTC: alias discovery landed/pushed as`ad65e468`. All three
+qualification checkouts advanced through scoped preservation stashes. The native
+plugin-pair's twelve Rust inputs and reviewed audit-location refresh are now
+integrated and frozen with both lockfiles in a15-input packet:
+`4a7d15c5d9c0dcf2f606ce8b55563e21b4cd04225a52a3d002e52275ddfb8d96`.
+Linux, macOS and Windows final1 started21:05UTC. The new final verifier passes
+history/preflight/frozen-source checks and refuses the expected missing terminal
+receipt; no final proof exists yet. The next bounded per-source compiler snapshot
+design is recorded in the capture contract; its implementation stays isolated.
+
 September17,21:03UTC: shared-schema alias discovery is qualified on Linux,
 macOS and native Windows. Windows completed all seven stages20:55:33UTC;
 its evidence was sealed21:00:47UTC and copied locally. The final verifier

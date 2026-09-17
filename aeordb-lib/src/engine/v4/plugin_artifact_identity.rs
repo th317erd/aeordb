@@ -1,7 +1,7 @@
 //! Read-only raw-artifact identity, not bytecode or executor admission.
-use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 use super::parser_registry_compiler::SemanticCompilationErrorV1;
 use super::plugin_identity::{decode_plugin_alias_v1, decode_plugin_manifest_payload_v1, AeorPluginManifestV1, PluginAliasRecordV1};
+use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 
 const IDENTITY_PATH: &str = "<plugin-artifact-identity>";
 const ARTIFACT_PREFIX: &str = "/.aeordb-system/plugin-artifacts/blake3/";
@@ -9,8 +9,13 @@ const MAX_MODULE_BYTES: usize = 64 << 20;
 const HASH_CHUNK_BYTES: usize = 64 << 10;
 // Fixed stack workspace, not input buffers (owned/admitted by the caller).
 // The core-only parser never grows its nested component-parser stack.
-const WORKSPACE_BYTES: usize = 16 << 10;
+pub(crate) const WORKSPACE_BYTES: usize = 16 << 10;
 const RESULT_BYTES: usize = std::mem::size_of::<PluginArtifactIdentityV1<'static>>();
+
+/// Canonical raw-module lookup path; the caller still has to prove its bytes.
+pub(crate) fn plugin_artifact_path_v1(fingerprint: &[u8; 32]) -> super::reader::FormatResult<String> {
+  super::plugin_identity::plugin_identity_path_v1(ARTIFACT_PREFIX, fingerprint)
+}
 const _: () = assert!(
   std::mem::size_of::<blake3::Hasher>()
     + std::mem::size_of::<wasmparser::Parser>()

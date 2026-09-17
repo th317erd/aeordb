@@ -2,6 +2,8 @@
 #[path = "native_retained_source_catalog_spec.rs"]
 mod retained_source_spec;
 use super::*;
+#[path = "native_plugin_source_spec.rs"]
+mod plugin_source_spec;
 
 const INDEX_SOURCE: &str = "/.aeordb-config/indexes.json";
 

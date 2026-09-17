@@ -2,6 +2,7 @@
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
+pub use semantic_mutation_observation::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 #[path = "staging_protection.rs"]
 mod staging_protection;
 pub use staging_protection::{NativeStagingProtectionV1, StagingProtectionErrorV1};

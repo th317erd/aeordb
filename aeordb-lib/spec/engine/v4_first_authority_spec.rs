@@ -315,6 +315,42 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   ] {
     assert!(!aliases.contains(forbidden), "source alias discovery gained another parser/owner: {forbidden}");
   }
+  let plugin_pair_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_plugin_source_native.rs")).unwrap();
+  let plugin_pair: String = plugin_pair_source.split_whitespace().collect();
+  for required in [
+    "letlookup=self.source_lookup(source_bounds);",
+    "decode_plugin_alias_v1(alias_source.body(),&alias_path)",
+    "inspect_plugin_artifact_identity_v1(",
+    "encode_dependency_record(&DependencyRecordV1",
+    "plugin_alias_path_v1(alias)",
+    "plugin_artifact_path_v1(alias_record.artifact_fingerprint)",
+    "maximum_read_bytes:bounds.maximum_read_bytes",
+    "PAIR_WORKSPACE_BYTES+IDENTITY_WORKSPACE_BYTES",
+    "before_complete();check_cancelled(&self.cancellation)?;",
+    "MemoryReservation",
+  ] {
+    assert!(plugin_pair.contains(required), "native plugin pair lost its single captured source owner: {required}");
+  }
+  assert_eq!(plugin_pair.matches("self.source_lookup(").count(), 1);
+  assert_eq!(plugin_pair.matches("self.read_source_from_lookup(").count(), 2);
+  for forbidden in [
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "OpenOptions",
+    "File::",
+    "publish_",
+    "write_file",
+    "lock_kv",
+    "capture_semantic_mutation_inventory(",
+    "read_protected_source(",
+    "HashMap",
+    "BTreeMap",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!plugin_pair.contains(forbidden), "native plugin pair gained another source/authority owner: {forbidden}");
+  }
   let source_staging_path = source_root.join("engine/v4/semantic_source_staging.rs");
   let source_staging = std::fs::read_to_string(&source_staging_path).unwrap();
   let staging: String = source_staging.split_whitespace().collect();

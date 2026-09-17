@@ -1067,3 +1067,63 @@ exists in these cases; small fixtures should finish in seconds under the native
 stage deadline. Full service E2E remains owed at runtime integration, rather than
 fabricated here. Candidate files and RED evidence are isolated from the frozen
 alias-discovery qualification; no production or retained database is involved.
+
+### Following native compiler boundary: prepared per-source alias snapshot
+
+September17 territory review: the registry and configuration compilers return
+borrowed dependency records through `ParserAliasSnapshotV1` and
+`IndexConfigurationAliasSnapshotV1`. Their only implementations remain test
+fixtures. The native pair now supplies verified captured metadata, but retains
+the full module body and does not implement either trait. Copying every module
+into a global compiler map would violate the bounded-source contract.
+
+Add a prepared snapshot for the aliases referenced by one registry or index
+configuration source. It borrows the same native capture/staging lifetime and
+owns only sorted exact alias names, requested-role markers and bounded encoded
+dependency records. Preparation reuses shared alias discovery; compilation uses
+binary search and existing record decoding, with no subsequent physical lookup.
+Missing prepared aliases/roles are explicit captured absence/unavailability;
+asking for an alias or role outside the prepared set is an operational misuse,
+not proof of absence. Repeated alias occurrences resolve one physical pair, and
+one alias requested in both roles preserves both records. Unused parsers remain
+unused. Release each pair's module/source buffers before reading the next alias.
+
+The first native entry explicitly resolves this capture's current protected
+sources. It does not represent requested replacements or retained catalog sides.
+Those adapters must select their own exact source side before later task
+integration; callers may not relabel this snapshot as a complete base/request
+union. A supplied configuration is caller-owned immutable bytes, not itself a
+namespace capture token. Artifact/bytecode/executor admission remains separate.
+
+Use the existing pair implementation with an injected captured lookup so every
+alias shares one cumulative physical-read budget. Preserve the public pair's
+behavior. Two deterministic discovery passes permit exact occurrence/name
+admission before allocation, without quadratic vector insertion or a whole-world
+map: count and sum bytes, admit/fallibly collect, sort and merge requested roles,
+then load each unique alias. Retained rows/names/records and parsing/pair scratch
+remain separately charged to the same coordinator; an explicit snapshot-byte
+ceiling bounds the retained table. Check cancellation/admission before work,
+between references, after final completion and on trait lookup.
+
+`test_protocol`: existing discovery, plugin-pair, registry/configuration/parser
+context and native captured-reader tests are regression guards. Three initial
+behavioral REDs must use actual native files: compile registry and mixed-role
+configuration with independently framed dependency records at32/64-byte widths;
+preserve an old prepared snapshot across alias replacement while a fresh capture
+changes; distinguish captured missing aliases, unused parsers and out-of-set
+lookup. Compare database bytes around read-only preparation/compilation.
+Then cover malformed sources, missing modules/roles, cumulative multi-alias read
+bounds, duplicate-load avoidance, table/name/record allocation failure, retained
+body release, callback-final/lookup cancellation and pressure, and retries.
+Unit/property cases help bound lookup/accounting; actual native compiler
+integration is decisive, not a mock resolver or encoder/decoder self-oracle.
+No network, module execution or service startup exists in these tests. Use small
+fixtures and the bounded native stage runner; service and durable task E2E remain
+owed. Keep this candidate isolated until the frozen plugin-pair final run lands.
+
+The namespace audit remains a separate owed edge: selected namespace reads use
+captured-header high-water checks with live publisher locators, whereas source
+inventory owns a settled KV snapshot. Shared directory validation lives in
+`read_view_native.rs`; shared bounded ordering/navigation lives in
+`namespace_seek.rs`. Future captured namespace traversal must reuse those rules
+without fabricating a user authorization/read-view object or consulting live KV.

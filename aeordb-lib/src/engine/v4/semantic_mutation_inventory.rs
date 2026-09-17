@@ -1,6 +1,7 @@
 //! Captured task discovery is not a resume, root admission or GC closure permit.
 #[path = "semantic_source_native.rs"]
 mod protected_sources;
+pub use protected_sources::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 pub use protected_sources::{NativeProtectedSemanticSourceV1, NativeSemanticSourceReadBoundsV1, NativeSemanticSourcePublicationErrorV1};
 #[path = "semantic_source_catalog_native.rs"]
 mod source_catalog;

@@ -1,6 +1,9 @@
 //! Protected raw inputs read from the same capture as semantic task inventory.
 //! Neither a source observation nor its bytes grant durable retention or resume.
 use super::*;
+#[path = "semantic_plugin_source_native.rs"]
+mod plugin_sources;
+pub use plugin_sources::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 #[path = "semantic_source_staging.rs"]
 mod staging;
 pub use staging::NativeSemanticSourcePublicationErrorV1;
