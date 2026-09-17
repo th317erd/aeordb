@@ -27,6 +27,7 @@ use aeordb::engine::v4::index_task::decode_index_task_artifact;
 use aeordb::engine::v4::migration_capture::decode_migration_capture_manifest;
 use aeordb::engine::v4::namespace::{decode_namespace_root, decode_semantic_object};
 use aeordb::engine::v4::parser_plan::decode_parser_resolution_plan;
+use aeordb::engine::v4::plugin_identity::{decode_plugin_alias_v1, decode_plugin_manifest_payload_v1};
 use aeordb::engine::v4::position::decode_logical_position;
 use aeordb::engine::v4::reader::FormatError;
 use aeordb::engine::v4::scope::decode_scope_definition;
@@ -49,6 +50,7 @@ struct FixtureRow {
   hash_algorithm: String,
   binary: String,
   expected: String,
+  canonical_key: Option<String>,
 }
 
 struct MeasuringAllocator;
@@ -322,6 +324,18 @@ fn decode_fixture_row(row: &FixtureRow, bytes: &[u8]) -> Result<Result<(), Forma
     "canonical-config-value-v1" => validate_canonical_value(bytes, CanonicalValueBounds::CONFIG).map(|_| ()),
     "invocation-policy-v1" => decode_invocation_policy(bytes).map(|_| ()),
     "dependency-table-v1" => decode_dependency_table(bytes).map(|_| ()),
+    "plugin-alias-record-v1" => {
+      // Bind mutations to the original manifest key, never a key recomputed
+      // from mutated alias bytes. Deliberately malformed fixtures may omit it;
+      // their exact expected decoder error must still be observed above.
+      let path = match row.canonical_key.as_deref() {
+        Some(path) => path,
+        None if row.expected.starts_with("error:") => "",
+        None => return Err(format!("plugin alias fixture {} has no canonical key", row.id)),
+      };
+      decode_plugin_alias_v1(bytes, path).map(|_| ())
+    }
+    "plugin-manifest-v1" => decode_plugin_manifest_payload_v1(bytes).map(|_| ()),
     "scope-definition-v1" => decode_scope_definition(bytes, algorithm).map(|_| ()),
     "parser-resolution-plan-v1" => decode_parser_resolution_plan(bytes).map(|_| ()),
     "source-selector-v1" => decode_source_selector(bytes).map(|_| ()),

@@ -879,6 +879,15 @@ enum SelectedDirectoryVisitV1 {
   Child(ChildEntry),
 }
 
+struct SelectedDirectoryTraversalFrameV1 {
+  hash: Vec<u8>,
+  node: crate::engine::btree::InternalNode,
+  next_child: usize,
+  lower_bound: Option<String>,
+  upper_bound: Option<String>,
+  _memory: MemoryReservation,
+}
+
 impl<'view> NativeSelectedNamespaceReaderV1<'view> {
   pub(super) fn selected_namespace_root_for_adapter_v1(&self) -> &'view [u8] {
     &self.view.root_metadata().hash
@@ -2012,34 +2021,13 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
           .load_directory_entity(self.view.captured_header(), hash, self.view.cancellation())
           .map_err(map_selected_namespace_error)?;
         let width = self.view.hash_algorithm().hash_length();
-        let node = if !is_btree_format(&entity.stored_value) {
-          if btree_child {
-            return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
-              "selected_namespace_btree_child_format",
-              "selected B-tree child uses a flat directory representation",
-            ));
-          }
-          let entries = deserialize_child_entries(&entity.stored_value, width, entity.entity_version)
-            .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_directory", error.to_string()))?;
-          if entries.len() > MAX_FLAT_DIRECTORY_ENTRIES {
-            return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
-              "selected_namespace_directory",
-              "selected flat directory exceeds its entry bound",
-            ));
-          }
-          validate_sorted_children(&entries, context_path).map_err(map_selected_namespace_error)?;
-          for _ in &entries {
+        let node = decode_validated_selected_directory_node(&entity, width, context_path, lower_bound, upper_bound, btree_child)?;
+        if let BTreeNode::Leaf(leaf) = &node {
+          let entry_work = if is_btree_format(&entity.stored_value) { 1 } else { leaf.entries.len() };
+          for _ in 0..entry_work {
             self.step(work_steps)?;
           }
-          BTreeNode::Leaf(crate::engine::btree::LeafNode { entries })
-        } else {
-          let node = decode_canonical_btree_node(&entity, width, context_path).map_err(map_selected_namespace_error)?;
-          if matches!(node, BTreeNode::Leaf(_)) {
-            self.step(work_steps)?;
-          }
-          node
-        };
-        validate_selected_seek_node(&node, width, lower_bound, upper_bound)?;
+        }
         self.check_cancelled()?;
         Ok(super::namespace_seek::LoadedNamespaceSeekNodeV1 { node, _memory: entity._memory })
       },
@@ -2860,30 +2848,33 @@ impl NativeReadViewSourceV1 {
     let mut current_hash = directory_hash.to_vec();
     let mut ancestors = BTreeSet::new();
     let mut btree_child = false;
+    let mut lower_bound = None;
+    let mut upper_bound = None;
     for _ in 0..MAX_BTREE_DEPTH {
       ensure_selected_not_cancelled(cancellation)?;
       if !ancestors.insert(current_hash.clone()) {
         return Err(selected_corrupt(name, "selected directory B-tree contains a cycle"));
       }
       let entity = self.load_directory_entity(header, &current_hash, cancellation)?;
-      if !is_btree_format(&entity.stored_value) {
-        if btree_child {
-          return Err(selected_corrupt(name, "selected B-tree child uses the flat-directory format"));
-        }
-        let children = deserialize_child_entries(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
-          .map_err(|error| selected_corrupt(name, error))?;
-        if children.len() > MAX_FLAT_DIRECTORY_ENTRIES {
-          return Err(selected_corrupt(name, "selected flat directory exceeds its entry bound"));
-        }
-        validate_sorted_children(&children, name)?;
-        return Ok(children.into_iter().find(|child| child.name == name));
-      }
-      match decode_canonical_btree_node(&entity, header.header.hash_algorithm.hash_length(), name)? {
+      let node = decode_validated_selected_directory_node(
+        &entity,
+        header.header.hash_algorithm.hash_length(),
+        name,
+        lower_bound.as_deref(),
+        upper_bound.as_deref(),
+        btree_child,
+      )
+      .map_err(map_directory_authorization_error)?;
+      match node {
         BTreeNode::Leaf(leaf) => {
           return Ok(leaf.entries.into_iter().find(|entry| entry.name == name));
         }
         BTreeNode::Internal(internal) => {
-          current_hash = internal.children[internal.find_child_index(name)].clone();
+          let index = internal.find_child_index(name);
+          (lower_bound, upper_bound) = super::namespace_seek::child_bounds(&internal, index, lower_bound, upper_bound)
+            .map_err(NativeSelectedNamespaceReadErrorV1::from)
+            .map_err(map_directory_authorization_error)?;
+          current_hash = internal.children[index].clone();
           btree_child = true;
         }
       }
@@ -3120,39 +3111,40 @@ impl NativeReadViewSourceV1 {
   where
     E: From<ReadViewAuthorizationFailureV1>,
   {
-    let mut stack = vec![(root_hash.to_vec(), 0usize, false)];
+    // Retain one accounted parent per depth, not a collection of every
+    // pending child/range. Each node is read once and validated before an
+    // early callback can turn malformed visited structure into a result.
+    let mut stack: Vec<SelectedDirectoryTraversalFrameV1> = Vec::new();
+    stack.try_reserve_exact(MAX_BTREE_DEPTH + 1).map_err(|error| {
+      E::from(selected_unavailable("directory traversal", format!("cannot reserve directory ancestor frames: {error}")))
+    })?;
+    let mut next_node = Some((root_hash.to_vec(), None, None));
     let mut visited_nodes = 0usize;
     let mut previous = None;
-    while let Some((hash, depth, btree_child)) = stack.pop() {
+    while let Some((hash, lower_bound, upper_bound)) = next_node.take() {
       ensure_selected_not_cancelled(cancellation).map_err(E::from)?;
       visited_nodes = visited_nodes.saturating_add(1);
-      if depth > MAX_BTREE_DEPTH || visited_nodes > MAX_BTREE_SCAN_NODES {
+      if stack.len() > MAX_BTREE_DEPTH || visited_nodes > MAX_BTREE_SCAN_NODES {
         return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected directory B-tree exceeds its depth or node bound")));
+      }
+      if stack.iter().any(|frame| frame.hash == hash) {
+        return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected directory B-tree contains a cycle")));
       }
       if visitor(SelectedDirectoryVisitV1::Node)? == SelectedDirectoryVisitControlV1::Break {
         return Ok(SelectedDirectoryVisitControlV1::Break);
       }
       let entity = self.load_directory_entity(header, &hash, cancellation).map_err(E::from)?;
-      if !is_btree_format(&entity.stored_value) {
-        if btree_child {
-          return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected B-tree child uses the flat-directory format")));
-        }
-        let children = deserialize_child_entries(&entity.stored_value, header.header.hash_algorithm.hash_length(), entity.entity_version)
-          .map_err(|error| E::from(selected_corrupt(&hex::encode(root_hash), error)))?;
-        if children.len() > MAX_FLAT_DIRECTORY_ENTRIES {
-          return Err(E::from(selected_corrupt(&hex::encode(root_hash), "selected flat directory exceeds its entry bound")));
-        }
-        validate_sorted_children(&children, &hex::encode(root_hash)).map_err(E::from)?;
-        for child in children {
-          validate_child_order(previous.as_deref(), &child.name).map_err(E::from)?;
-          previous = Some(child.name.clone());
-          if visitor(SelectedDirectoryVisitV1::Child(child))? == SelectedDirectoryVisitControlV1::Break {
-            return Ok(SelectedDirectoryVisitControlV1::Break);
-          }
-        }
-        continue;
-      }
-      match decode_canonical_btree_node(&entity, header.header.hash_algorithm.hash_length(), &hex::encode(root_hash)).map_err(E::from)? {
+      let node = decode_validated_selected_directory_node(
+        &entity,
+        header.header.hash_algorithm.hash_length(),
+        &hex::encode(root_hash),
+        lower_bound.as_deref(),
+        upper_bound.as_deref(),
+        !stack.is_empty(),
+      )
+      .map_err(map_directory_authorization_error)
+      .map_err(E::from)?;
+      match node {
         BTreeNode::Leaf(leaf) => {
           for child in leaf.entries {
             validate_child_order(previous.as_deref(), &child.name).map_err(E::from)?;
@@ -3163,10 +3155,35 @@ impl NativeReadViewSourceV1 {
           }
         }
         BTreeNode::Internal(internal) => {
-          for child in internal.children.into_iter().rev() {
-            stack.push((child, depth + 1, true));
-          }
+          let frame_bytes = [
+            size_of::<SelectedDirectoryTraversalFrameV1>(),
+            hash.capacity(),
+            lower_bound.as_ref().map_or(0, String::capacity),
+            upper_bound.as_ref().map_or(0, String::capacity),
+          ]
+          .into_iter()
+          .try_fold(0u64, |total, bytes| total.checked_add(bytes as u64))
+          .ok_or_else(|| E::from(selected_unavailable("directory traversal", "directory ancestor accounting overflowed")))?;
+          let mut memory = entity._memory;
+          memory.grow(frame_bytes).map_err(|error| E::from(selected_unavailable("directory traversal", error)))?;
+          stack.push(SelectedDirectoryTraversalFrameV1 { hash, node: internal, next_child: 0, lower_bound, upper_bound, _memory: memory });
         }
+      }
+      while let Some(parent) = stack.last_mut() {
+        if parent.next_child == parent.node.children.len() {
+          stack.pop();
+          continue;
+        }
+        let index = parent.next_child;
+        let (lower, upper) =
+          super::namespace_seek::child_bounds(&parent.node, index, parent.lower_bound.clone(), parent.upper_bound.clone())
+            .map_err(NativeSelectedNamespaceReadErrorV1::from)
+            .map_err(map_directory_authorization_error)
+            .map_err(E::from)?;
+        let hash = parent.node.children[index].clone();
+        parent.next_child += 1;
+        next_node = Some((hash, lower, upper));
+        break;
       }
     }
     Ok(SelectedDirectoryVisitControlV1::Continue)
@@ -3492,6 +3509,50 @@ fn decode_canonical_btree_node(
     }
   }
   Ok(node)
+}
+
+fn decode_validated_selected_directory_node(
+  entity: &LoadedImmutableEntityV1,
+  hash_width: usize,
+  context: &str,
+  lower: Option<&str>,
+  upper: Option<&str>,
+  btree_child: bool,
+) -> Result<BTreeNode, NativeSelectedNamespaceReadErrorV1> {
+  let node = if !is_btree_format(&entity.stored_value) {
+    if btree_child {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_btree_child_format",
+        "selected B-tree child uses a flat directory representation",
+      ));
+    }
+    let entries = deserialize_child_entries(&entity.stored_value, hash_width, entity.entity_version)
+      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_directory", error.to_string()))?;
+    if entries.len() > MAX_FLAT_DIRECTORY_ENTRIES {
+      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+        "selected_namespace_directory",
+        "selected flat directory exceeds its entry bound",
+      ));
+    }
+    validate_sorted_children(&entries, context).map_err(map_selected_namespace_error)?;
+    BTreeNode::Leaf(crate::engine::btree::LeafNode { entries })
+  } else {
+    decode_canonical_btree_node(entity, hash_width, context).map_err(map_selected_namespace_error)?
+  };
+  validate_selected_seek_node(&node, hash_width, lower, upper)?;
+  Ok(node)
+}
+
+fn map_directory_authorization_error(error: NativeSelectedNamespaceReadErrorV1) -> ReadViewAuthorizationFailureV1 {
+  match error.class() {
+    NativeSelectedNamespaceReadErrorClassV1::InvalidRequest | NativeSelectedNamespaceReadErrorClassV1::Corrupt => {
+      ReadViewAuthorizationFailureV1::Corrupt(error.to_string())
+    }
+    NativeSelectedNamespaceReadErrorClassV1::ResourceLimit | NativeSelectedNamespaceReadErrorClassV1::Unavailable => {
+      ReadViewAuthorizationFailureV1::Unavailable(error.to_string())
+    }
+    NativeSelectedNamespaceReadErrorClassV1::Cancelled => ReadViewAuthorizationFailureV1::Canceled,
+  }
 }
 
 fn validate_selected_seek_node(

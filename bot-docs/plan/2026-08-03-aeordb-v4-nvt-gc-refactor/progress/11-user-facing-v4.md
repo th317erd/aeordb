@@ -746,6 +746,225 @@ full-path pagination regressions. Do not silently replace linear traversal with
 per-entry root rescans. This prerequisite must be independently qualified before
 using it in the larger source-capture integration.
 
+### Native directory validation — entry07ef45b9
+
+Direct execution, no delegated edits. Captured inventory is committed/pushed as
+`07ef45b93ee43be124500f11bf95f078d72bf4b2`; origin matches. All three isolated
+sources advanced only after their sealed15-input hashes matched before/after
+the fast-forward. Prior overlays are retained in scoped stashes: desktop
+`83d6f11bf759f332ffcd11f21c23d8c524828035`, macOS
+`c6255931cc84bfb2ca1ba0ae88f21e00bd7e2c08`, Windows
+`fb3b8edfe7c65cea07f18d1927a9d4edf879336d`. Regular owner checkouts, fixture target
+links, all previous proofs and the retained production database are untouched.
+
+The new three native regressions use the existing physical fixture/public
+immutable publication, admitted read view and native reader. They require
+visited-range rejection before scoped file success, scoped absence and early
+identity success. The baseline target has89 passing cases on every platform.
+Only `selected_namespace_seek_spec.rs` changes for RED1; the packet also binds
+unchanged `read_view_native.rs`, `namespace_seek.rs` and both locks. Five-input
+SHA256`af54a5bb0976d5c9b83facad0e2015c0d2cf4cfe14eedd31636905deb54c2b63`.
+RED1 is running on desktop, unit`aeordb-v4-native-directory-red1-20260917`,
+invocation`8159c9d1f02b4b74a8ae7eb027242a2d`:
+`cargo test --offline --locked -j 2 -p aeordb --test v4_read_view_native_spec
+selected_namespace_directory_validation_`. Expect three behavioral failures,
+not a compile/setup failure. Test DBs now use
+`/media/Data/AeorDB/Tests/native-directory-20260917/temporary`; the existing
+30-minute/6GiB/no-test-swap/CPU200% runner and both host disk floors apply.
+No production fix has been made before that falsifying result.
+
+Owned correction perimeter after reproduction: the native directory decoder/
+point/streaming consumers and mirrored native validation/resource regressions;
+reuse the shared range rules, physical owner and memory coordinator. Paged seek
+must preserve its exact full-path ordering and work charges. Streaming identity
+and descendant permission traversal must validate before early callbacks,
+retain bounded/accounted traversal state and avoid repeated root scans per
+entry. Preserve source errors/cancellation as operational failures, malformed
+visited nodes as corruption, and authorized scope/row token/header bindings.
+This does not introduce source-capture authority, public writers or an executor.
+
+RED1 completed08:55:49UTC with the expected three behavioral failures and89
+filtered cases; all source/log/receipt/binary evidence was preserved before the
+fix. Candidate1 compiled and passed those regressions, but32 existing native
+query tests refused private scratch directories reported as0777 on Data's
+fuseblk filesystem (147 passed across four targets). This is retained failed
+harness evidence, not a waived product gate. The identical five-input snapshot
+was rerun with scratch under desktop `~/.cache/` on ext4 after a700-mode probe;
+all179 tests passed, including all92 native cases. Build output stays on Data,
+with unchanged30-minute/resource/disk guards. Both candidate runs are retained.
+Three further cases cover invalid non-selected roles, fallible ancestor-stack
+allocation and retained-parent admission/retry at both hash widths. They are
+unqualified until their next execution; final native platform proof remains due.
+
+Candidate2 preserved a test-only missing-import compile error, with no executed
+test binary. Candidate3 corrects it and adds unvisited-sibling/non-scanning and
+permission-route rejection/pin-cleanup cases: all184 tests across four targets
+pass09:20:04UTC, including97 native tests (eight new). Formatting and strict
+workspace/all-target Clippy pass09:22:33UTC. The preflight driver then stopped127
+because of a misnamed audit-script path; its exact journal/receipt remain intact.
+The remaining audit ran separately under the same resource caps and passed
+09:24:54UTC. Its1501 entries, locations and review data are unchanged; only the
+generator's final newline differs, so the checked-in allowlist is untouched.
+
+Final1 is launching on Linux/macOS/Windows with frozen six-input SHA256
+`b17c8d0d96fe98796487f5bd4ca58fcd5d8fb1124e523b116a91276985adf9f7`.
+Five narrow and105 affected targets include all36 preceding GC gates plus native
+authorization/pins/locators, root request/routes, plugin identity and scan owners.
+Full library, strict Clippy, format, contract/debt and independent-reference
+checks remain required. The strict proof verifier has checked historical
+packets/results and refuses to emit qualification before final receipts exist.
+All runtime/source changes remain frozen; no current-unit landing yet.
+
+Final1 found a pre-existing omitted decoder route in the generic hardening
+harness: Linux affected failed09:37:18UTC and Mac09:36:28UTC, both at its two
+tests. All preceding raw results/executable digests were preserved before any
+following build. A manifest/dispatch comparison identifies exactly two absent
+format routes, APAL and APWM (18 existing fixtures). The14-line test-only fix
+uses their existing production decoders and original manifest alias keys; no
+fixture bytes, expected errors, allocation ceiling or watchdog is changed.
+Candidate4 passes187 tests across five targets09:41:40UTC, including both
+hardening tests and all97 native cases. Format/strict Clippy pass09:41:57UTC.
+This is additional harness coverage, not a production format change.
+
+Final2 seven-input SHA256
+`b694683af3b35c6a8198357f07f6bb3cdf90d3bcb19605c666b6e520543492d0`
+is running on Linux/macOS. Native Windows final1 continues unchanged to its
+actual terminal result; final2 scripts/packet are transferred but not launched
+until failed-run evidence is sealed. Full final gates remain required and the
+proof verifier preserves both the missing-route failure and its correction.
+
+Final2 Linux completed all nine gates09:57:29UTC; macOS completed09:59:11UTC.
+Both were sealed at09:59UTC with the exact seven-input manifest and native
+tool hashes, then every raw receipt/log/source patch/binary digest was copied
+locally before any following build. Windows final1 was still progressing at
+09:59UTC in native read-view tests; no Windows terminal result is inferred.
+The strict verifier continues to refuse qualification while those receipts
+are missing. Desktop Data remained326,039,846,912bytes free and available
+host RAM32,254,353,408bytes; the test cgroup's no-swap limit does not imply
+zero pre-existing host swap usage.
+
+Windows final1 completed101/affected10:00:30UTC. All105 requested targets
+ran; exactly the two hardening-harness tests failed, with the same missing APAL
+route. Every raw file and executable digest was copied locally before the
+seven-input correction was applied. The strict verifier validates this failure
+and both green Unix waves, then correctly refuses the absent final2 Windows
+receipt. Windows final2 launched10:04UTC, driver8040, same one-job/90-minute
+stages and two-volume admission/stop guards. No runtime change accompanies it.
+
+Final2 Windows completed all seven gates10:40:54UTC and was sealed10:41:13UTC.
+Every raw receipt, guard sample, source manifest and executable digest is local
+before any following build. The strict verifier passed at10:41UTC and wrote the
+[source-bound qualification proof](../evidence/user-facing-v4-u1-native-directory-validation-proof-20260917.json).
+All three platforms pass207 narrow tests across five targets, including all97
+native read-view cases and the eight new directory regressions. Affected suites
+pass all105 targets:1628 cases each on Linux/macOS and1621 on Windows, with no
+failures, ignored, measured or filtered tests. Library totals are763 on each Unix
+host and778 on Windows; all three pass181 reference tests,496 independent
+fixtures, strict workspace/all-target Clippy and formatting over379 Cargo roots.
+Linux/macOS also pass the unchanged1501-entry audit, contracts and debt self-test.
+
+Windows minimum sampled C: free is43,401,895,936bytes, D:42,786,504,704bytes,
+available RAM10,295,111,680bytes. Linux minimum sampled home free is
+93,246,529,536bytes and Data326,021,570,560bytes; its6GiB cgroup limit was reached
+without a failed gate, and cgroup swap remained disabled. This is not a claim
+of zero host swap. Mac minimum sampled free disk is248,922,746,880bytes.
+The failing-first tests, permission-filesystem retry, missing test import,
+misnamed preflight script and omitted hardening routes remain immutable history.
+No fixture expectation, resource floor, timeout or production refusal was weakened.
+
+`test_check`/`thorough_review`: reviewed the complete runtime/test diff and both
+streaming callback consumers. Node callbacks only account work; child callbacks
+cannot return success before the whole visited leaf has passed validation.
+Point reads carry inherited separator bounds without scanning siblings. Streaming
+traversal visits each edge once and retains an accounted decoded ancestor per
+depth, with explicit allocation/admission refusal and retry. Existing workspace
+reservations and bounded legacy helpers remain; universal host-OOM recovery is
+not claimed. Malformed structure remains corruption and operational failures
+remain unavailable/cancelled. Native physical-file tests prove byte preservation,
+authorization/pin cleanup and healthy early results at both hash widths.
+
+This landing completes only native visited-directory validation and its shared
+hardening harness coverage. Source capture, durable closure, resume/activation,
+the rest of U1 and U2–U7 remain required. No ordinary-v4 default, semantic writer,
+capability advertisement, deployment or retained FS-Server1 mutation is enabled.
+Upstream fetched10:40UTC matches the entry revision; no integration drift.
+
+Read-only following-unit territory refinement, September17: the production
+symbol search still finds only the definitions/consumers of
+`ParserAliasSnapshotV1` and `IndexConfigurationAliasSnapshotV1`, no native
+implementation. Round9's archived modules and APAL aliases, and the global
+parser registry, are protected non-HEAD sources. The frozen SystemFamily
+manifest explicitly distinguishes alias family0x0031 from artifact family0x0032.
+`plugin_native_read` adapts authorized ordinary selected FileRecords; it is not
+the protected alias/archive capture owner. `plugin_artifact_identity` already
+checks borrowed APAL/APWM/raw-module identity but deliberately does not admit
+bytecode, an executor, durable retention or an entire compiler snapshot.
+
+The recently landed inventory captures a settled header/KV snapshot under live
+staging protection, with no long-held capture mutex; its lookup bounds and
+shared `load_canonical_system_file_at_path` are relevant existing owners to
+factor/reuse, not justification for a second file/KV owner. Protected system
+records use stable `HASH(file: + path)` lookup keys. The source fingerprint
+contract explicitly requires FileRecord identities rather than FileKeys; a
+native capture must demonstrate that replacing a control at the same path
+changes its captured revision/fingerprint while a held capture retains the
+prior incarnation. Exact revision derivation and complete base/request union
+enumeration remain entry design/proof obligations, not supplied by this note.
+Test missing versus failed protected reads, alias replacement during capture,
+module identity mismatch, bounded memory/read work and retry before exposing
+any source-capture claim. Do not turn the staged DirectoryIndex into an admitted
+NamespaceRoot or treat the fingerprint as a durable pin/executor permit.
+
+Following-unit persistence audit, September17: the statement in the Round17
+contract that all inputs remain available through the pinned base/staged trees
+is insufficient for protected non-HEAD inputs. This is a contract-integration
+gap, not evidence that an enabled task writer has lost data: those writers are
+still refused. The actual ASMC reader has nine hash slots and six declared root
+roles; its captured phase expressly has no catalog/output roots. Its source
+fingerprint is a comparison only. The captured inventory retains an in-memory
+`Arc<ReadSnapshot>`, not a restart-persistent source list. ADPT dependencies
+retain module fingerprints/roles/ABI/version, not original raw config or alias
+FileRecords. The inspected eight derived-index task kinds and twelve attachment
+roles do not include this semantic capture; reusing them would violate Round17.
+
+Therefore native source reading alone cannot complete checkpoint/resume. The
+following design must preserve an independently enumerable, durable exact-input
+capture, including protected controls and both sides of requested replacements,
+without exposing those controls through HEAD or hashing raw metadata into
+SemanticState. Existing ASMT/ASMC/ASMG bytes, source-fingerprint preimages and
+old task-kind meanings remain frozen. Round17's additive extension authority
+permits designing companion capture records; no new IDs, layouts, hash domains
+or publisher route are selected by this audit note. Prefer the existing control
+framing/physical owner and bounded directory/index primitives over another
+physical store. A source FileRecord's content/revision identity must be distinct
+from its stable system `file:` lookup key and physical incarnation.
+
+`map_territory` continuation: source producers are normal/config/plugin/mixed
+mutation ingress; consumers are the registry/config compilers, resume/activation
+preconditions, task-root discovery/mark/release, verification and physical-copy
+adoption. Logical transfer omits node-local in-flight tasks. Search/inspection
+has confirmed the present missing capture edge; exact new-format receiver and
+writer inventories remain an entry gate, not an assertion of completed design.
+`test_protocol` minimum falsifiers: capture old alias A, replace it with B and
+reopen while retaining A's exact input; mutate raw formatting without changing
+compiled semantics and require activation conflict; retain staged mixed ordinary
+and protected changes without early visibility. Also require explicit absence
+versus failed reads, missing/corrupt capture parts, GC while superseded physical
+records exist, cancellation, bounded traversal/allocation refusal and retry.
+Use independent envelopes/identities and actual native-file restart/retention
+tests, not live-latest alias mocks or fingerprint equality alone. Existing
+bounded runners and platform gates remain required before writer enablement.
+
+Verification order: preserve actual RED bytes/logs/executable; narrow green and
+all89 old native cases; every node role/range/format boundary plus cancellation,
+early stop, missing/read failure and memory/allocation retry; affected read-view,
+authorization, root request/route, native locator/source/parser/plugin, query
+and architecture targets; full library, format, strict workspace Clippy,
+unchanged audit/contract/debt and independent reference gates; matching native
+macOS/Windows final-source proof. Existing helper/property/allocation tests stay
+enabled. Native-file tests are the meaningful current boundary; they do not
+claim ordinary v4 HTTP service activation, which remains later work.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.

@@ -1,5 +1,9 @@
 use super::*;
+use aeordb::engine::directory_entry::deserialize_child_entries;
 use aeordb::engine::v4::namespace::SemanticUnavailableReasonV1;
+
+#[path = "../support/allocation_probe.rs"]
+mod allocation_probe;
 
 fn seek_child(name: &str, hash: Vec<u8>, entry_type: EntryTypeV4) -> ChildEntry {
   ChildEntry {
@@ -276,5 +280,254 @@ fn selected_namespace_seek_rejects_corrupt_inherited_ranges_before_emitting_a_pa
       assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
     });
     assert!(fs::read(&path).unwrap() == before, "failed range validation changed fixture bytes");
+  }
+}
+
+fn with_malformed_visited_range(
+  action: impl Fn(
+    HashAlgorithm,
+    &NativeReadViewSourceV1,
+    &ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
+    &MemoryCoordinator,
+    &[(String, Vec<u8>)],
+  ),
+) {
+  // Both leaves are locally sorted and every physical hash is valid. The
+  // first leaf's 'n' nevertheless exceeds the inherited upper bound 'm'.
+  with_directory_validation_tree(true, &["a", "n", "m", "z"], FileTreeCorruption::None, action);
+}
+
+fn with_directory_validation_tree(
+  btree: bool,
+  names: &[&str],
+  corruption: FileTreeCorruption,
+  action: impl Fn(
+    HashAlgorithm,
+    &NativeReadViewSourceV1,
+    &ResolvedReadViewV1<ResolvedPathAuthorizationV1>,
+    &MemoryCoordinator,
+    &[(String, Vec<u8>)],
+  ),
+) {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, publisher) = publisher(algorithm);
+    let first = publisher.publish(&first_request(algorithm)).unwrap();
+    let (_, identities) = publish_file_tree(&publisher, algorithm, first.namespace_root.root_hash, 1, btree, names, corruption);
+    let publisher = Arc::new(publisher);
+    let before = fs::read(&path).unwrap();
+    with_seek_view(algorithm, Arc::clone(&publisher), |source, view, memory, _| {
+      action(algorithm, source, view, memory, &identities);
+    });
+    assert_eq!(fs::read(&path).unwrap(), before, "failed directory validation changed fixture bytes");
+  }
+}
+
+#[test]
+fn selected_namespace_directory_validation_refuses_scoped_existing_file_from_bad_range() {
+  with_malformed_visited_range(|_, source, view, memory, _| {
+    let reader =
+      source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+    let baseline = memory.snapshot().unwrap().reserved_bytes;
+    let error = match reader.scan_files("/docs/a", None) {
+      Ok(_) => panic!("scoped file lookup accepted a visited leaf outside its inherited range"),
+      Err(error) => error,
+    };
+    assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+    assert!(error.context().contains("range"));
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  });
+}
+
+#[test]
+fn selected_namespace_directory_validation_refuses_scoped_absence_from_bad_range() {
+  with_malformed_visited_range(|_, source, view, memory, _| {
+    let reader =
+      source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+    let baseline = memory.snapshot().unwrap().reserved_bytes;
+    let error = match reader.scan_files("/docs/b", None) {
+      Ok(_) => panic!("scoped absence lookup accepted a visited leaf outside its inherited range"),
+      Err(error) => error,
+    };
+    assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+    assert!(error.context().contains("range"));
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  });
+}
+
+#[test]
+fn selected_namespace_directory_validation_refuses_early_identity_from_bad_range() {
+  with_malformed_visited_range(|algorithm, source, view, memory, identities| {
+    let reader =
+      source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+    let baseline = memory.snapshot().unwrap().reserved_bytes;
+    let file_key = digest_parts(algorithm, &[b"file:", b"/docs/a"]);
+    let error = match reader.resolve_file_identity("/docs", &file_key, &identities[0].1) {
+      Ok(_) => panic!("early identity lookup accepted a visited leaf outside its inherited range"),
+      Err(error) => error,
+    };
+    assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+    assert!(error.context().contains("range"));
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  });
+}
+
+#[test]
+fn selected_namespace_directory_validation_checks_unselected_roles_before_short_circuiting() {
+  for btree in [false, true] {
+    with_directory_validation_tree(btree, &["a", "z"], FileTreeCorruption::LastRole, |algorithm, source, view, memory, identities| {
+      let reader =
+        source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+      let baseline = memory.snapshot().unwrap().reserved_bytes;
+      let file_key = digest_parts(algorithm, &[b"file:", b"/docs/a"]);
+      for result in
+        [reader.scan_files("/docs/a", None).map(|_| ()), reader.resolve_file_identity("/docs", &file_key, &identities[0].1).map(|_| ())]
+      {
+        let error = result.expect_err("invalid non-selected role in a visited leaf was accepted");
+        assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+        assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+      }
+    });
+  }
+}
+
+fn traversal_frame_size() -> usize {
+  // Mirror field geometry, without exposing a private runtime type merely for
+  // tests. The boundary-specific error below proves the allocation was hit.
+  std::mem::size_of::<(Vec<u8>, InternalNode, usize, Option<String>, Option<String>, aeordb::engine::memory_coordinator::MemoryReservation)>(
+  )
+}
+
+#[test]
+fn selected_namespace_directory_validation_preserves_stack_allocation_failure_and_retry() {
+  with_directory_validation_tree(true, &["a", "m", "z"], FileTreeCorruption::None, |algorithm, source, view, memory, identities| {
+    let reader =
+      source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+    let baseline = memory.snapshot().unwrap().reserved_bytes;
+    let file_key = digest_parts(algorithm, &[b"file:", b"/docs/a"]);
+    let (result, allocations) =
+      allocation_probe::measure(129 * traversal_frame_size(), || reader.resolve_file_identity("/docs", &file_key, &identities[0].1));
+    assert!(allocations.injected_failure, "ancestor-frame allocation was not exercised");
+    let error = match result {
+      Ok(_) => panic!("ancestor-frame allocation failure was accepted"),
+      Err(error) => error,
+    };
+    assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Unavailable);
+    assert!(error.context().contains("cannot reserve directory ancestor frames"), "{error}");
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+    drop(reader.resolve_file_identity("/docs", &file_key, &identities[0].1).unwrap().into_found().unwrap());
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  });
+}
+
+#[test]
+fn selected_namespace_directory_validation_admits_retained_ancestor_memory_before_descent() {
+  with_directory_validation_tree(true, &["a", "m", "z"], FileTreeCorruption::None, |algorithm, source, view, memory, identities| {
+    let reader =
+      source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+    let root_hash = &view.authority().namespace_tree.root_hash;
+    let root = source
+      .publisher()
+      .load_immutable_entity_at_captured_header(view.captured_header(), root_hash, 1 << 20, &CancellationToken::new())
+      .unwrap()
+      .unwrap();
+    let children = deserialize_child_entries(&root.stored_value, algorithm.hash_length(), root.entity_version).unwrap();
+    let parent_locator = source.publisher().locator(&children[0].hash).unwrap().unwrap();
+    let root_load = 2 * u64::from(source.publisher().locator(root_hash).unwrap().unwrap().total_length) + 4096;
+    let parent_load = 2 * u64::from(parent_locator.total_length) + 4096;
+    let frame_bytes = (traversal_frame_size() + algorithm.hash_length()) as u64;
+    assert!(root_load < parent_load + frame_bytes, "fixture must admit root lookup before the parent retention boundary");
+    let baseline = memory.snapshot().unwrap().reserved_bytes;
+    let ordinary_limit = memory.snapshot().unwrap().policy.unwrap().ordinary_limit_bytes();
+    // Existing identity workspace is32MiB and this reader's result bound1MiB.
+    // Admit the parent read but leave its retained frame one byte short.
+    let remaining = (33 << 20) + parent_load + frame_bytes - 1;
+    let pressure = memory
+      .reserve(
+        aeordb::engine::memory_coordinator::MemoryOwner::Query,
+        ordinary_limit - baseline - remaining,
+        aeordb::engine::memory_coordinator::AdmissionClass::Workload,
+      )
+      .unwrap();
+    let file_key = digest_parts(algorithm, &[b"file:", b"/docs/a"]);
+    let error = match reader.resolve_file_identity("/docs", &file_key, &identities[0].1) {
+      Ok(_) => panic!("retained ancestor memory was not admitted"),
+      Err(error) => error,
+    };
+    assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Unavailable);
+    assert!(error.context().contains("directory traversal"), "{error}");
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline + pressure.bytes());
+    drop(pressure);
+    drop(reader.resolve_file_identity("/docs", &file_key, &identities[0].1).unwrap().into_found().unwrap());
+    assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+  });
+}
+
+#[test]
+fn selected_namespace_directory_validation_does_not_scan_unvisited_siblings_for_a_point_result() {
+  with_directory_validation_tree(
+    true,
+    &["a", "b", "m", "z"],
+    FileTreeCorruption::LastRole,
+    |algorithm, source, view, memory, identities| {
+      let reader =
+        source.selected_namespace_reader(view, NativeSelectedNamespaceLimitsV1::new(1, 1 << 20, 256, 32, 1024, 10_000).unwrap()).unwrap();
+      let baseline = memory.snapshot().unwrap().reserved_bytes;
+      // The right leaf contains an invalid role, but point lookup and early
+      // identity return need only the valid left leaf. This is not a repair scan.
+      let page = reader.scan_files("/docs/a", None).unwrap();
+      assert_eq!(page.rows()[0].path(), "/docs/a");
+      drop(page);
+      let file_key = digest_parts(algorithm, &[b"file:", b"/docs/a"]);
+      let found = reader.resolve_file_identity("/docs", &file_key, &identities[0].1).unwrap().into_found().unwrap();
+      assert_eq!(found.path(), "/docs/a");
+      drop(found);
+      let missing = reader.scan_files("/docs/c", None).unwrap();
+      assert!(missing.rows().is_empty());
+      drop(missing);
+      let right_key = digest_parts(algorithm, &[b"file:", b"/docs/m"]);
+      let error = match reader.resolve_file_identity("/docs", &right_key, &identities[2].1) {
+        Ok(_) => panic!("visited right leaf's invalid role was accepted"),
+        Err(error) => error,
+      };
+      assert_eq!(error.class(), NativeSelectedNamespaceReadErrorClassV1::Corrupt);
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, baseline);
+    },
+  );
+}
+
+#[test]
+fn selected_namespace_directory_validation_preserves_permission_failure_and_releases_pins() {
+  for algorithm in [HashAlgorithm::Blake3_256, HashAlgorithm::Sha512] {
+    let (_directory, path, publisher) = publisher(algorithm);
+    let first = publisher.publish(&first_request(algorithm)).unwrap();
+    publish_file_tree(&publisher, algorithm, first.namespace_root.root_hash, 1, true, &["a", "n", "m", "z"], FileTreeCorruption::None);
+    let publisher = Arc::new(publisher);
+    let before = fs::read(&path).unwrap();
+    let memory = Arc::new(MemoryCoordinator::new(MemoryPolicy::new(256 << 20, 512 << 20, 1, 1 << 20).unwrap()));
+    let source = Arc::new(NativeReadViewSourceV1::new(Arc::clone(&publisher), Arc::clone(&memory), 86_400_000));
+    let pins = RootReadPinCoordinatorV1::new(Arc::clone(&memory), algorithm, 8, 16).unwrap();
+    // /docs exercises permission-document point lookup; / exercises the
+    // descendant-navigation visitor after the root has no direct grant.
+    for request_path in ["/docs/", "/"] {
+      let current = CurrentReadAuthorizationV1::new(
+        CurrentPathAuthorizationV1::for_user(
+          request_path,
+          CrudlifyOp::List,
+          vec!["readers".to_string()],
+          PathAuthorizationDecisionV1::direct(),
+        ),
+        ReadViewCredentialKindV1::Ordinary,
+        ReadViewConcealmentV1::Conceal,
+      );
+      let authorizer =
+        ReadViewPermissionAuthorizerV1::new(CapturedCurrentPathAuthorizationSourceV1::new(Ok(current)), source.as_ref().clone());
+      let resolver = ReadViewResolverV1::new(Arc::clone(&source), pins.clone(), all_capabilities_profile());
+      let error = resolver.resolve(ReadViewSelectorV1::CurrentHead, &authorizer, &CancellationToken::new()).unwrap_err();
+      assert_eq!(error.code(), "read_authorization_corrupt");
+      assert!(error.to_string().contains("range"), "{error}");
+      assert_eq!(pins.active_pin_count().unwrap(), 0);
+      assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+    }
+    assert_eq!(fs::read(&path).unwrap(), before);
   }
 }

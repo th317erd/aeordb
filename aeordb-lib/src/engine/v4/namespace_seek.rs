@@ -146,7 +146,7 @@ fn check_ancestry(stack: &[NamespaceSeekFrameV1], hash: &[u8], maximum_depth: us
   Ok(())
 }
 
-fn child_bounds(
+pub(super) fn child_bounds(
   node: &InternalNode,
   index: usize,
   inherited_lower: Option<String>,
