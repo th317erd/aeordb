@@ -1,3 +1,5 @@
+#[path = "semantic_source_catalog_build_resource_spec.rs"]
+mod assembly;
 #[path = "semantic_source_writer_resource_spec.rs"]
 mod writers;
 use super::{fixture, measure, measure_nth};

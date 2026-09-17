@@ -1,7 +1,8 @@
 # Durable protected semantic sources — U1 reader contract
 
-Status: structural readers, byte-only writers, native catalog readers and guarded
-source staging qualified on Linux, macOS and Windows, September17.
+Status: structural readers, byte-only writers, native catalog readers, guarded
+source staging and paired ordered catalog assembly qualified on Linux, macOS
+and Windows, September17.
 The [immutable reader proof](evidence/user-facing-v4-u1-semantic-source-capture-readers-proof-20260917.json)
 does not qualify source-copy publication, complete closure, restart or activation.
 The [guarded staging proof](evidence/user-facing-v4-u1-guarded-source-staging-proof-20260917.json)
@@ -10,6 +11,10 @@ remains refused. Continue the
 existing [task contract](semantic-mutation-task-contract.md) and
 [ledger11](progress/11-user-facing-v4.md) under Round17's additive authority.
 Entry091d0666 has landed the preceding native-directory unit on all platforms.
+
+The [paired assembly proof](evidence/user-facing-v4-u1-source-catalog-build-proof-20260917.json)
+qualifies deterministic byte construction from an already complete ordered input,
+not discovery of that input or a durable task/GC closure permit.
 
 ## Proven missing edge
 
@@ -908,3 +913,128 @@ Write the independent two-path, split/ordering and failed-callback tests against
 a refusing scaffold first. Preserve the observed RED, then implement and expand
 adversarial/resource coverage before final native qualification. This design
 does not relax the coupled durable capture/publication gate above.
+
+## Following source-union entry: shared alias discovery
+
+The complete source-union map still has three distinct obligations: discover
+references from both configuration sets, resolve exact aliases/modules under
+the captured view, and produce an ordered deduplicated path stream including
+namespace configuration revisions. None is supplied by the catalog assembler.
+The first bounded step is alias discovery through the existing schema owners.
+
+`map_territory`: `parser_registry_compiler` owns strict registry parsing, MIME
+normalization, duplicate checks and the512-entry bound. Its compiler resolves
+one alias per normalized MIME entry. `index_configuration_source` owns the
+strict corrected index schema; `index_configuration_compiler` resolves an
+explicit parser only when at least one non-metadata field exists, and resolves
+mapper aliases from selectors. Its `unused_parser_does_not_create_dependencies`
+regression deliberately permits a missing unused parser. Both compiler traits
+return borrowed dependency records. Actual native loading therefore needs an
+owned, bounded prepared snapshot before those borrows, not live resolver calls
+or an unbounded global map. That adapter remains the next dependent obligation.
+
+Add a byte-only alias visitor beneath `semantic_source_capture`, with explicit
+source kind (parser registry or index configuration), proven optional source,
+source/workspace/alias-occurrence ceilings, role-tagged borrowed alias callbacks,
+shared memory accounting and cancellation. None means a proven absent source,
+not a read error or permission to infer absence. Return the completed occurrence
+count only on success. This visitor is not a compiled-schema validity token,
+captured snapshot, complete union, artifact/executor proof or publication permit.
+
+Extract the registry's existing parse and workspace calculation for its compiler
+and this visitor to share; preserve exact schema errors and its allocation-error
+classification. Reuse `index_configuration_source::parse` and factor only the
+existing used-parser predicate for both consumers. Do not add another JSON
+parser, change compiler bytes or resolve dependencies during discovery. Some
+semantic checks (scope normalization, field compatibility and compilation) still
+belong to the compiler, so successful discovery must not imply those passed.
+
+Registry occurrence order follows its existing normalized MIME order. Index
+discovery visits its used explicit parser, then mapper occurrences in source
+row order. Repeated aliases, including one alias in different roles, remain
+occurrences; the later source-union owner must sort/deduplicate paths and retain
+both role requirements. No process-wide alias set is introduced. Admit bounded
+AST memory before parsing and check cancellation/admission around every callback,
+including the final one and an empty result. Enforce occurrence limits before
+handing each alias to the caller. Callback errors propagate without a completed
+result; earlier notifications cannot confer closure authority.
+
+`test_protocol`: existing registry/config compiler specs are the consumer guards.
+Independent expected aliases/roles must cover normalized MIME order, repeated
+aliases, mixed parser/mapper selectors, missing/default/empty sources and the
+unused-parser rule. Compare discovery's role/name set with actual compiler
+resolver calls for valid configurations, without using the visitor to build its
+own oracle. Malformed/duplicate schemas, legacy versions, invalid aliases,
+unknown members/policies and bounds must refuse. Callback failures, final
+cancellation/pressure and retry must release memory; source-bound allocation
+probes preserve the parsers' explicitly inherited allocation limitations.
+Tests are deterministic and small; no network, module execution or database
+writes belong to this visitor. Later native alias/module and full-union/restart
+tests are still required. Begin with three positive tests against a refusing
+scaffold in an isolated worktree; preserve actual RED before implementation.
+
+The wider workspace audit found no drop-in path-union sorter: directory repair
+sorts depth/ChildEntry records with its own lifecycle; native query ordering
+sorts fixed-hash references into its specialized row spool. Reuse shared private
+path/capacity primitives and bounded run-tier patterns if external union sorting
+is required, but do not reuse those record formats or stale-cleanup authority.
+Exact captured namespace traversal and complete-union ownership remain an entry
+gate before selecting that next implementation, not settled by this inspection.
+
+### Next native dependency edge: one captured alias/module pair
+
+September17 territory review traced both compiler snapshot traits, all their
+implementations, APAL/APWM readers, raw-artifact inspection, dependency-record
+encoding, protected-source loading and native task inventory. Production does
+not yet implement either compiler snapshot trait. Existing implementations are
+test fixtures. The legacy `WasmPluginRuntime` implements the old `handle` ABI
+and host imports, not corrected pure profile2. Do not use it as availability
+proof for a newly compiled corrected dependency.
+
+The next bounded native prerequisite reads one alias and its referenced raw
+module from the same `NativeSemanticMutationInventoryV1`. It must reuse the
+existing captured lookup and source loader, with one cumulative read-byte
+budget across both records and their chunks. It may not consult live aliases,
+recapture between reads, publish a file/control, or create another physical
+owner. The result retains the two existing accounted protected-source values,
+their exact original revisions and the capture/staging lifetime.
+
+Centralize canonical path construction beside the existing identity readers:
+alias paths use BLAKE3 of exact alias UTF-8, module paths use the recorded raw
+module fingerprint. Preserve existing path checks and error meanings. Reject
+invalid/oversized alias names before lookup and use fallible bounded path
+allocation. A missing alias is proven absence in this capture; a present alias
+whose module is missing, malformed or inconsistent is an error, never absence.
+
+Use the shared APAL/APWM/raw-module inspector before returning the pair. Cache
+at most two bounded canonical dependency records, one per declared parser/mapper
+role, through the existing dependency encoder. Their profile2 fields describe
+the exact required executor; they do not prove that the module has valid core
+bytecode, correct exports/imports or an available executor. Unknown requested
+roles cannot manufacture a dependency. The result exposes borrowed decoded
+records for later prepared compiler snapshots, plus its original source values
+for guarded staging and union accounting. No process-wide alias map or module
+cache is added. Input bodies, short path/record workspace and temporary identity
+inspection all retain explicit shared memory admission and cancellation checks.
+
+The later bounded prepared snapshot must copy only necessary alias/record
+metadata, releasing module bodies between references, and preserve exact
+base/request source selection. Neither this pair nor alias discovery completes
+that snapshot, namespace configuration capture, sorted union, fingerprint,
+durable task closure, GC or activation. Resume through existing paired catalogs
+and executor admission remain explicit downstream obligations.
+
+`test_protocol`: preserve three actual behavioral REDs before implementation:
+exact native alias/module capture with independently framed role records at32/
+64-byte database widths; an old capture surviving alias replacement while a
+fresh capture sees the new module; and proven old absence after a later alias
+addition. Compare database bytes before/after every read-only exercise. Extend
+with missing/corrupt aliases/modules, metadata/digest/role disagreements, exact
+read/workspace/body bounds, cancellation/pressure at final checks, actual
+allocation failures and retry/accounting release. Keep the identity-versus-core
+bytecode distinction explicit in a regression. Existing artifact identity,
+protected-source, compiler and native library suites remain consumer guards.
+Use actual bounded native files, not a mocked mutable alias lookup. These tests
+perform no network calls or module execution; native stage deadlines and small
+fixtures bound them. Later service/plugin lifecycle and durable restart/GC
+tests remain required rather than being inferred from this local read edge.

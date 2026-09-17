@@ -1,4 +1,6 @@
 //! Independent capture bodies, with no production encoder or identity helper.
+#[path = "semantic_source_catalog_build_spec.rs"]
+mod assembly;
 #[path = "semantic_source_writer_spec.rs"]
 mod writers;
 use super::{ALGORITHMS, checkpoint_body, count, envelope, word};

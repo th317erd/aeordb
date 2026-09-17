@@ -1,4 +1,6 @@
 //! Physical reader fixtures. Ordered expected rows are independent of traversal.
+#[path = "native_source_catalog_build_spec.rs"]
+mod assembly;
 use super::*;
 #[path = "native_source_catalog_resource_spec.rs"]
 mod resource_spec;

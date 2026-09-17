@@ -1,4 +1,9 @@
 //! Structural capture records only; these views are not resume or retention permits.
+#[path = "semantic_source_catalog_build.rs"]
+mod build;
+pub use build::{
+  build_semantic_source_catalog_pair_v1, SemanticSourceCatalogBuildRequestV1, SemanticSourceCatalogPairRowV1, SemanticSourceCatalogPairV1,
+};
 #[path = "semantic_source_writer.rs"]
 mod writer;
 pub use writer::{encode_semantic_source_capture_v1, encode_semantic_source_internal_v1, encode_semantic_source_leaf_v1};

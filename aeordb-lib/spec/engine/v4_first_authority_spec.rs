@@ -245,6 +245,43 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  let source_catalog_build = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_build.rs")).unwrap();
+  let assembly: String = source_catalog_build.split_whitespace().collect();
+  for required in [
+    "build_semantic_source_catalog_pair_v1",
+    "encode_semantic_source_leaf_v1(",
+    "encode_semantic_source_internal_v1(",
+    "decode_system_control(",
+    "try_reserve_exact(",
+    "MemoryReservation",
+    "row.path.capacity()>self.request.maximum_path_bytes",
+    "identity.capacity()>width",
+    "maximum_node_pairs",
+    "maximum_output_bytes",
+    "builder.check()?;letnext=rows.next();builder.check()?;",
+    "(self.emit)(base,requested)?;self.check()?;",
+    "root.paths!=self.path_count||root.nodes!=self.node_count",
+  ] {
+    assert!(assembly.contains(required), "source catalog assembly lost its bounded shared-encoder boundary: {required}");
+  }
+  for forbidden in [
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "OpenOptions",
+    "File::",
+    "write_file",
+    "publish_",
+    "serialize",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!assembly.contains(forbidden), "source catalog assembly gained another owner or unchecked collection: {forbidden}");
+  }
   let source_staging_path = source_root.join("engine/v4/semantic_source_staging.rs");
   let source_staging = std::fs::read_to_string(&source_staging_path).unwrap();
   let staging: String = source_staging.split_whitespace().collect();
