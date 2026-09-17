@@ -609,3 +609,56 @@ native-platform/static/reference gates. Full durable typed-closure traversal,
 checkpoint selection/resume and atomic activation remain subsequent coupled
 runtime obligations; no semantic writer or capability advertisement is enabled
 by a read-only inventory.
+
+#### Captured entry visitor prerequisite — entry31460881
+
+Use buffered captured entries, not fabricated stable mark slots. Inspection of
+`DiskKVStore::publish_atomic_visibility_after_authority` confirms that successful
+authority publication exposes its delta through `publish_buffer_only`. Therefore
+the captured reader must support frozen buffered overrides without a hidden
+flush. Extend `ReadSnapshot` with a separately named strict entry visitor; retain
+ordinary visitor and flushed-slot contracts unchanged. The new visitor checks
+NVT/layout, page CRC/structure, bucket placement/duplicates, buffered map-key
+identity and exact effective live count. It reserves no whole-key collection,
+charges a caller work limit for each page and raw entry (including deleted or
+overridden entries), and checks cancellation before work and after callbacks.
+Early stop is explicitly incomplete; late corruption cannot become success.
+Its fixed one-page decode scratch must be included in the native inventory's
+memory admission. Snapshot lease retention is not physical-entity retention.
+
+Falsifying tests first in the existing `kv_snapshot_spec` target: wrong live
+count, cancellation on the final callback and mismatched buffered key must not
+return complete. Then cover both widths, page/buffer overrides and tombstones,
+wrong bucket/duplicate/NVT layout, callback errors/stops, empty cancellation,
+page/raw-entry budget exhaustion, bounded-provider read failure and retained
+old page generations while writes continue. Individual fixtures are small and
+bounded; existing desktop30-minute stage/resource wrappers remain the outer
+timeout. This prerequisite and its native task consumer qualify together;
+it does not complete global task discovery by itself.
+
+The first native inventory must not filter by unverified KV role tags and then
+claim global task absence. Validate current entity identity/integrity/role in a
+single bounded pass, sharing the existing whole-entity decoder and canonical
+system-file chain. Caller limits bound each entity and all read bytes (including
+canonical dependency rereads); an oversized ordinary entity refuses completion.
+This is a current-KV task inventory, not an inventory of every stale physical
+incarnation or proof of efficient multi-terabyte startup. Full physical inventory
+integration/performance and typed GC closure remain required downstream. Native
+lookup factoring must preserve current live-call error classification. Share
+optional A/B selection before binding its discovered identity to its canonical
+path; do not duplicate or weaken torn-control/allocation failure handling.
+
+Review boundaries: matching scalar header/KV counts do not prove settled
+visibility. Authority-bound capture must reject an active atomic visibility
+batch or transaction owner without changing the ordinary readers' right to
+use their previously published snapshot. A callback's original typed failure
+must survive cancellation arriving at the same callback boundary.
+
+Separate retained capture memory from per-visit scratch. The public captured
+view can be visited again, including recursively from a callback; simultaneous
+visits cannot share one scratch reservation. Each visit admits and releases its
+own bounded entity/control/page scratch through the existing memory coordinator,
+without a long-held publication mutex or another physical owner. Preserve
+retries and retained snapshot accounting on all exits. The dedicated nested
+visit test measures the extra charge independently of per-task observation
+memory; a compile failure is not its required falsifying result.

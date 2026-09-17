@@ -193,11 +193,62 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
   let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
+  let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
   let staging_protection_path = source_root.join("engine/v4/staging_protection.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
   collect_rust_files(&source_root, &mut files);
+
+  let mut staging_consumers: Vec<_> = files
+    .iter()
+    .filter(|path| *path != &first_authority_path)
+    .filter(|path| std::fs::read_to_string(path).unwrap().contains("NativeStagingProtectionV1"))
+    .collect();
+  staging_consumers.sort();
+  assert_eq!(staging_consumers, [&semantic_catalog_native_path, &semantic_mutation_inventory_path, &staging_protection_path]);
+  let inventory_source = std::fs::read_to_string(&semantic_mutation_inventory_path).unwrap();
+  let inventory: String = inventory_source.split_whitespace().collect();
+  for required in [
+    "_protection:&'aNativeStagingProtectionV1<'a>",
+    "snapshot:Arc<ReadSnapshot>",
+    "_memory:MemoryReservation",
+    "scan_scratch_bytes:u64",
+    "self.memory.reserve(MemoryOwner::Task,self.scan_scratch_bytes,AdmissionClass::Maintenance)",
+    ".visit_captured_entries(",
+    ".capture_settled_snapshot(",
+    "read_entity_bounded(",
+    "load_canonical_system_file_at_path(",
+    "select_available_mutable_control_slots(",
+    "complete_semantic_mutation_observation(",
+    "remaining_read_bytes:Cell<u64>",
+  ] {
+    assert!(inventory.contains(required), "captured task inventory lost shared ownership/validation: {required}");
+  }
+  for forbidden in [
+    "StorageEngine",
+    "DiskKVStore",
+    "OpenOptions",
+    "File::open",
+    "File::create",
+    "write_file",
+    "sync_file",
+    ".flush(",
+    ".publish(",
+    "publish_successor",
+    "RootReadAdmission",
+    "implCloneforNativeSemanticMutationInventoryV1",
+    "HashSet",
+    "iter_all(",
+  ] {
+    assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
+  }
+  let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  assert_eq!(
+    authority_source.matches("kv.admit_read(&locator)?").count(),
+    1,
+    "captured read limits must live in the shared physical reader"
+  );
 
   let mut publisher_callers: Vec<_> = files
     .iter()

@@ -6,6 +6,7 @@ mod semantic_mutation_observation;
 mod staging_protection;
 pub use staging_protection::{NativeStagingProtectionV1, StagingProtectionErrorV1};
 pub use semantic_mutation_observation::{
+  NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1, SemanticMutationInventorySummaryV1,
   SemanticMutationObservationDispositionV1, SemanticMutationObservationErrorV1, SemanticMutationObservationRequestV1,
   SemanticMutationObservationV1,
 };
@@ -13509,9 +13510,40 @@ fn immutable_entity_exists_for_authority(
   }
 }
 
+/// One lookup boundary for the live owner and retained, bounded captures.
+/// It does not own a file, KV store, publication or durability state.
+trait FirstAuthorityEntityLookupV1 {
+  fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError>;
+  fn hash_algo(&self) -> HashAlgorithm;
+  fn admit_read(&self, _locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    Ok(())
+  }
+}
+
+impl FirstAuthorityEntityLookupV1 for DiskKVStore {
+  fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
+    DiskKVStore::get(self, key)
+  }
+  fn hash_algo(&self) -> HashAlgorithm {
+    DiskKVStore::hash_algo(self)
+  }
+}
+
+impl<T: FirstAuthorityEntityLookupV1> FirstAuthorityEntityLookupV1 for MutexGuard<'_, T> {
+  fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
+    (**self).get(key)
+  }
+  fn hash_algo(&self) -> HashAlgorithm {
+    (**self).hash_algo()
+  }
+  fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    (**self).admit_read(locator)
+  }
+}
+
 fn read_entity_bounded(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   key: &[u8],
   maximum_total_length: usize,
   write_sequence_high_water: u64,
@@ -13534,6 +13566,7 @@ fn read_entity_bounded(
       format!("locator length {length} exceeds its {maximum_total_length}-byte role cap"),
     ));
   }
+  kv.admit_read(&locator)?;
   let mut bytes = Vec::new();
   bytes.try_reserve_exact(length).map_err(|error| {
     FirstAuthorityPublicationErrorV1::invalid("first_authority_readback_allocation", format!("entity read allocation failed: {error}"))
@@ -14086,7 +14119,7 @@ fn validate_immutable_system_control_identity(
 
 fn load_immutable_system_control_file(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   header: &DatabaseHeaderV4,
   kind: SystemControlKindV1,
   identity: &[u8],
@@ -14147,7 +14180,7 @@ fn load_reusable_root_admission(
 
 fn load_system_file_slot(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   header: &DatabaseHeaderV4,
   kind: SystemControlKindV1,
   identity: &[u8],
@@ -14159,7 +14192,7 @@ fn load_system_file_slot(
 
 fn load_canonical_system_file_at_path(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   header: &DatabaseHeaderV4,
   path: &str,
   content_type: &str,
@@ -14314,7 +14347,7 @@ fn validate_mutable_system_control_identity(
 
 fn load_mutable_system_control_pair(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   header: &DatabaseHeaderV4,
   kind: SystemControlKindV1,
   identity: &[u8],

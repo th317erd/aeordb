@@ -28,6 +28,14 @@ pub struct CapturedKvSlotVisitSummaryV1 {
   pub complete: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedKvEntriesVisitSummaryV1 {
+  pub scanned_pages: u64,
+  pub scanned_entries: u64,
+  pub visited_entries: u64,
+  pub complete: bool,
+}
+
 #[derive(Clone)]
 enum SnapshotPages {
   Resident(KvPageSet),
@@ -399,6 +407,89 @@ impl ReadSnapshot {
     self.visit(None, visitor)
   }
 
+  /// Visit a captured entry view, including frozen buffered overrides. Unlike
+  /// physical mark slots, buffered entries have no stable bucket/slot identity.
+  ///
+  /// Work charges one unit per page and raw entry, including tombstones and
+  /// overridden entries. Scratch is bounded by one decoded page, never the key
+  /// population; callers must admit that scratch and retain the snapshot lease.
+  /// Callbacks run without a snapshot-owner lock. They remain provisional until
+  /// the entire scan validates the effective count and returns complete.
+  pub fn visit_captured_entries<F>(
+    &self,
+    cancellation: &CancellationToken,
+    maximum_work: u64,
+    mut visitor: F,
+  ) -> EngineResult<CapturedKvEntriesVisitSummaryV1>
+  where
+    F: FnMut(&KVEntry) -> EngineResult<bool>,
+  {
+    check_captured_entries_cancellation(cancellation)?;
+    if self.bucket_count == 0 || self.nvt.bucket_count() != self.bucket_count {
+      return Err(EngineError::CorruptEntry { offset: 0, reason: "captured KV entry scan has inconsistent NVT bucket count".to_string() });
+    }
+    if matches!(&self.pages, SnapshotPages::Resident(pages) if pages.len() != self.bucket_count) {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: "captured KV resident page count disagrees with snapshot layout".to_string(),
+      });
+    }
+    let mut summary = CapturedKvEntriesVisitSummaryV1 { scanned_pages: 0, scanned_entries: 0, visited_entries: 0, complete: false };
+    let mut remaining_work = maximum_work;
+    for bucket in 0..self.bucket_count {
+      charge_captured_entries_work(cancellation, &mut remaining_work)?;
+      summary.scanned_pages += 1;
+      let page_data = self.page(bucket)?;
+      let entries = deserialize_page(&page_data, self.hash_algo.hash_length())?;
+      // This also validates overridden and deleted entries. A buffered value
+      // must never conceal malformed page structure or duplicate identities.
+      self.validate_captured_page(bucket, &entries)?;
+      for entry in &entries {
+        charge_captured_entries_work(cancellation, &mut remaining_work)?;
+        summary.scanned_entries += 1;
+        if entry.is_deleted() || self.buffer.contains_key(entry.hash.as_slice()) {
+          continue;
+        }
+        summary.visited_entries += 1;
+        let keep_scanning = visitor(entry)?;
+        check_captured_entries_cancellation(cancellation)?;
+        if !keep_scanning {
+          return Ok(summary);
+        }
+      }
+    }
+    for (key, entry) in &self.buffer {
+      charge_captured_entries_work(cancellation, &mut remaining_work)?;
+      summary.scanned_entries += 1;
+      if key.len() != self.hash_algo.hash_length() || key != &entry.hash || self.nvt.bucket_for_value(key) >= self.bucket_count {
+        return Err(EngineError::CorruptEntry {
+          offset: entry.offset,
+          reason: "captured KV buffer key disagrees with its entry or hash layout".to_string(),
+        });
+      }
+      if entry.is_deleted() {
+        continue;
+      }
+      summary.visited_entries += 1;
+      let keep_scanning = visitor(entry)?;
+      check_captured_entries_cancellation(cancellation)?;
+      if !keep_scanning {
+        return Ok(summary);
+      }
+    }
+    check_captured_entries_cancellation(cancellation)?;
+    let expected = u64::try_from(self.entry_count)
+      .map_err(|source| EngineError::ResourceExhausted(format!("captured KV entry count exceeds u64: {source}")))?;
+    if summary.visited_entries != expected {
+      return Err(EngineError::CorruptEntry {
+        offset: 0,
+        reason: format!("captured KV effective live count {} disagrees with snapshot entry count {expected}", summary.visited_entries),
+      });
+    }
+    summary.complete = true;
+    Ok(summary)
+  }
+
   /// Visit the immutable flushed KV layout with exact bucket/slot identity.
   ///
   /// Physical mark runs must flush before capture. Buffered overrides have no
@@ -615,6 +706,21 @@ impl ReadSnapshot {
       SnapshotPages::Unavailable(reason) => Err(crate::engine::errors::EngineError::DurabilityFailure(reason.to_string())),
     }
   }
+}
+
+fn check_captured_entries_cancellation(cancellation: &CancellationToken) -> EngineResult<()> {
+  if cancellation.is_cancelled() {
+    return Err(EngineError::Cancelled("captured KV entry scan".to_string()));
+  }
+  Ok(())
+}
+
+fn charge_captured_entries_work(cancellation: &CancellationToken, remaining: &mut u64) -> EngineResult<()> {
+  check_captured_entries_cancellation(cancellation)?;
+  *remaining = remaining.checked_sub(1).ok_or_else(|| EngineError::ResourceExhausted("captured KV entry scan work limit".to_string()))?;
+  // Every summary increment follows this debit, so their sum cannot exceed
+  // the original u64 budget even when the caller supplies u64::MAX.
+  Ok(())
 }
 
 #[cfg(test)]

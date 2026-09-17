@@ -12,6 +12,9 @@ use aeordb::engine::kv_snapshot::ReadSnapshot;
 use aeordb::engine::kv_store::{KVEntry, KV_TYPE_CHUNK, KV_TYPE_FILE_RECORD, KV_FLAG_DELETED};
 use tempfile::tempdir;
 
+#[path = "captured_entries_spec.rs"]
+mod captured_entries_spec;
+
 // ============================================================================
 // Helpers
 // ============================================================================

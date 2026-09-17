@@ -1565,6 +1565,20 @@ impl DiskKVStore {
     &self.snapshot
   }
 
+  /// Capture an authority-bound view only after every KV visibility owner has
+  /// settled. Ordinary lock-free readers may still use the previously published
+  /// view during a transaction; an authority capture must not mistake it for
+  /// the current owner's completed state. This check never flushes or publishes.
+  pub(crate) fn capture_settled_snapshot(&self) -> EngineResult<Arc<ReadSnapshot>> {
+    self.require_no_atomic_visibility("authority-bound snapshot capture")?;
+    if self.transaction_depth != 0 || self.pre_admitted_transaction_active {
+      return Err(EngineError::ResourceExhausted(
+        "authority-bound snapshot capture is unavailable while a transaction owns the KV writer".to_string(),
+      ));
+    }
+    Ok(self.snapshot.load_full())
+  }
+
   /// Make this KV store publish future lock-free snapshots through an existing
   /// engine-owned snapshot handle. Used when `StorageEngine::rebuild_kv`
   /// swaps in a newly-created store without replacing the engine's shared

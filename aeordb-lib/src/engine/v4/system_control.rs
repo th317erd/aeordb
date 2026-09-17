@@ -8,7 +8,7 @@ use crate::engine::HashAlgorithm;
 
 const HEADER_LENGTH: usize = 32;
 const CRC_LENGTH: usize = 4;
-const CONTROL_ROOT: &str = "/.aeordb-system/controls/v1";
+pub(crate) const CONTROL_ROOT: &str = "/.aeordb-system/controls/v1";
 pub const SYSTEM_CONTROL_IDENTITY_LENGTH_CAP: usize = 4_096;
 const ONE_MIB: usize = 1_048_576;
 const FOUR_KIB: usize = 4_096;

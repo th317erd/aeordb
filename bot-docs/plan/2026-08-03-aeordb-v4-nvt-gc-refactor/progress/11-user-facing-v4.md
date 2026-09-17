@@ -26,18 +26,30 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+Captured-task qualification completed September17,08:44:14UTC. Linux/macOS
+final1 and native Windows final3 passed every required gate against the same
+15-input source packet; all raw evidence is copied locally and sealed. The
+[executed immutable proof](../evidence/user-facing-v4-u1-captured-task-inventory-proof-20260917.json)
+validates source/lock archives, failing-first history, exact target/executable
+identities, resource samples and final results. This qualifies the read-only
+captured current-KV task inventory, not durable retention or complete U1.
+Windows final1/2 disk-floor failures remain intact. The authorized48GiB test disk
+resolved test-workspace pressure without resizing the OS or changing16GiB RAM/
+eight CPUs. Failure, cleanup and provisioning history is retained below.
+
 September17 continuation: canonical compilation/update and persisted catalog
 admission are qualified. Additive semantic task/checkpoint/generation codecs,
 source fingerprints, shared selection, native known-task observation and ordered
-namespace seeks have also landed with their immutable proofs below. The latest
-landed source is `38ef8edd` (namespace seeks).
+namespace seeks have also landed with their immutable proofs below. The captured
+inventory unit's entry revision is `31460881` (native staging protection).
 
 The staging-protection integration has passed final Linux, macOS and native
 Windows qualification; see its [immutable proof](../evidence/user-facing-v4-u1-staging-protection-proof-20260917.json).
 It binds the native catalog
 adapter to a counted process-local guard and excludes four final reclamation
-boundaries without holding the mutex during staging. Durable captured task
-inventory, full typed retention, checkpoint/resume and activation still follow.
+boundaries without holding the mutex during staging. Captured task inventory is
+now qualified below; full typed retention, checkpoint/resume and activation
+still follow.
 The contract's following-integration section records the refreshed capture
 requirements. Earlier reader/writer launch and approval notes below are history.
 
@@ -523,6 +535,216 @@ boundaries; existing pre-barrier journal flushes remain allowed. The barrier is
 publisher-local, not cross-process locking or durable checkpoint retention.
 No production action, capability change or ordinary-v4 cutover occurred. Continue
 with the captured-task inventory integration specified in the same contract.
+
+Captured task inventory started at31460881. Desktop source advanced only after
+the sealed staging packet's11 hashes matched before and after the fast-forward;
+prior overlay remains in scoped stash1ffe934aaa79e2c28eb76fbdaa44206a2764160e.
+The first prerequisite is a strict buffered snapshot visitor, because successful
+atomic authority publication exposes buffered entries. Ordinary snapshot and
+stable physical-slot APIs remain unchanged. RED1 launched06:07UTC under existing
+resource limits, unit`aeordb-v4-captured-task-red1-20260917`, invocation
+8132148e6257426a9547241435cd5060; five-input manifest
+93fc31eec9d9fad13d3ca687e73be6a09a1c5b3040d771768cbe0fe915f23af0.
+Three new tests exercise existing visitor behavior through a scaffold: wrong
+live count, cancellation after the final callback, and mismatched buffer key.
+RED1 failed exactly3 tests at06:08:30UTC (zero passes,20 filtered); all failures
+were false complete results from the ordinary visitor scaffold. Its raw logs and
+executed binary digest were copied before C1. C1 strict visitor passed128 tests
+across five complete targets by06:17:46UTC: disk KV63, GC mark8, concurrency8,
+page provider16 and snapshot33 (13 new cases). Its five-input manifest is
+2e50e3a873bdef4478a4ef0133e0d0ac6ebf5c44d9015e63d3cd1f151a646836; invocation
+f17c7b3b22ee4fd390348760e4d7312c. This is prerequisite qualification only.
+
+Native inventory RED2 launched06:19UTC, invocation
+b07ec1ff301244e7b4cf36e387f32e4c, ten-input manifest
+60353ec2738285f904065c189d2ebb24ea4446d35a5a59ffeaa5f96d43aa6536.
+The library observation module runs13 old cases and two new native inventory
+cases against an explicit unavailable scaffold. The seed fixture now takes its
+header live count from KV so replacements/shared chunks do not inflate it.
+RED2 passed13 existing cases and failed exactly2 unavailable-inventory cases
+at06:20:32UTC (731 filtered). Raw evidence was copied before implementation.
+C2 integrates captured lookup, the shared optional-slot selector and the
+existing observation completion path. All862 tests passed by06:35:47UTC:
+754 library,10 configuration controls,33 snapshots,36 semantic controls,
+25 v3 transition controls and4 authority/architecture tests. Its13-input SHA is
+d12eba40f211ebdf6712b9f9cf51c3948e357cc0c91ff3ebe8f4d617769cef7c;
+invocation794cd2b20122481482b57b2a1fb5ed54. Source and raw/binary evidence were
+copied before the review regressions below; this is not final qualification.
+
+RED3 launched06:40UTC, invocation3b64817c53994efbaeadf6b551e344ef,13-input SHA
+719a287a834ccfec91f0fb99b5c378576d7046d88d8d5c74ed16dcd82296ba4e. Two targeted
+review cases require refusal of an unresolved atomic KV visibility batch despite
+matching scalar metadata, and preservation of a callback error when cancellation
+arrives at the same boundary. Both failed as intended at06:40:58UTC. Fixes add
+read-only settled-owner capture and preserve the recorded callback error before
+handling outer cancellation. Nested/pre-admitted transaction cases are included.
+C3 failed before compilation because the runner named nonexistent Cargo targets;
+C4 corrected those names but failed compilation on a missing enum import in new
+error context. Both failures and exact source packets are retained; neither is
+behavioral proof. C4's preflight driver stopped before formatting/audit.
+
+A further review found that simultaneous visits shared one scan-scratch charge.
+RED4's first packet was prepared but never executed because it still lacked that
+import. The corrected `captured-task-red4-compilefix` packet has14 inputs, SHA
+977bc897f94ff0ff07f8a3b59086f902f4de5158093e8cd72371c1b426b2ca31,
+invocation2217decca543437aa4a7b7aca5e3518c. It compiled and failed exactly the
+nested-visit memory test at07:07:04UTC (zero passes,762 filtered). The second
+active visit added8,978,720 bytes, exactly its task-observation charge, with no
+independent scan scratch. Raw logs and executable hash were copied before fixing.
+
+C5 separates snapshot/capture retention from per-visit scratch, preserving the
+existing shared memory coordinator and unlocked callbacks. It contains19 native
+inventory and13 strict-snapshot regressions, including all-profile discovery,
+unknown paths, oversized ordinary FileRecords, actual public native callback
+publication, capture-wait cancellation/pressure, invalid bounds/extents, exact
+checkpoint edge roles and retry. C5 launched07:12:45UTC, invocation
+e09f499800ff4f39a53b03d158f98085;14-input SHA
+7f051a734a011c2ab1c03b63b8e06c144c94ac78a129da04ea0479b97ed5abb0.
+C5 passed966 tests by07:17:05UTC and formatting/strict Clippy by07:19:27UTC.
+The audit then refused baseline growth from1501 to1504: three newly added
+`Option::unwrap_or_default` path-component expressions. Although subsequent
+checks rejected those empty defaults, the parser now rejects missing components
+explicitly. The refusal logs are preserved; no allowance was increased.
+
+C6 adds missing-slot/missing-digest coverage to the existing malformed-path test
+and passed871 library/control/snapshot tests at07:23:34UTC. The unchanged KV
+targets had already passed in C5 and remain in final qualification. Formatting
+passed07:23:40, strict Clippy07:25:56, and audit refresh07:26:24, with1501 reviewed
+entries unchanged except26 line/column relocations. All source and raw evidence
+was copied locally before final rebuilds. C6's14-input SHA is
+c5fa7364a222bdcb2a676c766ebe0cb9d3ef758d5bd16569c0f579214be6e934;
+invocation781e5bf09ccc4baeaeedd718992ed335.
+
+Final1 adds the verified audit inventory as its fifteenth input; manifest SHA
+6cb8fe903e663bd1781c6c9111eae648fa2efad7795a6146e6d9516354bb4c60.
+Linux launched07:29:20UTC, invocation5272791943f147e6af05b0cfc01dec58;
+Windows driverPID4772 and macOS runnerPID31914 launched against identical
+source. The macOS launcher initially stopped before extraction because a string
+comparison did not accept `wc`'s leading whitespace; numeric comparison fixed
+the launcher without changing the source or overwriting test evidence.
+The final gates contain8 narrow and93 affected targets (all36 GC targets),
+full library, native/static/reference checks, and all379 format roots. Results
+are pending; no ordinary-service writer has been enabled.
+
+Unix final1 subsequently passed and was sealed: Linux finished07:38:16UTC;
+macOS finished07:41:44UTC. Each passed1448
+affected tests,763 library tests and181 independent-reference tests; narrow
+counts are253 Linux/251 macOS. Independent fixture count remains496 and the
+reviewed suppression inventory remains1501. Their raw logs and same-host
+executable hashes were copied before any further source or build work.
+
+Windows final1 stopped at07:37:08UTC with124/disk_floor; final2, after the
+authorized idle Cargo-cache cleanup described above, also stopped with124 at
+07:58:30UTC. Both narrow waves passed251 tests. Each affected wave completed
+the same first three targets (26+10+26 tests) and then only part of disk KV.
+Final2 had passed the500-file restart and both8GiB maximum-stage cases before
+the resource guard stopped it at `test_resize_preserves_all_entries`. Neither
+partial affected run is qualification. Both complete raw evidence sets survive.
+
+The owner's explicit development-VM reconfiguration approval was used to add
+a48GiB secondary test disk, keeping the installed OS,16GiB RAM and eight virtual
+CPUs unchanged. The VM shut down gracefully08:03:10UTC with no active Rust/test
+processes. `/media/Data/AeorDB/Tests/win11vm-development-20260917/semantic-tests.qcow2`
+is attached persistently through the existing Quickemu configuration; its
+original configuration is backed up locally and on the desktop. The first blank
+disk's full preallocation timed out after90seconds on the host's `fuseblk`
+filesystem; its incomplete image and check diagnostics were retained, never
+attached. A new sparse image passed an offline structural check before attach.
+Even its full48GiB size leaves the host above the250GB floor at provisioning.
+Windows initialized only the new RAW disk1 with serial`AEORDBTESTS20260917` as
+NTFS`D:`/`AeorDBTestData`,51.42GB free. Reboot reclaimed C: to43.92GB; the exact
+deferred-allocation cause remains unproven, rather than blamed on a product
+failure. No source/binary/database was transferred between platform builds.
+
+Windows final3 launched08:09:07UTC, driver2452, on the identical final1 source
+manifest. Test temporary storage is`D:\AeorDBTests\captured-task-final3`; builds
+remain in the existing C: target. C: admission/stop are12GB/8GB and D:30GB/12GB;
+five-second internal samples,4GiB initial available RAM,one Cargo job and
+90-minute stage deadlines remain. Narrow passed08:11:22UTC. All remaining
+gates and final seal are pending. Routine external monitoring stays near five
+minutes; failures received immediate bounded diagnosis instead of blind retries.
+
+Windows final3 completed all seven gates08:44:14UTC and was sealed08:45:12UTC.
+Its full raw evidence was copied locally before any subsequent build. Results:
+
+| Gate | Linux | macOS | Windows |
+| --- | ---: | ---: | ---: |
+| Narrow,8 targets | 253 | 251 | 251 |
+| Affected,93 targets including36 GC targets | 1448 | 1448 | 1441 |
+| Full library | 763 | 763 | 778 |
+| Independent reference tests | 181 | 181 | 181 |
+| Independent fixture cases | 496 | 496 | 496 |
+
+All final tests had zero failures/ignored/filtered cases; platform-specific
+test differences are retained with exact target lists. Formatting covers all379
+Cargo target roots; workspace Clippy, unchanged1501-entry audit, contract and
+debt gates passed. The strict verifier passed and wrote the immutable proof.
+Windows minimum sampled C: free was43,689,897,984bytes, D:43,229,609,984bytes,
+and available RAM10,193,719,296bytes. Linux stayed within its6GiB cgroup limit,
+with test-cgroup swap disabled; this is not a claim of no host-wide swap use.
+Mac minimum free disk remained249,118,842,880bytes. Runtime source did not change
+for either Windows disk retry. No declaration, audit exemption or test was
+weakened to obtain the final pass.
+
+After qualification, the exact unused preallocation-failure image was removed
+at08:46:26UTC, removing2,918,334,464 allocated file bytes. It contained no user data
+and was never attached; its check diagnostics remain local and on the desktop.
+The working secondary VM disk, OS, source and all test evidence are retained.
+Host Data free space then measured326,245,621,760bytes. No production service,
+installation, ordinary-v4 cutover or retained FS-Server1 database action occurred.
+
+Final review preserves the known-task decoder, optional-slot selection policy,
+ordinary/stable-slot snapshot APIs, shared physical reader and process-local
+retention boundary. Current-KV completeness requires success after the entire
+bounded scan, and each concurrent/nested visit has an independent memory charge.
+The19 new native and13 strict-snapshot cases include cancellation/error races,
+unsettled transactions, allocation/read failure and retry, malformed physical
+roles/paths, all hash profiles and native callback publication. Multi-terabyte
+startup performance, full GC closure, durable pins, resume and activation remain
+explicit subsequent obligations. Continue the following source-capture entry.
+
+Read-only following-unit inventory, not a new API or readiness claim:
+`ParserAliasSnapshotV1` and `IndexConfigurationAliasSnapshotV1` still have no
+production implementation. `plugin_artifact_identity` proves borrowed APAL/
+APWM identity but does not own captured files or admit an executor; the native
+parser still explicitly refuses unavailable WASM dependencies. The public
+plugin file reader requires an exact admitted/authorized namespace row and
+cannot be repurposed by pretending the unadmitted staged tree is a NamespaceRoot.
+The next source owner must capture the base/request union, controls, aliases and
+referenced module FileRecord identities; the existing fingerprint helper only
+checks an already-counted stream. Shared physical/namespace decoding, bounded
+ordered enumeration, per-compilation retained alias metadata, and later executor
+admission must stay distinct. Alias replacement, read failure versus absence,
+and one artifact with two roles are concrete native integration tests to add.
+The point-path lookup still has a separate B-tree descent from the range-checked
+paged seeker; malformed-separator behavior needs a falsifying test before any
+claim or correction. Its callers include permission documents, descendant
+navigation, scoped scans, resume validation and identity lookup. Complete this
+entry audit before selecting an API; do not change the current frozen unit.
+
+September17 read-only refinement: normative Round9 section6 explicitly places
+both archived modules and current aliases outside HEAD, in the protected system
+namespace. The ordinary selected-file body adapter is therefore not their
+physical reader. Existing canonical system-file validation and captured KV
+lookup must be composed under the existing publisher; no new file/KV owner or
+fabricated namespace admission is justified by the plugin identity codecs.
+
+Before depending on native directory traversal for complete source capture,
+run a separate failing-first check of its three decoded-node consumers:
+paged `seek_directory_child`, point `lookup_directory_child`, and streaming
+`visit_directory_children`. The latter checks global emitted ordering, but can
+return at a callback before reaching a later inconsistent separator boundary.
+The existing native fixture can publish locally sorted leaves `[a,n]` and
+`[m,z]` under separator `m`, with valid physical hashes. Check scoped existing
+`/docs/a`, scoped missing `/docs/b`, and early file-identity lookup through
+`/docs`; each visited malformed leaf must fail before returning a row/absence.
+This is a test hypothesis, not a diagnosed product failure or a demand to scan
+unvisited subtrees on every point lookup. If reproduced, share the established
+canonical node/range checks across these consumers and preserve permission
+intersection, cancellation, bounded work/memory, read-only bytes and recent
+full-path pagination regressions. Do not silently replace linear traversal with
+per-entry root rescans. This prerequisite must be independently qualified before
+using it in the larger source-capture integration.
 
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the

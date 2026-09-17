@@ -2,6 +2,8 @@
 use super::*;
 #[path = "../support/allocation_probe.rs"]
 mod allocation_probe;
+#[path = "semantic_mutation_inventory_spec.rs"]
+mod inventory_spec;
 use allocation_probe::measure;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationPhaseV1, SemanticMutationTaskStateV1};
 
@@ -44,22 +46,23 @@ fn checkpoint_identity() -> [u8; 24] {
 // permission to write semantic controls. Physical wrappers use existing codecs;
 // task/checkpoint/generation payloads remain independent fixture bytes.
 fn seed(publisher: &V4FirstAuthorityPublisher, controls: &[(SystemControlKindV1, &[u8], SystemControlSlotV1, &[u8])]) {
+  let files: Vec<_> = controls
+    .iter()
+    .map(|(kind, identity, slot, body)| (system_control_path(*kind, identity, *slot).unwrap(), SYSTEM_CONTROL_CONTENT_TYPE, *body))
+    .collect();
+  seed_files(publisher, &files);
+}
+
+fn seed_files(publisher: &V4FirstAuthorityPublisher, files: &[(String, &str, &[u8])]) {
   let _guard = publisher.root_state.lock().unwrap();
   let mut observed = publisher.observe().unwrap();
   let header = &mut observed.selected.header;
   let mut entities = Vec::new();
   let mut sequence = header.write_sequence_high_water;
-  for (kind, identity, slot, body) in controls {
-    sequence = append_system_file(
-      &mut entities,
-      system_control_path(*kind, identity, *slot).unwrap(),
-      SYSTEM_CONTROL_CONTENT_TYPE,
-      body,
-      header.hash_algorithm,
-      header.updated_at_ms + 1,
-      sequence,
-    )
-    .unwrap();
+  for (path, content_type, body) in files {
+    sequence =
+      append_system_file(&mut entities, path.clone(), content_type, body, header.hash_algorithm, header.updated_at_ms + 1, sequence)
+        .unwrap();
   }
   let mut kv = publisher.lock_kv().unwrap();
   let mut offset = header.hot_tail_offset;
@@ -70,12 +73,13 @@ fn seed(publisher: &V4FirstAuthorityPublisher, controls: &[(SystemControlKindV1,
   }
   kv.set_hot_tail_offset(offset);
   kv.force_flush_hot_buffer().unwrap();
+  let entry_count = kv.len() as u64;
   drop(kv);
   header.slot_sequence += 1;
   header.updated_at_ms += 1;
   header.hot_tail_offset = offset;
   header.write_sequence_high_water = sequence;
-  header.entry_count += entities.len() as u64;
+  header.entry_count = entry_count;
   header.required_reader_capabilities[3] |= 2;
   header.required_writer_capabilities[3] |= 2;
   let encoded = encode_database_header_slot(header).unwrap();

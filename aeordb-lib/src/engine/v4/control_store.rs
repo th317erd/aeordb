@@ -470,11 +470,8 @@ pub fn discover_mutable_control(
   if kind.is_immutable() {
     return Err(identity_error("control_store_discover_immutable", "mutable discovery cannot select an immutable control"));
   }
-  let selection = match (a.as_deref(), b.as_deref()) {
-    (None, None) => return Ok(None),
-    (Some(a), Some(b)) => select_system_control_pair(algorithm, a, b)?,
-    (Some(bytes), None) => select_single_mutable(algorithm, SystemControlSlotV1::A, bytes)?,
-    (None, Some(bytes)) => select_single_mutable(algorithm, SystemControlSlotV1::B, bytes)?,
+  let Some(selection) = select_available_mutable_control_slots(algorithm, a.as_deref(), b.as_deref())? else {
+    return Ok(None);
   };
   verify_kind_and_identity(&selection.control, kind, identity)?;
   loaded_mutable_control_from_selection(selection, a.as_deref(), b.as_deref()).map(Some)
@@ -553,14 +550,28 @@ fn select_mutable<'a>(
   if slots.immutable.is_some() {
     return Err(identity_error("control_store_mutable_i_slot", "mutable control received an immutable I slot"));
   }
-  let selection = match (slots.a, slots.b) {
-    (None, None) => return Ok(ControlStoreReadV1::Absent),
+  let Some(selection) = select_available_mutable_control_slots(algorithm, slots.a, slots.b)? else {
+    return Ok(ControlStoreReadV1::Absent);
+  };
+  verify_expected(&selection.control, expected_kind, expected_database_id, expected_identity)?;
+  Ok(ControlStoreReadV1::Mutable(selection))
+}
+
+/// Select before a discovery caller knows the identity. Callers must still
+/// bind the selected kind, database and identity to their canonical paths.
+/// This is the same optional-slot/torn-payload policy as known-key reads.
+pub(crate) fn select_available_mutable_control_slots<'a>(
+  algorithm: HashAlgorithm,
+  a: Option<&'a [u8]>,
+  b: Option<&'a [u8]>,
+) -> FormatResult<Option<SystemControlSelectionV1<'a>>> {
+  let selection = match (a, b) {
+    (None, None) => return Ok(None),
     (Some(a), Some(b)) => select_system_control_pair(algorithm, a, b)?,
     (Some(bytes), None) => select_single_mutable(algorithm, SystemControlSlotV1::A, bytes)?,
     (None, Some(bytes)) => select_single_mutable(algorithm, SystemControlSlotV1::B, bytes)?,
   };
-  verify_expected(&selection.control, expected_kind, expected_database_id, expected_identity)?;
-  Ok(ControlStoreReadV1::Mutable(selection))
+  Ok(Some(selection))
 }
 
 fn select_single_mutable(algorithm: HashAlgorithm, slot: SystemControlSlotV1, bytes: &[u8]) -> FormatResult<SystemControlSelectionV1<'_>> {
