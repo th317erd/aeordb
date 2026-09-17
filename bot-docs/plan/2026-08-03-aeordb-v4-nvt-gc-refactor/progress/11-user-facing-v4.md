@@ -331,6 +331,124 @@ directory sorting adapter: v4's canonical reader must not gain that permissive
 legacy behavior. This inventory does not yet settle the shared traversal API,
 prove complete semantic-source capture, or authorize task publication.
 
+**Namespace seek prerequisite started at82574387.** The first launcher exited
+127 before compilation because its script path was relative to the caller's
+working directory. Its journal is retained; the corrected absolute-path run
+completed03:23:59UTC with the intended failure: late-page scanning exceeded
+`selected_namespace_work` (0passed/1failed/85filtered). The native test body
+took0.02seconds; compilation53.32seconds. Its four-input snapshot, raw receipts
+and exact executable digest were copied before rebuilding. The existing isolated
+desktop checkout was advanced with a recoverable scoped stash and fast-forward,
+without changing the owner's checkout or transferring targets. A second test
+adds independently sorted punctuation/prefix expectations; its unchanged-code
+run is now separate `namespace-seek-red2`. No production traversal changes yet.
+
+RED2 initially reused the previous executable: the archive preserved source
+timestamps older than that build, despite correct source hashes. Its one-test
+count exposed the stale run; it is retained but is not ordering evidence.
+Refreshing the two transferred Rust timestamps produced the intended two
+failures03:32:36UTC: full-path punctuation order and late-page work refusal.
+All following source extractions explicitly refresh timestamps, and qualification
+checks exact test inventories as well as source and executable hashes.
+
+The shared ordered child/B-tree seek now serves the native selected-root reader
+and legacy maintenance adapter. Legacy revision point reads and parser callers
+are unchanged; canonical v4 validation remains separate from v0 flat sorting.
+Decoded-node reservations survive through use, with checked workspace geometry
+for retained path/child copies and inherited separators. This is not complete
+source capture or a new physical/GC owner.
+
+Candidate1 passed104 tests03:39:11UTC. Candidate2 passed731 library,9 scan,
+8 revision,64 resource and87 native-reader tests, but two new reader tests
+failed: fixture writer Drop flushed pending publication bytes after the
+comparison boundary, and250MiB did not exhaust the511MiB ordinary workload
+admission limit. The corrected tests retain the publisher through the strict
+byte comparison and leave page-sized headroom at the actual ordinary limit.
+No production admission policy was changed. Candidate3 passed all903 tests
+03:58:55UTC (733 library/9 scan/8 revision/64 resource/89 native reader).
+All failed/corrected raw runs and same-host executable digests remain intact.
+
+A static-preflight launch during candidate3 was refused by the existing
+single-Rust-job guard (exit93, no formatter/compiler stage ran). Candidate4
+instead serializes tests, formatting, Clippy and audit under one guarded driver.
+It adds three direct malformed-node validation cases and a shared-owner
+architecture check; full Linux/macOS/Windows qualification is still pending.
+Mac and Windows isolated sources advanced to82574387 only after the observation
+evidence was sealed, using recoverable scoped stashes; no target or DB transfer.
+
+Candidate4 passed906 tests04:05:44UTC. Formatting passed; strict Clippy found
+one redundant `vec!` in the new independent-ordering test. The fixed-size array
+keeps identical cases and ordering checks. Audit initially refused1502 versus
+the1501 baseline because the extracted helper introduced `Option::unwrap_or`.
+Restoring the predecessor's explicit optional-value match removes that new
+scanner occurrence without changing error behavior. The original failed check
+and refused refresh remain intact. Refresh2 passed04:12:02UTC with1501 entries,
+zero retired entries, and a byte-identical allowlist—no suppression waiver.
+
+Final1 freezes13 inputs, manifest
+`670d173d237de26fe4d3d940e9027d39f7696b026c1b01bc63a249e1cdd4adfe`.
+Linux unit `aeordb-v4-namespace-seek-final1-20260917`, native Mac runner and
+Windows PID6460 started around04:15UTC. Gates cover6 narrow targets,53 affected
+targets, full libraries, strict Clippy, formatting and independent reference;
+Unix additionally runs contract/debt gates. Full source-bound completion is
+pending. The strict new proof verifier validates the complete earlier history
+and refuses to write a completed proof before final receipts exist.
+
+Read-only capture-entry refinement while this frozen candidate qualifies:
+`ParserAliasSnapshotV1` and `IndexConfigurationAliasSnapshotV1` implementations
+remain test-only. The fingerprint helper requires a counted, sorted complete
+source stream and explicitly does not prove capture or retention. Native
+`scan_files` requires an admitted `ResolvedReadView`; a staged DirectoryIndex
+must not be made into a fake admitted view merely to reuse that interface.
+The existing physical publisher and shared child seeker remain the required
+read owners. Complete source capture must bind base/staged identities, current
+authorization, explicit absences, aliases and referenced module FileRecords,
+with retained ownership and no fallback to mutable HEAD. Plugin artifact
+identity inspection remains distinct from bytecode/executor admission.
+These are next-unit dependencies, not completed runtime behavior.
+
+Final1 Linux completed all9 gates04:24:27UTC; macOS completed04:24:13UTC.
+Each passed229 narrow tests,1054 affected tests across53 targets,736 library
+tests,181 reference tests,496 independent fixtures, strict Clippy, formatting,
+the unchanged1501-entry audit, and contract/debt checks. Linux evidence was
+sealed04:26:40UTC and Mac04:26:39UTC; all source/lock/executable/tool identities
+and raw receipts are mirrored locally. The strict verifier passes both Unix
+waves and all earlier history, but correctly refuses a completed proof while
+native Windows is still running its affected suite. No landing/readiness claim.
+
+**Ordered namespace seek qualification completed September17.** Windows
+finished all7 gates04:37:20UTC and sealed04:42:29UTC. Native Windows passed229
+narrow tests,1049 affected tests across53 targets,751 library tests and181
+reference tests; strict Clippy,496 independent fixtures and all379 Cargo-listed
+formatting roots passed. All final-platform test results have zero failures,
+ignored or filtered cases. Windows sampled free-space/RAM minima were
+10,163,826,688/10,714,742,784bytes, above the configured admission requirements.
+No VM configuration change or additional process termination was needed.
+All three platforms' raw receipts, exact executed-binary digests, source/lock
+manifests and tool identities are retained locally before any following build.
+The strict verifier passed and wrote the immutable
+[namespace seek proof](../evidence/user-facing-v4-u1-namespace-seek-proof-20260917.json).
+
+Final review covered both physical adapters, shared traversal lease lifetime,
+inherited range validation, raw-path ordering, explicit missing/non-file resume,
+work limits, cancellation, allocator refusal/retry and page/pin release. The
+legacy revision implementation is byte-identical to entry82574387; protected
+publication/admission/control and parser owners remain unchanged. This fixes
+bounded namespace paging, not complete source capture, durable staging or
+ordinary-v4 readiness. Existing infallible clones and the absence of a
+production-scale heap/time benchmark remain explicit proof limitations.
+
+Following integration inventory: Child04 requires KV/root-set capture followed
+by streamed traversal and a **short** final publication guard. A complete
+FileRecord inventory under one long-held `root_state` lock would violate that
+design. `ReadSnapshot::visit_all/visit_by_type` provide page-bounded iteration,
+but a captured snapshot alone does not protect staged physical closure.
+`RootReadPinCoordinatorV1` owns admitted-root lifecycle/request pins, not staged
+DirectoryIndex admission. Reuse the physical and retention owners with explicit
+typed staging protection; do not invent lifecycle proof or equate known-task
+observation with complete durable task discovery. No next-unit source changes
+were mixed into this qualified traversal snapshot.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.

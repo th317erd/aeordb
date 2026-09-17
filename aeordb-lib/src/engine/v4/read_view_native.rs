@@ -531,6 +531,21 @@ impl From<ReadViewAuthorizationFailureV1> for NativeSelectedNamespaceReadErrorV1
   }
 }
 
+impl From<super::namespace_seek::NamespaceSeekFailureV1> for NativeSelectedNamespaceReadErrorV1 {
+  fn from(error: super::namespace_seek::NamespaceSeekFailureV1) -> Self {
+    use super::namespace_seek::NamespaceSeekFailureV1;
+    match error {
+      NamespaceSeekFailureV1::Allocation(source) => Self::resource("selected_namespace_seek_allocation", source.to_string()),
+      NamespaceSeekFailureV1::Depth => Self::corrupt("selected_namespace_btree_depth", "B-tree seek exceeds its structural depth"),
+      NamespaceSeekFailureV1::Cycle => Self::corrupt("selected_namespace_btree_cycle", "B-tree seek repeats an ancestor"),
+      NamespaceSeekFailureV1::ParentShape => Self::corrupt("selected_namespace_btree_parent", "B-tree seek parent changed node shape"),
+      NamespaceSeekFailureV1::ChildIndex => Self::corrupt("selected_namespace_btree_child", "B-tree child index exceeds the internal node"),
+      NamespaceSeekFailureV1::InvalidChild(source) => Self::corrupt("selected_namespace_entry_type", source.to_string()),
+      NamespaceSeekFailureV1::PathOverflow => Self::resource("selected_namespace_path_bytes", "child scan-key length overflowed"),
+    }
+  }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeSelectedNamespaceFileRowV1 {
   file_key: Vec<u8>,
@@ -848,7 +863,6 @@ impl NativeReadViewSourceV1 {
 
 struct SelectedNamespaceScanStateV1<'request> {
   resume_after: Option<&'request str>,
-  resume_seen: bool,
   rows: Vec<NativeSelectedNamespaceFileRowV1>,
   has_more: bool,
   work_steps: u64,
@@ -895,7 +909,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
     let _workspace = self
       .source
       .memory
-      .reserve(MemoryOwner::Query, SELECTED_NAMESPACE_WORKSPACE_BYTES, AdmissionClass::Workload)
+      .reserve(MemoryOwner::Query, self.scan_workspace_bytes()?, AdmissionClass::Workload)
       .map_err(|error| NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_workspace_memory", error.to_string()))?;
     let mut rows = Vec::new();
     rows.try_reserve_exact(self.limits.maximum_page_documents).map_err(|error| {
@@ -904,20 +918,25 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         format!("cannot reserve selected namespace page rows: {error}"),
       )
     })?;
-    let mut state =
-      SelectedNamespaceScanStateV1 { resume_after, resume_seen: resume_after.is_none(), rows, has_more: false, work_steps: 0 };
+    let mut state = SelectedNamespaceScanStateV1 { resume_after, rows, has_more: false, work_steps: 0 };
+    if let Some(resume) = resume_after {
+      let reference = self
+        .source
+        .resolve_path(self.view.captured_header(), &self.view.authority().namespace_tree.root_hash, resume, self.view.cancellation())
+        .map_err(map_selected_namespace_error)?;
+      if reference.is_none_or(|child| child.entry_type != EntryType::FileRecord.to_u8()) {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_resume_missing",
+          "selected immutable namespace no longer contains its own file resume path",
+        ));
+      }
+    }
     let reference = self
       .source
       .resolve_path(self.view.captured_header(), &self.view.authority().namespace_tree.root_hash, scope, self.view.cancellation())
       .map_err(map_selected_namespace_error)?;
     if let Some(reference) = reference {
       self.scan_reference(scope, reference, selected_path_depth(scope), &mut state)?;
-    }
-    if !state.resume_seen {
-      return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
-        "selected_namespace_resume_missing",
-        "selected immutable namespace no longer contains its own resume path",
-      ));
     }
     self.check_cancelled()?;
     let complete = !state.has_more;
@@ -1879,10 +1898,7 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
       .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_entry_type", error.to_string()))?;
     match entry_type {
       EntryType::FileRecord => {
-        if !state.resume_seen {
-          if state.resume_after == Some(path) {
-            state.resume_seen = true;
-          }
+        if state.resume_after.is_some_and(|resume| path <= resume) {
           return Ok(SelectedDirectoryVisitControlV1::Continue);
         }
         if state.rows.len() >= self.limits.maximum_page_documents {
@@ -1921,17 +1937,38 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
             "selected namespace traversal exceeds its path-depth bound",
           ));
         }
-        let source = self.source.clone();
-        source.visit_directory_children(self.view.captured_header(), &reference.hash, self.view.cancellation(), |visit| match visit {
-          SelectedDirectoryVisitV1::Node => {
-            self.step(&mut state.work_steps)?;
-            Ok(SelectedDirectoryVisitControlV1::Continue)
+        let relative_lower = state.resume_after.and_then(|resume| {
+          if path == "/" {
+            resume.strip_prefix('/')
+          } else {
+            resume.strip_prefix(path).and_then(|suffix| suffix.strip_prefix('/'))
           }
-          SelectedDirectoryVisitV1::Child(child) => {
+        });
+        if let Some((component, _)) = relative_lower.and_then(|relative| relative.split_once('/')) {
+          if let Some(child) = self
+            .seek_directory_child(&reference.hash, component, true, path, &mut state.work_steps)?
+            .filter(|child| child.name == component && child.entry_type == EntryType::DirectoryIndex.to_u8())
+          {
             let child_path = join_selected_path(path, &child.name, self.limits.maximum_path_bytes)?;
-            self.scan_reference(&child_path, child, depth + 1, state)
+            if self.scan_reference(&child_path, child, depth + 1, state)? == SelectedDirectoryVisitControlV1::Break {
+              return Ok(SelectedDirectoryVisitControlV1::Break);
+            }
           }
-        })
+        }
+        let mut child_lower = relative_lower.map(|path| try_clone_selected_string(path, "relative resume path")).transpose()?;
+        loop {
+          let next = super::namespace_seek::next_namespace_child_by_path_v1(child_lower.as_deref(), |name, inclusive| {
+            self.seek_directory_child(&reference.hash, name, inclusive, path, &mut state.work_steps)
+          })?;
+          let Some((key, child)) = next else {
+            return Ok(SelectedDirectoryVisitControlV1::Continue);
+          };
+          child_lower = Some(key);
+          let child_path = join_selected_path(path, &child.name, self.limits.maximum_path_bytes)?;
+          if self.scan_reference(&child_path, child, depth + 1, state)? == SelectedDirectoryVisitControlV1::Break {
+            return Ok(SelectedDirectoryVisitControlV1::Break);
+          }
+        }
       }
       EntryType::Symlink => Ok(SelectedDirectoryVisitControlV1::Continue),
       EntryType::Chunk | EntryType::DeletionRecord | EntryType::Snapshot | EntryType::Void | EntryType::Fork => {
@@ -1941,6 +1978,72 @@ impl<'view> NativeSelectedNamespaceReaderV1<'view> {
         ))
       }
     }
+  }
+
+  fn scan_workspace_bytes(&self) -> Result<u64, NativeSelectedNamespaceReadErrorV1> {
+    super::namespace_seek::namespace_seek_workspace_bytes_v1(
+      self.limits.maximum_path_bytes as u64,
+      self.limits.maximum_depth as u64,
+      MAX_BTREE_DEPTH as u64,
+      self.view.hash_algorithm().hash_length() as u64,
+    )
+    .ok_or_else(|| {
+      NativeSelectedNamespaceReadErrorV1::resource("selected_namespace_workspace_memory", "selected namespace seek workspace overflowed")
+    })
+  }
+
+  fn seek_directory_child(
+    &self,
+    directory_hash: &[u8],
+    lower: &str,
+    inclusive: bool,
+    context_path: &str,
+    work_steps: &mut u64,
+  ) -> Result<Option<ChildEntry>, NativeSelectedNamespaceReadErrorV1> {
+    super::namespace_seek::seek_namespace_child_v1(
+      directory_hash,
+      lower,
+      inclusive,
+      MAX_BTREE_DEPTH,
+      |hash, lower_bound, upper_bound, btree_child| {
+        self.step(work_steps)?;
+        let entity = self
+          .source
+          .load_directory_entity(self.view.captured_header(), hash, self.view.cancellation())
+          .map_err(map_selected_namespace_error)?;
+        let width = self.view.hash_algorithm().hash_length();
+        let node = if !is_btree_format(&entity.stored_value) {
+          if btree_child {
+            return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+              "selected_namespace_btree_child_format",
+              "selected B-tree child uses a flat directory representation",
+            ));
+          }
+          let entries = deserialize_child_entries(&entity.stored_value, width, entity.entity_version)
+            .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_directory", error.to_string()))?;
+          if entries.len() > MAX_FLAT_DIRECTORY_ENTRIES {
+            return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+              "selected_namespace_directory",
+              "selected flat directory exceeds its entry bound",
+            ));
+          }
+          validate_sorted_children(&entries, context_path).map_err(map_selected_namespace_error)?;
+          for _ in &entries {
+            self.step(work_steps)?;
+          }
+          BTreeNode::Leaf(crate::engine::btree::LeafNode { entries })
+        } else {
+          let node = decode_canonical_btree_node(&entity, width, context_path).map_err(map_selected_namespace_error)?;
+          if matches!(node, BTreeNode::Leaf(_)) {
+            self.step(work_steps)?;
+          }
+          node
+        };
+        validate_selected_seek_node(&node, width, lower_bound, upper_bound)?;
+        self.check_cancelled()?;
+        Ok(super::namespace_seek::LoadedNamespaceSeekNodeV1 { node, _memory: entity._memory })
+      },
+    )
   }
 
   fn load_file_row(
@@ -3390,6 +3493,71 @@ fn decode_canonical_btree_node(
   }
   Ok(node)
 }
+
+fn validate_selected_seek_node(
+  node: &BTreeNode,
+  hash_width: usize,
+  lower: Option<&str>,
+  upper: Option<&str>,
+) -> Result<(), NativeSelectedNamespaceReadErrorV1> {
+  let in_range = |name: &str| lower.is_none_or(|bound| name >= bound) && upper.is_none_or(|bound| name < bound);
+  let canonical_name = |name: &str| !name.is_empty() && !matches!(name, "." | "..") && !name.contains('/') && !name.contains('\0');
+  if lower.zip(upper).is_some_and(|(lower, upper)| lower >= upper) {
+    return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+      "selected_namespace_btree_range",
+      "B-tree inherited range is empty or reversed",
+    ));
+  }
+  match node {
+    BTreeNode::Leaf(leaf) => {
+      for child in &leaf.entries {
+        let kind = EntryType::from_u8(child.entry_type)
+          .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_entry_type", error.to_string()))?;
+        if !matches!(kind, EntryType::FileRecord | EntryType::DirectoryIndex | EntryType::Symlink) {
+          return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_namespace_child_role",
+            "directory child cannot be a namespace entity",
+          ));
+        }
+        if !canonical_name(&child.name) || child.hash.len() != hash_width || child.hash.iter().all(|byte| *byte == 0) {
+          return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_namespace_child_identity",
+            "directory child has a noncanonical name or identity",
+          ));
+        }
+        if !in_range(&child.name) {
+          return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+            "selected_namespace_btree_range",
+            "B-tree child is outside its inherited separator range",
+          ));
+        }
+      }
+    }
+    BTreeNode::Internal(internal) => {
+      if internal.keys.iter().any(|key| !canonical_name(key) || !in_range(key)) {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_btree_range",
+          "B-tree separator is noncanonical or outside its inherited range",
+        ));
+      }
+      if internal.children.len() != internal.keys.len() + 1
+        || internal.children.iter().enumerate().any(|(index, hash)| {
+          hash.len() != hash_width || hash.iter().all(|byte| *byte == 0) || internal.children[index + 1..].contains(hash)
+        })
+      {
+        return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
+          "selected_namespace_btree_child",
+          "B-tree has invalid or repeated child identities",
+        ));
+      }
+    }
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../../spec/engine/selected_namespace_seek_validation_spec.rs"]
+mod seek_validation_tests;
 
 fn validate_sorted_children(children: &[ChildEntry], path: &str) -> Result<(), ReadViewAuthorizationFailureV1> {
   for pair in children.windows(2) {

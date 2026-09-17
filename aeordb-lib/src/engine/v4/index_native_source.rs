@@ -1,6 +1,5 @@
 //! Production source adapters for the native v4 index runtime.
 
-use std::cmp::Ordering;
 use std::mem::size_of;
 
 use crate::engine::btree::{BTREE_CONVERSION_THRESHOLD, BTREE_MAX_INTERNAL_KEYS, BTREE_MAX_LEAF_ENTRIES, BTreeNode, is_btree_format};
@@ -22,10 +21,10 @@ use super::index_maintenance_scan::{
   IndexMaintenanceScanReadV1, IndexMaintenanceScanRequestV1, IndexMaintenanceScanSourceV1, index_maintenance_scan_page_retained_bytes_v1,
   validate_index_maintenance_scan_request_v1,
 };
+use super::namespace_seek::{LoadedNamespaceSeekNodeV1, NamespaceSeekFailureV1, next_namespace_child_by_path_v1, seek_namespace_child_v1};
 
 const NATIVE_REVISION_ALLOCATION_MULTIPLIER: u64 = 4;
 const NATIVE_REVISION_FIXED_BYTES: u64 = 1_024;
-const NATIVE_SCAN_FIXED_WORKSPACE_BYTES: u64 = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeIndexSourceLimitsV1 {
@@ -495,48 +494,7 @@ impl<'engine> NativeIndexMaintenanceScanSourceV1<'engine> {
     context_path: &str,
     work: &mut NativeScanWorkV1<'_>,
   ) -> Result<Option<(String, ChildEntry)>, IndexMaintenanceScanReadErrorV1> {
-    let mut best: Option<(String, ChildEntry)> = None;
-    if let Some(lower) = lower {
-      let component = lower.split('/').next().map_or("", |component| component);
-      for (end, _) in component.char_indices().skip(1).chain(std::iter::once((component.len(), '\0'))) {
-        let prefix = &component[..end];
-        if prefix.is_empty() {
-          continue;
-        }
-        let child = self.scan_exact_child(directory_hash, prefix, context_path, work)?;
-        if let Some(entry) = child.filter(|entry| entry.entry_type == EntryType::DirectoryIndex.to_u8()) {
-          let key = child_scan_key(&entry)?;
-          if key.as_str() > lower && best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
-            best = Some((key, entry));
-          }
-        }
-      }
-    }
-
-    let mut raw_lower = match lower {
-      Some(lower) => lower.to_string(),
-      None => String::new(),
-    };
-    let mut inclusive = lower.is_none();
-    loop {
-      let child = self.seek_raw_child(directory_hash, &raw_lower, inclusive, context_path, work)?;
-      let Some(child) = child else {
-        break;
-      };
-      if best.as_ref().is_some_and(|(best_key, _)| child.name.as_str() >= best_key.as_str()) {
-        break;
-      }
-      let key = child_scan_key(&child)?;
-      if lower.is_none_or(|lower| key.as_str() > lower) && best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
-        best = Some((key, child.clone()));
-      }
-      if child.entry_type != EntryType::DirectoryIndex.to_u8() {
-        break;
-      }
-      raw_lower = child.name;
-      inclusive = false;
-    }
-    Ok(best)
+    next_namespace_child_by_path_v1(lower, |name, inclusive| self.seek_raw_child(directory_hash, name, inclusive, context_path, work))
   }
 
   fn scan_exact_child(
@@ -557,155 +515,40 @@ impl<'engine> NativeIndexMaintenanceScanSourceV1<'engine> {
     context_path: &str,
     work: &mut NativeScanWorkV1<'_>,
   ) -> Result<Option<ChildEntry>, IndexMaintenanceScanReadErrorV1> {
-    work.step()?;
-    let (header, value, reservation) =
-      self.revisions.load_directory_entity(directory_hash, context_path).map_err(map_revision_scan_error)?;
-    if !is_btree_format(&value) {
-      return seek_flat_child(&value, header.entry_version, self.revisions.engine.hash_algo().hash_length(), lower, inclusive, work);
-    }
-    self.seek_btree_child(directory_hash, (header, value, reservation), lower, inclusive, context_path, work)
-  }
-
-  fn seek_btree_child(
-    &self,
-    root_hash: &[u8],
-    loaded_root: (EntryHeader, Vec<u8>, MemoryReservation),
-    lower: &str,
-    inclusive: bool,
-    context_path: &str,
-    work: &mut NativeScanWorkV1<'_>,
-  ) -> Result<Option<ChildEntry>, IndexMaintenanceScanReadErrorV1> {
-    let hash_width = self.revisions.engine.hash_algo().hash_length();
-    let mut stack: Vec<NativeBtreeSeekFrameV1> = Vec::new();
-    stack.try_reserve_exact(usize::from(self.revisions.limits.maximum_btree_depth)).map_err(|error| {
-      IndexMaintenanceScanReadErrorV1::retryable("native_scan_allocation", format!("B-tree seek stack allocation failed: {error}"))
-    })?;
-    let mut node_hash = root_hash.to_vec();
-    let mut loaded = Some(loaded_root);
-    let mut lower_bound = None;
-    let mut upper_bound = None;
-    loop {
-      if stack.len() >= usize::from(self.revisions.limits.maximum_btree_depth) {
-        return Err(IndexMaintenanceScanReadErrorV1::corrupt(
-          "native_scan_btree_depth",
-          "B-tree seek exceeds the configured structural depth",
-        ));
-      }
-      if stack.iter().any(|frame| frame.node_hash == node_hash) {
-        return Err(IndexMaintenanceScanReadErrorV1::corrupt(
-          "native_scan_btree_cycle",
-          format!("B-tree seek repeats node {}", hex::encode(&node_hash)),
-        ));
-      }
-      let (header, value, reservation) = match loaded.take() {
-        Some(root) => root,
-        None => {
-          work.step()?;
-          self.revisions.load_directory_entity(&node_hash, context_path).map_err(map_revision_scan_error)?
-        }
-      };
-      let node = decode_canonical_btree_node(&node_hash, &header, &value, hash_width, lower_bound.as_deref(), upper_bound.as_deref())
-        .map_err(map_revision_scan_error)?;
-      drop(reservation);
-      match node {
-        BTreeNode::Leaf(leaf) => {
-          work.step()?;
-          let index = leaf.entries.partition_point(|entry| match entry.name.as_str().cmp(lower) {
-            Ordering::Less => true,
-            Ordering::Equal => !inclusive,
-            Ordering::Greater => false,
-          });
-          if let Some(entry) = leaf.entries.get(index) {
-            return Ok(Some(entry.clone()));
-          }
-          break;
-        }
-        BTreeNode::Internal(internal) => {
-          let child_index = internal.find_child_index(lower);
-          let (child_lower, child_upper) =
-            btree_child_bounds(&internal, child_index, lower_bound.clone(), upper_bound.clone()).map_err(map_revision_scan_error)?;
-          stack.push(NativeBtreeSeekFrameV1 { node_hash, child_index, lower_bound, upper_bound });
-          lower_bound = child_lower;
-          upper_bound = child_upper;
-          node_hash = internal.children[child_index].clone();
-        }
-      }
-    }
-
-    'ascend: while let Some(frame) = stack.pop() {
-      work.step()?;
-      let (header, value, reservation) =
-        self.revisions.load_directory_entity(&frame.node_hash, context_path).map_err(map_revision_scan_error)?;
-      let node = decode_canonical_btree_node(
-        &frame.node_hash,
-        &header,
-        &value,
-        hash_width,
-        frame.lower_bound.as_deref(),
-        frame.upper_bound.as_deref(),
-      )
-      .map_err(map_revision_scan_error)?;
-      drop(reservation);
-      let BTreeNode::Internal(parent) = node else {
-        return Err(IndexMaintenanceScanReadErrorV1::corrupt(
-          "native_scan_btree_parent",
-          "B-tree seek parent changed node shape during traversal",
-        ));
-      };
-      let next_child_index = frame
-        .child_index
-        .checked_add(1)
-        .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_btree_child", "B-tree child index overflowed"))?;
-      if next_child_index >= parent.children.len() {
-        continue;
-      }
-      let (child_lower, child_upper) = btree_child_bounds(&parent, next_child_index, frame.lower_bound.clone(), frame.upper_bound.clone())
-        .map_err(map_revision_scan_error)?;
-      stack.push(NativeBtreeSeekFrameV1 {
-        node_hash: frame.node_hash,
-        child_index: next_child_index,
-        lower_bound: frame.lower_bound,
-        upper_bound: frame.upper_bound,
-      });
-      node_hash = parent.children[next_child_index].clone();
-      lower_bound = child_lower;
-      upper_bound = child_upper;
-      loop {
-        if stack.len() >= usize::from(self.revisions.limits.maximum_btree_depth) {
-          return Err(IndexMaintenanceScanReadErrorV1::corrupt(
-            "native_scan_btree_depth",
-            "B-tree successor descent exceeds the configured structural depth",
-          ));
-        }
-        if stack.iter().any(|frame| frame.node_hash == node_hash) {
-          return Err(IndexMaintenanceScanReadErrorV1::corrupt(
-            "native_scan_btree_cycle",
-            format!("B-tree successor repeats node {}", hex::encode(&node_hash)),
-          ));
-        }
+    seek_namespace_child_v1(
+      directory_hash,
+      lower,
+      inclusive,
+      usize::from(self.revisions.limits.maximum_btree_depth),
+      |hash, lower_bound, upper_bound, btree_child| {
         work.step()?;
-        let (header, value, reservation) =
-          self.revisions.load_directory_entity(&node_hash, context_path).map_err(map_revision_scan_error)?;
-        let node = decode_canonical_btree_node(&node_hash, &header, &value, hash_width, lower_bound.as_deref(), upper_bound.as_deref())
-          .map_err(map_revision_scan_error)?;
-        drop(reservation);
-        match node {
-          BTreeNode::Leaf(leaf) => match leaf.entries.first() {
-            Some(entry) => return Ok(Some(entry.clone())),
-            None => continue 'ascend,
-          },
-          BTreeNode::Internal(internal) => {
-            let (child_lower, child_upper) =
-              btree_child_bounds(&internal, 0, lower_bound.clone(), upper_bound.clone()).map_err(map_revision_scan_error)?;
-            stack.push(NativeBtreeSeekFrameV1 { node_hash, child_index: 0, lower_bound, upper_bound });
-            lower_bound = child_lower;
-            upper_bound = child_upper;
-            node_hash = internal.children[0].clone();
+        let (header, value, reservation) = self.revisions.load_directory_entity(hash, context_path).map_err(map_revision_scan_error)?;
+        let node = if !is_btree_format(&value) {
+          if btree_child {
+            return Err(IndexMaintenanceScanReadErrorV1::corrupt(
+              "native_scan_btree_child_format",
+              "B-tree child uses a flat directory representation",
+            ));
           }
-        }
-      }
-    }
-    Ok(None)
+          let entries = decode_valid_flat_children(&value, header.entry_version, self.revisions.engine.hash_algo().hash_length())
+            .map_err(map_revision_scan_error)?;
+          for _ in &entries {
+            work.step()?;
+          }
+          BTreeNode::Leaf(crate::engine::btree::LeafNode { entries })
+        } else {
+          let node =
+            decode_canonical_btree_node(hash, &header, &value, self.revisions.engine.hash_algo().hash_length(), lower_bound, upper_bound)
+              .map_err(map_revision_scan_error)?;
+          if matches!(node, BTreeNode::Leaf(_)) {
+            work.step()?;
+          }
+          node
+        };
+        work.check_cancelled()?;
+        Ok(LoadedNamespaceSeekNodeV1 { node, _memory: reservation })
+      },
+    )
   }
 }
 
@@ -823,13 +666,6 @@ struct NativeScanReferenceV1 {
   depth: u16,
 }
 
-struct NativeBtreeSeekFrameV1 {
-  node_hash: Vec<u8>,
-  child_index: usize,
-  lower_bound: Option<String>,
-  upper_bound: Option<String>,
-}
-
 struct NativeScanWorkV1<'request> {
   steps: u32,
   maximum_steps: u32,
@@ -875,26 +711,6 @@ fn find_flat_child(
   Ok(entries.get(index).filter(|entry| entry.name == name).cloned())
 }
 
-fn seek_flat_child(
-  value: &[u8],
-  entry_version: u8,
-  hash_width: usize,
-  lower: &str,
-  inclusive: bool,
-  work: &mut NativeScanWorkV1<'_>,
-) -> Result<Option<ChildEntry>, IndexMaintenanceScanReadErrorV1> {
-  let entries = decode_valid_flat_children(value, entry_version, hash_width).map_err(map_revision_scan_error)?;
-  for _ in &entries {
-    work.step()?;
-  }
-  let index = entries.partition_point(|entry| match entry.name.as_str().cmp(lower) {
-    Ordering::Less => true,
-    Ordering::Equal => !inclusive,
-    Ordering::Greater => false,
-  });
-  Ok(entries.get(index).cloned())
-}
-
 fn decode_valid_flat_children(value: &[u8], entry_version: u8, hash_width: usize) -> Result<Vec<ChildEntry>, IndexFileRevisionReadErrorV1> {
   let mut entries = deserialize_child_entries(value, hash_width, entry_version).map_err(map_revision_error)?;
   if entries.len() >= BTREE_CONVERSION_THRESHOLD {
@@ -937,25 +753,6 @@ fn decode_canonical_btree_node(
     ));
   }
   Ok(node)
-}
-
-fn child_scan_key(entry: &ChildEntry) -> Result<String, IndexMaintenanceScanReadErrorV1> {
-  let entry_type = EntryType::from_u8(entry.entry_type).map_err(map_engine_scan_error)?;
-  let suffix = usize::from(entry_type == EntryType::DirectoryIndex);
-  let capacity = entry
-    .name
-    .len()
-    .checked_add(suffix)
-    .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_path_overflow", "child scan-key length overflowed"))?;
-  let mut key = String::new();
-  key.try_reserve_exact(capacity).map_err(|error| {
-    IndexMaintenanceScanReadErrorV1::retryable("native_scan_allocation", format!("child scan-key allocation failed: {error}"))
-  })?;
-  key.push_str(&entry.name);
-  if entry_type == EntryType::DirectoryIndex {
-    key.push('/');
-  }
-  Ok(key)
 }
 
 fn relative_scan_path<'path>(directory_path: &str, path: &'path str) -> Option<&'path str> {
@@ -1018,29 +815,27 @@ fn native_scan_workspace_bytes(
   maximum_btree_depth: u16,
   hash_width: usize,
 ) -> Result<u64, IndexMaintenanceScanReadErrorV1> {
-  let path_copies = u64::from(maximum_path_depth)
-    .checked_add(4)
-    .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "path workspace multiplier overflowed"))?;
-  let path_bytes = u64::from(maximum_path_bytes)
-    .checked_mul(path_copies)
-    .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "path workspace bytes overflowed"))?;
-  let hash_width = u64::try_from(hash_width).map_err(|error| {
-    IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", format!("hash width does not fit u64: {error}"))
-  })?;
-  let btree_item = u64::try_from(size_of::<NativeBtreeSeekFrameV1>())
-    .map_err(|error| {
-      IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", format!("B-tree item size does not fit u64: {error}"))
-    })?
-    .checked_add(hash_width)
-    .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "B-tree item bytes overflowed"))?;
-  path_bytes
-    .checked_add(
-      u64::from(maximum_btree_depth)
-        .checked_mul(btree_item)
-        .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "B-tree workspace bytes overflowed"))?,
-    )
-    .and_then(|bytes| bytes.checked_add(NATIVE_SCAN_FIXED_WORKSPACE_BYTES))
-    .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "native scan workspace bytes overflowed"))
+  super::namespace_seek::namespace_seek_workspace_bytes_v1(
+    u64::from(maximum_path_bytes),
+    u64::from(maximum_path_depth),
+    u64::from(maximum_btree_depth),
+    hash_width as u64,
+  )
+  .ok_or_else(|| IndexMaintenanceScanReadErrorV1::corrupt("native_scan_memory_overflow", "native scan workspace bytes overflowed"))
+}
+
+impl From<NamespaceSeekFailureV1> for IndexMaintenanceScanReadErrorV1 {
+  fn from(error: NamespaceSeekFailureV1) -> Self {
+    match error {
+      NamespaceSeekFailureV1::Allocation(source) => Self::retryable("native_scan_allocation", source.to_string()),
+      NamespaceSeekFailureV1::Depth => Self::corrupt("native_scan_btree_depth", "B-tree seek exceeds its structural depth"),
+      NamespaceSeekFailureV1::Cycle => Self::corrupt("native_scan_btree_cycle", "B-tree seek repeats an ancestor"),
+      NamespaceSeekFailureV1::ParentShape => Self::corrupt("native_scan_btree_parent", "B-tree seek parent changed node shape"),
+      NamespaceSeekFailureV1::ChildIndex => Self::corrupt("native_scan_btree_child", "B-tree child index exceeds the internal node"),
+      NamespaceSeekFailureV1::InvalidChild(source) => map_engine_scan_error(source),
+      NamespaceSeekFailureV1::PathOverflow => Self::corrupt("native_scan_path_overflow", "child scan-key length overflowed"),
+    }
+  }
 }
 
 fn map_scan_contract_error(error: IndexMaintenanceScanErrorV1) -> IndexMaintenanceScanReadErrorV1 {

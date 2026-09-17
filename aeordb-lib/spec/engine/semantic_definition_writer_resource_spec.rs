@@ -2,6 +2,9 @@
 #[path = "semantic_control_selection_resource_spec.rs"]
 mod semantic_control_selection_resource_spec;
 
+#[path = "namespace_seek_resource_spec.rs"]
+mod namespace_seek_resource_spec;
+
 #[path = "../support/allocation_probe.rs"]
 mod allocation_probe;
 use allocation_probe::{Allocations, FAIL_OCCURRENCE, FAIL_SIZE, measure, measure_nth};

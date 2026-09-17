@@ -1,3 +1,6 @@
+#[path = "selected_namespace_seek_spec.rs"]
+mod selected_namespace_seek_spec;
+
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -7155,6 +7158,19 @@ fn native_read_view_has_one_production_source_and_no_service_or_v3_storage_bypas
   assert_eq!(source_text.iter().map(|source| source.matches("load_immutable_entity_at_captured_header(").count()).sum::<usize>(), 2,);
   assert_eq!(source_text.iter().map(|source| source.matches("load_index_artifact_at_captured_header(").count()).sum::<usize>(), 2,);
   let native = fs::read_to_string(source_root.join("engine/v4/read_view_native.rs")).unwrap();
+  let seek = fs::read_to_string(source_root.join("engine/v4/namespace_seek.rs")).unwrap();
+  let maintenance = fs::read_to_string(source_root.join("engine/v4/index_native_source.rs")).unwrap();
+  for adapter in [&native, &maintenance] {
+    assert_eq!(adapter.matches("seek_namespace_child_v1(").count(), 1);
+    assert_eq!(adapter.matches("next_namespace_child_by_path_v1(").count(), 1);
+    assert!(!adapter.contains("fn seek_btree_child("));
+    assert!(!adapter.contains("fn child_scan_key("));
+  }
+  assert!(!native.contains("resume_seen"));
+  assert!(seek.contains("_memory: MemoryReservation"));
+  for forbidden in ["V4FirstAuthorityPublisher", "StorageEngine", "DiskKVStore", "std::fs", "crate::server", "Mutex", "RootReadPin"] {
+    assert!(!seek.contains(forbidden), "ordered traversal gained a physical or authority owner: {forbidden}");
+  }
   assert_eq!(native.matches("pub enum NativeSelectedSourceParserV1").count(), 1);
   assert_eq!(native.matches("pub fn prepare_authoritative_source").count(), 1);
   assert_eq!(native.matches("pub fn seek_posting_page").count(), 1);

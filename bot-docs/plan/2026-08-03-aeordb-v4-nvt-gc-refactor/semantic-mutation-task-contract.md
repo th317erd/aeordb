@@ -406,3 +406,53 @@ memory-pressure failure and identical-executable isolated recovery are retained.
 The operation satisfies this read-only slice; complete source enumeration,
 durable closure retention, checkpoint publication/resume and atomic activation
 remain separate required runtime work.
+
+### Next prerequisite: ordered native namespace seeks
+
+Entry82574387. Source capture requires an ordered, bounded namespace stream;
+the selected-root reader currently restarts DFS on every page. Its public
+`scan_files` consumer is `query_native_source`'s full partition builder. The
+existing `index_native_source` maintenance scanner already has the required
+full-path ordering and lower-bound/successor algorithm, including punctuation
+before the directory separator. Share that algorithm instead of adding another
+independent walk or routing v4 through a synthesized v3 header.
+
+The intended permanent internal owner is `v4/namespace_seek.rs`: ordered child
+selection and bounded B-tree lower-bound/successor traversal over caller-supplied
+validated directory nodes. It owns no file, KV, header, task, authorization or
+GC authority. Each loaded node retains its decoder's memory reservation through
+use; bounded traversal scratch is admitted by the existing calling operation.
+Physical adapters remain in `index_native_source` and `read_view_native` and
+preserve their own framing, content identity, cancellation and error policies.
+V0 flat directories retain their explicit sorting adapter; v4 flat directories
+remain strictly canonical. Inherited separator ranges must be validated before
+a skipped subtree can justify a successor/absence result. Keep legacy revision
+point lookup and its parser consumers outside this migration unless a necessary
+shared validation change is separately proved.
+
+Correct `scan_files` to return full-path byte order with direct resume seeks.
+Its captured header/root/semantic identity, authorization scope, request pin,
+page accounting, missing-resume failure, complete/incomplete reporting and
+symlink non-following behavior remain. It must never rescan all preceding
+documents merely to reach a later page. An explicit absent or non-file resume
+still fails before claiming completion. This is an in-process traversal API,
+not a newly persisted cursor, staged-root admission or complete source capture.
+
+Falsifying test first: the existing native fixture with two40-entry B-tree
+leaves must return76/77 after75 with64work steps, then78/79 and complete, at
+both hash widths and with byte-identical file contents. Add prefix-directory
+punctuation order versus an independently sorted path list; page concatenation
+must exactly match that list. Cover multi-level successor/empty leaves, unknown
+roles, malformed ranges/order, missing/native-read failures, authorization,
+cancel/retry and accounting release. Preserve all `index_native_scan_spec`
+cases (including late600-file seek, legacy unsorted flat input and historical
+root behavior), `index_native_source_spec`, native read-view/query partition
+consumers, and source-fingerprint tests. Measure seek work/read bounds instead
+of relying on elapsed-time claims. Existing bounded desktop/native-platform
+qualification and exact-source evidence gates apply before landing.
+
+This prerequisite is qualified on Linux, macOS and native Windows in the
+[September17 namespace seek proof](evidence/user-facing-v4-u1-namespace-seek-proof-20260917.json).
+The proof retains actual failing-first ordering/work tests, intermediate test
+and harness failures, final native suites and exact source/binary identity.
+It does not grant staged-root admission or complete capture/retention authority.

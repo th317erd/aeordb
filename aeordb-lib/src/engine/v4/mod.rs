@@ -134,6 +134,7 @@ pub mod migration_source_gc;
 pub mod migration_v3_authority_inventory;
 mod mime_router;
 pub mod namespace;
+mod namespace_seek;
 mod native_path;
 pub mod native_semantics;
 pub mod parser_context_compiler;
