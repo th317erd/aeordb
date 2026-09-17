@@ -57,6 +57,18 @@ impl NativeProtectedSemanticSourceV1<'_> {
 }
 
 impl NativeSemanticMutationInventoryV1<'_> {
+  /// Read one exact retained FileRecord revision, never its current path alias.
+  pub fn read_retained_protected_source(
+    &self,
+    path: &str,
+    revision: &[u8],
+    bounds: NativeSemanticSourceReadBoundsV1,
+  ) -> Result<NativeProtectedSemanticSourceV1<'_>, SemanticMutationObservationErrorV1> {
+    self
+      .read_source_from_lookup(path, Some(revision), bounds, &self.source_lookup(bounds), || {})?
+      .ok_or_else(|| invalid("semantic_source_retained_missing", "retained protected source is absent from the captured snapshot"))
+  }
+
   /// Read a protected non-HEAD input from this inventory's settled snapshot.
   /// An absent current path is explicit absence; an absent dependency is an
   /// error. The returned source keeps both capture protection and accounting.
@@ -72,6 +84,33 @@ impl NativeSemanticMutationInventoryV1<'_> {
     &self,
     path: &str,
     bounds: NativeSemanticSourceReadBoundsV1,
+    after_chunk: impl FnMut(),
+  ) -> Result<Option<NativeProtectedSemanticSourceV1<'_>>, SemanticMutationObservationErrorV1> {
+    self.read_source_from_lookup(path, None, bounds, &self.source_lookup(bounds), after_chunk)
+  }
+
+  fn source_lookup(&self, bounds: NativeSemanticSourceReadBoundsV1) -> CapturedEntityLookupV1<'_> {
+    CapturedEntityLookupV1 {
+      snapshot: &self.snapshot,
+      header: &self.header.selected.header,
+      bounds: NativeSemanticMutationInventoryBoundsV1 {
+        maximum_work: bounds.maximum_chunks,
+        maximum_entity_bytes: MAXIMUM_FILE_RECORD_BYTES.max(bounds.maximum_chunk_entity_bytes),
+        maximum_read_bytes: bounds.maximum_read_bytes,
+      },
+      cancellation: &self.cancellation,
+      remaining_read_bytes: Cell::new(bounds.maximum_read_bytes),
+    }
+  }
+
+  // Catalog traversal supplies its single cumulative lookup; it must not
+  // instantiate a fresh read budget for every referenced source.
+  pub(super) fn read_source_from_lookup(
+    &self,
+    path: &str,
+    retained_revision: Option<&[u8]>,
+    bounds: NativeSemanticSourceReadBoundsV1,
+    lookup: &impl FirstAuthorityEntityLookupV1,
     mut after_chunk: impl FnMut(),
   ) -> Result<Option<NativeProtectedSemanticSourceV1<'_>>, SemanticMutationObservationErrorV1> {
     check_cancelled(&self.cancellation)?;
@@ -84,29 +123,27 @@ impl NativeSemanticMutationInventoryV1<'_> {
     {
       return Err(invalid("semantic_source_bounds", "protected source read requires valid bounded work and byte limits"));
     }
-    validate_canonical_absolute_path(path)?;
     let header = &self.header.selected.header;
     let algorithm = header.hash_algorithm;
-    match SystemFamilyPolicyResolverV1::embedded(algorithm)?.policy(SystemFamilySubjectV1::Path(path), "captured semantic source")? {
-      SystemFamilyPolicyDecisionV1::Known { family_id: 0x0001 | 0x0003 | 0x0031 | 0x0032, .. } => {}
-      _ => return Err(invalid("semantic_source_family", "path is not a protected non-HEAD semantic input")),
+    validate_source_path(path, algorithm)?;
+    if retained_revision.is_some_and(|revision| revision.len() != algorithm.hash_length() || revision.iter().all(|byte| *byte == 0)) {
+      return Err(invalid("semantic_source_retained_identity", "retained source requires a nonzero selected-width revision"));
     }
     let mut memory = self.memory.reserve(MemoryOwner::Task, SOURCE_SCRATCH_BYTES, AdmissionClass::Maintenance)?;
-    let lookup = CapturedEntityLookupV1 {
-      snapshot: &self.snapshot,
-      header,
-      bounds: NativeSemanticMutationInventoryBoundsV1 {
-        maximum_work: bounds.maximum_chunks,
-        maximum_entity_bytes: MAXIMUM_FILE_RECORD_BYTES.max(bounds.maximum_chunk_entity_bytes),
-        maximum_read_bytes: bounds.maximum_read_bytes,
-      },
-      cancellation: &self.cancellation,
-      remaining_read_bytes: Cell::new(bounds.maximum_read_bytes),
+    let current_key;
+    let key = match retained_revision {
+      Some(revision) => revision,
+      None => {
+        current_key = source_digest(algorithm, &[b"file:", path.as_bytes()])?;
+        &current_key
+      }
     };
-    let key = source_digest(algorithm, &[b"file:", path.as_bytes()])?;
-    let Some(locator) = lookup.get(&key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
+    let Some(locator) = lookup.get(key).map_err(FirstAuthorityPublicationErrorV1::from)? else {
       check_cancelled(&self.cancellation)?;
       memory.check_admission()?;
+      if retained_revision.is_some() {
+        return Err(invalid("semantic_source_retained_missing", "retained protected source is absent from the captured snapshot"));
+      }
       return Ok(None);
     };
     if locator.type_flags != KV_TYPE_FILE_RECORD {
@@ -120,7 +157,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     // per-chunk vector overhead. No allocation scales with an unchecked count.
     memory.grow((record_length as u64) * 4)?;
     let bytes =
-      read_entity_bounded(&self._protection.publisher().file, &lookup, &key, MAXIMUM_FILE_RECORD_BYTES, header.write_sequence_high_water)
+      read_entity_bounded(&self._protection.publisher().file, lookup, key, MAXIMUM_FILE_RECORD_BYTES, header.write_sequence_high_water)
         .map_err(map_source_read_error)?
         .ok_or_else(|| invalid("semantic_source_record_missing", "captured protected source disappeared from the same snapshot"))?;
     let entity = decode_whole_entity(&bytes, algorithm, header.write_sequence_high_water)?;
@@ -130,6 +167,15 @@ impl NativeSemanticMutationInventoryV1<'_> {
     {
       return Err(invalid("semantic_source_record_representation", "protected source FileRecord representation is invalid"));
     }
+    let checked_revision = if let Some(expected) = retained_revision {
+      let actual = source_digest(algorithm, &[b"filec:", entity.stored_value])?;
+      if actual != expected {
+        return Err(invalid("semantic_source_retained_identity", "retained FileRecord bytes disagree with their content revision"));
+      }
+      Some(actual)
+    } else {
+      None
+    };
     let record = FileRecord::deserialize(entity.stored_value, algorithm.hash_length(), entity.entity_version)
       .map_err(FirstAuthorityPublicationErrorV1::from)?;
     if record.path != path {
@@ -152,7 +198,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     for chunk_key in &record.chunk_hashes {
       check_cancelled(&self.cancellation)?;
       memory.check_admission()?;
-      let count = self.read_source_chunk(&lookup, chunk_key, &mut body[written..], bounds)?;
+      let count = self.read_source_chunk(lookup, chunk_key, &mut body[written..], bounds)?;
       content.update(&body[written..written + count]);
       written += count;
       after_chunk();
@@ -170,7 +216,10 @@ impl NativeSemanticMutationInventoryV1<'_> {
     {
       return Err(invalid("semantic_source_content_identity", "protected source whole-content identity is invalid"));
     }
-    let revision = source_digest(algorithm, &[b"filec:", entity.stored_value])?;
+    let revision = match checked_revision {
+      Some(revision) => revision,
+      None => source_digest(algorithm, &[b"filec:", entity.stored_value])?,
+    };
     let mut encoded_record = Vec::new();
     encoded_record
       .try_reserve_exact(entity.stored_value.len())
@@ -192,7 +241,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
 
   fn read_source_chunk(
     &self,
-    lookup: &CapturedEntityLookupV1<'_>,
+    lookup: &impl FirstAuthorityEntityLookupV1,
     key: &[u8],
     output: &mut [u8],
     bounds: NativeSemanticSourceReadBoundsV1,
@@ -252,6 +301,14 @@ impl NativeSemanticMutationInventoryV1<'_> {
     check_cancelled(&self.cancellation)?;
     memory.check_admission()?;
     Ok(written)
+  }
+}
+
+pub(super) fn validate_source_path(path: &str, algorithm: HashAlgorithm) -> Result<(), SemanticMutationObservationErrorV1> {
+  validate_canonical_absolute_path(path)?;
+  match SystemFamilyPolicyResolverV1::embedded(algorithm)?.policy(SystemFamilySubjectV1::Path(path), "captured semantic source")? {
+    SystemFamilyPolicyDecisionV1::Known { family_id: 0x0001 | 0x0003 | 0x0031 | 0x0032, .. } => Ok(()),
+    _ => Err(invalid("semantic_source_family", "path is not a protected non-HEAD semantic input")),
   }
 }
 

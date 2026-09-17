@@ -704,6 +704,14 @@ entity reads, not underlying KV-page traffic. No nested per-source budget reset.
 Standalone current/retained source methods keep their own existing bounded read
 operation. Factor their common implementation over the existing lookup trait.
 
+Point-result layout refinement after the actual strict-Clippy failure: use a
+private-field result struct with `disposition()` and borrowed `source()` getters.
+The disposition remains the typed Unlisted/Absent/Present enum; only Present
+has a source. This preserves capture/accounting ownership without boxing the
+large source or suppressing the enum-size check. It changes no persisted bytes
+or existing service API. Native tests assert all three outcomes, absence of a
+source in the first two, and retained memory until the point result is dropped.
+
 Node loading reserves shared-control decode scratch, then retains separately
 charged bounded BTreeNode projections. Point lookup uses the shared direct seek;
 paired cursors retain one internal ancestor per level plus one leaf each and
@@ -725,3 +733,75 @@ observation and selected-directory tests remain regression gates. The native
 loader/compiler/control/migration/GC consumer inventory and architecture owner
 test must be refreshed together before final platform qualification. The same
 bounded native runners apply; no service/network dependency enters these tests.
+
+### Following guarded source staging — implementation-entry review
+
+`map_territory`: the next physical dependency is preserving a validated captured
+source as its exact immutable `filec:` record, sharing its existing typed chunks.
+The producer is `NativeProtectedSemanticSourceV1`; its private fields retain the
+originating captured inventory and staging guard. The existing sole physical
+owner supplies the immutable batch transaction, collision readback, publication
+observer and committed-error receipt. Do not create another file/KV writer,
+serialize the decoded FileRecord again, or weaken generic SYSTEM refusal.
+
+The source reader currently discards chunk representation evidence after
+decompression. A future staging call cannot merely trust the old successful
+read and assume the live chunk locators still denote those bytes. Preserve a
+bounded in-memory digest of the ordered original chunk versions, flags,
+compression, keys and stored bytes during successful source validation.
+Physical offsets, publication timestamps and write sequences are excluded:
+relocation may change them without changing the retained representation.
+This is ephemeral comparison evidence, not a new wire identity or graph edge.
+
+Before staging, validate the live typed chunk closure against that evidence
+through a fresh settled snapshot of the SAME physical owner. Enforce cumulative
+read/work bounds, cancellation and memory admission. Compare database, algorithm,
+physical identity and writer fence with the source's originating capture.
+Do the potentially long chunk reads outside the root/KV mutex. Under the short
+publication guard, recheck the exact fresh header sequence; concurrent change
+refuses for bounded retry, not unbounded internal retry or trusting stale reads.
+Then use the existing dependency transaction for one original-version/flags/body
+FileRecord with no mutable path alias. Exact-repeat publication is idempotent;
+different representation at the same identity is a collision. Preserve committed
+receipts if publication or readback reports a post-commit failure.
+
+This is staging under a live process-local guard, analogous to the existing
+native semantic-catalog staging adapter. It cannot release that guard, select an
+ASMT/ASMC/ASCM, advertise capabilities, create a durable task pin or admit a root.
+The earlier durable-operation gate still requires full task retention/recovery
+and reclamation integration. Direct task/control publication remains disabled.
+Complete compiler source-union capture, staged namespace closure, selected-task
+GC traversal and activation remain the coupled following integration—not
+consequences of a successful immutable source copy.
+
+`test_protocol`: existing native source tests prove decoding and process-local
+ownership; immutable authority tests prove transaction boundaries; staging tests
+exercise the four final reclamation barriers. None yet proves this composed
+source-staging path. The hypothesis is that a captured old record can be staged
+after its current alias changes, then reopened at its exact revision, without
+changing HEAD/current alias/chunk representation or bypassing resource limits.
+
+Falsifiers before implementation:
+
+1. Given original v0/v1 ordinary/SYSTEM sources with compressed and plain chunks,
+   capture, replace the current alias, stage, reopen, and compare exact original
+   bytes/body/revision. A second stage is byte-stable idempotence. Both widths
+   and all registered algorithms need coverage.
+2. Given missing, wrong-role, changed-representation or corrupt live chunks,
+   staging refuses before copying the record. Repaired framing/CRC must not hide
+   changed content. Wrong physical identity/fence and header-change races also
+   refuse; no current-path fallback is permitted.
+3. Given cancellation, memory/read/work limits, allocation failure or injected
+   publication failure, preserve the exact no-commit/committed distinction,
+   release accounting, retain staging protection and allow a bounded retry.
+
+Unit checks cover digest framing and representation distinctions; native
+integration covers real file publication/reopen/current-alias preservation;
+property cases span hash profiles and original versions/flags; fault tests use
+existing transaction observers and bounded coordination. A copied test fixture
+or only checking that a key exists would give false confidence. No network or
+production dependency enters these tests. Established native stage watchdogs
+apply, with two-second coordination deadlines and no joins while holding a
+guard needed by the worker. Run the composed behavioral REDs before changing
+production behavior; qualify the full affected/static/native suite before any
+staging-enable landing. Refresh this entry map and exact API at that boundary.

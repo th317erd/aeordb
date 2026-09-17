@@ -1,4 +1,6 @@
-// Uninstalled next-unit tests. The preceding canonical-length source stays frozen.
+//! Captured raw-source regressions and retained-source catalog integration.
+#[path = "native_retained_source_catalog_spec.rs"]
+mod retained_source_spec;
 use super::*;
 
 const INDEX_SOURCE: &str = "/.aeordb-config/indexes.json";

@@ -26,6 +26,15 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,17:27UTC: retained-source and paired native source-catalog readers
+are qualified on Linux, macOS and Windows; see the
+[immutable proof](../evidence/user-facing-v4-u1-native-source-catalog-proof-20260917.json).
+Twenty-two new regressions cover exact retained records, paired ordering and
+closure failures, cumulative work/read bounds and cancellation/allocation paths.
+All raw results are sealed and local. Guarded source staging is the next unit;
+durable task publication, complete compiler/namespace/GC closure and activation
+remain unfinished. Ordinary creation still defaults to v3.
+
 September17,15:48UTC: ASCM/ASCN byte writers are qualified on Linux, macOS and
 Windows; see the
 [immutable proof](../evidence/user-facing-v4-u1-source-capture-writers-proof-20260917.json).
@@ -89,6 +98,115 @@ disabled, and U2–U7 are still required. No production deployment, service acti
 or retained FS-Server1 database mutation is authorized by these test results.
 
 ## Active next unit: semantic-mutation durable task contract
+
+### Current continuation: native source catalogs — entry713f8859
+
+The byte-writer unit landed/pushed713f8859 with all platform receipts sealed
+and copied locally. All three isolated native sources advanced only after
+scoped preservation. The separate retained-source RED worktree stays unchanged.
+The refreshed captured-source/catalog contract and API refinement apply;
+publication, advertised capabilities, GC permits and ordinary defaults remain
+unchanged. Direct execution, no agents or production operations.
+
+The retained-read implementation shares the existing source decoder, chunk
+reader and captured lookup, accepts only exact nonzero selected-width `filec:`
+revisions, and refuses missing retained identity without current-path fallback.
+It checks raw revision before body allocation; current-path behavior preserves
+its prior error/allocation order. Catalog operations can supply a single shared
+lookup rather than resetting each source's total read budget.
+
+Candidate1 five-input SHA2c875d02dfa7e23ff277c281811b98528a7a4b91f1df7f64c75a88d6cb3c39ca
+passed54native observation/inventory/source regressions at15:55:11UTC, including
+the three preserved RED1 cases;731other library tests filtered. All seven raw
+receipts and exact binary are local and strictly checked before advancing.
+New paired-catalog fixtures/scaffolds add differently shaped ordered trees,
+exact old/new reads after reopen, point absence distinctions and final-path
+mismatch. RED2 packet48849fe00dd2665ea766224f960340fd5286c9460e5c13e5216fe880723053fa
+compiled but the mistaken `native_source` filter ran two unrelated tests
+(786filtered). It is preserved as a selection error, not behavioral RED evidence.
+RED3 reuses that exact ten-input archive with the correct
+`retained_source_spec::catalog_spec::` filter; catalog behavior remains refused
+until actual target failures are preserved.
+
+RED3 completed16:00:13UTC with0pass/3fail/785filtered, each identifying the
+refusing catalog scaffold. All seven raw receipts/binary identities are local
+and strictly verified. Candidate2 then passed60targeted regressions16:07:41;
+eleven-input SHAfe4445b1491ca23e5855ac9fc07b9b729c18cd9dc1b628e13b70c89c80995df2.
+It shares canonical control loading and direct namespace seek, validates
+retained identities and paired source paths/counts, and enforces cumulative
+entity reads plus node/row work. Actual node projections retain accounting;
+two ordered cursors keep only ancestors/current leaves, not world-sized maps.
+
+Candidate3 added cumulative exact-byte/work and one-less refusal, final-callback
+cancel/pressure/stop/error/nesting, allocation retry, malformed counts/ranges/
+missing sources, capability/identity/full-checkpoint binding, stale diagnostic
+captures and all-profile ordered-map/point-seek cases. Separate cursor models
+cover cycles/depth without pretending invalid hashes form a native hash cycle.
+Fifteen-input SHAb39ad7158655b40486d09a38783084b875c0a7026d30403389da4eaf2ea89bf8
+passed all802library tests; all raw evidence is local. Candidate4 added missing
+checkpoint and old-versus-fresh captured-control tests. Packet
+8619abd23231bcf3913458c6dd6e1d13d2552b3ab5060a769ff8e49fa5e48677
+passed804library tests16:25:04,4architecture cases16:26:01 and formatting,
+then strict Clippy refused the256-byte point-result enum16:27:02.
+All29stage/driver artifacts were preserved before correction; audit did not run.
+
+Candidate5 replaces only that in-memory result shape and its consumers with
+private consistent fields, a typed unlisted/absent/present disposition and an
+optional accounted source. No extra heap allocation, suppression, weaker
+assertion or persisted/API-service byte change was introduced. The point test
+also checks retained accounting until result drop and empty-source consistency.
+Fifteen-input SHA0d51d103ae655173ead8773abdd2713224c2daef4adaf354cf252bc9b03ee33c.
+Preflight2 passed804library tests16:32:59UTC,4architecture cases16:33:55,
+formatting16:34:02 and strict workspace Clippy16:36:25; the audit/driver
+completed16:36:55. All raw receipts are local. The audit retains exactly1501
+reviewed entries and identical reviews; only source-location metadata changed.
+Runtime/tests are frozen. Final1's sixteen-input manifest SHA is
+8a938475cd148ccef0f79a818b3d578e38d5e6f1b759d2ebd9292be843f8cde5.
+Linux, macOS and native Windows launched the same packet around16:43UTC;
+the native libraries now contain804Unix/819Windows cases. Linux is limited to
+two jobs/6GiB/no swap/200%CPU; Mac and Windows use one job. Established disk
+floors and watchdogs remain active. No further VM reconfiguration was needed.
+
+Refreshed final affected inventory:115integration targets plus five separate
+narrow targets. It retains the native-reader consumer set, removes only the
+five duplicated narrow selections, and adds namespace mutation and final
+migration reconciliation. Consumers include control/capability/physical-read
+boundaries, compiler/catalog/index/query adapters, captured namespace/KV,
+staging/reclamation, migration and public-root adapters. Neither codec-only
+history nor this read-only catalog is claimed as task resume, typed GC retention,
+activation or ordinary-v4 service qualification. Final native/platform/static/
+reference gates and immutable proof remain owed before landing.
+
+Final1 completed Linux16:54:00UTC, macOS16:55:47UTC and Windows17:25:43UTC.
+All nine Unix and seven Windows gates passed:226narrow cases,115affected targets,
+804Unix/819Windows library cases,185reference tests and502independent fixtures,
+plus strict workspace Clippy, formatting and the applicable audit/debt checks.
+Both Unix affected runs passed1733cases. Windows formatted379Rust roots.
+Both Unix seals were recorded16:57:21UTC; Windows17:27:05UTC. Every raw artifact
+was copied locally before any source/build advance. The strict proof checks
+historical failures, exact archives/source/locks/executables, resource samples,
+unchanged publication boundaries and all three native results. No production
+operation or VM reconfiguration occurred.
+
+Landing review (`test_check` / `thorough_review`): the critical falsifiers are
+missing retained identity without current-alias fallback and late paired-path
+mismatch without successful closure; both are permanent passing regressions
+with preserved failing-first history and watchdog-bounded executions. Reviewed
+the shared lookup/decoder, exact ASMC binding, all source exports, node/cursor
+ownership and resource release, plus unchanged physical publication/capability
+boundaries. Callbacks remain explicitly provisional and empty sources remain
+distinct from unlisted paths. No service/production-readiness claim is made.
+Upstream refreshed17:28UTC: no divergence; final frozen input verification PASS.
+
+Following guarded source staging: the contract now records the refreshed owner,
+live-chunk evidence and test protocol. A separate desktop worktree at713f8859
+retains the frozen reader packet plus an explicit refusing method and three
+positive native tests. RED1's17-input manifest SHA is
+32c5db2407197144cdcf4f865ea6fc4b12049181498f1dd838bef6fe4194a5b8.
+At17:02:01UTC the exact `source_staging_spec::` filter produced0pass/3fail,
+804filtered; every failure reports `semantic_source_staging_unimplemented`.
+This is behavioral RED evidence, not implementation or publication readiness.
+The main qualification source and existing RED specimens remain unchanged.
 
 ### Current continuation: capture byte writers — entry71b30f49
 

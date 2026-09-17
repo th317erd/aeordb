@@ -245,6 +245,48 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  let catalog_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_native.rs")).unwrap();
+  let catalog: String = catalog_source.split_whitespace().collect();
+  for required in [
+    "capture:&'aNativeSemanticMutationInventoryV1<'a>",
+    "snapshot:&capture.snapshot",
+    "remaining_work:Cell<u64>",
+    "load_immutable_system_control_file(",
+    "decode_semantic_source_capture_binding_v1(",
+    "seek_namespace_child_v1(",
+    ".read_source_from_lookup(",
+  ] {
+    assert!(catalog.contains(required), "native source catalog lost captured/shared ownership: {required}");
+  }
+  let cursor_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_cursor.rs")).unwrap();
+  let cursor: String = cursor_source.split_whitespace().collect();
+  for required in
+    ["decode_semantic_source_node_v1(", "child_bounds(", "_memory:MemoryReservation", "stack:Vec<SourceCatalogFrameV1>", "leaf:Option<"]
+  {
+    assert!(cursor.contains(required), "source catalog lost bounded node/cursor ownership: {required}");
+  }
+  for source in [&catalog, &cursor] {
+    for forbidden in [
+      "StorageEngine",
+      "DiskKVStore",
+      "OpenOptions",
+      "File::open",
+      "write_file",
+      "sync_file",
+      "publish_",
+      "RootReadAdmission",
+      "capture_settled_snapshot",
+      "lock_kv(",
+      "HashMap",
+      "HashSet",
+      "FileRecord::deserialize",
+      "FileRecord::serialize",
+      "next_namespace_child_by_path_v1",
+      "node.serialize(",
+    ] {
+      assert!(!source.contains(forbidden), "read-only source catalog gained another authority/decoder/unbounded path: {forbidden}");
+    }
+  }
   let source_reader = std::fs::read_to_string(&semantic_source_native_path).unwrap();
   let source_reader: String = source_reader.split_whitespace().collect();
   for required in [
