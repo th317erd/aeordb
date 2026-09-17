@@ -1,4 +1,8 @@
-//! Borrowed Round 17 readers. Decoding confers no publication or GC authority.
+//! Round 17 borrowed readers and byte encoders, without publication or GC authority.
+#[path = "semantic_mutation_writer.rs"]
+mod writer;
+pub use writer::{encode_semantic_mutation_checkpoint, encode_semantic_mutation_generation, encode_semantic_mutation_task};
+
 #[path = "semantic_mutation_sources.rs"]
 mod sources;
 pub use sources::{

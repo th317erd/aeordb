@@ -252,3 +252,71 @@ Falsifying test order:
    exact source/lock/executable evidence. Existing reader/publisher refusal tests
    remain mandatory. This byte-only API has no live service surface to exercise;
    native file publication/reopen remains owed by the following runtime slice.
+
+## Runtime entry: coherent native observation — September17
+
+This is the first runtime prerequisite after the qualified byte writers, not
+permission to enable task publication independently of retention/activation.
+The existing first-authority loaders each take `root_state`, observe the header
+and lock the same KV owner. Calling the task/generation/checkpoint loaders in
+sequence does not retain that common boundary across calls. Introduce one
+bounded native observation at the existing physical owner, reusing its canonical
+SystemControl FileRecord/chunk loaders and A/B selector under one guard.
+Do not add another file/KV owner or bypass a publication refusal.
+
+The observation is deliberately **not** a resume permit, pin, admitted root or
+compiled-catalog proof. It reports the captured header, selected generation,
+task and—only while pins remain held—the bound immutable checkpoint. Enforce
+logical database/kind/path/identity, complete envelope digest, selected phase
+and existing fence/timestamp relationships through the shared readers.
+Current physical identity, writer epoch, generation, exact input identities,
+closure retention and executor availability still require the subsequent
+fenced runtime owner's decisions. In particular, a completed historical task
+need not match today's semantic generation, and an adopted physical copy must
+not silently grant old task ownership.
+
+Released terminal tasks no longer promise retention of their checkpoints.
+Their observation must remain a released terminal summary, not manufacture
+checkpoint absence into an empty active task or declare a legitimately collected
+checkpoint corrupt. Conversely, an unreleased selected task without its exact
+checkpoint/generation is an incomplete authority observation and must fail;
+mark must never treat that failure as no protected roots. A missing requested
+task can be reported only after checked A/B lookup; malformed slot/body/I/O
+errors retain the selector's existing fail-closed distinctions.
+
+Keep memory and work bounded independently of catalog/source counts. Reserve
+scratch before any file-body allocation and retain the result's charge while
+owned bytes remain alive. Check cancellation before admission and between
+bounded reads; preserve operational/resource failures rather than classifying
+them as missing/corrupt data. Avoid recursive acquisition of `root_state` when
+composing the existing loaders. Runtime publication and capability25 remain
+disabled throughout this observational slice.
+
+Falsifying proof before implementation: callable refusal plus native disposable
+file fixtures containing independently frozen task/checkpoint/generation bytes.
+Fixtures must use test-only physical assembly, not enable production publishers.
+Prove reopen/read-only bytes and physical length stability, both 32/64-byte
+widths, absent task, generation absence, malformed slots, equal-sequence
+disagreement, selected digest/phase/identity mismatch, released terminal summary
+after checkpoint absence, physical-copy/history observations without ownership,
+pre-cancellation, memory refusal/retry and exact retained accounting. A controlled
+selection-change test must demonstrate one boundary rather than three unlocked
+lookups. Reuse existing native file/entity validation instead of a mock-only
+store; fault tests may supplement that actual file path.
+
+Before coding, complete the exact helper/error/fixture consumer inventory and
+freeze the bounded request/result types. That entry check remains outstanding.
+The September17 helper audit found an additional prerequisite: shared
+`select_system_control_pair` currently classifies **every** decode error as a
+bad slot, although the new semantic task identity decoder can fail allocation.
+Add real allocator-injection RED for failure in either slot (including the
+newer slot), and resource failure beside a genuinely corrupt peer. Preserve
+genuine torn-slot fallback, equal-sequence ambiguity and identity checks while
+propagating operational allocation errors. Qualify that selector correction
+before using it for native task observations. Existing native slot loading also
+contains body clones/owned FileRecord decoding: bounded admission is not proof
+that every inner allocation is fallible. Inventory and test that boundary before
+claiming native observation's resource behavior.
+The following dependent slices still owe complete source capture (including
+sorted, non-rescanning enumeration), durable task-root discovery/GC protection,
+checkpoint publication/resume and guarded HEAD/generation/task activation.

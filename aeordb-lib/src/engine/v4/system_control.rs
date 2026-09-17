@@ -648,23 +648,40 @@ pub(crate) fn encode_system_control(
   body: &[u8],
   algorithm: HashAlgorithm,
 ) -> FormatResult<Vec<u8>> {
+  encode_system_control_with_body(kind, sequence, body.len(), algorithm, |destination| destination.copy_from_slice(body))
+}
+
+/// One framing owner for existing body slices and typed, single-buffer writers.
+/// Filling bytes grants no publication authority; the complete payload must
+/// still pass the common decoder before it can leave this function.
+pub(crate) fn encode_system_control_with_body(
+  kind: SystemControlKindV1,
+  sequence: u64,
+  body_length: usize,
+  algorithm: HashAlgorithm,
+  fill_body: impl FnOnce(&mut [u8]),
+) -> FormatResult<Vec<u8>> {
   if sequence == 0 {
     return Err(identity_error("system_control_sequence", "control sequence must be nonzero"));
   }
-  if body.len() > kind.body_cap() {
-    return Err(amplification_error("system_control_body_cap", body.len(), kind.body_cap()));
+  if body_length > kind.body_cap() {
+    return Err(amplification_error("system_control_body_cap", body_length, kind.body_cap()));
   }
-  let total = checked_add(checked_add(HEADER_LENGTH, body.len(), "control body")?, CRC_LENGTH, "control CRC")?;
-  let total_u32 = u32::try_from(total).map_err(|_| overflow_error("control total length"))?;
-  let body_length = u32::try_from(body.len()).map_err(|_| overflow_error("control body length"))?;
-  let mut bytes = vec![0u8; total];
+  let total = checked_add(checked_add(HEADER_LENGTH, body_length, "control body")?, CRC_LENGTH, "control CRC")?;
+  let total_u32 = u32::try_from(total).map_err(|source| overflow_error(format!("control total length: {source}")))?;
+  let body_length_u32 = u32::try_from(body_length).map_err(|source| overflow_error(format!("control body length: {source}")))?;
+  let mut bytes = Vec::new();
+  bytes.try_reserve_exact(total).map_err(|source| {
+    FormatError::allocation_failure("system_control_output_allocation", format!("cannot reserve {total} control bytes: {source}"))
+  })?;
+  bytes.resize(total, 0);
   bytes[..4].copy_from_slice(kind.magic());
   bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
   bytes[6..8].copy_from_slice(&(HEADER_LENGTH as u16).to_le_bytes());
   bytes[8..12].copy_from_slice(&total_u32.to_le_bytes());
   bytes[16..24].copy_from_slice(&sequence.to_le_bytes());
-  bytes[24..28].copy_from_slice(&body_length.to_le_bytes());
-  bytes[HEADER_LENGTH..HEADER_LENGTH + body.len()].copy_from_slice(body);
+  bytes[24..28].copy_from_slice(&body_length_u32.to_le_bytes());
+  fill_body(&mut bytes[HEADER_LENGTH..HEADER_LENGTH + body_length]);
   let crc_offset = bytes.len() - CRC_LENGTH;
   let crc = crc32fast::hash(&bytes[..crc_offset]);
   bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());

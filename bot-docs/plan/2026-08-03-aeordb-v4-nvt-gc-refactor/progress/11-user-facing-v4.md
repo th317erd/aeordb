@@ -78,6 +78,91 @@ types and shared SystemControl framing owner. Its test plan is appended to the
 additive contract. It does not relax native/v3 publication refusal or advertise
 capability25. Actual capture, pinning, recovery and activation remain later gates.
 
+Reader proof/byte-writer plan landed and pushed as
+`5a8ccf9f9af0a79cc12c51cd9ef4e6ded6d16c11`. Linux, macOS and Windows isolated
+sources advanced to that exact commit only after their preceding evidence was
+sealed; original worktrees and the Linux/Mac echo-fixture target links remain
+untouched. The byte-writer unit now has nine independent positive/malformed
+targets plus three allocation targets, connected to the existing control and
+resource test harnesses. Public writer scaffolds explicitly refuse all calls;
+no byte implementation or publication guard was changed yet.
+Actual RED launched~23:20UTC on desktop, unit
+`aeordb-v4-semantic-writer-red-20260916`, invocation
+`5795a8eff53b46678f49b8b3122674cd`, eight frozen inputs and retained source archive.
+Command: `cargo test --offline --locked -j 2 -p aeordb --test
+semantic_mutation_control_spec writers::`, with30-minute deadline,6GiB memory,
+zero test-cgroup swap,CPU200%, home64GiB and Data250GB free-space floors.
+RED finished23:21:22UTC:3 rejection cases passed,6 positive cases failed with the
+explicit unimplemented error. Separate allocation RED finished23:24:26UTC:
+all3 new cases failed against the same refusing snapshot. Both source archives,
+raw receipts/logs and same-host binary hashes were preserved before implementation.
+Candidate1 finished23:29:04UTC:223 tests passed across seven targets, including
+36 control/source-fingerprint/writer tests and61 allocation/resource tests.
+The shared framing owner now allocates fallibly and fills one output buffer;
+all new width/presence/cursor checks occur before copying into it. Existing
+control byte fixtures and publication-refusal tests remain green.
+Audit refresh retired exactly two discarded integer-conversion causes and moved
+metadata only for retained sites:1503 ->1501 maximum, no new suppression IDs or
+review changes. Its before-failure, generated inventories and after-PASS remain
+preserved. This is not a waiver of legacy runtime diagnostic-classification work.
+Final1 qualification is now running on ten frozen inputs: Linux unit
+`aeordb-v4-semantic-writer-final1-20260916`, invocation
+`3624590c567c4fe7acbfb8ddd17de58a`; native Windows PID11996; native Mac via
+`run-semantic-writer-macos-final1.sh`. The final gates include all shared framing
+caller families, full libraries, strict Clippy, independent reference, formatting
+and static contracts/debt checks. Exact test binaries are sealed before the next
+stage on every platform. No byte-writer landing or runtime readiness is claimed
+before these final gates finish.
+
+Final1 Linux finished all nine gates23:44:29UTC. Mac passed narrow/affected,
+audit and formatting, then Rust1.95 Clippy rejected the inherited nested version
+match in `plugin_artifact_identity` (Linux uses1.94, Windows1.96). Preserve the
+failed run. The equivalent guarded-match spelling keeps valid core modules,
+invalid versions/components and all remaining framing behavior unchanged;
+the existing12 identity regressions exercise these paths. No lint allowance,
+format contract or suppression-inventory increase was added.
+Final2 adds that one source file to the ten-input snapshot; manifest SHA256
+`c13dadf511f4e3a85ff0c7a98d7029ce61b7d1f81cefb6c68ca50c17e01de9a2`.
+Linux all nine final2 gates passed September17 at00:00:25UTC and were sealed
+before subsequent builds. Mac passed tests, library, reference, format and
+strict Clippy; its contract shell gate then found missing Python `yaml`.
+An isolated cache-local virtual environment with PyYAML6.0.3 supplies that
+existing dependency; only unfinished gates resume, with failed receipts intact.
+Windows final1 completed all gates00:01:20UTC and was sealed/copied before
+final2 began. A malformed preparation script was rejected by PowerShell before
+execution; the corrected script passed parsing/source checks and launched
+final2 PID6084. This is harness history, not a database or product failure.
+Final2 Windows and resumed Mac gates are still pending here; no landing yet.
+
+Mac resumed contract/debt gates passed00:05:06UTC and sealed00:06:17UTC;
+all prior native raw evidence and executable digests were retained before
+subsequent work. While Windows finished, the runtime entry audit found the
+shared A/B selector can suppress task-identity allocation failure. Separate
+allocator RED completed00:16:29UTC:2 failures, including actual selection of old
+sequence8 when newer sequence9 could not allocate16 bytes. Earlier test-harness
+compile failure and first RED are retained separately. This is a following
+selector prerequisite, not a claim about writer byte correctness or readiness.
+Its test-only overlay and two guarded error-propagation arms are being checked
+in the isolated desktop checkout after preserving the writer's final evidence;
+the local writer snapshot and Windows run remain unchanged for writer sealing.
+
+**Byte writers qualified September17.** Windows final2 completed00:19:14UTC;
+the strict verifier executed PASS and wrote the immutable
+[writer proof](../evidence/user-facing-v4-u1-semantic-writer-proof-20260916.json).
+Linux/macOS each passed235 narrow,819 affected (40 targets),713 library and181
+independent-reference tests. Windows passed247 narrow,814 affected (40 targets),
+728 library and181 reference tests. All test runs have zero failures, ignored
+or filtered cases. Each platform passed strict workspace Clippy, formatting and
+496 independent fixtures; Windows formatting covers all379 Cargo-listed roots.
+Unix contract/debt/audit gates passed; audit maximum is1501. Final Linux sampled
+home/Data minima69,252,657,152/334,234,935,296bytes remained above their floors;
+the6GiB cgroup peak reached its cap, with zero swap and successful completion.
+Windows sealed00:20:12UTC with17,936,572,416bytes free. Every executed binary was
+hashed on its native host before the next build. All source archives, historical
+failures and raw receipts remain retained. This completes byte encoding only;
+the selector allocation defect above and all runtime capture/pin/resume/activation
+obligations remain explicit. No capability advertisement or service change.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.
@@ -93,7 +178,7 @@ within that scope. Production/service/retained-database gates remain separate.
       target; prove registered-hash widths, bounded decode and legacy stability.
 - [x] Implement shared readers, publication refusal and Linux contract gates.
 - [x] Finish native Windows reader/probe qualification.
-- [ ] Qualify byte-exact writers; keep actual task publication disabled until
+- [x] Qualify byte-exact writers; keep actual task publication disabled until
       runtime proof.
 - [ ] Integrate durable capture/pins, checkpoint resume, persisted base admission,
       short guarded activation/rebase, cancellation and post-HEAD recovery.

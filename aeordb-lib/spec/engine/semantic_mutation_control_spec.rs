@@ -1,4 +1,7 @@
 //! Independent Round 17 bodies: no production encoder supplies these bytes.
+#[path = "semantic_mutation_writer_spec.rs"]
+mod writers;
+
 #[path = "semantic_mutation_sources_spec.rs"]
 mod source_fingerprint;
 use aeordb::engine::HashAlgorithm;

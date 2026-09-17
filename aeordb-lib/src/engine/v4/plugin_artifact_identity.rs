@@ -96,11 +96,11 @@ pub fn inspect_plugin_artifact_identity_v1<'a>(
   for payload in wasmparser::Parser::new(0).parse_all(request.module_bytes) {
     check(&reservation, is_cancelled)?;
     match payload.map_err(|source| invalid(source.to_string()))? {
-      wasmparser::Payload::Version { num, encoding, .. } => {
-        if num != 1 || encoding != wasmparser::Encoding::Module {
-          return Err(invalid("artifact identity requires a version-1 core module"));
-        }
+      wasmparser::Payload::Version { num, encoding, .. } if num != 1 || encoding != wasmparser::Encoding::Module => {
+        return Err(invalid("artifact identity requires a version-1 core module"));
       }
+      // A valid core-module version contributes no identity metadata. The
+      // iterator still checks the remaining framing before identity is returned.
       wasmparser::Payload::UnknownSection { .. } => return Err(invalid("unknown outer module section")),
       wasmparser::Payload::CustomSection(section) if section.name() == "aeordb.plugin.v1" => {
         if manifest.is_some() {
