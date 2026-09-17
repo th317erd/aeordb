@@ -1,7 +1,10 @@
 //! A coherent read of durable task controls, never a resume or retention permit.
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
-pub use inventory::{NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1, SemanticMutationInventorySummaryV1};
+pub use inventory::{
+  NativeProtectedSemanticSourceV1, NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1,
+  NativeSemanticSourceReadBoundsV1, SemanticMutationInventorySummaryV1,
+};
 use super::*;
 use super::super::semantic_mutation_control::{
   SemanticMutationCheckpointV1, SemanticMutationTaskV1, decode_semantic_mutation_checkpoint, decode_semantic_mutation_selection,
@@ -87,6 +90,10 @@ impl SemanticMutationObservationV1 {
 #[derive(Debug)]
 pub enum SemanticMutationObservationErrorV1 {
   Invalid { code: &'static str, message: &'static str },
+  Resource { code: &'static str, message: &'static str },
+  Allocation { code: &'static str, source: std::collections::TryReserveError },
+  ResourceRead { code: &'static str, source: FirstAuthorityPublicationErrorV1 },
+  Compression { status: usize },
   Authority(FirstAuthorityPublicationErrorV1),
   Memory(MemoryCoordinatorError),
 }
@@ -94,7 +101,9 @@ pub enum SemanticMutationObservationErrorV1 {
 impl SemanticMutationObservationErrorV1 {
   pub fn code(&self) -> &'static str {
     match self {
-      Self::Invalid { code, .. } => code,
+      Self::Invalid { code, .. } | Self::Resource { code, .. } => code,
+      Self::Allocation { code, .. } | Self::ResourceRead { code, .. } => code,
+      Self::Compression { .. } => "semantic_source_chunk_compression",
       Self::Authority(source) => source.code(),
       Self::Memory(_) => "semantic_task_observation_memory",
     }
@@ -104,7 +113,12 @@ impl SemanticMutationObservationErrorV1 {
 impl Display for SemanticMutationObservationErrorV1 {
   fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Invalid { code, message } | Self::Resource { code, message } => write!(formatter, "{code}: {message}"),
+      Self::Allocation { code, source } => write!(formatter, "{code}: {source}"),
+      Self::ResourceRead { code, source } => write!(formatter, "{code}: {source}"),
+      Self::Compression { status } => {
+        write!(formatter, "semantic_source_chunk_compression: {} ({status})", zstd::zstd_safe::get_error_name(*status))
+      }
       Self::Authority(source) => write!(formatter, "semantic task observation: {source}"),
       Self::Memory(source) => write!(formatter, "semantic task observation memory: {source}"),
     }
@@ -114,7 +128,10 @@ impl Display for SemanticMutationObservationErrorV1 {
 impl Error for SemanticMutationObservationErrorV1 {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
-      Self::Invalid { .. } => None,
+      Self::Invalid { .. } | Self::Resource { .. } => None,
+      Self::Allocation { source, .. } => Some(source),
+      Self::ResourceRead { source, .. } => Some(source),
+      Self::Compression { .. } => None,
       Self::Authority(source) => Some(source),
       Self::Memory(source) => Some(source),
     }

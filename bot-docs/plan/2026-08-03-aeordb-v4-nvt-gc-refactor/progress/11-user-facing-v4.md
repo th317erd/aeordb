@@ -26,6 +26,13 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,14:49UTC: native protected-source reads are qualified on Linux,
+macOS and Windows; see the
+[immutable proof](../evidence/user-facing-v4-u1-native-protected-source-proof-20260917.json).
+Exact original records and chunk bodies now share the existing captured snapshot
+and staging lifetime. This does not publish durable copies or grant resume/GC
+authority. Byte writers and complete durable typed closure follow below.
+
 September17,13:29UTC: the shared canonical loader's declared-length allocation
 boundary is qualified on Linux, macOS and native Windows; see its
 [immutable proof](../evidence/user-facing-v4-u1-canonical-system-length-proof-20260917.json).
@@ -73,6 +80,132 @@ disabled, and U2–U7 are still required. No production deployment, service acti
 or retained FS-Server1 database mutation is authorized by these test results.
 
 ## Active next unit: semantic-mutation durable task contract
+
+### Current continuation: captured protected inputs — entry3589b88a
+
+The preceding length correction landed/pushed3589b88a; all platform evidence
+was sealed/copied before advancing isolated sources. No drift, unrelated work
+preserved. The capture contract now records the read-only source API and exact
+test/ownership perimeter. No source-copy writer or task activation is enabled.
+Four native tests are installed against a refusing scaffold, including old/new
+capture identity, explicit absence and hand-built v0/v1 metadata/multiple-chunk
+representations. RED1 packet has nine inputs, SHA256
+82c5b8ad57d407385a92ae2a0932bb8457330572c2726ad1a26101135266d679.
+The runtime behavior is not implemented; actual failing-first output is owed.
+
+RED1 completed13:34:06UTC,0passed/4failed/767filtered: all four behavioral
+failures identify the explicit refusing scaffold, not a compile/setup failure.
+All seven raw artifacts and the executed binary hash were local before runtime
+implementation. Unit aeordb-v4-native-source-red1-20260917 invocation
+af30c86f21e9451b8d3b34b2d0ef1e91/MainPID1647366.
+
+Candidate1 completed13:42:45UTC,40observation/inventory/source tests PASS,
+731filtered. Nine-input SHA187d2e27a26ce387aa49b8ef0d5df01099e19b4d87ce7bb896f37d573be155e7;
+all raw files are local before replacing desktop source. It reads protected
+inputs through the same captured lookup, preserves exact FileRecord bytes and
+flags, validates chunks/length/whole-content identity, and retains per-source
+memory plus the borrowed staging lifetime. No native writer has been enabled.
+Allocation/read failures retain their original causes; codec failures retain
+the actual Zstd status rather than becoming absence.
+
+Candidate2 launched13:47UTC with twelve source tests and existing observation
+regressions, adding all-profile families, bounds, missing dependencies, malformed
+identity/length/path, empty/cancelled reads, allocator/memory retry, retained
+charges, compressed output limits and physical role/integrity failures. Nine-input
+SHAb00c4ab9396a7dbb981a0a59ea020db96028349fca48296ced046234b68cbbc7.
+The architecture target now explicitly constrains the read-only source child;
+that target and all broad/native gates still need execution. Compression uses
+the locked Zstd1.5.7 in-memory decoder into an already admitted destination,
+with fallible context creation; review of transitive legacy codec workspace
+and its accounting remains part of this unfinished unit, not a universal-OOM claim.
+
+Candidate2 finished13:47:56UTC:48passed/731filtered; all raw receipts and
+same-host executable hashes were copied locally. The next three tests extend
+allocation-cause/retry, cancellation/pressure after the first or final chunk,
+and the actual64MiB source. RED2 finished13:53:28UTC:0passed/1failed/781filtered,
+with `semantic_task_inventory_bounds` rejecting the framing-inclusive ceiling.
+Ten-input SHAdce99d46b58ef4f41c0365d380cfb0cb1ffbfa24d44a9c33d7214b8ba96feab6.
+All raw evidence was local before raising the operational entity ceiling to
+64MiB+8192; the payload maximum remains64MiB. The old negative-bound regression
+now tests one byte beyond the new ceiling. No persistent layout was changed.
+
+Candidate3 finished13:56:51UTC:51passed/731filtered, including15 source tests.
+Ten-input SHAdf9f6e31b51ec41751196d6a0aefb41a525c2d7857e5dcc764c44f684de6b7dd.
+Preflight1 finished14:03:06UTC:4architecture tests, formatting, strict workspace
+all-target Clippy and audit refresh PASS. All raw evidence is local. Audit
+inventory remains byte-identical at1501 occurrences, with no changed reviews.
+
+Pinned-codec review followed Zstd1.5.7's `ZSTD_decompressDCtx` through
+`ZSTD_decompressMultiFrame`: one-shot decoding uses the caller's bounded output
+as history, not the streaming path's frame-sized allocation. Legacy one-shot
+branches use fixed contexts; the same-host C layout probe measured all seven
+legacy context types,10288..157848bytes. The reader's separately admitted1MiB
+per-chunk decoder allowance covers this fixed workspace and its modern context;
+the additional pinned modern-context layout probe measured95976bytes, so its
+combined size with the largest legacy context is253824bytes, below that charge.
+no dictionary or streaming buffers are supplied. Retain the probe/source/binary
+hashes in `native-source-zstd-context-sizes.txt`. This does not claim execution
+of every historical compressed frame, C allocator injection, or universally
+fallible allocation: the reused owned FileRecord decoder remains infallible
+internally and is bounded/accounted by the admitted physical record size.
+
+Final1 launched~14:06UTC on all three native platforms with11 frozen inputs,
+SHA24263a020807a501ff38fd843583e4a83c5f5ed22f4df72cbd1111917c35b838.
+Linux unit aeordb-v4-native-source-final1-20260917, invocation
+ed9f2455b7364fa28d5bdcfe480d6d1a/MainPID1681962; Mac driver14972;
+Windows driver6596. Existing CPU/memory/disk/time guards remain unchanged.
+Native source is frozen; qualification, immutable proof and landing are still
+pending. No durable source-copy writer, task-resume or activation was enabled.
+
+Linux final1 completed14:16:55UTC:all nine gates passed, including212 narrow,
+1880 affected tests across118 targets,782 library tests,185 reference tests,
+502 fixtures, unchanged1501-site audit, format/Clippy/contracts/debt checks.
+Sealed14:21:18UTC and all raw artifacts copied locally before any later desktop
+build. Strict verifier passes the entire Linux/history/source packet and stops
+at missing native Mac evidence as expected. Mac/Windows remain pending.
+
+While those unchanged candidates continue, a separate detached desktop worktree
+`source-u1-source-capture-writer` at3589b88a runs only the following byte-writer
+tests and refusing scaffold. No byte-writing implementation or task publisher is
+enabled; the local native-source packet and existing qualification checkouts are
+unchanged. Its prerequisite structural ASCM/ASCN readers are already qualified.
+Eight-input RED1 SHAee250f526c1c0462295864734126bb07ed1b9cbd6d5da9a9a4b55d51fd9b29a8;
+unit aeordb-v4-capture-writer-red1-20260917, invocation
+552ab150cda44ca5b0e53261b82a1147/PID1706756. Raw receipt completion and resource
+RED remain to collect;14:25 control stdout shows4passed/4behavioral failures.
+Tests/protocol are appended to the existing capture contract, not a new plan.
+
+Following byte-writer RED receipts are now local and independently checked:
+control RED1 ended14:25:17UTC,4passed/4failed/51filtered; resource RED1 ended
+14:25:25UTC,0passed/1failed/68filtered. RED2 adds only two resource cases for
+large-node capacity and graph-count allocation, preserving the same refusing
+scaffold. Eight-input SHAebf400861c709f9fe71ea872b82137d66013ef6bf09c24dccb1181e4b5da83f3;
+unit aeordb-v4-capture-writer-red2-20260917 invocation
+6f32cab13c6246758ce41dc2321db3c0/PID1714710 ended14:33:28UTC,
+0passed/3failed/68filtered. Every failure names the unimplemented writer, not
+a compiler/setup error. All21 raw artifacts are local before implementation;
+`verify-capture-writer-red.mjs` passes archives, exact source delta, behavior,
+resource receipts and actual executable hashes. No byte behavior was added.
+
+Mac native-source final1 completed14:39:24UTC:all nine gates passed and the
+evidence was sealed14:40:02UTC. Raw receipts, source manifests and executed
+binary identities are copied locally. Windows affected stage passed14:37:25UTC;
+its library and final gates are pending, so no cross-platform landing yet.
+Final review retained the sole captured snapshot/staging lifetime, no mutation
+or alternate decoder, exact v0/v1 bytes/flags, bounded per-source/per-chunk
+memory and explicit errors rather than absent/partial success. No new service
+surface exists; durable restart/GC/activation and full U1 are still owed.
+
+Windows final1 completed all seven gates14:48:35UTC and sealed14:49:43UTC.
+Passed212 narrow,1873 affected/118 targets,797 library,185 independent-reference
+tests,502 fixtures, strict workspace Clippy and all379 formatting roots. All raw
+evidence is local before any source advance. Final Windows free space:
+C43,472,252,928bytes; test D51,421,302,784bytes. The VM remains16GiB/eight CPUs;
+no configuration change, production action or data cleanup was needed here.
+The strict cross-platform verifier passed, then generated the immutable
+[reader proof](../evidence/user-facing-v4-u1-native-protected-source-proof-20260917.json).
+This closes only the captured protected-source reader unit. Ordinary creation
+stays v3; semantic task/source publishers and capability advertisement stay off.
 
 September16 native Windows continuation: VM restored using the owner's standing
 launch permission. Fresh detached `source-u1-semantic-readers` at

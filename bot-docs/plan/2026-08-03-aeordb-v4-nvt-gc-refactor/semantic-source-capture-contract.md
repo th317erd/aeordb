@@ -471,3 +471,112 @@ owners. A future captured-source entry must validate an unforgeable same-owner
 capture before entering that path. Keep public GenericContent SYSTEM refusal;
 do not turn a caller-supplied descriptor or reader view into a copy/GC permit.
 Actual source replacement, restart, typed closure and release tests remain owed.
+
+### Captured-source reader entry3589b88a
+
+The canonical-length prerequisite is committed/pushed. Reuse the existing
+`NativeSemanticMutationInventoryV1` as the single captured physical view; add
+`read_protected_source(path, bounds)` rather than capturing a second snapshot or
+renaming the existing qualified task-inventory API. A non-Clone returned source
+borrows that capture and retains its own memory reservation. Borrowed getters
+expose exact original encoded FileRecord, decoded metadata, body, selected-H
+`filec:` revision, entity version and flags. No owned-buffer extraction, resume
+permission, publisher access or durable-retention claim is added.
+
+`map_territory`: physical lookup/framing stays at `first_authority`; snapshot,
+protection and read admission stay in `semantic_mutation_inventory`. A private
+`semantic_source_native` child owns this source projection, reexported through
+the existing observation/authority owner. Reuse `FileRecord::deserialize`, not
+the migration-only borrowed parser or a third implementation. Existing task
+visits and all publication refusals remain intact. Refresh the architecture
+owner test with this deliberately read-only child when qualifying it.
+
+`test_protocol`: the key hypothesis is that task/source reads share exactly one
+captured boundary. Given replacement after capture, the old view returns old raw
+bytes and a fresh view returns new bytes; captured absence cannot consult live
+state. Given v0/v1 records with metadata, multiple chunks and actual inherited
+flags, preserve the exact serialized record rather than canonicalizing it into
+a control wrapper. Given bad framing, missing chunks, wrong roles/paths/hashes,
+declared-length mismatch, cancellation or resource refusal, return an explicit
+failure without writes, leaked reservations or fabricated absence.
+
+Native file tests use independently built raw FileRecord bodies at both widths;
+existing physical wrappers only assemble disposable fixtures. Add all-profile
+identity, family/absence, malformed/read/work bounds, nested lifetime, allocator
+refusal/retry and compressed-content bounds. One-source output is admitted at
+its actual declared bounded size, not the64MiB module maximum for every source.
+The existing stream decompressor's bounded output alone does not prove bounded
+decoder workspace: inspect its actual implementation and qualify the selected
+bounded path before claiming that property. Retain inherited allocation caveats.
+
+`test_check`: four positive native tests run against an explicitly refusing
+scaffold before implementation: `cargo test --offline --locked -j 2 -p aeordb
+--lib protected_source_spec::`. Use the existing30-minute/6GiB/no-swap desktop
+runner. A compile failure is not the required behavioral RED. Preserve raw
+receipts and exact binaries before correcting the scaffold. Affected native
+inventory/observation/source/compiler/migration/GC tests and final platform,
+library/static/reference gates remain mandatory. Complete source-copy/catalog
+closure, restart and activation are subsequent coupled U1 obligations.
+
+Qualified September17 on Linux, macOS and native Windows in the
+[native protected-source proof](evidence/user-facing-v4-u1-native-protected-source-proof-20260917.json).
+The15 native cases preserve raw v0/v1 metadata/flags, old/fresh captures and
+absence, all five hash profiles, bounded reads/allocation/decoder output, late
+cancellation/pressure and the actual64MiB body. The operational physical entity
+ceiling now includes8192bytes of framing headroom without enlarging the payload
+limit. Fixed decoder workspace is separately charged; inherited FileRecord
+allocations remain an explicitly documented limitation. No source-copy writer,
+durable closure, resume or activation was enabled by this qualification.
+
+### Following byte-writer boundary — September17 review
+
+Prepare independent tests while native source qualification runs; executable
+byte-writer behavior starts only after its green landing. A refusing scaffold
+may run in a separate disposable checkout after the preceding Linux evidence
+is sealed/copied; it cannot modify the active native candidate or enable a
+publisher. The structural ASCM/ASCN prerequisite is already qualified on all
+three platforms. This extends the assigned ASCM/ASCN
+contract, not the capability mask or native publisher. No actual control may be
+published until complete typed retention/recovery is integrated.
+
+`map_territory`: `semantic_source_capture` owns borrowed manifest/leaf/child
+views and validation; `system_control::encode_system_control_with_body` owns
+fallible one-buffer framing, CRC and decode/readback. Reuse those owners via
+three byte-only APIs: `encode_semantic_source_capture_v1`,
+`encode_semantic_source_leaf_v1` and `encode_semantic_source_internal_v1`.
+Manifest input is the existing borrowed capture view; nodes take database ID
+and bounded borrowed row/child slices. Internal children keep their existing
+first-no-separator representation. All envelopes use immutable sequence1.
+No new physical file, envelope parser, persisted layout, writer permit, native
+capture or public service route is needed. The compiler/task/native closure
+consumers still follow; node bytes alone never prove full source-set coverage.
+
+Validate identity/hash widths, absent-versus-present-zero, row/child shape,
+canonical sorted paths, duplicate child IDs and checked payload capacity before
+allocating output. Use the shared decoder for complete scalar/count/identity
+validation after bounded fill. Keep original fixed fixtures, known/unadvertised
+capabilities25/27 and every native/v3/control-store publication refusal intact.
+Memory is one bounded output plus the existing24-byte manifest or H-byte node
+identity, not a temporary body plus output or an allocation from declared graph
+counts. Caller-owned row slices do not transfer their allocation responsibility.
+
+`test_protocol`: hypothesis—these APIs reproduce independently hand-built
+ASCM/ASCN bytes for every registered hash, without granting authority. Given
+paired absent/present rows, encoding must preserve zero absence and exact H-wide
+record identity. Given maximum fanout/long paths or bad ordering/width/shape,
+bounded success or explicit refusal must occur without truncation or panic.
+Given failure of output or identity allocation, preserve operational failure
+and retry successfully with unchanged inputs. Self-roundtrips alone are not
+proof: expected envelopes/CRC/identities come from the existing independent
+test bodies and immutable reference fixtures.
+
+Add actual positive RED against refusing scaffolds before implementation, then
+malformed/count/length/path/duplicate/overflow matrices and measured allocation
+refusal/retry. Unit/reference tests establish exact bytes; existing native
+publication-refusal tests establish no new physical authority. Complete catalog
+property tests and actual restart/GC/task E2E belong to following integration,
+not a claim conferred by this byte-only API. Existing bounded30/50/90-minute
+platform stages remain outer watchdogs; deterministic codec cases require no
+network or blocking callbacks. Run narrow control/resource targets, all framing
+consumers, libraries, architecture/static/reference and all native platforms
+before landing. No production or VM reconfiguration is required by this slice.

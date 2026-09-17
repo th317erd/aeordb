@@ -483,7 +483,7 @@ fn native_task_inventory_rejects_invalid_bounds_before_allocating_capture_scratc
     NativeSemanticMutationInventoryBoundsV1 { maximum_work: 0, ..bounds() },
     NativeSemanticMutationInventoryBoundsV1 { maximum_read_bytes: 0, ..bounds() },
     NativeSemanticMutationInventoryBoundsV1 { maximum_entity_bytes: 0, ..bounds() },
-    NativeSemanticMutationInventoryBoundsV1 { maximum_entity_bytes: (64 << 20) + 1, ..bounds() },
+    NativeSemanticMutationInventoryBoundsV1 { maximum_entity_bytes: (64 << 20) + 8193, ..bounds() },
     NativeSemanticMutationInventoryBoundsV1 { maximum_entity_bytes: usize::MAX, ..bounds() },
   ] {
     let result = protection.capture_semantic_mutation_inventory(invalid, &memory, &cancellation);

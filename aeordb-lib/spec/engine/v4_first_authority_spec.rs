@@ -194,6 +194,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
+  let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
   let staging_protection_path = source_root.join("engine/v4/staging_protection.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
@@ -244,6 +245,39 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  let source_reader = std::fs::read_to_string(&semantic_source_native_path).unwrap();
+  let source_reader: String = source_reader.split_whitespace().collect();
+  for required in [
+    "_capture:&'aNativeSemanticMutationInventoryV1<'a>",
+    "_memory:MemoryReservation",
+    "snapshot:&self.snapshot",
+    "FileRecord::deserialize(",
+    "read_entity_bounded(",
+    "IncrementalDigestV1::new(",
+    "decoder.decompress(output,entity.stored_value)",
+  ] {
+    assert!(source_reader.contains(required), "protected source reader lost shared capture/validation: {required}");
+  }
+  for forbidden in [
+    "StorageEngine",
+    "DiskKVStore",
+    "OpenOptions",
+    "File::open",
+    "File::create",
+    "write_file",
+    "sync_file",
+    ".flush(",
+    "publish_",
+    "RootReadAdmission",
+    "capture_settled_snapshot",
+    "lock_kv(",
+    "implCloneforNativeProtectedSemanticSourceV1",
+    "decompress_bounded(",
+    "FileRecord::serialize",
+    "unsafe",
+  ] {
+    assert!(!source_reader.contains(forbidden), "protected source reader gained another authority or decoder: {forbidden}");
+  }
   assert_eq!(
     authority_source.matches("kv.admit_read(&locator)?").count(),
     1,

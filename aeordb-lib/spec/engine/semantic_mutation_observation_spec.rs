@@ -4,6 +4,8 @@ use super::*;
 mod allocation_probe;
 #[path = "semantic_mutation_inventory_spec.rs"]
 mod inventory_spec;
+#[path = "native_protected_source_spec.rs"]
+mod protected_source_spec;
 use allocation_probe::measure;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationPhaseV1, SemanticMutationTaskStateV1};
 

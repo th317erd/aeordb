@@ -1,4 +1,7 @@
 //! Captured task discovery is not a resume, root admission or GC closure permit.
+#[path = "semantic_source_native.rs"]
+mod protected_sources;
+pub use protected_sources::{NativeProtectedSemanticSourceV1, NativeSemanticSourceReadBoundsV1};
 use super::*;
 use std::cell::Cell;
 use crate::engine::kv_snapshot::ReadSnapshot;
@@ -8,7 +11,9 @@ use super::super::super::reader::MalformedInputClass;
 use super::super::super::system_control::CONTROL_ROOT;
 use super::super::super::system_family::{SystemFamilyPolicyResolverV1, SystemFamilySubjectV1};
 
-const MAXIMUM_ENTITY_BYTES: usize = 64 * 1024 * 1024;
+// A maximum-size raw module still has a WholeEntity header, key and checksum.
+// This is an operational read ceiling, not a larger source-payload wire limit.
+const MAXIMUM_ENTITY_BYTES: usize = (64 << 20) + 8192;
 const CAPTURE_SCRATCH_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug)]
