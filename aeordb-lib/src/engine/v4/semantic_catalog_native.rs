@@ -5,7 +5,7 @@ use crate::engine::EngineError;
 
 use super::first_authority::{
   FirstAuthorityPublicationErrorV1, ImmutableEntityBatchPublicationErrorV1, ImmutableSemanticObjectBatchPublicationRequestV1,
-  V4FirstAuthorityPublisher,
+  NativeStagingProtectionV1, V4FirstAuthorityPublisher,
 };
 use super::header_publication::DatabaseHeaderPublicationErrorV4;
 use super::namespace::EncodedSemanticObjectV1;
@@ -16,12 +16,14 @@ type Result<T> = std::result::Result<T, SemanticCatalogReadErrorV1>;
 
 /// Borrow the existing physical owner for bounded, dependency-first staging.
 /// This adapter never changes HEAD, acquires a namespace guard, or creates a
-/// second KV/file owner. The caller must retain staging protection against GC
-/// until activation or discard; constructing this adapter does not create a
-/// durable task pin. Compiler scratch and physical KV accounting stay with
-/// their respective owners.
+/// second KV/file owner. It borrows active in-process staging protection for
+/// its entire usable lifetime. The caller must retain that guard after this
+/// adapter drops until checkpoint selection or safe discard. Neither this
+/// adapter nor a compiler result creates a durable task pin. Compiler scratch
+/// and physical KV accounting stay with their respective owners.
 pub struct NativeSemanticCatalogStagingStoreV1<'a> {
   publisher: &'a V4FirstAuthorityPublisher,
+  _protection: &'a NativeStagingProtectionV1<'a>,
   database_id: [u8; 16],
   publication_timestamp_ms: u64,
   cancellation: &'a CancellationToken,
@@ -29,7 +31,7 @@ pub struct NativeSemanticCatalogStagingStoreV1<'a> {
 
 impl<'a> NativeSemanticCatalogStagingStoreV1<'a> {
   pub fn new(
-    publisher: &'a V4FirstAuthorityPublisher,
+    protection: &'a NativeStagingProtectionV1<'a>,
     database_id: [u8; 16],
     publication_timestamp_ms: u64,
     cancellation: &'a CancellationToken,
@@ -38,12 +40,13 @@ impl<'a> NativeSemanticCatalogStagingStoreV1<'a> {
     if publication_timestamp_ms == 0 || publication_timestamp_ms > i64::MAX as u64 {
       return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_publication_time", "invalid staging timestamp"));
     }
+    let publisher = protection.publisher();
     let observation = publisher.observe().map_err(authority_error)?;
     if observation.selected.header.database_id != database_id {
       return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_database", "staging belongs to another logical database"));
     }
     check_cancelled(cancellation)?;
-    Ok(Self { publisher, database_id, publication_timestamp_ms, cancellation })
+    Ok(Self { publisher, _protection: protection, database_id, publication_timestamp_ms, cancellation })
   }
 }
 

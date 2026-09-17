@@ -456,3 +456,156 @@ This prerequisite is qualified on Linux, macOS and native Windows in the
 The proof retains actual failing-first ordering/work tests, intermediate test
 and harness failures, final native suites and exact source/binary identity.
 It does not grant staged-root admission or complete capture/retention authority.
+
+### Runtime staging protection — September17 entry38ef8edd
+
+The next integration prerequisite closes the in-process interval between
+immutable staging and durable checkpoint selection. Add a non-Clone, privately
+constructed `NativeStagingProtectionV1` borrowing the existing
+`V4FirstAuthorityPublisher`. Acquisition/release update bounded state under
+that owner's existing `root_state` mutex; the returned guard does **not** hold
+the mutex during compilation. Account its lifetime with the shared task-memory
+coordinator. Cancellation/admission/poisoning/count exhaustion fail closed.
+The guard grants no namespace admission, task ownership or restart permission.
+This is a permanent publication-gap barrier, not a new persisted format,
+second physical writer or replacement for durable task-root discovery.
+Protection belongs to the borrowed publisher, not a cross-process file lock;
+ordinary-engine enforcement of the single-owner boundary remains U2 work.
+
+Exact current exclusion consumers are `publish_physical_quarantine_excluded`,
+`publish_root_retirement_excluded`, `publish_root_reclaim_excluded` and
+`execute_sweep_locator_removals`' guarded callback. Under the same root mutex,
+each must refuse final publication/removal while staging protection is active.
+Request-pin coordinators remain unchanged. Ordinary immutable staging, reads,
+and successor publication must remain possible; predecessor-only GC evidence
+must not bypass the final barrier. Guard acquisition after a reclaim cannot
+restore missing bytes: subsequent source/closure validation is still required.
+Keep receipt reconciliation and existing receipt-backed Void settlement intact;
+the guard does not retroactively invalidate completed removals or durable uses.
+
+Bind `NativeSemanticCatalogStagingStoreV1` to a borrowed protection guard,
+not an unchecked promise from its caller. The repository has six constructor
+call sites, all in `migration_execution_spec`; there is no production runtime
+caller yet. Its sole physical publisher remains borrowed through the guard.
+Update that complete fixture inventory and architecture-owner assertions with
+the binding. Do not enable semantic task/control writers or capability25.
+
+Falsifying sequence: add explicit refusing acquisition plus native tests before
+implementation; retain that RED. Prove acquire/drop and nested lifetimes at
+both hash widths, no long-held mutex, memory refusal/retry, cancellation and
+poisoned accounting. Actual native retirement, reclaim, quarantine and sweep
+fixtures must refuse at the final boundary, preserve selected state/locators,
+and succeed after the final protection drops. Controlled races exercise both
+linearization orders with bounded waits. Catalog staging/readback must work
+while protection is held, and its borrow must prevent premature release.
+Run native authority, lifecycle/quarantine/sweep/Void, compiler/migration,
+request-pin and allocation regressions; full platform/static/reference gates
+apply. No result here proves durable selected-checkpoint closure across restart;
+global discovery, typed GC edges and checkpoint/activation integration remain
+mandatory before ordinary service or semantic publication can be enabled.
+
+Candidate1 exposed a necessary receiver correction before runtime binding:
+the quarantine, root-retirement and root-reclaim public/observer wrappers take
+`&mut self` solely because they pass `self` to `RetirementJournalOwnerV1::flush`.
+Their actual final publication already uses the internal authority/KV mutexes.
+Use the existing `SharedFirstAuthorityRetirementSinkV1` (already used by mutable
+controls and index publication) for all six pre/post flushes, and accept `&self`
+in those six wrappers. Keep the exact ordering, receipts and post-commit lineage
+failure behavior; do not create another sink or detach the staging lifetime from
+its publisher. Existing mutable callers remain valid. The failed candidate is
+retained, and the complete native fault/race/lineage suites must qualify this
+coupled receiver change before landing.
+Existing pre-barrier journal flushes remain allowed. Refusal prevents final
+reclamation authority/removal, not every possible journal append; byte-identical
+refusal fixtures deliberately begin with drained journals.
+
+Candidate2 exercised743 library cases:742 passed and one new fixture failed.
+It reused the initial empty namespace/semantic contents under a new transaction,
+so content identity correctly entered the retry path and rejected its missing
+publication witness. Candidate3 uses a distinct parent directory referencing
+the already-published empty child, asserts a non-idempotent successor, and keeps
+that witness validation unchanged. Seven newly unnecessary mutable test bindings
+were removed following the receiver correction. Preserve both failed candidates.
+Final qualification also includes controlled cancellation/hard-memory-pressure
+arrival while acquisition waits for the root mutex, with no retained count or
+reservation after refusal, then successful retry. The expanded affected inventory
+contains all36 existing `gc_v4_*` targets; native-library tests own the actual
+first-authority boundaries, not an invented second reclamation implementation.
+
+This slice is qualified on Linux, macOS and native Windows in the
+[September17 staging-protection proof](evidence/user-facing-v4-u1-staging-protection-proof-20260917.json).
+All eight new native cases, the augmented GC boundary/race cases, full library,
+88 affected targets and platform/static/reference gates passed. Failed scaffolds,
+candidates and preflight are retained; the proof does not grant durable retention,
+cross-process locking, task activation or ordinary-v4 service readiness.
+
+### Following integration: captured native task inventory
+
+Start only after the staging-protection source is qualified and landed. This
+extends the same U1 contract, not the persisted format or service permissions.
+The current known-task observation is not global discovery. Canonical controls
+are stable-path-keyed FileRecords in KV, and may be absent from the namespace.
+The existing captured-header readers still use live KV locators: they are not
+a frozen view of mutable control incarnations.
+
+Capture the selected header and a retained `Arc<ReadSnapshot>` under the existing
+short root/KV exclusion, borrowing live staging protection from the same owner.
+Validate exact database/physical/layout/hash/frontier alignment; release both
+mutexes before enumeration or caller callbacks. No implicit flush, new file/KV
+owner, root admission or resume permission may be hidden in this read operation.
+Keep the snapshot's existing page-generation lifetime/accounting and admit all
+additional bounded task scratch. Hold the protection through use; a captured
+locator by itself does not prevent physical reuse.
+
+Share the canonical physical read chain (`read_entity_bounded`,
+`load_canonical_system_file_at_path`, control-slot loading) with an explicit
+captured lookup input. Do not copy the FileRecord/chunk/content/key checks into
+another physical decoder or substitute live locators when a capture misses.
+Any factoring must preserve every existing live caller and error classification.
+Enumerate page-by-page with checked work/read limits, cancellation and explicit
+completion. No complete-key/task vector, world-sized dedup set or repeated
+prefix scan is acceptable. `visit_captured_slots` already requires flushed
+stable slots; `visit_all` additionally understands frozen buffered overrides.
+Choose the matching existing snapshot contract deliberately, and test it.
+
+The namespace reader currently bounds an individual FileRecord entity to4MiB.
+Control payload caps do not justify skipping larger ordinary FileRecords during
+discovery. Bound each read/decode before allocation; crossing the admitted record,
+work or memory bound produces typed incomplete/resource evidence, never a
+successful empty inventory. Reuse existing v4 `IncrementalDigestV1` if streaming
+integrity becomes necessary; the legacy `HashAlgorithm::incremental_hasher`
+supports only BLAKE3 and is not a v4 all-profile replacement. Do not introduce a
+second framing parser merely to optimize this scan.
+
+Pathnames contain a fixed BLAKE3 digest of kind/identity, not the task ID itself.
+Discover a complete canonical A/B pair, derive the selected identity through the
+shared selector, then prove its exact path/database/kind binding. Reuse the
+existing torn-payload fallback and allocation-error refusal policy; physical
+FileRecord/chunk corruption must not turn into fallback or absence. Emit a task
+once, for its selected physical slot, rather than retaining a global dedup map.
+Released terminal controls may summarize without a checkpoint as the existing
+observer does. Unreleased tasks require generation and exact selected checkpoint
+identity/digest/state binding before visiting their six declared typed roots.
+Declared edges remain obligations, not proof that the complete graph exists or
+that a candidate NamespaceRoot has been admitted.
+
+Tests before implementation: a native fixture with two task controls outside the
+namespace must enumerate both; a snapshot captured before A/B replacement must
+retain the old selected incarnation while a fresh capture sees the new one;
+and callback-triggered publication must complete without a held scan mutex.
+Use independent control payload fixtures, actual positioned file/KV reads, both
+hash widths, and byte comparisons while the publisher remains alive. Extend
+coverage to A-only/B-only/equal-sequence/torn/ambiguous pairs, wrong role/path or
+database, missing generation/checkpoint, bad binding, unknown protected inputs,
+buffer overrides, bounded page generations, early stop/cancellation, read and
+allocation failures, oversized records, and retry after pressure release.
+Partial callbacks cannot grant a complete retention result. Controlled races
+need bounded waits and must release their setup gates before assertions.
+
+Preserve the thirteen known-task observation regressions, snapshot/mark-slot
+visitors, selector allocation-failure regressions, native publication/recovery,
+all affected GC and compiler/migration targets. Apply the established final-source
+native-platform/static/reference gates. Full durable typed-closure traversal,
+checkpoint selection/resume and atomic activation remain subsequent coupled
+runtime obligations; no semantic writer or capability advertisement is enabled
+by a read-only inventory.

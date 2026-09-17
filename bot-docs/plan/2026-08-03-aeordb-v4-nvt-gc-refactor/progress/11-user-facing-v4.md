@@ -26,18 +26,25 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
-Incremental compilation is qualified through all eleven Linux gates; see the
-[strict incremental proof](../evidence/user-facing-v4-u1-catalog-incremental-proof-20260915.json).
-It preserves the base while producing an unselected updated catalog, prunes
-unused dependencies, avoids whole-catalog scans for unchanged dependencies,
-and returns typed failures for the two formerly aborting semantic-state buffers.
-Persisted base admission is now qualified and landed as `28e6a202`; durable task
-capture/activation remain outstanding. The
-owner has now authorized dedicated versioned semantic-mutation task/checkpoint
-definitions (Round17, September16 UTC), preserving existing IDs/layouts. The
-format inventory, independent contracts/readers and crash-safe integration are
-the active next unit; prior pending-approval notes below are historical.
-Full U1 and user-facing production readiness are not complete.
+September17 continuation: canonical compilation/update and persisted catalog
+admission are qualified. Additive semantic task/checkpoint/generation codecs,
+source fingerprints, shared selection, native known-task observation and ordered
+namespace seeks have also landed with their immutable proofs below. The latest
+landed source is `38ef8edd` (namespace seeks).
+
+The staging-protection integration has passed final Linux, macOS and native
+Windows qualification; see its [immutable proof](../evidence/user-facing-v4-u1-staging-protection-proof-20260917.json).
+It binds the native catalog
+adapter to a counted process-local guard and excludes four final reclamation
+boundaries without holding the mutex during staging. Durable captured task
+inventory, full typed retention, checkpoint/resume and activation still follow.
+The contract's following-integration section records the refreshed capture
+requirements. Earlier reader/writer launch and approval notes below are history.
+
+Full U1 and user-facing production readiness are **not complete**. Ordinary
+creation remains v3, semantic task publication/capability advertisement remain
+disabled, and U2–U7 are still required. No production deployment, service action
+or retained FS-Server1 database mutation is authorized by these test results.
 
 ## Active next unit: semantic-mutation durable task contract
 
@@ -448,6 +455,74 @@ DirectoryIndex admission. Reuse the physical and retention owners with explicit
 typed staging protection; do not invent lifecycle proof or equate known-task
 observation with complete durable task discovery. No next-unit source changes
 were mixed into this qualified traversal snapshot.
+
+Namespace seek milestone landed and pushed as
+`38ef8eddd254e143d4cc132e209fc848e9c034a1`. The following bounded slice is
+specified in the contract's runtime staging-protection section. It adds an
+in-process publication-gap guard at the same physical owner, then binds the
+native catalog adapter; it does not replace durable checkpoint/GC closure.
+The two first native tests exercise admitted lifetime/no long-held mutex and
+pre-cancellation against an explicit refusing acquisition scaffold. RED1
+launched04:50:42UTC on the desktop, unit
+`aeordb-v4-staging-protection-red1-20260917`, invocation
+`5cddc139519744178825940264b04737`, six frozen inputs, two jobs,6GiB/no swap,
+30-minute deadline and unchanged disk floors. The existing isolated source
+advanced only after namespace evidence was sealed; its prior qualified overlay
+is recoverably retained in stash3dbf07c4. No behavioral implementation has begun.
+
+The staging RED subsequently finished04:51:27UTC with both new tests failing
+against explicit refusal. Candidate1 failed compilation before any test because
+the GC wrappers unnecessarily required an exclusive publisher borrow; the
+contract records the shared retirement-sink correction. Candidate2 ran the full
+743-test library:742 passed and one newly added successor fixture failed by
+reusing the initial content identity under another transaction. Its genuine
+successor correction and seven compiler-reported unused mutable bindings are in
+candidate3, launched05:14UTC, invocation9980fb76163040e7a33da16fdcc4990e.
+The failed snapshots, raw logs and same-host executable hashes were retained
+before rebuilding. Candidate3 is followed serially by format, strict workspace
+Clippy and a no-new-debt audit refresh. Final qualification adds an eighth test
+for cancellation/pressure arriving while acquisition waits, and expands affected
+regressions to88 targets including all36 existing `gc_v4_*` targets. Native
+qualification and immutable proof remain pending; this is not full U1 readiness.
+
+Candidate3 passed769 tests, then strict Clippy reported one additional unnecessary
+mutable publisher binding in `gc_v4_root_retirement_publication_spec:590`.
+Candidate4 includes its removal and the waiting-race test:770 tests passed
+(744 library,22 migration,4 architecture) at05:21:51UTC. Formatting, strict
+workspace/all-target Clippy and audit-refresh2 passed by05:24:49UTC; the audit
+retains1501 reviewed occurrences with only13 line relocations and no review or
+identity changes. Raw failed/passing evidence was copied before subsequent builds.
+Final1 launched~05:26UTC on Linux, macOS and Windows with11 frozen inputs,
+manifest SHA256f986b363e3d202bf1eb21962b7b4a7ce4d73e10c2998b8730dcd365b60921260.
+Linux invocationf7b50367dcaa46e0a5b374d9f275d96d; WindowsPID10876. Unix has nine
+stages and Windows seven, retaining all379 formatting target roots. No VM
+reconfiguration was necessary. Final native results/seals/proof are pending.
+
+Final1 is now qualified and sealed on all three platforms. Linux finished
+05:36:58UTC, macOS05:37:33UTC and Windows05:50:10UTC; Unix evidence was sealed
+05:38:26UTC and Windows05:54:24UTC. Raw source-bound logs, exact same-host
+executable hashes and tool/environment receipts were mirrored locally before
+any following build. The strict proof verifier passed, then wrote the immutable
+[staging-protection proof](../evidence/user-facing-v4-u1-staging-protection-proof-20260917.json).
+
+Linux passed220 focused tests across7 targets,1309 affected across88,744 library,
+181 independent-reference tests and496 fixtures. macOS passed218 focused,
+1309 affected and744 library, plus the same reference/static gates. Windows
+passed218 focused,1302 affected and759 library,181 reference tests,496 fixtures,
+strict Clippy and all379 Cargo-discovered formatting roots. All final test runs
+had zero failures, ignored or filtered cases. Platform-conditional cases explain
+the count differences; the exact executed target sets are checked by the proof.
+Windows minimum sampled disk was9,741,844,480bytes and minimum sampled RAM
+10,719,481,856bytes. Desktop ended with74,012,676,096bytes home free and
+326,506,553,344bytes Data free. Existing resource limits were unchanged.
+
+Review preserved normal publication/readback, cancellation and memory rechecks,
+accounting/poisoning fail-closed behavior, both race orders, canonical adapter
+ownership and exact journal forwarding. Refusal occurs at final reclamation
+boundaries; existing pre-barrier journal flushes remain allowed. The barrier is
+publisher-local, not cross-process locking or durable checkpoint retention.
+No production action, capability change or ordinary-v4 cutover occurred. Continue
+with the captured-task inventory integration specified in the same contract.
 
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the

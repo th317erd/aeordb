@@ -587,7 +587,7 @@ fn lifecycle_support_closure_rejects_descriptor_substitution_and_memory_pressure
 #[test]
 fn guarded_retirement_rejects_the_current_head_before_publishing_authority() {
   let algorithm = HashAlgorithm::Blake3_256;
-  let (_directory, mut publisher) = publisher();
+  let (_directory, publisher) = publisher();
   let first_authority = publisher.publish(&first_authority_request()).unwrap();
   let admission_commit_payload_hash = digest_parts(algorithm, &[&first_authority.admission_control]);
   let prior_lifecycle_manifest_hash = digest_parts(algorithm, &[b"prior lifecycle manifest"]);

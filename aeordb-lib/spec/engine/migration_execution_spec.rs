@@ -1970,8 +1970,9 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
       maximum_workspace_bytes: 64 << 20,
     };
     let compile = |publisher: &V4FirstAuthorityPublisher| {
+      let protection = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
       let mut store = NativeSemanticCatalogStagingStoreV1::new(
-        publisher,
+        &protection,
         before.selected.header.database_id,
         before.selected.header.updated_at_ms + 1,
         &cancellation,
@@ -2015,8 +2016,9 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
       panic!("complete catalog")
     };
     assert_eq!((catalog_record_count, definition_count, dependency_count), (13, 13, 4));
+    let protection = reopened.acquire_staging_protection(&memory, &cancellation).unwrap();
     let store = NativeSemanticCatalogStagingStoreV1::new(
-      &reopened,
+      &protection,
       before.selected.header.database_id,
       before.selected.header.updated_at_ms + 1,
       &cancellation,
@@ -2109,9 +2111,11 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     assert_eq!(update.semantic_state(), empty.semantic_state());
     let updated_observation = reopened.observe().unwrap();
     assert_eq!(updated_observation.selected.header.head_hash, before.selected.header.head_hash);
+    drop(protection);
     drop(reopened);
     let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
     assert_eq!(reopened.observe().unwrap(), updated_observation);
+    let protection = reopened.acquire_staging_protection(&memory, &cancellation).unwrap();
     for candidate in [&admitted, &update] {
       assert_eq!(
         reopened.load_semantic_object(1, &candidate.semantic_state().object_id).unwrap().unwrap(),
@@ -2122,7 +2126,7 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
         panic!("complete");
       };
       let source = NativeSemanticCatalogStagingStoreV1::new(
-        &reopened,
+        &protection,
         before.selected.header.database_id,
         before.selected.header.updated_at_ms + 1,
         &cancellation,
@@ -2140,13 +2144,14 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     }
     drop(empty);
     drop(update);
-    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, [0; 16], 1, &cancellation).is_err());
-    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 0, &cancellation).is_err());
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&protection, [0; 16], 1, &cancellation).is_err());
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&protection, before.selected.header.database_id, 0, &cancellation).is_err());
     cancellation.cancel();
-    assert!(NativeSemanticCatalogStagingStoreV1::new(&reopened, before.selected.header.database_id, 1, &cancellation).is_err());
+    assert!(NativeSemanticCatalogStagingStoreV1::new(&protection, before.selected.header.database_id, 1, &cancellation).is_err());
     assert_eq!(reopened.observe().unwrap(), updated_observation);
     drop(admitted);
     drop(registry);
+    drop(protection);
     assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
   }
 }

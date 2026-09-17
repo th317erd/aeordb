@@ -193,6 +193,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let read_view_native_path = source_root.join("engine/v4/read_view_native.rs");
   let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
+  let staging_protection_path = source_root.join("engine/v4/staging_protection.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
   let mut files = Vec::new();
@@ -228,6 +229,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &read_view_native_path,
       &semantic_catalog_native_path,
       &semantic_mutation_observation_path,
+      &staging_protection_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
   );
@@ -253,6 +255,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &read_view_native_path,
     &semantic_catalog_native_path,
     &semantic_mutation_observation_path,
+    &staging_protection_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
     for forbidden in ["DirectoryOps", "crate::server", "tokio::spawn"] {
@@ -282,6 +285,8 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       let compact: String = owner_source.split_whitespace().collect();
       let calls: Vec<_> = compact.split(".publisher.").skip(1).map(|call| call.split('(').next().unwrap()).collect();
       assert_eq!(calls, ["observe", "load_semantic_object_at_captured_header", "publish_immutable_semantic_objects"]);
+      assert!(compact.contains("_protection:&'aNativeStagingProtectionV1<'a>"));
+      assert!(compact.contains("letpublisher=protection.publisher();"));
       for forbidden in ["StorageEngine", "DiskKVStore", "FirstAuthorityPublicationRequestV1", "publish_successor_authority", ".publish("] {
         assert!(!compact.contains(forbidden), "semantic staging gained authority or physical ownership: {forbidden}");
       }
@@ -300,6 +305,29 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       }
       assert!(compact.contains("_memory:MemoryReservation"));
       assert!(compact.contains("decode_semantic_mutation_selection("));
+    } else if owner_path == &staging_protection_path {
+      let compact: String = owner_source.split_whitespace().collect();
+      assert!(compact.contains("_memory:MemoryReservation"));
+      assert!(compact.contains("drop(authority);Ok(NativeStagingProtectionV1"));
+      assert!(compact.contains("implDropforNativeStagingProtectionV1"));
+      for forbidden in ["implCloneforNativeStagingProtectionV1", "RootReadAdmission", ".file", ".kv", "publish_", "std::fs"] {
+        assert!(!compact.contains(forbidden), "staging protection gained detached or physical authority: {forbidden}");
+      }
+      let authority = std::fs::read_to_string(&first_authority_path).unwrap();
+      assert_eq!(authority.matches(".ensure_no_staging_protection()?").count(), 4);
+      for method in [
+        "fn publish_physical_quarantine_excluded(",
+        "fn publish_root_retirement_excluded(",
+        "fn publish_root_reclaim_excluded(",
+        "pub fn execute_sweep_locator_removals(",
+      ] {
+        let start = authority.find(method).unwrap();
+        let body = &authority[start..];
+        let lock = body.find("self.root_state.lock()").unwrap();
+        let gate = body.find(".ensure_no_staging_protection()?").unwrap();
+        let observation = body.find("let observation = self.observe()?").unwrap();
+        assert!(lock < gate && gate < observation, "{method} must recheck staging while holding the authority boundary");
+      }
     } else {
       assert!(!owner_source.contains("StorageEngine"), "disconnected owner {owner_path:?} gained direct v3 engine ownership");
     }

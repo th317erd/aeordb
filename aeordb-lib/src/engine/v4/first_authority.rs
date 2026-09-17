@@ -2,6 +2,9 @@
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
+#[path = "staging_protection.rs"]
+mod staging_protection;
+pub use staging_protection::{NativeStagingProtectionV1, StagingProtectionErrorV1};
 pub use semantic_mutation_observation::{
   SemanticMutationObservationDispositionV1, SemanticMutationObservationErrorV1, SemanticMutationObservationRequestV1,
   SemanticMutationObservationV1,
@@ -2831,12 +2834,18 @@ pub struct V4FirstAuthorityPublisher {
   file: File,
   kv: Mutex<DiskKVStore>,
   header_publisher: DatabaseHeaderPublisherV4,
-  root_state: Mutex<()>,
+  root_state: Mutex<FirstAuthorityRootStateV1>,
+}
+
+#[derive(Default)]
+struct FirstAuthorityRootStateV1 {
+  active_staging_protections: u64,
+  staging_accounting_failed: bool,
 }
 
 pub(crate) struct SelectedSemanticAuthorityGuardV1<'publisher> {
   publisher: &'publisher V4FirstAuthorityPublisher,
-  _authority: MutexGuard<'publisher, ()>,
+  _authority: MutexGuard<'publisher, FirstAuthorityRootStateV1>,
 }
 
 impl SelectedSemanticAuthorityGuardV1<'_> {
@@ -2890,7 +2899,12 @@ impl V4FirstAuthorityPublisher {
     let file = kv.clone_database_file()?;
     let observation = observe_database_header_v4(&file)?;
     validate_kv_header_alignment(&kv, &observation.selected.header)?;
-    Ok(Self { file, kv: Mutex::new(kv), header_publisher: DatabaseHeaderPublisherV4::new(coordinator), root_state: Mutex::new(()) })
+    Ok(Self {
+      file,
+      kv: Mutex::new(kv),
+      header_publisher: DatabaseHeaderPublisherV4::new(coordinator),
+      root_state: Mutex::new(FirstAuthorityRootStateV1::default()),
+    })
   }
 
   pub fn observe(&self) -> Result<DatabaseHeaderObservationV4, FirstAuthorityPublicationErrorV1> {
@@ -6406,7 +6420,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   pub fn publish_physical_quarantine(
-    &mut self,
+    &self,
     request: PhysicalQuarantinePublicationRequestV1<'_>,
     authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
@@ -6420,7 +6434,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   fn publish_physical_quarantine_with_control_observer(
-    &mut self,
+    &self,
     request: PhysicalQuarantinePublicationRequestV1<'_>,
     authority_verifier: &mut dyn PhysicalQuarantineAuthorityVerifierV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
@@ -6447,7 +6461,7 @@ impl V4FirstAuthorityPublisher {
         "retirement lineage owner differs from the quarantine database or hash profile",
       ));
     }
-    retirement_owner.flush(self)?;
+    retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
 
     let mut locked_result = None;
     let exclusion_result = request.pin_coordinator.with_global_exclusion(request.cancellation, || {
@@ -6483,7 +6497,7 @@ impl V4FirstAuthorityPublisher {
       }
     }
     let lineage_state = if locked.control.replaced_control {
-      match retirement_owner.flush(self) {
+      match retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self }) {
         Ok(true) => PhysicalQuarantineLineageStateV1::HardPublished {
           hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
         },
@@ -6625,6 +6639,7 @@ impl V4FirstAuthorityPublisher {
       drop(poisoned);
       PhysicalQuarantinePublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
     })?;
+    _authority.ensure_no_staging_protection()?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
     if observation.selected.redundancy_degraded
@@ -6717,7 +6732,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   pub fn publish_root_retirement(
-    &mut self,
+    &self,
     request: RootRetirementPublicationRequestV1<'_>,
     authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
@@ -6731,7 +6746,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   fn publish_root_retirement_with_control_observer(
-    &mut self,
+    &self,
     request: RootRetirementPublicationRequestV1<'_>,
     authority_verifier: &mut dyn RootRetirementAuthorityVerifierV1,
     retirement_owner: &mut RetirementJournalOwnerV1,
@@ -6760,7 +6775,7 @@ impl V4FirstAuthorityPublisher {
     }
     self.verify_root_retirement_support_is_durable(&request)?;
 
-    retirement_owner.flush(self)?;
+    retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
     let mut locked_result = None;
     let exclusion_result =
       request.pin_coordinator.with_retirement_exclusion(&request.intent.namespace_root_hash, request.cancellation, || {
@@ -6795,7 +6810,7 @@ impl V4FirstAuthorityPublisher {
       }
     }
     let lineage_state = if locked.control.replaced_control {
-      match retirement_owner.flush(self) {
+      match retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self }) {
         Ok(true) => RootRetirementLineageStateV1::HardPublished {
           hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence,
         },
@@ -6911,6 +6926,7 @@ impl V4FirstAuthorityPublisher {
       drop(poisoned);
       RootRetirementPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
     })?;
+    _authority.ensure_no_staging_protection()?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
     let database_id = request.support_closure.database_id();
@@ -7036,7 +7052,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   pub fn publish_root_reclaim(
-    &mut self,
+    &self,
     request: RootReclaimPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1,
   ) -> Result<RootReclaimPublicationReceiptV1, RootReclaimPublicationErrorV1> {
@@ -7044,7 +7060,7 @@ impl V4FirstAuthorityPublisher {
   }
 
   fn publish_root_reclaim_with_control_observer(
-    &mut self,
+    &self,
     request: RootReclaimPublicationRequestV1<'_>,
     retirement_owner: &mut RetirementJournalOwnerV1,
     control_observer: &mut dyn FirstAuthorityDependencyObserverV1,
@@ -7069,7 +7085,7 @@ impl V4FirstAuthorityPublisher {
     }
     self.verify_root_reclaim_support_is_durable(&request)?;
 
-    retirement_owner.flush(self)?;
+    retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self })?;
     let mut locked_result = None;
     let exclusion_result =
       request.pin_coordinator.with_retirement_exclusion(request.retention_permit.namespace_root_hash(), request.cancellation, || {
@@ -7101,7 +7117,7 @@ impl V4FirstAuthorityPublisher {
       }
     }
     let lineage_state = if locked.control.replaced_control {
-      match retirement_owner.flush(self) {
+      match retirement_owner.flush(&mut SharedFirstAuthorityRetirementSinkV1 { publisher: self }) {
         Ok(true) => {
           RootReclaimLineageStateV1::HardPublished { hard_publication_sequence: retirement_owner.status().last_hard_publication_sequence }
         }
@@ -7220,6 +7236,7 @@ impl V4FirstAuthorityPublisher {
       drop(poisoned);
       RootReclaimPublicationErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
     })?;
+    _authority.ensure_no_staging_protection()?;
     let observation = self.observe()?;
     let header = &observation.selected.header;
     let database_id = request.support_closure.database_id();
@@ -7493,6 +7510,7 @@ impl V4FirstAuthorityPublisher {
           drop(poisoned);
           SweepLocatorRemovalErrorV1::Authority(FirstAuthorityPublicationErrorV1::StateLockPoisoned)
         })?;
+        _authority.ensure_no_staging_protection()?;
         if request.cancellation.is_cancelled() {
           return Err(SweepLocatorRemovalErrorV1::invalid(
             "sweep_removal_canceled",

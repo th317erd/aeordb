@@ -3,6 +3,9 @@ use super::*;
 #[path = "semantic_mutation_observation_spec.rs"]
 mod semantic_mutation_observation_spec;
 
+#[path = "staging_protection_spec.rs"]
+mod staging_protection_spec;
+
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -4007,7 +4010,7 @@ fn create_environment_for_algorithm_at_kv_stage(
       file: publisher_file,
       kv: Mutex::new(kv),
       header_publisher: DatabaseHeaderPublisherV4::with_io(coordinator.clone(), Arc::new(FaultingNativeHeaderPublicationIo { failure })),
-      root_state: Mutex::new(()),
+      root_state: Mutex::new(FirstAuthorityRootStateV1::default()),
     }
   } else {
     V4FirstAuthorityPublisher::new(kv, coordinator.clone()).unwrap()
@@ -7785,6 +7788,18 @@ fn guarded_root_reclaim_cancellation_and_active_pins_refuse_before_authority_pub
   let retired_manifest_key = selected_root_lifecycle_manifest_key(&publisher);
   let target_locator = publisher.locator(&retirement.target_root_hash).unwrap().unwrap();
 
+  let staging = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+  let before_staging_refusal = publisher.observe().unwrap();
+  let staging_error =
+    publisher.publish_root_reclaim(reclaim.request(&cancellation, &retirement.pin_coordinator), &mut retirement_owner).unwrap_err();
+  assert_eq!(staging_error.code(), "staging_protection_active");
+  assert!(staging_error.committed_receipt().is_none());
+  assert_eq!(publisher.observe().unwrap(), before_staging_refusal);
+  assert_eq!(selected_root_lifecycle_manifest_key(&publisher), retired_manifest_key);
+  assert!(publisher.locator(&reclaim.root_object_reclaim_proof.key).unwrap().is_none());
+  assert_eq!(publisher.locator(&retirement.target_root_hash).unwrap().unwrap(), target_locator);
+  drop(staging);
+
   let canceled = CancellationToken::new();
   canceled.cancel();
   let canceled_error =
@@ -7938,7 +7953,7 @@ fn every_root_reclaim_selector_header_failure_restarts_as_exactly_retired_or_rec
     drop(retirement_owner);
     drop(publisher);
 
-    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let (_restart_coordinator, reopened) = reopen(&path);
     let expected_manifest = if selector_may_have_committed { &reclaim.lifecycle_manifest.key } else { &retired_manifest_key };
     assert_eq!(&selected_root_lifecycle_manifest_key(&reopened), expected_manifest, "failure {failure:?}");
     assert_eq!(reopened.locator(&retirement.target_root_hash).unwrap().unwrap(), target_locator, "failure {failure:?}");
@@ -8495,7 +8510,7 @@ fn root_retirement_failure_before_selector_keeps_prior_lifecycle_selected_across
     drop(retirement_owner);
     drop(publisher);
 
-    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let (_restart_coordinator, reopened) = reopen(&path);
     assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.prior_lifecycle_manifest_key, "phase {phase:?}");
     let retry_cancellation = CancellationToken::new();
     let mut retry_owner = RetirementJournalOwnerV1::new_chain(
@@ -8576,7 +8591,7 @@ fn every_final_selector_header_failure_restarts_as_exactly_pending_or_retired_an
     drop(retirement_owner);
     drop(publisher);
 
-    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let (_restart_coordinator, reopened) = reopen(&path);
     let selected_manifest = selected_root_lifecycle_manifest_key(&reopened);
     let expected_manifest =
       if selector_may_have_committed { &prepared.lifecycle_manifest.key } else { &prepared.prior_lifecycle_manifest_key };
@@ -8709,7 +8724,7 @@ fn post_selector_lineage_failure_returns_the_exact_committed_retirement_receipt(
   drop(retirement_owner);
   drop(publisher);
 
-  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let (_restart_coordinator, reopened) = reopen(&path);
   assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key);
   let retry_cancellation = CancellationToken::new();
   let mut retry_owner = RetirementJournalOwnerV1::new_chain(
@@ -8899,7 +8914,7 @@ fn root_retirement_failure_after_selector_reports_committed_and_restarts_as_reti
   drop(retirement_owner);
   drop(publisher);
 
-  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let (_restart_coordinator, reopened) = reopen(&path);
   assert_eq!(selected_root_lifecycle_manifest_key(&reopened), prepared.lifecycle_manifest.key);
   let retry_cancellation = CancellationToken::new();
   let mut retry_owner = RetirementJournalOwnerV1::new_chain(
@@ -9950,6 +9965,17 @@ fn guarded_physical_quarantine_selects_control_last_and_exact_retry_skips_stale_
   let request = prepared.request(&cancellation);
   let before_frontier = coordinator.snapshot().unwrap().hard_frontier;
 
+  let staging = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+  let before_staging_refusal = publisher.observe().unwrap();
+  let staging_error = publisher.publish_physical_quarantine(request, &mut verifier, &mut retirement_owner).unwrap_err();
+  assert_eq!(staging_error.code(), "staging_protection_active");
+  assert!(staging_error.committed_receipt().is_none());
+  assert!(!verifier.called);
+  assert!(publisher.locator(&prepared.manifest.key).unwrap().is_none());
+  assert_eq!(publisher.observe().unwrap(), before_staging_refusal);
+  assert_eq!(selected_physical_quarantine_manifest_key(&publisher), prepared.prior_manifest_key);
+  drop(staging);
+
   let pinned_root = digest_parts(algorithm, &[b"unrelated active request pin"]);
   let active_read = prepared.pin_coordinator.admit_read(&pinned_root, &cancellation, || Ok(RootLifecycleObservationV1::Live)).unwrap();
   let error = publisher.publish_physical_quarantine(request, &mut verifier, &mut retirement_owner).unwrap_err();
@@ -10350,6 +10376,15 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
   };
 
   let active_root = digest_parts(algorithm, &[b"active read while sweep removal waits"]);
+  let staging = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+  let before_staging_refusal = publisher.observe().unwrap();
+  let mut staging_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+  let staging_error = publisher.execute_sweep_locator_removals(removal_request, &mut staging_authority).unwrap_err();
+  assert_eq!(staging_error.code(), "staging_protection_active");
+  assert_eq!(staging_authority.recheck_calls, 0);
+  assert_eq!(staging_authority.remove_calls, 0);
+  assert_eq!(publisher.observe().unwrap(), before_staging_refusal);
+  drop(staging);
   let active_read =
     eligible_prepared.pin_coordinator.admit_read(&active_root, &cancellation, || Ok(RootLifecycleObservationV1::Live)).unwrap();
   let mut pinned_authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
@@ -10365,9 +10400,20 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
   racing_authority.recheck_barriers = Some((recheck_entered.clone(), recheck_release.clone()));
   let read_started = Arc::new(Barrier::new(2));
   let (lifecycle_callback_sender, lifecycle_callback_receiver) = mpsc::channel();
+  let staging_started = Arc::new(Barrier::new(2));
+  let (staging_acquired_sender, staging_acquired_receiver) = mpsc::channel();
   std::thread::scope(|scope| {
     let removal = scope.spawn(|| publisher.execute_sweep_locator_removals(removal_request, &mut racing_authority));
     recheck_entered.wait();
+
+    let staging = scope.spawn(|| {
+      staging_started.wait();
+      let guard = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();
+      staging_acquired_sender.send(()).unwrap();
+      guard
+    });
+    staging_started.wait();
+    assert!(matches!(staging_acquired_receiver.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)));
 
     let pin_coordinator = eligible_prepared.pin_coordinator.clone();
     let read_started_thread = read_started.clone();
@@ -10387,6 +10433,8 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
 
     recheck_release.wait();
     drop(removal.join().unwrap().unwrap());
+    staging_acquired_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(staging.join().unwrap());
     lifecycle_callback_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
     drop(read.join().unwrap().unwrap());
   });
@@ -10960,7 +11008,7 @@ fn every_physical_quarantine_selector_failure_restarts_as_exactly_prior_or_selec
     drop(retirement_owner);
     drop(publisher);
 
-    let (_restart_coordinator, mut reopened) = reopen(&path);
+    let (_restart_coordinator, reopened) = reopen(&path);
     let expected_manifest = if selector_may_have_committed { &prepared.manifest.key } else { &prepared.prior_manifest_key };
     assert_eq!(&selected_physical_quarantine_manifest_key(&reopened), expected_manifest, "failure {failure:?}");
     let retry_cancellation = CancellationToken::new();
@@ -11038,7 +11086,7 @@ fn post_selector_quarantine_replacement_lineage_failure_preserves_the_exact_comm
   drop(retirement_owner);
   drop(publisher);
 
-  let (_restart_coordinator, mut reopened) = reopen(&path);
+  let (_restart_coordinator, reopened) = reopen(&path);
   assert_eq!(selected_physical_quarantine_manifest_key(&reopened), replacement.manifest.key);
   let retry_cancellation = CancellationToken::new();
   let mut retry_owner = RetirementJournalOwnerV1::new_chain(
