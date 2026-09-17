@@ -48,6 +48,9 @@ mod canonical_value_borrowed_resource_spec;
 #[path = "semantic_mutation_control_resource_spec.rs"]
 mod semantic_mutation_control_resource_spec;
 
+#[path = "semantic_source_capture_resource_spec.rs"]
+mod semantic_source_capture_resource_spec;
+
 #[path = "semantic_mutation_writer_resource_spec.rs"]
 mod semantic_mutation_writer_resource_spec;
 

@@ -1,0 +1,30 @@
+# fixture: control-blake3-256-semantic-source-node-valid
+# contract: SystemControlV1
+# hash: blake3-256 (32 bytes)
+# expected: control:semantic-source-node:sequence=1:body=160
+# canonical key: /.aeordb-system/controls/v1/0049/0c25aa2087038bff8bf1a7b8f452ba82d9a35e596f8f5d95cfb0591b0f483747/i.ctrl
+# relation: slot:immutable-i
+# hex offsets are absolute within this fixture
+# control +0x000 len 4: kind-specific magic
+# control +0x004 len 2: schema_version=1
+# control +0x006 len 2: header_length=32
+# control +0x008 len 4: total_length
+# control +0x00c len 4: kind-specific flags
+# control +0x010 len 8: control_sequence
+# control +0x018 len 4: body_length
+# control +0x01c len 4: reserved zero
+# control +0x020 len 160: canonical kind body
+# control final len 4: CRC-32/ISO-HDLC
+00000000: 4153434e01002000c400000000000000
+00000010: 0100000000000000a000000000000000
+00000020: 01010101010101010101010101010101
+00000030: 01000000020000008000000000000000
+00000040: 1c0000002f2e61656f7264622d636f6e
+00000050: 6669672f696e64657865732e6a736f6e
+00000060: 00000000000000000000000000000000
+00000070: 00000000000000000000000000000000
+00000080: 1c0000002f2e61656f7264622d636f6e
+00000090: 6669672f706172736572732e6a736f6e
+000000a0: 51515151515151515151515151515151
+000000b0: 51515151515151515151515151515151
+000000c0: 1f80735f

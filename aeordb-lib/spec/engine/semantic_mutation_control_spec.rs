@@ -4,6 +4,9 @@ mod writers;
 
 #[path = "semantic_mutation_sources_spec.rs"]
 mod source_fingerprint;
+
+#[path = "semantic_source_capture_spec.rs"]
+mod source_capture;
 use aeordb::engine::HashAlgorithm;
 use aeordb::engine::v4::admission::{BinaryCapabilityProfileV1, CapabilitySetV1};
 use aeordb::engine::v4::semantic_mutation_control::{
@@ -145,7 +148,7 @@ fn new_capability_is_known_but_not_advertised_before_runtime_integration() {
   for bit in 0..256 {
     let mut bytes = [0; 32];
     bytes[bit / 8] = 1 << (bit % 8);
-    assert_eq!(CapabilitySetV1::from_bytes(bytes).is_ok(), bit < 24 || bit == 25, "bit {bit}");
+    assert_eq!(CapabilitySetV1::from_bytes(bytes).is_ok(), bit < 24 || bit == 25 || bit == 27, "bit {bit}");
   }
 }
 
@@ -316,24 +319,30 @@ fn bounded_cursor_limit_and_impossible_counts_are_rejected() {
 fn known_sparse_capability_reaches_header_admission_but_current_binary_refuses_it() {
   use aeordb::engine::v4::admission::{AdmissionModeV1, admit_v4_header};
   use aeordb::engine::v4::database_header::decode_header_region;
-  let mut bytes =
+  let baseline =
     std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/spec/fixtures/v4/database-header-v4/header-blake3-256-valid-ab.bin")).unwrap();
-  for slot in bytes.chunks_exact_mut(1_024) {
-    slot[61] |= 2;
-    slot[355] |= 2;
-    let crc = crc32fast::hash(&slot[..1_020]);
-    slot[1_020..].copy_from_slice(&crc.to_le_bytes());
+  for bit in [25, 27] {
+    let mut bytes = baseline.clone();
+    for slot in bytes.chunks_exact_mut(1_024) {
+      slot[61] |= 1 << (bit % 8);
+      slot[355] |= 1 << (bit % 8);
+      let crc = crc32fast::hash(&slot[..1_020]);
+      slot[1_020..].copy_from_slice(&crc.to_le_bytes());
+    }
+    let selected = decode_header_region(&bytes).unwrap();
+    let error = admit_v4_header(&selected, AdmissionModeV1::SemanticReadOnly, BinaryCapabilityProfileV1::current(), None).unwrap_err();
+    assert_eq!(error.code(), "missing_reader_capabilities");
+    assert_eq!(error.capability_bits(), &[bit]);
+    for unknown in [24, 26] {
+      let mut changed = bytes.clone();
+      for slot in changed.chunks_exact_mut(1_024) {
+        slot[61] |= 1 << (unknown % 8);
+        let crc = crc32fast::hash(&slot[..1_020]);
+        slot[1_020..].copy_from_slice(&crc.to_le_bytes());
+      }
+      assert!(decode_header_region(&changed).is_err(), "bit{unknown} remains unassigned");
+    }
   }
-  let selected = decode_header_region(&bytes).unwrap();
-  let error = admit_v4_header(&selected, AdmissionModeV1::SemanticReadOnly, BinaryCapabilityProfileV1::current(), None).unwrap_err();
-  assert_eq!(error.code(), "missing_reader_capabilities");
-  assert_eq!(error.capability_bits(), &[25]);
-  for slot in bytes.chunks_exact_mut(1_024) {
-    slot[61] |= 1;
-    let crc = crc32fast::hash(&slot[..1_020]);
-    slot[1_020..].copy_from_slice(&crc.to_le_bytes());
-  }
-  assert!(decode_header_region(&bytes).is_err(), "bit24 remains unassigned");
 }
 
 #[test]

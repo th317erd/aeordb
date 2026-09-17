@@ -28,10 +28,10 @@ const INITIAL_CAPABILITIES: &[u8; 32] = &[
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-// Round17 deliberately leaves bit24 unassigned: existing negative fixtures
+// Round17 deliberately leaves bits24/26 unassigned: existing negative tests
 // exercise it. Runtime support is separate from structural format recognition.
 pub(crate) fn capabilities_are_known(bytes: &[u8]) -> bool {
-  bytes.len() == 32 && bytes[3] & !0x02 == 0 && bytes[4..].iter().all(|byte| *byte == 0)
+  bytes.len() == 32 && bytes[3] & !0x0a == 0 && bytes[4..].iter().all(|byte| *byte == 0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

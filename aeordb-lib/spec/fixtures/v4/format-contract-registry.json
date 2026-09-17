@@ -157,9 +157,13 @@
     {
       "bit": 25,
       "name": "SemanticMutationTaskV1"
+    },
+    {
+      "bit": 27,
+      "name": "SemanticSourceCaptureV1"
     }
   ],
-  "unassigned_capability_bits": [24],
+  "unassigned_capability_bits": [24, 26],
   "persistent_registries": {
     "entry_type_v1": [
       { "id": 1, "name": "Chunk", "kv_tag": 0 },
@@ -3417,6 +3421,7 @@
         "0x0030": "AMLE", "0x0031": "AMPR", "0x0032": "ALRM", "0x0033": "ALRP",
         "0x0040": "ATPN", "0x0041": "ASMJ", "0x0042": "ARTX", "0x0043": "ARAC",
         "0x0044": "ASMT", "0x0045": "ASMC", "0x0046": "ASMG",
+        "0x0048": "ASCM", "0x0049": "ASCN",
         "0x0050": "ADLT", "0x0051": "ASPC", "0x0052": "ACUT"
       },
       "kind_registry": {
@@ -3426,6 +3431,7 @@
         "0x0030": "MigrationLease", "0x0031": "MigrationProgress", "0x0032": "LegacyRootMapControl", "0x0033": "LegacyRootMapPage",
         "0x0040": "TaskPin", "0x0041": "SemanticMutationSegment", "0x0042": "RootPublicationPrepare", "0x0043": "RootAdmissionCommit",
         "0x0044": "SemanticMutationTask", "0x0045": "SemanticMutationCheckpoint", "0x0046": "SemanticMutationGeneration",
+        "0x0048": "SemanticSourceCapture", "0x0049": "SemanticSourceNode",
         "0x0050": "DurabilityLatch", "0x0051": "EmergencySpillCatalog", "0x0052": "SideBySideCutoverControl"
       },
       "body_contracts": {
@@ -3457,6 +3463,18 @@
         "0x0046": {
           "identity": "singleton", "formula": "16", "cap": 1048576,
           "contract": "semantic-mutation-task-contract.md, Round17; ASMG database_id body, envelope sequence is the semantic generation; capability25"
+        },
+        "0x0048": {
+          "identity": "task_id[16] || checkpoint_sequence u64", "formula": "112 + 6H", "cap": 1048576,
+          "contract": "semantic-source-capture-contract.md, Round17; ASCM immutable companion binds exact ASMC payload and captured authority; capability27",
+          "hash_roles": { "base_namespace_root": "graph edge", "staged_directory_root": "graph edge", "base_source_catalog": "graph edge", "requested_source_catalog": "graph edge", "source_identity_fingerprint": "fingerprint", "checkpoint_payload_hash": "identity" }
+        },
+        "0x0049": {
+          "identity": "HASH('aeordb.semantic-source-node.v1\\0' || body)", "formula": "32 + payload_length", "cap": 1048576,
+          "contract": "semantic-source-capture-contract.md, Round17; ASCN immutable bounded source catalog; capability27; local validity is not complete closure",
+          "leaf": "1..256 strictly ordered canonical absolute paths (1..65535 UTF-8 bytes), each u32 length + path + H FileRecord content identity; zero means explicit absence",
+          "internal": "1..128 strictly ordered canonical absolute separators, first child H then u32 length + separator + child H; nonzero pairwise-distinct children",
+          "hash_roles": { "leaf_file_record_id": "graph edge", "internal_child_node_id": "graph edge" }
         },
         "0x0050": { "identity": "singleton", "formula": "88 + 2H + diagnostic_length", "cap": 1048576 },
         "0x0051": { "identity": "singleton", "formula": "44 + H + sum(72 + path_length)", "cap": 1048576 },
@@ -3495,7 +3513,7 @@
           "stable_file_identity_hash": "HASH('aeordb.side-by-side-cutover.stable-file-identity.v1\\0' || artifact_role u8 || database_id[16] || physical_instance_id[16] || platform_file_identity_descriptor[56] || format u16 LE || selected_header_sequence u64 LE || selected_header_BLAKE3[32] || file_size u64 LE) using the selected database hash algorithm"
         }
       },
-      "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043", "0x0045"],
+      "immutable_kinds": ["0x0033", "0x0041", "0x0042", "0x0043", "0x0045", "0x0048", "0x0049"],
       "pending_body_fixture_kinds": [],
       "identity_length_cap": 4096,
       "body_formula": "36 + kind-specific body B",
@@ -3532,6 +3550,7 @@
         "control-blake3-256-migration-lease-valid", "control-blake3-256-migration-progress-valid", "control-blake3-256-legacy-root-map-valid", "control-blake3-256-legacy-root-map-page-valid",
         "control-blake3-256-task-pin-valid", "control-blake3-256-semantic-mutation-segment-valid", "control-blake3-256-root-publication-prepare-valid", "control-blake3-256-root-admission-commit-valid",
         "control-blake3-256-semantic-mutation-task-valid", "control-blake3-256-semantic-mutation-checkpoint-valid", "control-blake3-256-semantic-mutation-generation-valid",
+        "control-blake3-256-semantic-source-capture-valid", "control-blake3-256-semantic-source-node-valid", "control-blake3-256-semantic-source-node-internal-valid",
         "control-blake3-256-durability-latch-valid", "control-blake3-256-emergency-spill-catalog-valid", "control-blake3-256-side-by-side-cutover-valid"
       ],
       "fixture_ids_64": [
@@ -3541,6 +3560,7 @@
         "control-sha512-migration-lease-valid", "control-sha512-migration-progress-valid", "control-sha512-legacy-root-map-valid", "control-sha512-legacy-root-map-page-valid",
         "control-sha512-task-pin-valid", "control-sha512-semantic-mutation-segment-valid", "control-sha512-root-publication-prepare-valid", "control-sha512-root-admission-commit-valid",
         "control-sha512-semantic-mutation-task-valid", "control-sha512-semantic-mutation-checkpoint-valid", "control-sha512-semantic-mutation-generation-valid",
+        "control-sha512-semantic-source-capture-valid", "control-sha512-semantic-source-node-valid", "control-sha512-semantic-source-node-internal-valid",
         "control-sha512-durability-latch-valid", "control-sha512-emergency-spill-catalog-valid", "control-sha512-side-by-side-cutover-valid"
       ]
     },
@@ -3877,7 +3897,7 @@
   ],
   "p0b_progress": {
     "fixture_family_count": 26,
-    "fixture_count": 496,
+    "fixture_count": 502,
     "production_writer_exists": false,
     "completed_scope": "DatabaseHeaderV4, whole-entity, NamespaceRoot, semantic objects, common IndexArtifact envelope, all three A/B pointers, all four immutable manifests, all canonical semantic definitions through FieldIndexDefinitionV1, all converter/strategy bundles, ArtifactDirectoryNodeV1, all seven index directory roles, all ordered page/record roles, NvtTileV1, MutationJournalSegmentV1, IndexTaskCheckpointV1, LogicalPositionTokenV1, the complete 34-kind GcArtifactV1 family, all twenty SystemControlV1 kinds, protected FileRecord control paths, the external side-by-side cutover journal, the external migration capture checkpoint, the external index runtime workspace manifest/object formats, and the complete 46-family SystemFamilyRegistryV1",
     "remaining_p0b_2_scope": "none; the P0b baseline remains frozen, with ratified post-freeze AMCM/AMPR, per-type EntityVersion, P6-2d-c3c external index-runtime workspace, and Round17 ASMT/ASMC/ASMG reader-first extensions registered before their first writers"

@@ -2694,7 +2694,7 @@ fn gc_audit_closure_rejects_detached_and_cross_database_artifacts() {
 fn every_system_control_fixture_matches_the_independent_oracle() {
   let root = fixture_root();
   let rows: Vec<_> = manifest().fixtures.into_iter().filter(is_system_control_fixture).collect();
-  assert_eq!(rows.len(), 48);
+  assert_eq!(rows.len(), 54);
 
   for row in rows {
     let bytes = fs::read(root.join(row.binary)).unwrap();
@@ -2853,7 +2853,15 @@ fn every_system_control_kind_rejects_repaired_crc_zero_database_identity() {
   let root = fixture_root();
   let rows: Vec<_> =
     manifest().fixtures.into_iter().filter(|row| row.format_id == "system-control-v1" && row.hash_algorithm == "blake3-256").collect();
-  assert_eq!(rows.len(), SystemControlKindV1::ALL.len());
+  assert_eq!(rows.len(), SystemControlKindV1::ALL.len() + 1); // Both leaf and internal ASCN variants.
+  let kinds: std::collections::BTreeSet<_> = rows
+    .iter()
+    .map(|row| {
+      let bytes = fs::read(root.join(&row.binary)).unwrap();
+      decode_system_control(&bytes, HashAlgorithm::Blake3_256).unwrap().kind as u16
+    })
+    .collect();
+  assert_eq!(kinds, SystemControlKindV1::ALL.iter().map(|kind| *kind as u16).collect());
   for row in rows {
     let mut bytes = fs::read(root.join(row.binary)).unwrap();
     bytes[32..48].fill(0);
@@ -2892,6 +2900,8 @@ fn every_system_control_body_validator_rejects_a_kind_specific_semantic_mutation
     ("semantic-mutation-task", 96),
     ("semantic-mutation-checkpoint", 88),
     ("semantic-mutation-generation", 0),
+    ("semantic-source-capture", 32),
+    ("semantic-source-node", 16),
     ("durability-latch", 42),
     ("emergency-spill-catalog", 32),
     ("side-by-side-cutover", 88),
@@ -2911,9 +2921,9 @@ fn every_system_control_body_validator_rejects_a_kind_specific_semantic_mutation
 fn system_control_registry_paths_and_immutable_sequences_are_closed() {
   use std::collections::BTreeSet;
 
-  assert_eq!(SystemControlKindV1::ALL.len(), 23);
-  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind as u16).collect::<BTreeSet<_>>().len(), 23);
-  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind.magic()).collect::<BTreeSet<_>>().len(), 23);
+  assert_eq!(SystemControlKindV1::ALL.len(), 25);
+  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind as u16).collect::<BTreeSet<_>>().len(), 25);
+  assert_eq!(SystemControlKindV1::ALL.iter().map(|kind| *kind.magic()).collect::<BTreeSet<_>>().len(), 25);
   for kind in SystemControlKindV1::ALL {
     assert_eq!(SystemControlKindV1::from_u16(kind as u16), Some(kind));
     assert_eq!(SystemControlKindV1::from_magic(kind.magic()), Some(kind));

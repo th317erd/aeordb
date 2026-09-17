@@ -4,8 +4,8 @@
   "landing_unit": "P0c",
   "entry_commit": "7a39204a493fae890058e27bf61e0ab7a8e616cc",
   "architecture_registry_sha256": "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568",
-  "generated_rust_sha256": "3069e0f1d31e5dc6b9939761cbdd55f6b0420c911ccd9a861f773774e888fe44",
-  "generated_rust_bytes": 62385,
+  "generated_rust_sha256": "efc6a443bbffb490cebc14327092a8ab555458b1fdb1fae6d16249366056b950",
+  "generated_rust_bytes": 62497,
   "counts": {
     "route_classes": 7,
     "configuration_properties": 41,
@@ -15,11 +15,11 @@
     "semantic_bundles": 37
   },
   "proof": {
-    "reference_tests_passed": 181,
+    "reference_tests_passed": 185,
     "production_tests_passed": 17,
     "strict_reference_clippy": "pass",
     "rustfmt_check": "pass",
-    "fixture_cases_verified": 496,
+    "fixture_cases_verified": 502,
     "route_registrations_inventoried": 95,
     "documentation_pages_inventoried": 39,
     "v4_writers_activated": false
@@ -34,6 +34,31 @@
     "cleanup result without behavior or debt owner",
     "semantic bundle collision, noncanonical order, or malformed fingerprint"
   ],
+  "semantic_source_capture_reader_refresh": {
+    "date_utc": "2026-09-17",
+    "source_entry_commit": "091d0666f36fd0e9507bae192cecdce16c840545",
+    "previous_live_values": {
+      "generated_rust_sha256": "3069e0f1d31e5dc6b9939761cbdd55f6b0420c911ccd9a861f773774e888fe44",
+      "generated_rust_bytes": 62385,
+      "reference_tests_passed": 181,
+      "fixture_cases_verified": 496
+    },
+    "generated_change": "Registry digests, capability27 constant and sparse known mask only; architecture registry and runtime support masks unchanged.",
+    "reference_test_strict_clippy_and_fixture_stage": "semantic-capture-reference2",
+    "finished_utc": "2026-09-17T11:25:00Z",
+    "registry_generation_stage": "semantic-capture-registry1",
+    "production_stage": "semantic-capture-candidate2",
+    "production_reader_tests_passed": 51,
+    "production_format_tests_passed": 79,
+    "production_finished_utc": "2026-09-17T11:34:58Z",
+    "workspace_format_stage": "semantic-capture-preflight1-format",
+    "historical_production_tests_passed_retained": true,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-writer-evidence",
+    "qualification_note": "These executed stage results do not claim the failed Final1 Unix contract stages or unfinished native qualification passed.",
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
+  },
   "plugin_identity_reader_refresh": {
     "date_utc": "2026-09-16",
     "source_entry_commit": "4a04be77838c12875435f1105e39b22a463236a2",

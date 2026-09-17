@@ -10,7 +10,7 @@
     "reviewer_status": "pending-owner-review-before-production-writer"
   },
   "contract_registry": "format-contract-registry.json",
-  "fixture_count": 496,
+  "fixture_count": 502,
   "fixtures": [
     {
       "id": "header-blake3-256-valid-ab",
@@ -6763,6 +6763,36 @@
       "relation": "slot:mutable-a"
     },
     {
+      "id": "control-blake3-256-semantic-source-capture-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "system-control-v1/control-blake3-256-semantic-source-capture-valid.bin",
+      "annotated_hex": "system-control-v1/control-blake3-256-semantic-source-capture-valid.hex",
+      "byte_length": 340,
+      "sha256": "75f8e4a887ce6034e3ef1aa73f4a5cd73e9d5a0aa6af5d24f39474294ae1af03",
+      "blake3": "a867f3dbfaca6faec44f73848389b0cbc64bf1bb2043c2bdab99abab2d4b407f",
+      "canonical_key": "/.aeordb-system/controls/v1/0048/3fbaaa6c866a721db5747c800a2163a6429b50fcf1eb92ad0d5d4da1d98dbe2e/i.ctrl",
+      "expected": "control:semantic-source-capture:sequence=1:body=304",
+      "relation": "slot:immutable-i"
+    },
+    {
+      "id": "control-blake3-256-semantic-source-node-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "system-control-v1/control-blake3-256-semantic-source-node-valid.bin",
+      "annotated_hex": "system-control-v1/control-blake3-256-semantic-source-node-valid.hex",
+      "byte_length": 196,
+      "sha256": "ab75d699a0409f0fd3aea41c06d913c2229c8373deb6a0aa5579c340028b398f",
+      "blake3": "3e5519a5043ac7bd6b25fb104e6ec29c5243212ea673b476cf624de73351bc16",
+      "canonical_key": "/.aeordb-system/controls/v1/0049/0c25aa2087038bff8bf1a7b8f452ba82d9a35e596f8f5d95cfb0591b0f483747/i.ctrl",
+      "expected": "control:semantic-source-node:sequence=1:body=160",
+      "relation": "slot:immutable-i"
+    },
+    {
       "id": "control-blake3-256-durability-latch-valid",
       "format_id": "system-control-v1",
       "family": "SystemControlV1",
@@ -6806,6 +6836,21 @@
       "canonical_key": "/.aeordb-system/controls/v1/0052/b30e5d757767ed799e9045551406a4125e7474892a8149e8478c7041bc4bf40e/a.ctrl",
       "expected": "control:side-by-side-cutover:sequence=7:body=300",
       "relation": "slot:mutable-a"
+    },
+    {
+      "id": "control-blake3-256-semantic-source-node-internal-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "blake3-256",
+      "hash_width": 32,
+      "binary": "system-control-v1/control-blake3-256-semantic-source-node-internal-valid.bin",
+      "annotated_hex": "system-control-v1/control-blake3-256-semantic-source-node-internal-valid.hex",
+      "byte_length": 164,
+      "sha256": "9d82a9803a5becbe5c05b6cca4d2a191635ff5146364873a3a5ed7e4525be097",
+      "blake3": "f2f8f6e968b265582f744760de01d35754d6f9f465a0f29991fade57671e8a2a",
+      "canonical_key": "/.aeordb-system/controls/v1/0049/1b98ff969b5fcdf436408417c1dc1ebe0bf6246395e9d0ef282158b44c38bd6d/i.ctrl",
+      "expected": "control:semantic-source-node:sequence=1:body=128",
+      "relation": "slot:immutable-i"
     },
     {
       "id": "cutover-blake3-256-external-journal-valid",
@@ -7123,6 +7168,36 @@
       "relation": "slot:mutable-a"
     },
     {
+      "id": "control-sha512-semantic-source-capture-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "system-control-v1/control-sha512-semantic-source-capture-valid.bin",
+      "annotated_hex": "system-control-v1/control-sha512-semantic-source-capture-valid.hex",
+      "byte_length": 532,
+      "sha256": "af0bdda4d9c9f05239d5bdf6191ec586b89c8db1f5807b83b3fe6c16c3351976",
+      "blake3": "f0917c783c0b7630302cfef843ed1622d4ea506123dc5e670ad8fe362b3211a7",
+      "canonical_key": "/.aeordb-system/controls/v1/0048/3fbaaa6c866a721db5747c800a2163a6429b50fcf1eb92ad0d5d4da1d98dbe2e/i.ctrl",
+      "expected": "control:semantic-source-capture:sequence=1:body=496",
+      "relation": "slot:immutable-i"
+    },
+    {
+      "id": "control-sha512-semantic-source-node-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "system-control-v1/control-sha512-semantic-source-node-valid.bin",
+      "annotated_hex": "system-control-v1/control-sha512-semantic-source-node-valid.hex",
+      "byte_length": 260,
+      "sha256": "68cfedb0cab3090acb8de0d752c52163a802a1ef4097181847527ebc1e6534ba",
+      "blake3": "7fe1e437d532ecf2f36ed6c614a7f4e15479a9ee9401699b10917fcb11396489",
+      "canonical_key": "/.aeordb-system/controls/v1/0049/d9f562d04e94c63c6d49eadf356964e6aa8a993205a7e48dbc2e4b88d5f5d76e/i.ctrl",
+      "expected": "control:semantic-source-node:sequence=1:body=224",
+      "relation": "slot:immutable-i"
+    },
+    {
       "id": "control-sha512-durability-latch-valid",
       "format_id": "system-control-v1",
       "family": "SystemControlV1",
@@ -7166,6 +7241,21 @@
       "canonical_key": "/.aeordb-system/controls/v1/0052/b30e5d757767ed799e9045551406a4125e7474892a8149e8478c7041bc4bf40e/a.ctrl",
       "expected": "control:side-by-side-cutover:sequence=7:body=460",
       "relation": "slot:mutable-a"
+    },
+    {
+      "id": "control-sha512-semantic-source-node-internal-valid",
+      "format_id": "system-control-v1",
+      "family": "SystemControlV1",
+      "hash_algorithm": "sha512",
+      "hash_width": 64,
+      "binary": "system-control-v1/control-sha512-semantic-source-node-internal-valid.bin",
+      "annotated_hex": "system-control-v1/control-sha512-semantic-source-node-internal-valid.hex",
+      "byte_length": 228,
+      "sha256": "c47ed2489d0802e782814b01a2e5c0a6df3e274b105eb4f7a15babe2c3379078",
+      "blake3": "ca90e796ef7728b5f664d4ba02a3006ba5f0d161094359fc434591b27b2ed6ea",
+      "canonical_key": "/.aeordb-system/controls/v1/0049/4273bddcbff2c09bfaeefcb9eb5a6c940de65526c8143a6ebadb434fd5a86f97/i.ctrl",
+      "expected": "control:semantic-source-node:sequence=1:body=192",
+      "relation": "slot:immutable-i"
     },
     {
       "id": "cutover-sha512-external-journal-valid",

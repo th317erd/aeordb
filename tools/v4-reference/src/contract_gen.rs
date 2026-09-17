@@ -277,11 +277,11 @@ fn validate(registry: &Value, system_family: &Value) -> DynResult<()> {
   let capabilities = array_at(registry, &["capability_bits"])?;
   validate_unique(capabilities, "bit", "name")?;
   let bits: Vec<_> = capabilities.iter().map(|row| u64_field(row, "bit")).collect::<Result<_, _>>()?;
-  if bits != (0..24).chain([25]).collect::<Vec<_>>() {
-    return Err("capability bits must preserve 0..23 and assign25, leaving24 unassigned".into());
+  if bits != (0..24).chain([25, 27]).collect::<Vec<_>>() {
+    return Err("capability bits must preserve 0..23 and assign25/27, leaving24/26 unassigned".into());
   }
-  if registry.get("unassigned_capability_bits") != Some(&serde_json::json!([24])) {
-    return Err("bit24 must remain unassigned to preserve the frozen malformed-capability fixtures".into());
+  if registry.get("unassigned_capability_bits") != Some(&serde_json::json!([24, 26])) {
+    return Err("bits24/26 must remain unassigned to preserve malformed-capability meanings".into());
   }
 
   let entry_types = array_at(registry, &["persistent_registries", "entry_type_v1"])?;

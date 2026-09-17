@@ -171,6 +171,7 @@ pub mod semantic_catalog_mutation;
 pub mod semantic_catalog_native;
 pub mod semantic_compiler_profile;
 pub mod semantic_mutation_control;
+pub mod semantic_source_capture;
 pub mod semantic_store;
 pub mod source_evaluator;
 pub mod source_selector;

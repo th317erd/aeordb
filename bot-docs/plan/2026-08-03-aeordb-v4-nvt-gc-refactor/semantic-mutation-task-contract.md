@@ -662,3 +662,23 @@ without a long-held publication mutex or another physical owner. Preserve
 retries and retained snapshot accounting on all exits. The dedicated nested
 visit test measures the extra charge independently of per-task observation
 memory; a compile failure is not its required falsifying result.
+
+### Protected source retention addendum — September17 entry091d0666
+
+The earlier sentence that inputs remain reachable through base/staged trees
+does not cover Round9's protected non-HEAD global configuration, aliases and
+module archives. Existing ASMC bytes and source fingerprint preimages remain
+unchanged; the [durable source capture contract](semantic-source-capture-contract.md)
+supplies the missing explicitly enumerable companion closure. It selects two
+immutable reader-first controls, ASCM0x0048 and ASCN0x0049, plus capability27,
+while preserving unknown24/26 and the existing unknown-kind0x0047 fixture.
+The initial ASCR wrapper proposal was discarded in favor of retaining exact
+existing content-keyed FileRecords and sharing their actual typed chunks.
+
+The ASCM companion is addressed by task/checkpoint identity and additionally
+binds the entire original ASMC envelope digest. Neither decoded paired records
+nor a matching digest grants resume, executor, namespace or GC admission. New
+publication remains refused until bounded source capture, durable complete typed
+closure, checkpoint/resume and atomic activation are independently qualified.
+Old codec-only task observations remain inspectable with their original semantics;
+no missing companion is turned into a fabricated empty source set or live permit.

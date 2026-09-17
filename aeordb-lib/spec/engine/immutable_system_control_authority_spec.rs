@@ -174,27 +174,32 @@ fn publication_request<'a>(
 
 #[test]
 fn semantic_task_reader_wave_refuses_checkpoint_publication_before_any_file_change() {
-  let (_directory, path, publisher) = create_publisher_for(HashAlgorithm::Blake3_256);
-  let mut bytes = std::fs::read(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/spec/fixtures/v4/system-control-v1/control-blake3-256-semantic-mutation-checkpoint-valid.bin"
-  ))
-  .unwrap();
-  bytes[32..48].copy_from_slice(&DATABASE_ID);
-  bytes[72..88].copy_from_slice(&DESTINATION_PHYSICAL_ID);
-  let crc_offset = bytes.len() - 4;
-  let crc = crc32fast::hash(&bytes[..crc_offset]);
-  bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
-  let control = aeordb::engine::v4::system_control::decode_system_control(&bytes, HashAlgorithm::Blake3_256).unwrap();
-  let before = std::fs::read(&path).unwrap();
-  let writes = [ImmutableSystemControlWriteV1 {
-    kind: SystemControlKindV1::SemanticMutationCheckpoint,
-    identity: &control.identity,
-    encoded_control: &bytes,
-  }];
-  let result = publisher.publish_immutable_system_controls(publication_request(&writes, &DATABASE_ID, 1_700_000_000_200));
-  assert_eq!(result.unwrap_err().code(), "semantic_task_writer_not_qualified");
-  assert_eq!(std::fs::read(&path).unwrap(), before);
+  for (algorithm, profile) in [(HashAlgorithm::Blake3_256, "blake3-256"), (HashAlgorithm::Sha512, "sha512")] {
+    let (_directory, path, publisher) = create_publisher_for(algorithm);
+    for kind in
+      [SystemControlKindV1::SemanticMutationCheckpoint, SystemControlKindV1::SemanticSourceCapture, SystemControlKindV1::SemanticSourceNode]
+    {
+      let mut bytes = std::fs::read(format!(
+        "{}/spec/fixtures/v4/system-control-v1/control-{profile}-{}-valid.bin",
+        env!("CARGO_MANIFEST_DIR"),
+        kind.slug()
+      ))
+      .unwrap();
+      bytes[32..48].copy_from_slice(&DATABASE_ID);
+      if kind != SystemControlKindV1::SemanticSourceNode {
+        bytes[72..88].copy_from_slice(&DESTINATION_PHYSICAL_ID);
+      }
+      let crc_offset = bytes.len() - 4;
+      let crc = crc32fast::hash(&bytes[..crc_offset]);
+      bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+      let control = aeordb::engine::v4::system_control::decode_system_control(&bytes, algorithm).unwrap();
+      let before = std::fs::read(&path).unwrap();
+      let writes = [ImmutableSystemControlWriteV1 { kind, identity: &control.identity, encoded_control: &bytes }];
+      let result = publisher.publish_immutable_system_controls(publication_request(&writes, &DATABASE_ID, 1_700_000_000_200));
+      assert_eq!(result.unwrap_err().code(), "semantic_task_writer_not_qualified");
+      assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+  }
 }
 
 #[test]

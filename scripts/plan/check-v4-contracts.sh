@@ -234,11 +234,12 @@ jq -e --arg campaign "$campaign_id" --argjson format_count "$expected_format_cou
   .campaign_id == $campaign and
   .coverage_stage == "p0b-2-system-family" and
   ([.hash_algorithms[].id] | length) == ([.hash_algorithms[].id] | unique | length) and
-  ([.capability_bits[].bit] | length) == 25 and
-  ([.capability_bits[].bit] | unique | length) == 25 and
-  [.capability_bits[].bit] == ([range(0;24)] + [25]) and
-  .unassigned_capability_bits == [24] and
+  ([.capability_bits[].bit] | length) == 26 and
+  ([.capability_bits[].bit] | unique | length) == 26 and
+  [.capability_bits[].bit] == ([range(0;24)] + [25,27]) and
+  .unassigned_capability_bits == [24,26] and
   (.capability_bits[] | select(.bit == 25).name) == "SemanticMutationTaskV1" and
+  (.capability_bits[] | select(.bit == 27).name) == "SemanticSourceCaptureV1" and
   (.capability_bits[] | select(.bit == 17).name) == "RootLifecycleRetirementV1" and
   (.formats | length) == $format_count and
   .p0b_progress.fixture_family_count == $format_count and
@@ -332,7 +333,7 @@ jq -e --arg source_sha "$(sha256_canonical_text_file "$contract_registry")" \
   .schema_version == 1 and .campaign_id == "aeordb-v4-nvt-gc-2026-08-03" and
   .source_sha256 == $source_sha and .fixture_manifest_sha256 == $fixture_sha and
   .counts.formats == $format_count and .counts.fixtures == $fixture_count and
-  .counts.capability_bits == 25 and .counts.entry_types == 10 and .counts.kv_tags == 12 and
+  .counts.capability_bits == 26 and .counts.entry_types == 10 and .counts.kv_tags == 12 and
   .counts.shared_enum_scopes == 13 and .counts.shared_enum_values == 134 and
   .counts.system_families == 46 and .counts.system_family_descriptors == 63 and
   .counts.malformed_input_classes == 16 and
@@ -708,6 +709,7 @@ jq -e '
     "0x0030":"AMLE", "0x0031":"AMPR", "0x0032":"ALRM", "0x0033":"ALRP",
     "0x0040":"ATPN", "0x0041":"ASMJ", "0x0042":"ARTX", "0x0043":"ARAC",
     "0x0044":"ASMT", "0x0045":"ASMC", "0x0046":"ASMG",
+    "0x0048":"ASCM", "0x0049":"ASCN",
     "0x0050":"ADLT", "0x0051":"ASPC", "0x0052":"ACUT"
   } and
   .version == 1 and .header_length == 32 and .identity_length_cap == 4096 and
@@ -715,14 +717,17 @@ jq -e '
   .physical_representation.mutable_slots == ["a.ctrl", "b.ctrl"] and
   .physical_representation.immutable_slot == "i.ctrl" and
   .physical_representation.content_type == "application/vnd.aeordb.system-control" and
-  (.body_contracts | length) == 23 and
-  .immutable_kinds == ["0x0033", "0x0041", "0x0042", "0x0043", "0x0045"] and
+  (.body_contracts | length) == 25 and
+  .immutable_kinds == ["0x0033", "0x0041", "0x0042", "0x0043", "0x0045", "0x0048", "0x0049"] and
   .body_contracts["0x0044"].identity == "task_id[16]" and
   .body_contracts["0x0044"].formula == "112 + H" and
   .body_contracts["0x0045"].identity == "task_id[16] || checkpoint_sequence u64" and
   .body_contracts["0x0045"].formula == "168 + 9H + cursor_length" and
   .body_contracts["0x0046"].identity == "singleton" and
   .body_contracts["0x0046"].formula == "16" and
+  .body_contracts["0x0048"].identity == "task_id[16] || checkpoint_sequence u64" and
+  .body_contracts["0x0048"].formula == "112 + 6H" and
+  .body_contracts["0x0049"].formula == "32 + payload_length" and
   (.pending_body_fixture_kinds | length) == 0
 ' "$contract_registry" >/dev/null \
   || fail "P0b-2 SystemControl registry/framing is incomplete"
@@ -748,6 +753,8 @@ required_p0b2_system_control_results=(
   'control:semantic-mutation-task:'
   'control:semantic-mutation-checkpoint:'
   'control:semantic-mutation-generation:'
+  'control:semantic-source-capture:'
+  'control:semantic-source-node:'
   'control:durability-latch:'
   'control:emergency-spill-catalog:'
   'control:side-by-side-cutover:'

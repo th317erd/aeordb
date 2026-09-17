@@ -2704,6 +2704,18 @@
       "result": "pass"
     },
     {
+      "fixture_id": "control-blake3-256-semantic-source-capture-valid",
+      "expected": "control:semantic-source-capture:sequence=1:body=304",
+      "observed": "control:semantic-source-capture:sequence=1:body=304",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-semantic-source-node-valid",
+      "expected": "control:semantic-source-node:sequence=1:body=160",
+      "observed": "control:semantic-source-node:sequence=1:body=160",
+      "result": "pass"
+    },
+    {
       "fixture_id": "control-blake3-256-durability-latch-valid",
       "expected": "control:durability-latch:sequence=7:body=227",
       "observed": "control:durability-latch:sequence=7:body=227",
@@ -2719,6 +2731,12 @@
       "fixture_id": "control-blake3-256-side-by-side-cutover-valid",
       "expected": "control:side-by-side-cutover:sequence=7:body=300",
       "observed": "control:side-by-side-cutover:sequence=7:body=300",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-blake3-256-semantic-source-node-internal-valid",
+      "expected": "control:semantic-source-node:sequence=1:body=128",
+      "observed": "control:semantic-source-node:sequence=1:body=128",
       "result": "pass"
     },
     {
@@ -2848,6 +2866,18 @@
       "result": "pass"
     },
     {
+      "fixture_id": "control-sha512-semantic-source-capture-valid",
+      "expected": "control:semantic-source-capture:sequence=1:body=496",
+      "observed": "control:semantic-source-capture:sequence=1:body=496",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-source-node-valid",
+      "expected": "control:semantic-source-node:sequence=1:body=224",
+      "observed": "control:semantic-source-node:sequence=1:body=224",
+      "result": "pass"
+    },
+    {
       "fixture_id": "control-sha512-durability-latch-valid",
       "expected": "control:durability-latch:sequence=7:body=291",
       "observed": "control:durability-latch:sequence=7:body=291",
@@ -2863,6 +2893,12 @@
       "fixture_id": "control-sha512-side-by-side-cutover-valid",
       "expected": "control:side-by-side-cutover:sequence=7:body=460",
       "observed": "control:side-by-side-cutover:sequence=7:body=460",
+      "result": "pass"
+    },
+    {
+      "fixture_id": "control-sha512-semantic-source-node-internal-valid",
+      "expected": "control:semantic-source-node:sequence=1:body=192",
+      "observed": "control:semantic-source-node:sequence=1:body=192",
       "result": "pass"
     },
     {

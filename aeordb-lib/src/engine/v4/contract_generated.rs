@@ -2,8 +2,8 @@
 // Regenerate with `aeordb-v4-reference generate-contracts`.
 #![allow(dead_code)]
 
-pub const CONTRACT_REGISTRY_SHA256: &str = "4806133706407a5f8f3f5b0a56fcaa85af5a1223af0d6390128272a4004a24a8";
-pub const CONTRACT_REGISTRY_BLAKE3: &str = "e1c404ec3f27a5805b0d17eb6e0c1dfd2e5f762bbab1f7f63d7ebba906d0ebbd";
+pub const CONTRACT_REGISTRY_SHA256: &str = "d315021d905bef0f3c8046fb9ea192e5e5503138934ec5a354786002dc059075";
+pub const CONTRACT_REGISTRY_BLAKE3: &str = "70a0f95db2ff46aee6efe2f246ab34fb27f09ff78fb3a0f2e653cb35f78bb13f";
 pub const SYSTEM_FAMILY_MANIFEST_SHA256: &str = "d29b99aff333b49abfcf554ac9d80345baf2377e822ddd50d8b9d6b775b73170";
 
 pub const ARCHITECTURE_REGISTRY_SHA256: &str = "d0c608fd61635cbe28b6fbdd1a66b968c2e854be44f962150a1fb28b5a623568";
@@ -66,6 +66,7 @@ pub const CAPABILITY_BITS: &[RegistryValue] = &[
   RegistryValue { id: 22, name: "DurabilityLatchSpillV1" },
   RegistryValue { id: 23, name: "DurableTaskPinV1" },
   RegistryValue { id: 25, name: "SemanticMutationTaskV1" },
+  RegistryValue { id: 27, name: "SemanticSourceCaptureV1" },
 ];
 
 pub mod capability_bit {
@@ -94,9 +95,10 @@ pub mod capability_bit {
   pub const DURABILITY_LATCH_SPILL_V1: u16 = 22;
   pub const DURABLE_TASK_PIN_V1: u16 = 23;
   pub const SEMANTIC_MUTATION_TASK_V1: u16 = 25;
+  pub const SEMANTIC_SOURCE_CAPTURE_V1: u16 = 27;
 }
 
-pub const KNOWN_CAPABILITY_MASK: [u8; 32] = [255, 255, 255, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+pub const KNOWN_CAPABILITY_MASK: [u8; 32] = [255, 255, 255, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 pub const ENTRY_TYPES: &[EntryTypeValue] = &[
   EntryTypeValue { id: 1, name: "Chunk", kv_tag: 0 },

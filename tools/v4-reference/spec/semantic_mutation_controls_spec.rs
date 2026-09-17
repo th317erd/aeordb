@@ -26,7 +26,7 @@ fn oracle_capability_mask_preserves_the_historical_gap() {
   for bit in 0..256 {
     let mut bytes = [0; 32];
     bytes[bit / 8] |= 1 << (bit % 8);
-    assert_eq!(crate::core::capabilities_are_known(&bytes), bit < 24 || bit == 25);
+    assert_eq!(crate::core::capabilities_are_known(&bytes), bit < 24 || bit == 25 || bit == 27);
   }
   for length in [0, 3, 4, 31, 33, 64] {
     assert!(!crate::core::capabilities_are_known(&vec![0; length]));

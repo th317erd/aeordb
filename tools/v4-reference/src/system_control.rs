@@ -4,6 +4,8 @@ use crate::gc::{decode_physical_incarnation, encode_physical_incarnation, Physic
 
 #[path = "semantic_mutation_controls.rs"]
 mod semantic_mutation_controls;
+#[path = "semantic_source_controls.rs"]
+mod semantic_source_controls;
 
 const HEADER_LENGTH: usize = 32;
 const CRC_LENGTH: usize = 4;
@@ -68,13 +70,15 @@ enum ControlKind {
   SemanticMutationTask,
   SemanticMutationCheckpoint,
   SemanticMutationGeneration,
+  SemanticSourceCapture,
+  SemanticSourceNode,
   DurabilityLatch,
   EmergencySpillCatalog,
   SideBySideCutover,
 }
 
 impl ControlKind {
-  const ALL: [Self; 23] = [
+  const ALL: [Self; 25] = [
     Self::IndexRegistry,
     Self::IndexOperation,
     Self::IndexDegraded,
@@ -95,6 +99,8 @@ impl ControlKind {
     Self::SemanticMutationTask,
     Self::SemanticMutationCheckpoint,
     Self::SemanticMutationGeneration,
+    Self::SemanticSourceCapture,
+    Self::SemanticSourceNode,
     Self::DurabilityLatch,
     Self::EmergencySpillCatalog,
     Self::SideBySideCutover,
@@ -122,6 +128,8 @@ impl ControlKind {
       Self::SemanticMutationTask => 0x0044,
       Self::SemanticMutationCheckpoint => 0x0045,
       Self::SemanticMutationGeneration => 0x0046,
+      Self::SemanticSourceCapture => 0x0048,
+      Self::SemanticSourceNode => 0x0049,
       Self::DurabilityLatch => 0x0050,
       Self::EmergencySpillCatalog => 0x0051,
       Self::SideBySideCutover => 0x0052,
@@ -155,6 +163,8 @@ impl ControlKind {
       Self::SemanticMutationTask => *b"ASMT",
       Self::SemanticMutationCheckpoint => *b"ASMC",
       Self::SemanticMutationGeneration => *b"ASMG",
+      Self::SemanticSourceCapture => *b"ASCM",
+      Self::SemanticSourceNode => *b"ASCN",
       Self::DurabilityLatch => *b"ADLT",
       Self::EmergencySpillCatalog => *b"ASPC",
       Self::SideBySideCutover => *b"ACUT",
@@ -183,6 +193,8 @@ impl ControlKind {
       Self::SemanticMutationTask => "semantic-mutation-task",
       Self::SemanticMutationCheckpoint => "semantic-mutation-checkpoint",
       Self::SemanticMutationGeneration => "semantic-mutation-generation",
+      Self::SemanticSourceCapture => "semantic-source-capture",
+      Self::SemanticSourceNode => "semantic-source-node",
       Self::DurabilityLatch => "durability-latch",
       Self::EmergencySpillCatalog => "emergency-spill-catalog",
       Self::SideBySideCutover => "side-by-side-cutover",
@@ -197,6 +209,8 @@ impl ControlKind {
         | Self::RootPublicationPrepare
         | Self::RootAdmissionCommit
         | Self::SemanticMutationCheckpoint
+        | Self::SemanticSourceCapture
+        | Self::SemanticSourceNode
     )
   }
 
@@ -244,6 +258,19 @@ pub fn fixture_cases() -> Vec<SystemControlFixtureCase> {
         bytes,
       });
     }
+
+    let body = semantic_source_controls::node_body(profile, true);
+    let bytes = build_control(ControlKind::SemanticSourceNode, 1, &body);
+    let decoded = decode_control(profile, &bytes).expect("internal source node must decode independently");
+    cases.push(SystemControlFixtureCase {
+      id: leak(format!("control-{}-semantic-source-node-internal-valid", profile.label())),
+      format: SystemControlFormat::SystemControlV1,
+      profile,
+      expected: leak(format!("control:semantic-source-node:sequence=1:body={}", body.len())),
+      relation: Some("slot:immutable-i"),
+      canonical_key: Some(control_path(ControlKind::SemanticSourceNode, &decoded.identity, 2)),
+      bytes,
+    });
 
     let body = build_body(profile, ControlKind::SideBySideCutover);
     let journal = build_cutover_journal(&body, 11, 12);
@@ -392,6 +419,7 @@ fn build_body(profile: HashProfile, kind: ControlKind) -> Vec<u8> {
     ControlKind::SemanticMutationTask | ControlKind::SemanticMutationCheckpoint | ControlKind::SemanticMutationGeneration => {
       semantic_mutation_controls::body(profile, kind.id())
     }
+    ControlKind::SemanticSourceCapture | ControlKind::SemanticSourceNode => semantic_source_controls::body(profile, kind.id()),
     ControlKind::DurabilityLatch => build_durability_latch(profile),
     ControlKind::EmergencySpillCatalog => build_spill_catalog(profile),
     ControlKind::SideBySideCutover => build_cutover(profile),
@@ -846,6 +874,7 @@ fn validate_body(profile: HashProfile, kind: ControlKind, body: &[u8]) -> Result
     ControlKind::SemanticMutationTask | ControlKind::SemanticMutationCheckpoint | ControlKind::SemanticMutationGeneration => {
       semantic_mutation_controls::validate(profile, kind.id(), body)
     }
+    ControlKind::SemanticSourceCapture | ControlKind::SemanticSourceNode => semantic_source_controls::validate(profile, kind.id(), body),
     ControlKind::DurabilityLatch => validate_durability_latch(profile, body),
     ControlKind::EmergencySpillCatalog => validate_spill_catalog(profile, body),
     ControlKind::SideBySideCutover => validate_cutover(profile, body),
@@ -1578,7 +1607,7 @@ mod tests {
 
   #[test]
   fn permanent_registry_is_complete_unique_and_matches_magic() {
-    assert_eq!(ControlKind::ALL.len(), 23);
+    assert_eq!(ControlKind::ALL.len(), 25);
     let mut ids = ControlKind::ALL.map(ControlKind::id).to_vec();
     ids.sort_unstable();
     ids.dedup();

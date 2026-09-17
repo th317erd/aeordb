@@ -3,13 +3,13 @@
   "campaign_id": "aeordb-v4-nvt-gc-2026-08-03",
   "stage": "p6-3b0-tombstone-only-manifests",
   "source": "aeordb-lib/spec/fixtures/v4/format-contract-registry.json",
-  "source_sha256": "4806133706407a5f8f3f5b0a56fcaa85af5a1223af0d6390128272a4004a24a8",
-  "fixture_manifest_sha256": "58319c06e066ee750293b7e4d6bb538629f5714e7b70c20a3d4f5bbfa6125afd",
+  "source_sha256": "d315021d905bef0f3c8046fb9ea192e5e5503138934ec5a354786002dc059075",
+  "fixture_manifest_sha256": "ea22389e06c154581048ae7a6f7c23abbafc6fd1bff77b71f0a0b2d249e5657c",
   "system_family_registry_sha256": "d68941806cfeb897702a444314af94e1899ef0396b4b0620e94becf6d8ef9925",
   "counts": {
     "formats": 26,
-    "fixtures": 496,
-    "capability_bits": 25,
+    "fixtures": 502,
+    "capability_bits": 26,
     "entry_types": 10,
     "kv_tags": 12,
     "shared_enum_scopes": 13,
@@ -55,8 +55,30 @@
   ],
   "reference_tool": {
     "production_dependencies": [],
-    "tests_passed": 181,
+    "tests_passed": 185,
     "reviewer_status": "pending-owner-review-before-production-writer"
+  },
+  "semantic_source_capture_reader_refresh": {
+    "date_utc": "2026-09-17",
+    "source_entry_commit": "091d0666f36fd0e9507bae192cecdce16c840545",
+    "scope": "Round17 ASCM/ASCN structural readers and checkpoint binding; capability27 known but unadvertised; no source-copy, resume, GC or activation permission.",
+    "previous_live_values": {
+      "source_sha256": "4806133706407a5f8f3f5b0a56fcaa85af5a1223af0d6390128272a4004a24a8",
+      "fixture_manifest_sha256": "58319c06e066ee750293b7e4d6bb538629f5714e7b70c20a3d4f5bbfa6125afd",
+      "fixtures": 496,
+      "capability_bits": 25,
+      "reference_tests_passed": 181
+    },
+    "reference_test_strict_clippy_and_fixture_stage": "semantic-capture-reference2",
+    "finished_utc": "2026-09-17T11:25:00Z",
+    "existing_binary_and_hex_files_unchanged": 992,
+    "added_binary_fixtures": 6,
+    "production_hash_algorithms_tested": 5,
+    "evidence_host": "wyatt-desktop",
+    "evidence_directory": "/home/wyatt/.cache/codex/v4-service-completion-20260913/u1-semantic-writer-evidence",
+    "qualification_note": "Final1 Linux/macOS passed narrow, affected, audit, format, Clippy, library and reference stages, then failed this stale-report gate. This refresh is not a final qualification claim.",
+    "service_writers_activated": false,
+    "production_readiness_claimed": false
   },
   "plugin_identity_reader_refresh": {
     "date_utc": "2026-09-16",

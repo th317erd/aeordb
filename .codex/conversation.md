@@ -16186,3 +16186,21 @@ fixture specifically sets bit24. Preserve its bytes AND rejection by keeping
 every bit below the maximum is known. The initial unimplemented test draft
 used24; its launch stopped before compilation because the fresh worktree lacked
 the ignored lockfile. The actual failing-first target uses25.
+
+### Round17 protected-source capture refinement (September17 UTC)
+
+Technical implementation refinement within the existing additive authorization:
+global configuration, aliases and archived modules are protected non-HEAD
+inputs, so the original ASMC base/staged namespace edges cannot preserve all raw
+capture inputs by themselves. Keep all ASMT/ASMC/ASMG layouts and fingerprint
+preimages unchanged. The contract in
+`bot-docs/plan/2026-08-03-aeordb-v4-nvt-gc-refactor/semantic-source-capture-contract.md`
+selects an immutable ASCM companion0x0048 (112+6H body, task/checkpoint identity,
+complete ASMC digest binding) and bounded ASCN source-catalog nodes0x0049, with
+capability27 kept unadvertised. Existing FileRecord content identities preserve
+raw source revisions and their chunk closure; the draft ASCR wrapper is not
+assigned. Unknown24/26 and control-kind0x0047 remain unknown.
+
+This records design, not qualification or a new owner permission. Independent
+reader tests precede implementation. Native source-copy/closure retention,
+restart/resume, GC and activation proof remain mandatory before writer use.

@@ -84,6 +84,8 @@ fn v4_control_store_publishes_qualified_kinds_and_refuses_reader_only_semantic_t
       SystemControlKindV1::SemanticMutationTask
         | SystemControlKindV1::SemanticMutationCheckpoint
         | SystemControlKindV1::SemanticMutationGeneration
+        | SystemControlKindV1::SemanticSourceCapture
+        | SystemControlKindV1::SemanticSourceNode
     ) {
       let error = if kind.is_immutable() {
         store.publish_immutable(kind, database_id, &identity, &bytes).unwrap_err()
