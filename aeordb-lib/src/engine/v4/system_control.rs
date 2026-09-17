@@ -703,6 +703,8 @@ pub fn select_system_control_pair<'a>(algorithm: HashAlgorithm, a: &'a [u8], b: 
   let a_control = decode_system_control(a, algorithm);
   let b_control = decode_system_control(b, algorithm);
   match (a_control, b_control) {
+    (Err(error), _) if error.is_allocation_failure() => Err(error),
+    (_, Err(error)) if error.is_allocation_failure() => Err(error),
     (Ok(a), Ok(b)) => select_valid_control_pair(a, b),
     (Ok(control), Err(_)) => {
       ensure_mutable(&control)?;

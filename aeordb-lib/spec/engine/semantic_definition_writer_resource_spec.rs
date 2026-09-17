@@ -1,4 +1,7 @@
 //! Measured preflight and fallible-output allocation for canonical writers.
+#[path = "semantic_control_selection_resource_spec.rs"]
+mod semantic_control_selection_resource_spec;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

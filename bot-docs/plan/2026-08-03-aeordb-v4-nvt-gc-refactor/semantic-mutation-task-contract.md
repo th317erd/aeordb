@@ -320,3 +320,65 @@ claiming native observation's resource behavior.
 The following dependent slices still owe complete source capture (including
 sorted, non-rescanning enumeration), durable task-root discovery/GC protection,
 checkpoint publication/resume and guarded HEAD/generation/task activation.
+
+### Native observation entry inventory and API
+
+The September17 follow-up inspected the executable call chain, not just imports:
+`load_mutable_system_control{,_selected_pair}` and
+`load_immutable_system_control` each acquire `root_state`, observe one header,
+lock the same KV owner and check layout alignment. The private pair loader
+uses `load_system_file_slot` -> `load_canonical_system_file_at_path` ->
+`read_entity_bounded`/`decode_whole_entity`/`FileRecord::deserialize`.
+`discover_mutable_control` supplies the existing identity/sequence policy.
+The immutable loader verifies kind/database/path identity. The already-qualified
+`decode_semantic_mutation_selection` supplies exact checkpoint digest, task,
+physical identity, captured fence, lifetime and phase checks. Reuse these owners;
+do not copy their policies into another native file reader.
+
+Freeze the next API as `V4FirstAuthorityPublisher::observe_semantic_mutation_task`
+with a borrowed request containing database ID, task ID, cancellation and the
+shared memory coordinator. Return a non-Clone, privately constructed observation
+containing the captured header, selected task/generation metadata and owned
+checkpoint bytes when retained. Expose borrowed typed readers and explicit
+`Absent`, `ReleasedTerminal`, or `CheckpointHeld` disposition. The result owns
+its memory reservation; no `into_bytes` escape may discard that charge while
+returning owned buffers. Neither disposition nor a parsed checkpoint implements
+any resume, root-admission or retention permit trait.
+
+One `root_state` guard and one checked header/KV boundary cover all reads. Do
+not compose the separately locking public loaders. A missing task returns an
+absent observation only after checking its slots; an existing task requires a
+selected generation. Read and bind its checkpoint only when pins are not
+released. Current generation/physical instance/writer ownership are observations,
+not implicit adoption checks: historical completion may legitimately differ.
+The later fenced owner decides whether current authority permits work.
+
+Memory inventory: canonical FileRecord entities are capped at64KiB and control
+bodies at their registered encoded caps. The pair loader temporarily retains
+both FileRecords/bodies plus body clones and the selected owned copy; sequential
+task/generation reads retain prior outputs. Reserve a conservative envelope of
+`8 * (largest_control_encoded_cap + 64KiB) + 64KiB` before header/body loading,
+under `MemoryOwner::Task`, and retain that charge with the result. Prove measured
+peak ownership fits this bound. Existing KV cache/page allocations retain their
+existing coordinator, not a second task charge. Cancellation is checked before
+admission, after acquiring the guard and between bounded reads.
+
+The transitive audit also found small infallible path/header/hash allocations,
+owned FileRecord fields, and pair body clones. Reservation is **not** universal
+host-OOM recovery. Native proof must distinguish coordinator refusal, currently
+fallible entity/body-buffer failures, and these inherited allocations. Preserve
+original error sources and resource distinctions; do not advertise universal
+allocator recovery or silently call an I/O/resource failure absence. Allocation
+fault qualification may require further shared-helper corrections before this
+observational unit is ready; no duplicate parser is authorized as a shortcut.
+
+Test entry is a child of the existing native first-authority internal harness,
+using `create_environment_for_algorithm_at_kv_stage` and test-only physical
+FileRecord/chunk assembly. Frozen ASMT/ASMC/ASMG bytes remain independent of the
+production semantic writers. Reopen actual disposable files at32/64-byte widths;
+compare bytes/length/header before and after observation. Exercise absent and
+released tasks, missing generation/checkpoint, corrupt slots and ambiguous ties,
+all existing binding failures, physical/history differences without ownership,
+cancellation, budget refusal/retry and reservation lifetime. A controlled writer
+attempt during observation must remain blocked until the complete observation
+has been assembled. No production publisher refusal is relaxed for fixtures.

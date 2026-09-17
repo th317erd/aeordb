@@ -163,6 +163,56 @@ failures and raw receipts remain retained. This completes byte encoding only;
 the selector allocation defect above and all runtime capture/pin/resume/activation
 obligations remain explicit. No capability advertisement or service change.
 
+Byte-writer milestone landed/pushed as
+`d240e5c213ffcab00a64dea434f86a684e40c5d4`. All three isolated sources advanced
+to it with source verification and preceding evidence sealed; the desktop's
+selector test/fix overlay was preserved. The actual selector RED and candidate
+archives are retained under the existing campaign cache. Candidate1 passed237
+tests00:20:22UTC. The two guarded match arms preserve allocation failures before
+ordinary invalid-slot fallback. The audit refresh changed only line metadata,
+retaining all1501 occurrence IDs and reviews. Final source also removes the
+scratch harness's unnecessary import reordering; no test behavior changes.
+Final1 selector qualification launched~00:31UTC on six frozen inputs, manifest
+SHA256 `aa5c69618fc5c9a5efe78f5f58319e4a8a1d5c0da4aee9018877aac1240b78af`.
+Linux unit `aeordb-v4-semantic-selection-final1-20260917`, invocation
+`f2cc321260944687b766ff1f2162749c`; Mac PID1033; Windows PID5448. All platforms
+repeat focused, affected, library, strict Clippy, format and independent fixture
+gates on the final source. Source publication/pin/default guards remain unchanged.
+Do not claim selector completion until these gates and the source-bound proof
+finish; native observation/capture/retention work remains after this correction.
+
+**Selector qualified September17.** Linux completed00:40:10UTC, Mac00:40:15UTC,
+and Windows00:53:36UTC. The strict verifier executed PASS and sealed the
+[selector proof](../evidence/user-facing-v4-u1-semantic-selection-proof-20260917.json).
+Linux/Mac each passed237 narrow tests,819 affected tests across40 targets,
+713 library and181 independent-reference tests. Windows passed249 narrow,
+814 affected across40 targets,728 library and181 reference tests. All full
+runs have zero failed, ignored or filtered cases. All platforms passed strict
+workspace Clippy, formatting and496 independent fixtures; Windows formatting
+covered all379 Cargo-listed roots. Unix audit/contracts/debt checks passed,
+with the1501-entry audit changed only in line metadata. Native source/lock,
+test/tool binary hashes and raw receipts were sealed before subsequent builds.
+Windows ended with15,243,292,672bytes free, above its8GB floor.
+
+Review: propagation precedes both fallback arms, including allocation refusal
+beside a corrupt peer. It uses the explicit allocation-failure flag, not the
+broader malformed-size class, so deterministic format failures retain their
+existing fallback meaning. Both slot positions, both sequence orderings,
+32/64-byte hashes, successful retry and genuine torn fallback are covered.
+Actual prior behavior selected8 instead of9; corrected behavior returns the
+operational failure. Control-store/native callers, identity ambiguity and
+publication-refusal regressions passed. Native capture, pins and activation
+remain incomplete; this fix does not change any persistent bytes or enable v4.
+
+Next observational API/types/helper inventory are appended to the task contract.
+After Linux evidence was sealed/copied, an isolated10-input desktop snapshot
+added an explicit refusing observation stub and four native-file tests. Actual
+RED finished00:55:28UTC,0 passed/4 failed/713 filtered, all failures reaching
+`semantic_task_observation_unimplemented`. Source archive, receipts and exact
+binary digest were captured before implementation; unit invocation
+`dd832dfc5e6043588fce0dc68abb3576`. This is the following unit's failing baseline,
+not part of the selector's final source or a completed runtime observation.
+
 Entry716cf3d6, fetched origin matches0/0; direct integration owner, no tracked
 unrelated edits. Preserve untracked WIP and all immutable evidence. Use the
 existing control, namespace publication, task, semantic compiler and GC owners.
