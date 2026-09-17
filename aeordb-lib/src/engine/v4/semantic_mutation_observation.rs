@@ -2,9 +2,10 @@
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
 pub use inventory::{
-  SemanticSourceLookupDispositionV1, NativeSemanticSourceCatalogBoundsV1, NativeSemanticSourceLookupV1, SemanticSourceCatalogSideV1,
-  SemanticSourceCatalogSummaryV1, NativeProtectedSemanticSourceV1, NativeSemanticMutationInventoryBoundsV1,
-  NativeSemanticMutationInventoryV1, NativeSemanticSourceReadBoundsV1, SemanticMutationInventorySummaryV1,
+  NativeSemanticSourcePublicationErrorV1, SemanticSourceLookupDispositionV1, NativeSemanticSourceCatalogBoundsV1,
+  NativeSemanticSourceLookupV1, SemanticSourceCatalogSideV1, SemanticSourceCatalogSummaryV1, NativeProtectedSemanticSourceV1,
+  NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1, NativeSemanticSourceReadBoundsV1,
+  SemanticMutationInventorySummaryV1,
 };
 use super::*;
 use super::super::semantic_mutation_control::{

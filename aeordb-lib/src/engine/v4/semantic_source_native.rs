@@ -1,6 +1,9 @@
 //! Protected raw inputs read from the same capture as semantic task inventory.
 //! Neither a source observation nor its bytes grant durable retention or resume.
 use super::*;
+#[path = "semantic_source_staging.rs"]
+mod staging;
+pub use staging::NativeSemanticSourcePublicationErrorV1;
 use crate::engine::v4::hash::{IncrementalDigestV1, try_digest_parts};
 use crate::engine::v4::scope::validate_canonical_absolute_path;
 use crate::engine::v4::system_family::SystemFamilyPolicyDecisionV1;
@@ -27,6 +30,7 @@ pub struct NativeProtectedSemanticSourceV1<'a> {
   revision: Vec<u8>,
   entity_version: u8,
   flags: u8,
+  chunk_representation_fingerprint: [u8; 32],
   _memory: MemoryReservation,
 }
 
@@ -195,10 +199,11 @@ impl NativeSemanticMutationInventoryV1<'_> {
     body.resize(output_length, 0);
     let mut written = 0usize;
     let mut content = IncrementalDigestV1::new(algorithm);
+    let mut representations = staging::chunk_representation_fingerprint(record.chunk_hashes.len());
     for chunk_key in &record.chunk_hashes {
       check_cancelled(&self.cancellation)?;
       memory.check_admission()?;
-      let count = self.read_source_chunk(lookup, chunk_key, &mut body[written..], bounds)?;
+      let count = self.read_source_chunk(lookup, chunk_key, &mut body[written..], bounds, &mut representations)?;
       content.update(&body[written..written + count]);
       written += count;
       after_chunk();
@@ -235,6 +240,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
       revision,
       entity_version: entity.entity_version,
       flags: entity.flags,
+      chunk_representation_fingerprint: *representations.finalize().as_bytes(),
       _memory: memory,
     }))
   }
@@ -245,6 +251,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     key: &[u8],
     output: &mut [u8],
     bounds: NativeSemanticSourceReadBoundsV1,
+    representations: &mut blake3::Hasher,
   ) -> Result<usize, SemanticMutationObservationErrorV1> {
     let locator = lookup
       .get(key)
@@ -300,6 +307,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     }
     check_cancelled(&self.cancellation)?;
     memory.check_admission()?;
+    staging::fingerprint_chunk_representation(representations, &entity);
     Ok(written)
   }
 }

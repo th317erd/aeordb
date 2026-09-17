@@ -6,11 +6,11 @@ mod semantic_mutation_observation;
 mod staging_protection;
 pub use staging_protection::{NativeStagingProtectionV1, StagingProtectionErrorV1};
 pub use semantic_mutation_observation::{
-  SemanticSourceLookupDispositionV1, NativeSemanticSourceCatalogBoundsV1, NativeSemanticSourceLookupV1, SemanticSourceCatalogSideV1,
-  SemanticSourceCatalogSummaryV1, NativeProtectedSemanticSourceV1, NativeSemanticSourceReadBoundsV1,
-  NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1, SemanticMutationInventorySummaryV1,
-  SemanticMutationObservationDispositionV1, SemanticMutationObservationErrorV1, SemanticMutationObservationRequestV1,
-  SemanticMutationObservationV1,
+  NativeSemanticSourcePublicationErrorV1, SemanticSourceLookupDispositionV1, NativeSemanticSourceCatalogBoundsV1,
+  NativeSemanticSourceLookupV1, SemanticSourceCatalogSideV1, SemanticSourceCatalogSummaryV1, NativeProtectedSemanticSourceV1,
+  NativeSemanticSourceReadBoundsV1, NativeSemanticMutationInventoryBoundsV1, NativeSemanticMutationInventoryV1,
+  SemanticMutationInventorySummaryV1, SemanticMutationObservationDispositionV1, SemanticMutationObservationErrorV1,
+  SemanticMutationObservationRequestV1, SemanticMutationObservationV1,
 };
 
 use std::collections::HashSet;
@@ -2199,6 +2199,7 @@ struct PreparedWholeEntityV1 {
 enum ImmutableEntityValidationV1 {
   GenericContent,
   PrevalidatedSystemFiles,
+  CapturedProtectedSource,
 }
 
 fn validate_immutable_entity_batch_request(

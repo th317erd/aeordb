@@ -1,9 +1,12 @@
 # Durable protected semantic sources — U1 reader contract
 
-Status: structural readers and byte-only writers qualified on Linux, macOS and Windows, September17.
+Status: structural readers, byte-only writers, native catalog readers and guarded
+source staging qualified on Linux, macOS and Windows, September17.
 The [immutable reader proof](evidence/user-facing-v4-u1-semantic-source-capture-readers-proof-20260917.json)
 does not qualify source-copy publication, complete closure, restart or activation.
-Writer enablement remains refused. Continue the
+The [guarded staging proof](evidence/user-facing-v4-u1-guarded-source-staging-proof-20260917.json)
+qualifies process-local source copies only. Durable task/control publication
+remains refused. Continue the
 existing [task contract](semantic-mutation-task-contract.md) and
 [ledger11](progress/11-user-facing-v4.md) under Round17's additive authority.
 Entry091d0666 has landed the preceding native-directory unit on all platforms.
@@ -805,3 +808,103 @@ apply, with two-second coordination deadlines and no joins while holding a
 guard needed by the worker. Run the composed behavioral REDs before changing
 production behavior; qualify the full affected/static/native suite before any
 staging-enable landing. Refresh this entry map and exact API at that boundary.
+
+Observed staging refinements (September17): exact-repeat byte stability requires
+readback before entering the generic publisher's KV baseline flush. Keep the
+existing generic flush/transaction semantics intact; under the existing root
+guard, use its shared exact-entity reader and fallible one-entry receipt on the
+no-write branch. Only a missing identity enters the physical transaction.
+Fresh slot sequence and write high-water must also be monotonic relative to the
+originating capture, in addition to the same owner/fence and final full-header
+comparison. Actual failing regressions establish both requirements.
+
+Retry has two distinct boundaries: resource/cancellation/concurrent-change
+refusals have no commit, while a hard dependency failure preserves the old
+authority but leaves the existing durability coordinator failed. That latter
+case requires reopen/recovery before another write; never clear its latch as
+part of source staging. A post-commit observer failure instead preserves its
+committed receipt and permits exact idempotent readback. The composed tests must
+assert these existing producer contracts rather than assuming all failures can
+retry in the same process.
+## Following catalog assembly: bounded ordered construction
+
+The next construction boundary consumes an already ordered, exactly counted
+stream of paired base/request revisions. It does not discover that stream or
+claim its compiler dependency union is complete. In particular, namespace
+configuration rows also belong to the existing source fingerprint, whereas
+these catalogs contain only protected non-HEAD sources. Do not substitute a
+protected-only digest for that existing fingerprint.
+
+Territory searched: the ASCN encoders/borrowed decoders, native paired traversal
+and point seek, source fingerprint, semantic catalog compiler/native adapter,
+legacy B-tree writer, KV rebuild sorting, query ordering runs and migration
+root-map sorting. The latter three own specialized record formats and lifecycle
+rules; none is a ready-made canonical path-union iterator. The legacy B-tree
+writer publishes DirectoryIndex bytes through StorageEngine. Neither is a
+drop-in ASCN writer. Avoid adding an external workspace owner just to assemble
+an already ordered stream. Complete dependency discovery/sorting remains a
+separate explicit obligation, not an inferred property of this constructor.
+
+Use the qualified leaf/internal encoders and their shared control identity.
+Consume one row at a time; form leaves at the existing 256-row or 1 MiB body
+boundary. Fold completed leaves through a bounded binary carry forest. Each
+internal node has exactly two children, uses the right subtree's first path as
+separator, and is emitted only after both children. At end, fold the retained
+forest from right to left. This gives deterministic, bounded-depth construction
+without unary nodes, a world-sized map, or reads of all earlier nodes. The
+existing format permits this shape; no persistent layout or maximum changes.
+Base/request catalogs use the identical row partition and path set, including
+explicit absences. One synchronous node callback hands immutable encoded bytes
+to the caller's existing staging owner. No new file, KV, header, transaction,
+task/control publisher, capability advertisement or activation route belongs
+in this construction helper.
+
+Account for the leaf window, both output buffers, row/child projections,
+previous/current paths, hash state, forest minima/identities and returned roots
+under the existing memory coordinator. Caller-owned iterator backing and sink
+storage remain their own explicitly documented admission obligations. Reject
+oversized owned capacities as well as oversized logical rows. Enforce exact
+count, strict path ordering, selected-H nonzero identities, path validity,
+checked node counts, and caller work/output/workspace limits. Check cancellation
+and memory pressure around input and sink callbacks, including the final EOF
+and final node emission. A failure returns no completed catalog; earlier
+unselected emissions do not grant retention, resume, or visibility authority.
+
+`map_territory` checkpoint: this limited assembler's producers are the counted
+row iterator and existing encoders; consumers are the staging callback and a
+private-field result containing roots/counts. Native task selection, source
+union discovery, GC and activation are still unimplemented consumers, not
+implicitly qualified by the assembler. The public publisher's semantic-task
+refusal must remain unchanged throughout this unit.
+
+`test_protocol` for this boundary:
+
+- Existing byte writer and native reader tests remain unchanged; add assembler
+  tests alongside the semantic source capture specs. Independent hand-built
+  control bytes/digests and a test-only ordered map provide the oracle.
+- Given two paired paths with a base/request replacement and explicit absence,
+  constructing both catalogs must match independently encoded leaf bytes and
+  selected-H identities for every registered hash algorithm.
+- Given more than 256 paths, odd leaf counts and maximum-length paths, traverse
+  every emitted root independently: exact rows, range separators, no missing or
+  repeated edges, correct counts, bounded height, and children emitted first.
+- Given malformed/unsorted/duplicate rows, count mismatch, an iterator error,
+  a sink error, exhausted bounds, cancellation or allocation refusal, return
+  no completed result and release the helper's memory. Explicitly test failures
+  at final EOF and after the final sink callback.
+- Unit tests prove deterministic bytes and limits; integration combines the
+  assembler with the existing readers against actual emitted objects; property
+  tests compare varied partitions and both catalog sides to an independent map.
+  A native service E2E test does not yet apply to this byte-only helper. Later
+  task/restart/GC and ordinary-service gates remain owed, not replaced by mocks.
+- False confidence: encoder/decoder agreement alone, a sink that secretly
+  stores the whole stream in production, retained per-row capacities, or a
+  result called a closure permit. No network or waits are needed; small
+  deterministic tests target ten seconds, with existing bounded native stage
+  runners as the outer deadline. Large stress cases need explicit resource and
+  elapsed-time bounds rather than an unbounded test loop.
+
+Write the independent two-path, split/ordering and failed-callback tests against
+a refusing scaffold first. Preserve the observed RED, then implement and expand
+adversarial/resource coverage before final native qualification. This design
+does not relax the coupled durable capture/publication gate above.

@@ -245,6 +245,52 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  let source_staging_path = source_root.join("engine/v4/semantic_source_staging.rs");
+  let source_staging = std::fs::read_to_string(&source_staging_path).unwrap();
+  let staging: String = source_staging.split_whitespace().collect();
+  for required in [
+    "implNativeProtectedSemanticSourceV1<'_>",
+    "letcapture=self._capture;",
+    "capture._protection.capture_semantic_mutation_inventory(",
+    "fresh_header.slot_sequence<old_header.slot_sequence",
+    "fresh_header.write_sequence_high_water<old_header.write_sequence_high_water",
+    "self.validate_live_chunks(&fresh,bounds)?;",
+    "publisher.root_state.lock()",
+    "current.selected.header!=*fresh_header",
+    "load_exact_immutable_entity(",
+    "ImmutableEntityValidationV1::CapturedProtectedSource",
+    ".publish_immutable_entity_batch_with_validation_locked(",
+    "key:&self.revision",
+    "stored_value:&self.encoded_record",
+    "entity_version:self.entity_version",
+    "flags:self.flags",
+  ] {
+    assert!(staging.contains(required), "source staging lost its guarded shared-owner boundary: {required}");
+  }
+  for forbidden in [
+    "OpenOptions",
+    "File::open",
+    "File::create",
+    "write_file",
+    "sync_file",
+    ".flush(",
+    "FileRecord::serialize",
+    "FileRecord::deserialize",
+    "encode_whole_entity",
+    "RootReadAdmission",
+    "publish_mutable",
+    "publish_successor",
+    "HashMap",
+    "HashSet",
+    "unsafe",
+  ] {
+    assert!(!staging.contains(forbidden), "source staging gained another writer/parser/authority path: {forbidden}");
+  }
+  let captured_source_publishers: Vec<_> = files
+    .iter()
+    .filter(|path| std::fs::read_to_string(path).unwrap().contains("ImmutableEntityValidationV1::CapturedProtectedSource"))
+    .collect();
+  assert_eq!(captured_source_publishers, [&source_staging_path]);
   let catalog_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_native.rs")).unwrap();
   let catalog: String = catalog_source.split_whitespace().collect();
   for required in [

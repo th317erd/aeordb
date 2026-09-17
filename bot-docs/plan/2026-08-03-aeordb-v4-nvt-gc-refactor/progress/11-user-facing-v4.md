@@ -26,6 +26,15 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September17,18:37UTC: guarded source staging is qualified on Linux, macOS and
+Windows; see the [immutable proof](../evidence/user-facing-v4-u1-guarded-source-staging-proof-20260917.json).
+Eighteen native regressions cover original representations, exact retries,
+concurrency, resource refusal and actual transaction/reopen failure boundaries.
+All raw results are sealed and local. This stages one exact revision while its
+process-local guard remains held; it does not select a durable task or prove
+GC/restart/activation closure. Paired catalog assembly is the next unit, with
+its initial RED and passing candidates isolated below. Ordinary creation is v3.
+
 September17,17:27UTC: retained-source and paired native source-catalog readers
 are qualified on Linux, macOS and Windows; see the
 [immutable proof](../evidence/user-facing-v4-u1-native-source-catalog-proof-20260917.json).
@@ -98,6 +107,128 @@ disabled, and U2–U7 are still required. No production deployment, service acti
 or retained FS-Server1 database mutation is authorized by these test results.
 
 ## Active next unit: semantic-mutation durable task contract
+
+### Current continuation: guarded source staging — entry74c18553
+
+Final2 is complete: Linux nine gates18:07:24UTC, macOS nine18:16:21UTC and
+Windows seven18:35:49UTC; sealed Windows18:37:19UTC. The strict evidence
+verifier passes every archived source, executable, command/count and sampled
+resource binding. Exact results include226narrow tests,115affected targets,
+822Unix/837Windows library tests,185reference tests,502independent fixtures,
+formatting (379Windows roots), strict Clippy and unchanged1501 reviewed audit
+entries. Complete diff review preserves the generic publisher/KV/durability
+methods, shared readers, existing fixture bytes and capability/default masks.
+The guarded operation's private validation mode has one caller; no second
+writer, parser or selection route was added. No production database or service
+was touched. Earlier running-state notes below are chronological evidence.
+
+Final2 Linux completed all nine gates at18:07:24UTC; macOS completed all nine
+at18:16:21UTC. Both raw evidence sets are sealed and local, and the strict
+verifier passes both before correctly refusing the not-yet-present Windows
+terminal receipt. Windows is still executing its affected regressions with
+unchanged source and safe resource headroom. No final proof or commit yet.
+
+Read-only follow-up mapping selected bounded ordered paired catalog assembly,
+documented in the source-capture contract. This does not discover the complete
+source union or enable task publication. Three independent-byte/graph/sink-error
+tests and an explicit refusing scaffold are isolated in a separate desktop
+worktree at74c18553 plus the frozen staging packet. The18-input RED1 packet
+has manifest0cefe39de5c6b6009ac31b86473e546f56833f45e91257c89027392e3984849f;
+it launched18:18UTC only after Linux final2 evidence was sealed and copied
+locally. Main and Windows qualification inputs remain unchanged. Preserve the
+observed result before implementing the assembler or rebuilding that target.
+
+Assembly RED1 completed18:19:25UTC,0pass/3fail/61filtered; all seven raw files
+are local and strictly verified. The separate candidate1 then passed all nine
+assembly cases18:27:44UTC, including count/capacity and final callback failures.
+Its19-input manifest isb17db82aace6a43eccfacf962a5530dd9c18ba6cc73e441e704f2f2f4a2ece83.
+Those raw results are also preserved. Candidate2 adds independent internal-byte,
+maximum-path,10,000-row and allocator-failure tests without changing runtime;
+its22-input manifest isf09637d36113cae972582e7e945dc953c34e51f985486e4056d63c818353ce38.
+It passed both full74-test targets18:32:29UTC; all seven raw artifacts are local.
+No assembler source has entered the main checkout.
+Windows staging's affected115-target suite passed18:25:54UTC; its remaining
+library/static/reference gates still need completion before staging can land.
+
+The reader milestone landed/pushed74c18553 after all native receipts were sealed
+and copied locally. All three isolated platform sources advanced with scoped
+preservation. Earlier staging development used separate worktrees at713f8859,
+including the exact full reader packet; those archives remain historical inputs,
+not evidence falsely attributed to the new main HEAD.
+
+Staging RED1 completed17:02:01UTC:0pass/3fail/804filtered, every failure from
+the explicit refusing scaffold. Candidate1 then completed17:13:22UTC with
+5pass/1fail/804filtered, nineteen-input manifest
+d885272ab48dea68180e589f40b548c4bd8887a7b33bb51cf7ee27c91dffa074.
+Exact repeat returned idempotent but changed93bytes and shortened the fixture
+71386→71340bytes. Both header slots were unchanged. Inspection traced this to
+the generic immutable publisher's baseline KV flush before exact-identity lookup,
+not a rewritten source record. The raw large-array failure log is preserved.
+
+Candidate2 changed tests only: twenty archived inputs, manifest
+6b3282ac09505ca9884b54300470e79f2af2614dadcd694063fe8ad4aa7b5f0e.
+It produced7pass/3fail/804filtered. It preserves the retry failure, adds an actual
+counter-regression failure, and exposed a test assumption: hard dependency
+failure makes the coordinator refuse subsequent hard-authority admission.
+Existing coordinator code and immutable-transaction regressions require reopen;
+the test must not expect that safety latch to be cleared or bypassed.
+
+Candidate3 uses the sole physical owner's exact readback helper before entering
+the generic batch transaction. An exact existing copy returns a fallibly built
+receipt without flushing; collisions also refuse before flush. Missing copies
+still use the existing transaction with a private captured-source validation
+mode. Fresh header/write counters must not regress below the original capture.
+The fault test now asserts in-process hard-failure refusal and successful reopen
+recovery, while preserving committed-error receipts and commit-wins-cancellation.
+Twenty-input manifestb53a49197ef799d70a9131b6f7790b6500e8ebb1397d56613ddd6b1b12c76056
+passed all10staging cases17:32:01UTC. Every stage's seven raw artifacts are local
+and strictly checked before advancing. C4 adds six admission/relocation tests
+and expands the original-record matrix to mixed flags/domains; it is not yet
+claimed green. Final architecture, resource, affected and native gates are owed.
+
+C4 completed17:37:48UTC with16pass/0fail/804filtered; every raw artifact is local
+and strictly checked. Runtime is byte-identical to C3. Candidate5 integrates onto
+main74c18553, adds two concurrent/protection-lifetime tests and extends the
+single-owner architecture gate. The thirteen-input manifest is
+d68f4813037ec4aeb8ceabeed3a093c8ca5bdc3cfefb4838fbad6a1f06bb6100.
+Preflight1 library passed17:44:40UTC, architecture17:45:38 and format17:45:45;
+strict Clippy and the audit refresh are still running. Main runtime/tests stay
+frozen during qualification. The source-staging module cannot write files/KV,
+serialize FileRecords, select controls/roots, or bypass the existing transaction.
+Its private validation mode has exactly one reviewed caller.
+
+Final affected inventory remains the115reader-consumer targets plus five separate
+narrow targets, with the full native library carrying the new composed staging
+and existing immutable-transaction fault tests. Rechecked the shared physical
+batch owner, captured current/retained/catalog readers, final reclamation
+barriers, migration destination/cutover and native semantic-catalog adapter.
+No alternative physical writer or changed generic KV/durability semantics are
+introduced. Cross-platform final results and immutable proof remain owed.
+
+Resource refresh17:49UTC: desktop16logical CPUs with31.1GB available memory,
+100.6GB free on home and325.9GB on Data. Windows retains16GiB/eight CPUs and
+its48GiB test disk, with13.6GB guest RAM free and no active Cargo/rustc process.
+The next Windows runner uses two Cargo jobs (the normal global maximum), without
+changing VM/host allocations. Admission requires6GiB free guest RAM; a sampled
+2GiB floor stops the owned job and records a failure. Existing disk floors and
+90-minute stage deadlines remain. Linux stays two jobs/6GiB/no swap/200%CPU;
+Mac remains one job. No target artifacts are transferred.
+
+Preflight1 completed17:48:46UTC, all PASS:822library tests,4architecture tests,
+formatting, strict workspace Clippy17:48:15 and audit1501. All stage/driver/audit
+raw artifacts are local. The refreshed audit changes source locations only;
+every occurrence identity and review is unchanged. Final source validation
+confirms runtime is byte-identical to C3, with unchanged reader remainder bound
+by committed74c18553. Upstream refreshed17:53UTC with no divergence. Final
+qualification uses one14-input packet on all three native platforms; expected
+library counts are822Unix and837Windows. These are not yet final results.
+
+Final1 preparation was refused locally before any native launch: applying the
+generated audit-location diff added a final newline, but its serializer's
+canonical artifact has none. The strict audit hash check caught the one-byte
+difference. The unlaunched14-input packet12dbbbef52cd77a86eb085144ec4cc4bbd11e620c6e7e2103fb4e92280c3e7a1
+is preserved. Canonical formatting was restored with no semantic/runtime change;
+final2 carries the exact generated audit artifact and is the next run label.
 
 ### Current continuation: native source catalogs — entry713f8859
 

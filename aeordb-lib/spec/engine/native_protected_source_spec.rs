@@ -588,3 +588,6 @@ fn native_protected_source_supports_the_actual_64_mib_module_bound_without_maxim
   assert_eq!(small.body(), b"{}");
   assert!(memory.snapshot().unwrap().reserved_bytes < retained + (1 << 20));
 }
+
+#[path = "native_source_staging_spec.rs"]
+mod source_staging_spec;
