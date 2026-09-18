@@ -26,6 +26,84 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September18,02:20UTC: prepared native alias snapshots passed every final
+Linux/macOS/Windows gate. Windows completed22:40:24UTC onSeptember17;
+after the interrupted session resumed, its environment was sealed02:17:16UTC
+and all raw artifacts copied locally. The strict source-bound verifier passed
+against the unchanged13-input packet and generated the
+[snapshot proof](../evidence/user-facing-v4-u1-native-alias-snapshot-proof-20260917.json).
+Final counts are253narrow tests,118affected targets,850Unix/865Windows library
+tests,185reference tests and502independent fixtures, with1,501unchanged audit
+identities. This completes the per-source current-alias adapter, notU1or service
+readiness; full source union, task integration andU2–U7 remain active.
+
+The separate decoder preflight1 passed architecture/format, then Clippy found
+one test-style issue (`err().expect()` where `expect_err()` is supported).
+All22raw artifacts are local. Candidate2 changes that expression only;
+runtime and assertions are unchanged. Its19-input packet is
+`86d2cea510b947bc9234adcc9685c32c456cf119a4222fe77a3563c3c617ce2e`.
+Preflight2 started02:19UTC with the complete1,219tests and static/audit gates.
+
+September17,22:36UTC: bounded-directory candidate1 passed all1,219tests
+(859library and360across six complete consumers)22:32:04UTC. All seven raw
+artifacts are local; strict verification preserves the original RED bodies,
+unchanged legacy decoder bodies and frozen prepared-snapshot foundation.
+The four additional decoder tests and two actual table/name refusal probes
+are now passing evidence. Architecture/format/Clippy/audit preflight1 began
+22:34UTC in the same isolated worktree; final native qualification is still owed.
+
+September17,22:30UTC: the three directory-allocation REDs were observed and
+strictly verified with all seven raw artifacts local. The unchecked internal
+header allocated1,572,840bytes; flat/leaf decoding allocated257/41child names.
+Candidate1 adds bounded collection/owner entry points while leaving generic
+legacy decoding intact, plus four decoder boundary cases and two snapshot
+table/name allocation probes. Its19-input packet is
+`2f2c0f4c27aefb6604000355b6baba74d63f8b4ae5c5b6f1fdb16247b0e06038`.
+The isolated complete-library/six-consumer run started22:29UTC; no green
+result is claimed yet. Main snapshot qualification remains frozen. Windows
+passed all118affected targets22:28:29UTC and is running its library stage.
+
+September17,22:21UTC: prepared snapshot Linux completed all nine stages
+22:14:22UTC and was sealed22:18:33UTC. macOS was sealed22:13:25UTC. Both
+complete raw sets are local; strict verification passes both platforms and
+stops at the still-missing Windows terminal receipt. Windows is progressing
+through offline migration regressions. Source remains frozen.
+
+After preserving Linux evidence, the isolated directory-allocation RED run
+started22:18UTC. Its16-input manifest is
+`3a538593544096f40de61b7b0112f1bb11573139c940b0a82e8aa9cea4426b53`.
+Actual failure is not yet observed; no implementation has begun. Four additional
+decoder boundary/legacy-parity/resource tests and two prepared-alias allocation
+tests remain drafts for the separate candidate, not passing evidence.
+
+September17,22:13UTC: prepared snapshot macOS final1 passed all nine stages
+22:10:59UTC; evidence sealing is in progress. Linux passed118affected targets,
+audit, formatting and strict Clippy and has reached its library stage. Windows
+is still running affected targets. No final proof or landing yet.
+
+Read-only namespace review identified prevalidation allocation in the shared
+selected-directory decoder. Three isolated independent-byte regression fixtures
+and a16-input RED packet are prepared; they have not run, and no decoder fix
+exists yet. The test contract is recorded in the capture document. Two adjacent
+prepared-snapshot table/name allocator-fault probes are also unregistered drafts.
+Keep all follow-up work separate until Linux final evidence is sealed/local.
+
+September17,22:00UTC: plugin pairs landed/pushed as`2012a17b`; all three test
+checkouts advanced through scoped preservation. Snapshot preflight2 passed all
+gates21:54:53UTC with1,501unchanged reviewed audit identities. All raw receipts
+are local and strictly verified, including the preceding audit refusal and exact
+diagnostic-only correction. Its inherited audit bytes are separately bound to
+the qualified predecessor because preflight manifests exclude generated location
+refreshes; no historical manifest or raw receipt was modified.
+
+The prepared snapshot's ten Rust files and audit refresh are integrated and
+frozen with both lockfiles in13-input packet
+`2e7f98138657b0956cb2c675ff693e836ed21514c215cc6612bc1533dfc8ad30`.
+Linux/macOS/Windows final1 started21:56–21:57UTC. Final qualification is pending.
+Review carries direct table/name allocator-fault injection into the next bounded
+native follow-up before fullU1readiness; the current13cases already cover four
+actual pair/retained-record allocation failures, limits and release/retry.
+
 September17,21:51UTC: native plugin-pair final1 is qualified on all three hosts.
 Windows completed all seven stages21:47:03UTC; its seal21:50:01UTC and every
 raw artifact are local. The final verifier generated and rechecked the

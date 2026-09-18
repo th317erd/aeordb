@@ -1127,3 +1127,37 @@ inventory owns a settled KV snapshot. Shared directory validation lives in
 `read_view_native.rs`; shared bounded ordering/navigation lives in
 `namespace_seek.rs`. Future captured namespace traversal must reuse those rules
 without fabricating a user authorization/read-view object or consulting live KV.
+
+### Namespace-reader prerequisite: bound directory decoding before allocation
+
+September17 source review traced all three selected-directory decoder consumers:
+selected scanning, selected point/permission lookup and descendant authorization.
+They share `decode_validated_selected_directory_node` in`read_view_native.rs`.
+Its legacy B-tree decoder allocates the declared internal-key vector before the
+selected owner checks canonical fanout; flat and B-tree leaf decoding likewise
+materialize all children before checking their selected limits. A three-byte
+internal header can therefore request65,535String slots before rejection. This
+is a source-review finding until the isolated allocation tests run, not an
+observed production incident or a reason to change valid persistent bytes.
+
+Before wiring another bounded captured namespace reader, enforce those existing
+selected limits before materialization through the shared directory/B-tree
+owners. Keep legacy decoding behavior in its existing adapter; do not add an
+independent format parser. Preserve canonical round-trip validation, exact
+ordering, inherited ranges, flat-root/B-tree-child rules and selected errors.
+No authorization, physical lookup, mutable owner or staging permit is added.
+
+`test_protocol`: three independent byte fixtures must first demonstrate actual
+excess allocation/child decoding in the existing selected path: a three-byte
+maximum-count internal header,257flat children and41actual B-tree leaf children
+behind a40-count header. Use the thread-local allocator's non-failing occurrence
+measurement; assert bounded peak allocation or name-decode count, not merely
+that malformed data is rejected eventually. Then preserve valid flat/B-tree
+cases at both widths, malformed/version/framing/count boundaries, old generic
+decoder behavior and actual selected native-reader integration. Unit allocation
+measurements establish timing of refusal; existing native selected-reader tests
+establish integration, and final runtime service E2E remains owed. Small fixtures
+have no network/stdin; use the bounded native test runner. Keep the RED and
+candidate separate from the frozen prepared-snapshot qualification. Include the
+adjacent prepared-snapshot table/name allocation probes in this follow-up before
+fullU1readiness; they are not claimed by the earlier record-copy probes.

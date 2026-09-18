@@ -318,7 +318,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let plugin_pair_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_plugin_source_native.rs")).unwrap();
   let plugin_pair: String = plugin_pair_source.split_whitespace().collect();
   for required in [
-    "letlookup=self.source_lookup(source_bounds);",
+    "letlookup=self.source_lookup(plugin_source_read_bounds(bounds));",
     "decode_plugin_alias_v1(alias_source.body(),&alias_path)",
     "inspect_plugin_artifact_identity_v1(",
     "encode_dependency_record(&DependencyRecordV1",
@@ -350,6 +350,49 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "expect(",
   ] {
     assert!(!plugin_pair.contains(forbidden), "native plugin pair gained another source/authority owner: {forbidden}");
+  }
+  let prepared_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_alias_snapshot_native.rs")).unwrap();
+  let prepared: String = prepared_source.split_whitespace().collect();
+  for required in [
+    "visit_semantic_source_aliases_v1(",
+    "aliases.try_reserve_exact(count)",
+    "aliases.sort_unstable_by(",
+    "aliases.dedup_by(",
+    "retained.requested_roles|=removed.requested_roles;",
+    "letlookup=self.source_lookup(plugin_source_read_bounds(request.plugins));foraliasin&mutaliases{",
+    "self.read_protected_plugin_sources_from_lookup(&alias.alias,request.plugins,&lookup,||{})?",
+    "maximum_snapshot_bytes",
+    "binary_search_by(",
+    "bytes.map(decode_dependency_record_bytes)",
+    "before_complete();check_snapshot(self,&reservation)?;",
+    "MemoryReservation",
+    "implParserAliasSnapshotV1forNativeSemanticAliasSnapshotV1",
+    "implIndexConfigurationAliasSnapshotV1forNativeSemanticAliasSnapshotV1",
+  ] {
+    assert!(prepared.contains(required), "prepared native aliases lost their bounded captured owner: {required}");
+  }
+  assert_eq!(prepared.matches("visit_semantic_source_aliases_v1(").count(), 2);
+  assert_eq!(prepared.matches("self.source_lookup(").count(), 1);
+  assert_eq!(prepared.matches("self.read_protected_plugin_sources_from_lookup(").count(), 1);
+  for forbidden in [
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "OpenOptions",
+    "File::",
+    "publish_",
+    "write_file",
+    "lock_kv",
+    "capture_semantic_mutation_inventory(",
+    "read_protected_source(",
+    "read_protected_plugin_sources(",
+    "HashMap",
+    "BTreeMap",
+    "serde_json",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!prepared.contains(forbidden), "prepared native aliases gained another schema/source/authority owner: {forbidden}");
   }
   let source_staging_path = source_root.join("engine/v4/semantic_source_staging.rs");
   let source_staging = std::fs::read_to_string(&source_staging_path).unwrap();

@@ -3,6 +3,7 @@
 use super::*;
 #[path = "semantic_plugin_source_native.rs"]
 mod plugin_sources;
+pub use plugin_sources::{NativeSemanticAliasSnapshotRequestV1, NativeSemanticAliasSnapshotV1};
 pub use plugin_sources::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 #[path = "semantic_source_staging.rs"]
 mod staging;

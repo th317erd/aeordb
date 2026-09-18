@@ -1,5 +1,8 @@
 //! Exact captured source identity, never corrected executor availability.
 use super::*;
+#[path = "semantic_alias_snapshot_native.rs"]
+mod prepared;
+pub use prepared::{NativeSemanticAliasSnapshotRequestV1, NativeSemanticAliasSnapshotV1};
 use crate::engine::v4::dependency::{decode_dependency_record_bytes, encode_dependency_record, DependencyRecordV1};
 use crate::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
 use crate::engine::v4::plugin_artifact_identity::{
@@ -75,37 +78,33 @@ impl NativeSemanticMutationInventoryV1<'_> {
     bounds: NativeSemanticPluginSourceBoundsV1,
     before_complete: impl FnOnce(),
   ) -> Result<Option<NativeSemanticPluginSourcesV1<'_>>, NativeSemanticPluginSourceErrorV1> {
+    let lookup = self.source_lookup(plugin_source_read_bounds(bounds));
+    self.read_protected_plugin_sources_from_lookup(alias, bounds, &lookup, before_complete)
+  }
+
+  fn read_protected_plugin_sources_from_lookup(
+    &self,
+    alias: &str,
+    bounds: NativeSemanticPluginSourceBoundsV1,
+    lookup: &impl FirstAuthorityEntityLookupV1,
+    before_complete: impl FnOnce(),
+  ) -> Result<Option<NativeSemanticPluginSourcesV1<'_>>, NativeSemanticPluginSourceErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-    if !(1..=MAXIMUM_SOURCE_BODY_BYTES).contains(&bounds.maximum_module_bytes)
-      || !(1..=MAXIMUM_CHUNK_ENTITY_BYTES).contains(&bounds.maximum_chunk_entity_bytes)
-      || bounds.maximum_source_chunks == 0
-      || bounds.maximum_read_bytes == 0
-    {
-      return Err(invalid("semantic_plugin_source_bounds", "captured plugin pair requires valid bounded work and byte limits").into());
-    }
-    if bounds.maximum_workspace_bytes < PAIR_WORKSPACE_BYTES + IDENTITY_WORKSPACE_BYTES {
-      return Err(resource("semantic_plugin_source_workspace", "captured plugin pair exceeds its workspace limit").into());
-    }
+    validate_plugin_source_bounds(bounds)?;
     let memory = self
       .memory
       .reserve(MemoryOwner::Task, PAIR_WORKSPACE_BYTES as u64, AdmissionClass::Maintenance)
       .map_err(SemanticMutationObservationErrorV1::from)?;
     let alias_path = plugin_alias_path_v1(alias).map_err(SemanticMutationObservationErrorV1::from)?;
-    let source_bounds = NativeSemanticSourceReadBoundsV1 {
-      maximum_body_bytes: bounds.maximum_module_bytes,
-      maximum_chunk_entity_bytes: bounds.maximum_chunk_entity_bytes,
-      maximum_chunks: bounds.maximum_source_chunks,
-      maximum_read_bytes: bounds.maximum_read_bytes,
-    };
+    let source_bounds = plugin_source_read_bounds(bounds);
     // One captured lookup and one cumulative physical-read counter for both
     // sources. Per-source chunk ceilings never reset the paired byte budget.
-    let lookup = self.source_lookup(source_bounds);
     let Some(alias_source) = self.read_source_from_lookup(
       &alias_path,
       None,
       NativeSemanticSourceReadBoundsV1 { maximum_body_bytes: ALIAS_MAX_LENGTH, ..source_bounds },
-      &lookup,
+      lookup,
       || {},
     )?
     else {
@@ -120,7 +119,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     }
     let artifact_path = plugin_artifact_path_v1(alias_record.artifact_fingerprint).map_err(SemanticMutationObservationErrorV1::from)?;
     let artifact = self
-      .read_source_from_lookup(&artifact_path, None, source_bounds, &lookup, || {})?
+      .read_source_from_lookup(&artifact_path, None, source_bounds, lookup, || {})?
       .ok_or_else(|| invalid("semantic_plugin_source_module_missing", "captured plugin alias references an absent raw module"))?;
     let identity = inspect_plugin_artifact_identity_v1(
       PluginArtifactIdentityRequestV1 {
@@ -165,4 +164,27 @@ impl NativeSemanticMutationInventoryV1<'_> {
     memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     Ok(Some(NativeSemanticPluginSourcesV1 { alias: alias_source, artifact, parser, mapper, _memory: memory }))
   }
+}
+
+fn plugin_source_read_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> NativeSemanticSourceReadBoundsV1 {
+  NativeSemanticSourceReadBoundsV1 {
+    maximum_body_bytes: bounds.maximum_module_bytes,
+    maximum_chunk_entity_bytes: bounds.maximum_chunk_entity_bytes,
+    maximum_chunks: bounds.maximum_source_chunks,
+    maximum_read_bytes: bounds.maximum_read_bytes,
+  }
+}
+
+fn validate_plugin_source_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> Result<(), NativeSemanticPluginSourceErrorV1> {
+  if !(1..=MAXIMUM_SOURCE_BODY_BYTES).contains(&bounds.maximum_module_bytes)
+    || !(1..=MAXIMUM_CHUNK_ENTITY_BYTES).contains(&bounds.maximum_chunk_entity_bytes)
+    || bounds.maximum_source_chunks == 0
+    || bounds.maximum_read_bytes == 0
+  {
+    return Err(invalid("semantic_plugin_source_bounds", "captured plugin pair requires valid bounded work and byte limits").into());
+  }
+  if bounds.maximum_workspace_bytes < PAIR_WORKSPACE_BYTES + IDENTITY_WORKSPACE_BYTES {
+    return Err(resource("semantic_plugin_source_workspace", "captured plugin pair exceeds its workspace limit").into());
+  }
+  Ok(())
 }

@@ -2,6 +2,8 @@
 use super::*;
 #[path = "native_plugin_source_lifecycle_spec.rs"]
 mod lifecycle;
+#[path = "native_alias_snapshot_spec.rs"]
+mod prepared;
 #[path = "native_plugin_source_validation_spec.rs"]
 mod validation;
 use crate::engine::v4::semantic_source_capture::SemanticSourceAliasRoleV1;
