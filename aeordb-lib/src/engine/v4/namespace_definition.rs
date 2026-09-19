@@ -68,7 +68,7 @@ pub fn encode_semantic_definition_object(
   Ok(EncodedSemanticDefinitionObjectV1 { semantic_id, object: EncodedSemanticObjectV1 { object_id, value } })
 }
 
-fn validated_semantic_identity(class: u16, definition: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
+pub(crate) fn validated_semantic_identity(class: u16, definition: &[u8], hash_algorithm: HashAlgorithm) -> FormatResult<Vec<u8>> {
   let domain: &[u8] = match class {
     1 | 2 => {
       validate_canonical_value(definition, CanonicalValueBounds::CONFIG)?;

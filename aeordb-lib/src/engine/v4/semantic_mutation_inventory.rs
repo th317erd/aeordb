@@ -1,6 +1,24 @@
 //! Captured task discovery is not a resume, root admission or GC closure permit.
+#[path = "semantic_task_graph_native.rs"]
+mod task_graph;
+pub use task_graph::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
+#[path = "semantic_source_capture_staging.rs"]
+mod source_capture_staging;
+pub use source_capture_staging::{
+  NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1,
+};
+#[path = "semantic_source_control_staging.rs"]
+mod source_control_staging;
+pub use source_control_staging::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 #[path = "semantic_source_native.rs"]
 mod protected_sources;
+#[path = "semantic_source_base_native.rs"]
+mod source_base;
+pub use protected_sources::NativeSemanticNamespaceSourceCursorV1;
+pub use protected_sources::{
+  NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
+  NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,
+};
 pub use protected_sources::{
   NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
   NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
@@ -161,6 +179,23 @@ impl FirstAuthorityEntityLookupV1 for CapturedEntityLookupV1<'_> {
         "captured entity exceeds the admitted byte bound",
       ));
     }
+    self.validate_reference_extent(locator)?;
+    let remaining = self.remaining_read_bytes.get().checked_sub(length).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "semantic_task_inventory_read_bound",
+        "captured inventory exhausted its total read-byte bound",
+      )
+    })?;
+    self.remaining_read_bytes.set(remaining);
+    Ok(())
+  }
+}
+
+impl CapturedEntityLookupV1<'_> {
+  /// Geometry shared by full reads and opaque leaf references. This does not
+  /// assert that the referenced payload has been read or integrity-verified.
+  fn validate_reference_extent(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    let length = u64::from(locator.total_length);
     let end = locator
       .offset
       .checked_add(length)
@@ -179,13 +214,6 @@ impl FirstAuthorityEntityLookupV1 for CapturedEntityLookupV1<'_> {
         "captured entity is outside the selected data region",
       ));
     }
-    let remaining = self.remaining_read_bytes.get().checked_sub(length).ok_or_else(|| {
-      FirstAuthorityPublicationErrorV1::invalid(
-        "semantic_task_inventory_read_bound",
-        "captured inventory exhausted its total read-byte bound",
-      )
-    })?;
-    self.remaining_read_bytes.set(remaining);
     Ok(())
   }
 }

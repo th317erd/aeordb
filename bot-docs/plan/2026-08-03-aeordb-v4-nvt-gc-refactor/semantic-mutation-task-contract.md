@@ -682,3 +682,50 @@ publication remains refused until bounded source capture, durable complete typed
 closure, checkpoint/resume and atomic activation are independently qualified.
 Old codec-only task observations remain inspectable with their original semantics;
 no missing companion is turned into a fabricated empty source set or live permit.
+
+### Captured graph integration boundary — September19
+
+The source union, actual guard-bound node/copy staging and selected-task graph
+passed [one final-source three-platform qualification](evidence/user-facing-v4-u1-captured-task-integration-proof-20260919.json)
+on September19. This does not relax the
+remaining task-writer gate. The existing physical owner, captured KV boundary,
+canonical control readers, directory validators and semantic catalog codecs
+remain the sole owners of their respective representations.
+
+`visit_captured_semantic_task_physical_entries` is a bounded deep inspection:
+it binds the selected task/checkpoint/source pair, historical admitted base,
+staged namespace, current/pruning catalogs, output state and staged candidate.
+It validates ordinary file chunks and whole-file content without retaining a
+whole media body. Unknown supported dependency shapes remain retainable without
+inventing executor availability; archived module identity uses its existing
+content-fingerprint path, not the current alias. A staged candidate does not
+acquire invented RootAdmissionCommit evidence.
+
+`visit_captured_semantic_task_metadata_entries` shares that traversal but treats
+ordinary chunk payloads as opaque leaves, matching the ratified bounded-mark
+decision. Verified FileRecord references resolve through the same captured KV
+snapshot. Check key, role, minimum locator length and captured data-region
+geometry before presenting the reference. Missing or invalid locators refuse
+completion; nonempty files cannot omit every chunk reference. This operation
+does not read/decompress/hash ordinary chunk payloads or certify their health.
+`physical_reads`/`read_bytes` exclude these leaves; separate
+`opaque_chunk_references`/`opaque_chunk_bytes` describe them. Repeated edges
+remain repeated work, not an unbounded in-memory deduplication set.
+
+Both operations retain cancellation, cumulative read/work limits, bounded
+namespace ancestors/depth/path/chunk workspace and original callback failures.
+Callbacks run without the root/KV mutexes and are provisional until successful
+completion. Cancellation or pressure at the last callback still refuses a
+summary. Neither a successful summary nor a caller's accepted callback grants
+a durable GC mark, compiler resume/admission, namespace admission or activation
+permission. The capture must retain its existing staging protection.
+
+Source/control/catalog bodies still require their exact bounded readers. The
+metadata operation is consequently not a cheap commit-time validator, a global
+startup inventory optimization or the final spillable/checkpointed GC frontier.
+Those owners must preserve zero-content-read existing-chunk commits and the
+full bounded-mark contract during U2/U3/U5 integration. Resource qualification
+does not claim universal recovery from inherited inner allocation failures.
+Actual durable checkpoint publication, retention discovery across restart,
+compiler-owned cursor restoration and atomic task/generation/HEAD activation
+remain mandatory before ordinary task publication or capability advertisement.

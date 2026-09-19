@@ -2419,11 +2419,11 @@ struct SelectedNamespaceIdentityStateV1<'request> {
 }
 
 #[derive(Clone, Copy)]
-struct SelectedSemanticExpectedCountsV1 {
-  records: u64,
-  nodes: u64,
-  definitions: u64,
-  dependencies: u64,
+pub(super) struct SelectedSemanticExpectedCountsV1 {
+  pub(super) records: u64,
+  pub(super) nodes: u64,
+  pub(super) definitions: u64,
+  pub(super) dependencies: u64,
 }
 
 fn validate_selected_semantic_counts(
@@ -2459,7 +2459,7 @@ fn validate_selected_semantic_counts(
   Ok(())
 }
 
-fn validate_selected_semantic_walk(
+pub(super) fn validate_selected_semantic_walk(
   stats: SemanticCatalogWalkStatsV1,
   expected: SelectedSemanticExpectedCountsV1,
 ) -> Result<(), SemanticCatalogReadErrorV1> {

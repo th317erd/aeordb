@@ -3,6 +3,11 @@
 use super::*;
 #[path = "semantic_namespace_source_native.rs"]
 mod namespace_sources;
+pub use namespace_sources::NativeSemanticNamespaceSourceCursorV1;
+pub use namespace_sources::{
+  NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
+  NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,
+};
 pub use namespace_sources::{
   NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
   NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
@@ -45,7 +50,7 @@ pub struct NativeProtectedSemanticSourceV1<'a> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SemanticSourceKindV1 {
+pub(super) enum SemanticSourceKindV1 {
   Protected,
   Namespace,
 }
@@ -301,7 +306,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     }))
   }
 
-  fn read_source_chunk(
+  pub(super) fn read_source_chunk(
     &self,
     lookup: &impl FirstAuthorityEntityLookupV1,
     key: &[u8],

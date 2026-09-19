@@ -44,6 +44,15 @@ pub(super) fn fingerprint_chunk_representation(digest: &mut blake3::Hasher, enti
 }
 
 impl NativeProtectedSemanticSourceV1<'_> {
+  #[cfg(test)]
+  pub(in crate::engine::v4::first_authority) fn stage_retained_copy_metered(
+    &self,
+    bounds: NativeSemanticSourceReadBoundsV1,
+    publication_timestamp_ms: u64,
+  ) -> Result<(ImmutableEntityBatchPublicationReceiptV1, u64), NativeSemanticSourcePublicationErrorV1> {
+    self.stage_retained_copy_metered_observed(bounds, publication_timestamp_ms, || {}, &mut NoopFirstAuthorityDependencyObserverV1)
+  }
+
   /// Stage this exact original FileRecord under its content identity, sharing
   /// the original typed chunks. The source's live staging guard must remain
   /// held until a durable task takes ownership or the staged work is discarded.
@@ -65,6 +74,16 @@ impl NativeProtectedSemanticSourceV1<'_> {
     after_validation: impl FnOnce(),
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<ImmutableEntityBatchPublicationReceiptV1, NativeSemanticSourcePublicationErrorV1> {
+    self.stage_retained_copy_metered_observed(bounds, publication_timestamp_ms, after_validation, observer).map(|(receipt, _)| receipt)
+  }
+
+  pub(in crate::engine::v4::first_authority) fn stage_retained_copy_metered_observed(
+    &self,
+    bounds: NativeSemanticSourceReadBoundsV1,
+    publication_timestamp_ms: u64,
+    after_validation: impl FnOnce(),
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<(ImmutableEntityBatchPublicationReceiptV1, u64), NativeSemanticSourcePublicationErrorV1> {
     let capture = self._capture;
     check_cancelled(&capture.cancellation)?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
@@ -97,7 +116,7 @@ impl NativeProtectedSemanticSourceV1<'_> {
     {
       return Err(invalid("semantic_source_stage_regression", "source staging authority regressed behind its originating capture").into());
     }
-    self.validate_live_chunks(&fresh, bounds)?;
+    let validation_read_bytes = self.validate_live_chunks(&fresh, bounds)?;
     after_validation();
     check_cancelled(&capture.cancellation)?;
     // The original reader caps the FileRecord at4MiB. Charge the bounded
@@ -155,7 +174,10 @@ impl NativeProtectedSemanticSourceV1<'_> {
         receipts.push(ImmutableEntityPublicationReceiptV1 { key, write_sequence, idempotent: true });
         check_cancelled(&capture.cancellation)?;
         memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-        return Ok(ImmutableEntityBatchPublicationReceiptV1 { entities: receipts, observation: current, idempotent: true });
+        return Ok((
+          ImmutableEntityBatchPublicationReceiptV1 { entities: receipts, observation: current, idempotent: true },
+          validation_read_bytes,
+        ));
       }
     }
     // The private source object, not an arbitrary descriptor, authorizes this
@@ -164,6 +186,7 @@ impl NativeProtectedSemanticSourceV1<'_> {
     // later; never reinterpret a durable publication as an uncommitted refusal.
     publisher
       .publish_immutable_entity_batch_with_validation_locked(request, observer, ImmutableEntityValidationV1::CapturedProtectedSource)
+      .map(|receipt| (receipt, validation_read_bytes))
       .map_err(NativeSemanticSourcePublicationErrorV1::from)
   }
 
@@ -171,7 +194,7 @@ impl NativeProtectedSemanticSourceV1<'_> {
     &self,
     fresh: &NativeSemanticMutationInventoryV1<'_>,
     bounds: NativeSemanticSourceReadBoundsV1,
-  ) -> Result<(), SemanticMutationObservationErrorV1> {
+  ) -> Result<u64, SemanticMutationObservationErrorV1> {
     let lookup = fresh.source_lookup(bounds);
     let header = &fresh.header.selected.header;
     let mut fingerprint = chunk_representation_fingerprint(self.record.chunk_hashes.len());
@@ -211,6 +234,6 @@ impl NativeProtectedSemanticSourceV1<'_> {
     }
     check_cancelled(&fresh.cancellation)?;
     self._memory.check_admission()?;
-    Ok(())
+    Ok(bounds.maximum_read_bytes - lookup.remaining_read_bytes.get())
   }
 }

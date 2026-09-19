@@ -11,6 +11,13 @@ pub use build::{
 mod writer;
 pub use writer::{encode_semantic_source_capture_v1, encode_semantic_source_internal_v1, encode_semantic_source_leaf_v1};
 
+#[path = "semantic_source_path_workspace.rs"]
+mod path_workspace;
+pub use path_workspace::{
+  SemanticSourcePathWorkspaceBoundsV1, SemanticSourcePathWorkspaceStatisticsV1, SemanticSourcePathWorkspaceBuilderV1,
+  SemanticSourcePathWorkspaceV1, SemanticSourcePathCursorV1, SemanticSourcePathV1,
+};
+
 use super::hash::try_digest_parts;
 use super::reader::{FormatError, FormatResult, MalformedInputClass, fixed_array_at};
 use super::scope::validate_canonical_absolute_path;

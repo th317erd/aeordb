@@ -1,14 +1,17 @@
 //! Actual native captured pairs, not a mock alias resolver or executor test.
 use super::*;
+use super::plugin_fixtures as fixtures;
 #[path = "native_plugin_source_lifecycle_spec.rs"]
 mod lifecycle;
 #[path = "native_alias_snapshot_spec.rs"]
 mod prepared;
+#[path = "native_selected_plugin_source_spec.rs"]
+mod selected;
+#[path = "native_selected_plugin_source_boundary_spec.rs"]
+mod selected_boundary;
 #[path = "native_plugin_source_validation_spec.rs"]
 mod validation;
 use crate::engine::v4::semantic_source_capture::SemanticSourceAliasRoleV1;
-#[path = "plugin_artifact_identity_fixtures.rs"]
-mod fixtures;
 
 fn plugin_bounds() -> NativeSemanticPluginSourceBoundsV1 {
   NativeSemanticPluginSourceBoundsV1 {

@@ -16,6 +16,7 @@ pub use catalog_encoding::{encode_semantic_catalog_internal, encode_semantic_cat
 
 #[path = "namespace_definition.rs"]
 mod definition_encoding;
+pub(crate) use definition_encoding::validated_semantic_identity;
 pub use definition_encoding::{EncodedSemanticDefinitionObjectV1, encode_semantic_definition_object};
 
 const DIRECTORY_HEADER_LENGTH: usize = 32;

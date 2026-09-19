@@ -1,5 +1,6 @@
 //! Read-only captured catalog observations, never publication or GC permits.
 use super::*;
+use std::cell::RefCell;
 use crate::engine::directory_entry::ChildEntry;
 use crate::engine::v4::namespace_seek::{namespace_seek_workspace_bytes_v1, seek_namespace_child_v1, NamespaceSeekFailureV1};
 use crate::engine::v4::semantic_source_capture::{decode_semantic_source_capture_binding_v1, decode_semantic_source_capture_v1};
@@ -55,6 +56,31 @@ pub struct SemanticSourceCatalogSummaryV1 {
 }
 
 impl NativeSemanticMutationInventoryV1<'_> {
+  /// Stream provisional physical entries for one complete source-capture branch.
+  /// This is not selected task, namespace, resume or complete GC authority.
+  /// Entries may repeat and are visited before payload validation. Only complete
+  /// success validates the whole branch; an error invalidates all prior visits.
+  pub fn visit_captured_source_physical_entries(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticSourceCatalogBoundsV1,
+    mut visitor: impl FnMut(&KVEntry) -> Result<(), SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticSourceCatalogSummaryV1, SemanticMutationObservationErrorV1> {
+    let observer = CatalogPhysicalVisitorV1 {
+      visitor: RefCell::new(&mut visitor),
+      failure: RefCell::new(None),
+      cancellation: &self.cancellation,
+      memory: &self._memory,
+    };
+    let result =
+      self.visit_captured_protected_source_pairs_observed(task_id, checkpoint_sequence, bounds, Some(&observer), |_, _, _| Ok(true));
+    match observer.failure.into_inner() {
+      Some(original) => Err(original),
+      None => result,
+    }
+  }
+
   pub fn read_captured_protected_source(
     &self,
     task_id: &[u8; 16],
@@ -63,7 +89,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     path: &str,
     bounds: NativeSemanticSourceCatalogBoundsV1,
   ) -> Result<NativeSemanticSourceLookupV1<'_>, SemanticMutationObservationErrorV1> {
-    let operation = CatalogReadOperationV1::new(self, bounds)?;
+    let operation = CatalogReadOperationV1::new(self, bounds, None)?;
     protected_sources::validate_source_path(path, operation.algorithm())?;
     let companion = operation.load_companion(task_id, checkpoint_sequence)?;
     let manifest = decode_semantic_source_capture_v1(&companion.bytes, operation.algorithm())?;
@@ -92,13 +118,28 @@ impl NativeSemanticMutationInventoryV1<'_> {
     task_id: &[u8; 16],
     checkpoint_sequence: u64,
     bounds: NativeSemanticSourceCatalogBoundsV1,
+    visitor: impl FnMut(
+      &str,
+      Option<&NativeProtectedSemanticSourceV1<'_>>,
+      Option<&NativeProtectedSemanticSourceV1<'_>>,
+    ) -> Result<bool, SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticSourceCatalogSummaryV1, SemanticMutationObservationErrorV1> {
+    self.visit_captured_protected_source_pairs_observed(task_id, checkpoint_sequence, bounds, None, visitor)
+  }
+
+  fn visit_captured_protected_source_pairs_observed(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticSourceCatalogBoundsV1,
+    observer: Option<&dyn CatalogPhysicalEntryObserverV1>,
     mut visitor: impl FnMut(
       &str,
       Option<&NativeProtectedSemanticSourceV1<'_>>,
       Option<&NativeProtectedSemanticSourceV1<'_>>,
     ) -> Result<bool, SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticSourceCatalogSummaryV1, SemanticMutationObservationErrorV1> {
-    let operation = CatalogReadOperationV1::new(self, bounds)?;
+    let operation = CatalogReadOperationV1::new(self, bounds, observer)?;
     let companion = operation.load_companion(task_id, checkpoint_sequence)?;
     let manifest = decode_semantic_source_capture_v1(&companion.bytes, operation.algorithm())?;
     let mut base = SourceCatalogCursorV1::new(manifest.base_source_catalog, bounds.maximum_depth)?;
@@ -146,12 +187,49 @@ impl NativeSemanticMutationInventoryV1<'_> {
   }
 }
 
-struct CatalogLookupV1<'a> {
-  captured: CapturedEntityLookupV1<'a>,
-  remaining_work: Cell<u64>,
+trait CatalogPhysicalEntryObserverV1 {
+  fn observe(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1>;
 }
 
-impl CatalogLookupV1<'_> {
+type CatalogPhysicalCallbackV1<'a> = dyn FnMut(&KVEntry) -> Result<(), SemanticMutationObservationErrorV1> + 'a;
+
+struct CatalogPhysicalVisitorV1<'a> {
+  visitor: RefCell<&'a mut CatalogPhysicalCallbackV1<'a>>,
+  failure: RefCell<Option<SemanticMutationObservationErrorV1>>,
+  cancellation: &'a CancellationToken,
+  memory: &'a MemoryReservation,
+}
+
+impl CatalogPhysicalEntryObserverV1 for CatalogPhysicalVisitorV1<'_> {
+  fn observe(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    let result: Result<(), SemanticMutationObservationErrorV1> = (|| {
+      check_cancelled(self.cancellation)?;
+      self.memory.check_admission()?;
+      {
+        let mut visitor = self.visitor.borrow_mut();
+        visitor(locator)?;
+      }
+      check_cancelled(self.cancellation)?;
+      self.memory.check_admission()?;
+      Ok(())
+    })();
+    if let Err(original) = result {
+      *self.failure.borrow_mut() = Some(original);
+      // The existing physical read trait carries its own error type. Preserve
+      // the actual callback/admission cause for the public boundary above.
+      return Err(FirstAuthorityPublicationErrorV1::invalid("semantic_source_physical_visitor", "physical entry visitor refused"));
+    }
+    Ok(())
+  }
+}
+
+struct CatalogLookupV1<'a, 'observer> {
+  captured: CapturedEntityLookupV1<'a>,
+  remaining_work: Cell<u64>,
+  observer: Option<&'observer dyn CatalogPhysicalEntryObserverV1>,
+}
+
+impl CatalogLookupV1<'_, '_> {
   fn charge_work(&self) -> Result<(), FirstAuthorityPublicationErrorV1> {
     let remaining = self.remaining_work.get().checked_sub(1).ok_or_else(|| {
       FirstAuthorityPublicationErrorV1::invalid("semantic_source_catalog_work_bound", "source catalog exhausted its cumulative work bound")
@@ -161,7 +239,7 @@ impl CatalogLookupV1<'_> {
   }
 }
 
-impl FirstAuthorityEntityLookupV1 for CatalogLookupV1<'_> {
+impl FirstAuthorityEntityLookupV1 for CatalogLookupV1<'_, '_> {
   fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
     self.captured.get(key)
   }
@@ -170,14 +248,18 @@ impl FirstAuthorityEntityLookupV1 for CatalogLookupV1<'_> {
   }
   fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
     self.charge_work()?;
-    self.captured.admit_read(locator)
+    self.captured.admit_read(locator)?;
+    if let Some(observer) = self.observer {
+      observer.observe(locator)?;
+    }
+    Ok(())
   }
 }
 
-struct CatalogReadOperationV1<'a> {
+struct CatalogReadOperationV1<'a, 'observer> {
   capture: &'a NativeSemanticMutationInventoryV1<'a>,
   bounds: NativeSemanticSourceCatalogBoundsV1,
-  lookup: CatalogLookupV1<'a>,
+  lookup: CatalogLookupV1<'a, 'observer>,
   _memory: MemoryReservation,
 }
 
@@ -186,10 +268,11 @@ struct CatalogCompanionV1 {
   _memory: MemoryReservation,
 }
 
-impl<'a> CatalogReadOperationV1<'a> {
+impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
   fn new(
     capture: &'a NativeSemanticMutationInventoryV1<'a>,
     bounds: NativeSemanticSourceCatalogBoundsV1,
+    observer: Option<&'observer dyn CatalogPhysicalEntryObserverV1>,
   ) -> Result<Self, SemanticMutationObservationErrorV1> {
     check_cancelled(&capture.cancellation)?;
     capture._memory.check_admission()?;
@@ -222,6 +305,7 @@ impl<'a> CatalogReadOperationV1<'a> {
         remaining_read_bytes: Cell::new(bounds.maximum_read_bytes),
       },
       remaining_work: Cell::new(bounds.maximum_work),
+      observer,
     };
     Ok(Self { capture, bounds, lookup, _memory: memory })
   }

@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::kv_stages::initial_block_size;
-use aeordb::engine::v4::database_header::{DATABASE_HEADER_V4_DATA_OFFSET, DatabaseHeaderV4, encode_database_header_slot};
+use aeordb::engine::v4::database_header::{encode_database_header_slot, DatabaseHeaderV4, DATABASE_HEADER_V4_DATA_OFFSET};
 use aeordb::engine::v4::first_authority::{FirstAuthorityPublicationRequestV1, PreparedNamespaceTreeV0, V4FirstAuthorityPublisher};
 use aeordb::engine::v4::hash::digest_parts;
-use aeordb::engine::v4::namespace::{SemanticAvailabilityV1, SemanticStateWriteV1, encode_semantic_state_object};
+use aeordb::engine::v4::namespace::{encode_semantic_state_object, SemanticAvailabilityV1, SemanticStateWriteV1};
 use aeordb::engine::v4::root_authority::decode_root_admission_commit;
 use aeordb::engine::{DiskKVStore, HashAlgorithm};
 
@@ -209,6 +209,65 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   staging_consumers.sort();
   assert_eq!(staging_consumers, [&semantic_catalog_native_path, &semantic_mutation_inventory_path, &staging_protection_path]);
   let inventory_source = std::fs::read_to_string(&semantic_mutation_inventory_path).unwrap();
+  for name in ["semantic_task_graph_native.rs", "semantic_task_namespace_graph.rs", "semantic_task_catalog_graph.rs"] {
+    let graph = std::fs::read_to_string(source_root.join("engine/v4").join(name)).unwrap();
+    for forbidden in [
+      "StorageEngine",
+      "DiskKVStore",
+      "File::open",
+      "File::create",
+      "OpenOptions",
+      "write_file",
+      "sync_file",
+      "publish_",
+      "lock_kv",
+      "capture_settled_snapshot",
+      "HashSet",
+      "HashMap",
+      "BTreeMap",
+      "BTreeSet",
+      "next_namespace_child_by_path_v1",
+      "decompress_bounded",
+      "unwrap(",
+      "expect(",
+    ] {
+      assert!(!graph.contains(forbidden), "captured task graph gained an independent/unbounded owner: {name}: {forbidden}");
+    }
+  }
+  let graph = std::fs::read_to_string(source_root.join("engine/v4/semantic_task_graph_native.rs")).unwrap();
+  for required in [
+    "complete_semantic_mutation_observation(",
+    "load_namespace_authority_from_lookup(",
+    "visit_captured_source_physical_entries(",
+    "remaining_read_bytes",
+    "failure.borrow_mut().take()",
+    "checkpoint.pruning_catalog_root",
+    "checkpoint.candidate_namespace_root",
+  ] {
+    assert!(graph.contains(required), "captured task graph omitted a shared owner or checkpoint branch: {required}");
+  }
+  let namespace_graph = std::fs::read_to_string(source_root.join("engine/v4/semantic_task_namespace_graph.rs")).unwrap();
+  for required in [
+    "decode_validated_selected_directory_node(",
+    "validate_selected_file_record_metadata(",
+    "read_source_chunk(",
+    "IncrementalDigestV1",
+    "NamespaceCharge",
+    "maximum_namespace_workspace_bytes",
+  ] {
+    assert!(namespace_graph.contains(required), "captured task namespace lost a bounded shared reader: {required}");
+  }
+  let catalog_graph = std::fs::read_to_string(source_root.join("engine/v4/semantic_task_catalog_graph.rs")).unwrap();
+  for required in [
+    "SemanticCatalogReaderV1::new(",
+    "reader.with_definition(",
+    "validated_semantic_identity(",
+    "validate_selected_semantic_walk(",
+    "plugin_artifact_path_v1(",
+    "source.body().chunks(64 << 10)",
+  ] {
+    assert!(catalog_graph.contains(required), "captured task catalog lost its typed closure owner: {required}");
+  }
   let inventory: String = inventory_source.split_whitespace().collect();
   for required in [
     "_protection:&'aNativeStagingProtectionV1<'a>",
@@ -332,7 +391,18 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(plugin_pair.contains(required), "native plugin pair lost its single captured source owner: {required}");
   }
   assert_eq!(plugin_pair.matches("self.source_lookup(").count(), 1);
-  assert_eq!(plugin_pair.matches("self.read_source_from_lookup(").count(), 2);
+  // Current selection supplies one shared lookup; both selected inputs pass
+  // through the same pair owner and must belong to this exact capture/path.
+  assert_eq!(plugin_pair.matches("self.read_source_from_lookup(").count(), 1);
+  for required in [
+    "self.read_plugin_sources_with_selected_reader(",
+    "read_source(&alias_path,alias_bounds)?",
+    "read_source(&artifact_path,source_bounds)?",
+    "std::ptr::eq(source._capture,self)",
+    "source.record().path!=path",
+  ] {
+    assert!(plugin_pair.contains(required), "selected plugin inputs lost their shared capture boundary: {required}");
+  }
   for forbidden in [
     "StorageEngine",
     "V4FirstAuthorityPublisher",
@@ -440,6 +510,104 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     .filter(|path| std::fs::read_to_string(path).unwrap().contains("ImmutableEntityValidationV1::CapturedProtectedSource"))
     .collect();
   assert_eq!(captured_source_publishers, [&source_staging_path]);
+  let node_staging_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_control_staging.rs")).unwrap();
+  let node_staging: String = node_staging_source.split_whitespace().collect();
+  for required in [
+    "implNativeSemanticMutationInventoryV1<'_>",
+    "request.encoded_nodes.len()>2",
+    "SystemControlKindV1::SemanticSourceNode",
+    "decode_system_control(",
+    "control.database_id!=captured_header.database_id",
+    "MemoryOwner::Task",
+    "AdmissionClass::Maintenance",
+    "publisher.root_state.lock()",
+    "authority.staging_accounting_failed",
+    "authority.active_staging_protections==0",
+    "header.physical_instance_id!=captured_header.physical_instance_id",
+    "header.writer_fence_epoch!=captured_header.writer_fence_epoch",
+    "header.slot_sequence<captured_header.slot_sequence",
+    "header.write_sequence_high_water<captured_header.write_sequence_high_water",
+    "capability_bit::SEMANTIC_MUTATION_TASK_V1",
+    "capability_bit::SEMANTIC_SOURCE_CAPTURE_V1",
+    "load_canonical_system_file_at_path(",
+    "prepare_system_control_file_record(",
+    "existing.record.created_at,existing.record.updated_at",
+    "entity.stored_value!=item.record_value",
+    "ifexisting_receipts.len()==controls.len(){returnOk(",
+    "publish_immutable_entity_batch_with_validation_locked(",
+    "ImmutableEntityValidationV1::PrevalidatedSystemFiles",
+    "translate_immutable_system_control_receipt(",
+    "ImmutableEntityBatchPublicationErrorV1::Committed",
+    "try_reserve_exact(",
+  ] {
+    assert!(node_staging.contains(required), "source node staging lost its bounded shared-owner boundary: {required}");
+  }
+  for forbidden in [
+    "OpenOptions",
+    "File::open",
+    "File::create",
+    "write_file",
+    "sync_file",
+    ".flush(",
+    "FileRecord::serialize",
+    "FileRecord::deserialize",
+    "encode_whole_entity",
+    "RootReadAdmission",
+    "publish_mutable",
+    "publish_successor",
+    "SystemControlKindV1::SemanticMutationTask",
+    "SystemControlKindV1::SemanticMutationCheckpoint",
+    "SystemControlKindV1::SemanticSourceCapture",
+    "HashMap",
+    "HashSet",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!node_staging.contains(forbidden), "source node staging gained another writer/parser/authority path: {forbidden}");
+  }
+  let owned_staging = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_capture_staging.rs")).unwrap();
+  let owned_staging: String = owned_staging.split_whitespace().collect();
+  for required in [
+    "union:NativeSemanticSourceUnionV1<'a>",
+    "_memory:MemoryReservation",
+    "self.prepare_semantic_source_union(",
+    "self.stage_semantic_source_nodes_observed(",
+    "source.stage_retained_copy_metered_observed(",
+    "remaining.min(source_bounds.maximum_read_bytes)",
+    "maximum_validation_read_bytes.checked_sub(next.validation_read_bytes)",
+    "maximum_source_copy_attempts",
+    "maximum_payload_bytes",
+    "current.checked_add(amount).filter(|next|*next<=maximum)",
+    "check_cancelled(&self.cancellation)?;memory.check_admission()",
+  ] {
+    assert!(owned_staging.contains(required), "owned source staging lost its bounded existing sink: {required}");
+  }
+  for forbidden in [
+    "OpenOptions",
+    "File::",
+    "lock_kv(",
+    "root_state.lock(",
+    "publish_immutable",
+    "publish_mutable",
+    "publish_successor",
+    "capture_settled_snapshot(",
+    "FileRecord::",
+    "decode_whole_entity",
+    "serde_json",
+    "RootReadAdmission",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!owned_staging.contains(forbidden), "owned source staging gained another authority/schema/unbounded owner: {forbidden}");
+  }
+  assert_eq!(owned_staging.matches("self.prepare_semantic_source_union(").count(), 1);
+  assert_eq!(staging.matches("self.validate_live_chunks(&fresh,bounds)?;").count(), 1);
+  assert!(staging.contains("Ok(bounds.maximum_read_bytes-lookup.remaining_read_bytes.get())"));
   let catalog_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_native.rs")).unwrap();
   let catalog: String = catalog_source.split_whitespace().collect();
   for required in [
@@ -450,9 +618,15 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "decode_semantic_source_capture_binding_v1(",
     "seek_namespace_child_v1(",
     ".read_source_from_lookup(",
+    "self.visit_captured_protected_source_pairs_observed(",
+    "matchobserver.failure.into_inner(){Some(original)=>Err(original),None=>result,}",
+    "self.captured.admit_read(locator)?;ifletSome(observer)=self.observer{observer.observe(locator)?;}",
+    "check_cancelled(self.cancellation)?;self.memory.check_admission()?;{letmutvisitor=self.visitor.borrow_mut();visitor(locator)?;}check_cancelled(self.cancellation)?;self.memory.check_admission()?;",
   ] {
     assert!(catalog.contains(required), "native source catalog lost captured/shared ownership: {required}");
   }
+  assert_eq!(catalog.matches("letmutbase=SourceCatalogCursorV1::new(").count(), 1);
+  assert_eq!(catalog.matches("letmutrequested=SourceCatalogCursorV1::new(").count(), 1);
   let cursor_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_cursor.rs")).unwrap();
   let cursor: String = cursor_source.split_whitespace().collect();
   for required in
@@ -477,6 +651,8 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       "FileRecord::deserialize",
       "FileRecord::serialize",
       "next_namespace_child_by_path_v1",
+      "BTreeMap",
+      "BTreeSet",
       "node.serialize(",
     ] {
       assert!(!source.contains(forbidden), "read-only source catalog gained another authority/decoder/unbounded path: {forbidden}");
@@ -484,8 +660,86 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   }
   let source_reader = std::fs::read_to_string(&semantic_source_native_path).unwrap();
   let source_reader: String = source_reader.split_whitespace().collect();
+  let union_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_union_native.rs")).unwrap();
+  let union_source: String = union_source.split_whitespace().collect();
+  for required in [
+    "read_source_base_from_lookup(request.expected_base_root,&operation.namespace.lookup,",
+    "NamespaceSourceStateV1",
+    "namespace:NamespaceSourceOperationV1",
+    "visit_semantic_source_aliases_v1(",
+    "read_plugin_sources_with_selected_reader(",
+    "forrequestedin[false,true]",
+    "build_semantic_source_catalog_pair_v1(",
+    "fingerprint_semantic_mutation_sources_v1(",
+    "SemanticSourcePathWorkspaceBuilderV1::new(",
+    "finish_bridge(",
+    "*failure=Some(error)",
+    "maximum_alias_occurrences",
+    "self.namespace.lookup.charge_work(1)",
+    "self.replacements.partition_point(",
+  ] {
+    assert!(union_source.contains(required), "complete source union lost shared bounded ownership: {required}");
+  }
+  assert_eq!(union_source.matches("NamespaceSourceOperationV1::new(").count(), 1);
+  for forbidden in [
+    "StorageEngine",
+    "DiskKVStore",
+    "OpenOptions",
+    "File::",
+    "lock_kv(",
+    "capture_settled_snapshot(",
+    "capture_semantic_mutation_inventory(",
+    "source_lookup(",
+    "open_namespace_configuration_cursor(",
+    "load_selected_semantic_authority(",
+    "read_protected_source(",
+    "publish_",
+    "write_file",
+    "stage_retained_copy(",
+    "FileRecord::deserialize",
+    "FileRecord::serialize",
+    "node.serialize(",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!union_source.contains(forbidden), "complete source union gained an independent owner/fallback/decoder: {forbidden}");
+  }
   let namespace_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_namespace_source_native.rs")).unwrap();
   let namespace_source: String = namespace_source.split_whitespace().collect();
+  for required in [
+    "whileletSome(source)=cursor.next_source()?",
+    "operation:NamespaceSourceOperationV1",
+    "stack:Vec<NamespaceDirectoryFrameV1>",
+    "Err(error)=>{self.failed=true;Err(error)}",
+  ] {
+    assert!(namespace_source.contains(required), "pausable namespace traversal lost its bounded owner: {required}");
+  }
+  let workspace_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_path_workspace.rs")).unwrap();
+  let workspace: String = workspace_source.split_whitespace().collect();
+  for required in [
+    "create_private_regular_file(",
+    "validate_private_regular_file(",
+    "secure_platform_private_directory(",
+    "ensure_capacity(",
+    "try_reserve_exact(",
+    "maximum_sort_bytes",
+    "maximum_stored_bytes",
+    "maximum_io_bytes",
+    "merge_fan_in",
+    "AtomicU64",
+    "MemoryReservation",
+    "tempfile::TempDir",
+  ] {
+    assert!(workspace.contains(required), "source-path workspace lost resource or private-file accounting: {required}");
+  }
+  for forbidden in ["StorageEngine", "V4FirstAuthorityPublisher", "DiskKVStore", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "unsafe"] {
+    assert!(!workspace.contains(forbidden), "source-path ordering gained a database owner or unbounded collection: {forbidden}");
+  }
   for required in [
     "snapshot:&capture.snapshot",
     "read_entity_bounded(",

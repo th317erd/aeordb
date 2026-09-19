@@ -26,6 +26,439 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,14:00UTC: the combined captured-task prerequisite passed all final
+Linux/macOS/Windows gates on the exact59-input manifest. Windows finished
+13:54:24 and was sealed13:56:14; all raw platform evidence is local. Strict
+source/resource/executable verification passed and produced the
+[three-platform proof](../evidence/user-facing-v4-u1-captured-task-integration-proof-20260919.json).
+Linux/macOS each passed253narrow,1991affected,1004library and185reference tests;
+Windows passed253narrow,1984affected,1019library and185reference tests. Required
+format/static/contracts gates passed, including502 independent fixture cases.
+The proof checker initially conflated18 union cases with2 additional staging
+cases; it now checks both groups separately, without changing runtime or tests.
+This qualifies captured source preparation/staging and read-only task graph
+inspection, not durable task selection, resume, GC marking or activation.
+
+The separate receipt candidate passed all6targeted functions13:45:42, including
+four replacement/original-error combinations and exact reopened retries.
+Its audit preserves all1501identities/reviews. Final62-input receipt manifest
+`4c5bf0022b47189017fd44e488c3433ffff0a1faba810e01ea05241be2397845`
+is running Linux broad qualification; native-platform launch is in progress.
+It adds the active-pointer authority suite to the inherited124affected targets.
+The main prerequisite source remains unchanged pending its milestone commit.
+No production, service or installation actions occurred. U1 and U2-U7 remain open.
+
+September19,13:44UTC: Windows affected suite passed13:40:44; library is running.
+Linux/macOS final59 evidence remains sealed and locally verified. The separate
+receipt investigation reproduced all three suspected boundaries without changing
+runtime: RED1 lost receipts on generic/index readback (0/2,13:24:18), RED2 lost
+the receipt after committed retirement (0/1,13:32:46), and RED3 reproduced that
+active-pointer path at32/64bytes plus the original control case (0/3,13:38:21).
+All21raw failure artifacts are local and strictly verified. Candidate1 changes
+only the existing mutable-control and active-pointer post-commit error handling,
+preserving earlier tests and adding exact reopen/retry/error-priority coverage.
+It is being launched in separate scratch; main59source remains unchanged.
+No correction success or full three-platform completion is claimed yet.
+
+September19,13:23UTC: final59 Linux and macOS passed all nine stages, finishing
+13:20:00 and13:16:53 respectively. Each passed253narrow,1991affected,1004library
+and185reference tests, plus format/strictClippy/audit/contracts/debt gates.
+Both were sealed13:20:25; all132raw artifacts are local and strict source-bound
+validation passed. Windows narrow passed13:04:41; affected continues at13:20
+with safe42.48GBsystem/51.42GBtest free and13.10GBfreeRAM. Full three-platform
+proof remains pending. Main59source is frozen and upstream still matches HEAD
+after13:22fetch. A separate61-input test-only receipt RED packet now targets
+the shared mutable-control post-commit readback classification; it adds no
+runtime changes or task-publication permission. Its manifest is
+`9d42490789ea088e66c364778f38fb4bbab250d8aa8f5295ca24af1f55cc9731`.
+It may run only after the finished Linux evidence is sealed and copied, which
+has now been verified. No failing result is claimed before actual execution.
+
+September19,13:02UTC: metadata candidate3 passed all24graph tests12:47:33;
+all seven artifacts are local and strictly source/resource/binary verified.
+The audit retains exactly1,501identities/reviews. The reviewed combined source
+is now integrated in the main checkout; all59inputs match the candidate plus
+refreshed audit byte-for-byte. The final manifest is
+`e761875c64cf82c4f88bb5ffb4b6459fb26ace82967e06c82be345954eed58d7`.
+Final1 was launched on Linux, macOS and native Windows around13:01; launch
+receipts succeeded, but no final-stage result is yet claimed. Existing resource,
+timeout, format/static, reference, contract and affected-suite gates remain.
+The prepared combined verifier will not create completion evidence before all
+three exact-source runs and local raw artifacts pass. This supersedes the old
+32-input qualification packaging, not any missing platform obligation.
+
+September19,12:46UTC: metadata RED1 failed both intended tests12:26:09;
+candidate1 then passed all23graph targets12:34:04. Both raw packets are local
+and strictly verified. Review added one independent nonempty-file/zero-chunks
+case over unchanged runtime; candidate2 failed it12:39:44, accepting malformed
+metadata. All seven artifacts are local. Candidate3 adds only the missing
+reference-presence check; all tests remain unchanged. Its24-target run is
+starting; broad/platform qualification is not yet claimed.
+Mac12:30 is reachable again through both routes. The next final platform wave
+will qualify the combined59-input source rather than run a now-stale32-input
+Mac candidate first. Earlier32-input Linux/Windows results remain immutable
+partial evidence, not a completed three-platform qualification. The combined
+wave retains every preceding gate and adds dependency_catalog_identity_spec
+(124affected targets plus the separate5-target narrow gate). Main still holds
+the exact32-input source pending candidate3 and audit validation. Upstream
+matched HEADa1f0b3ed at12:35fetch; no service or production action occurred.
+
+September19,12:23UTC: selected-task graph qualification1 completed successfully
+at12:16:13 on C6's exact58-input packet:1,584tests (997library plus587 across
+22affected targets), formatting, workspace/all-target strictClippy and unchanged
+1,501audit identities. All29raw artifacts are local; the strict source-bound
+verifier passed. Native platforms and durable lifecycle integration remain owed.
+Review found the ratified bounded-mark decision (`.codex/conversation.md:1954`)
+requires opaque ordinary payload leaves. Current graph traversal is a deep
+integrity inspection, not a suitable default GC traversal. Preserve its tests;
+add an explicit shared metadata traversal with captured-reference/extent checks,
+separate read/reference accounting and no ordinary chunk payload reads. This
+does not make the entire task graph a durable GC frontier or a commit validator.
+Protected source/semantic bodies still require their exact existing readers;
+final GC integration must separately respect its streamed/checkpointed contract.
+
+September19,12:08UTC: all17selected-task reader targets passed12:00:57;
+all seven artifacts are local and strictly verified. The tests cover captured,
+compiling, pruning, ready and activated checkpoints; historical complete base;
+exact physical sets; late damaged/missing edges; source/output binding; budgets,
+interruption/allocation retry; linear wide traversal; B-tree ranges; and raw/
+compressed v0/v1 streamed files. C4's final failure was an unstaged fixture state;
+C5 supplied that dependency before publishing the historical root.
+C6 changes only one assertion's repository-edition formatting, manifest
+`6a97572f3df70e55efe0bf4a031624abf78d7014b10d1b643639b5bd0a1a1e1a`.
+The full library+22affected suites, formatting, Clippy and audit are running.
+This does not qualify durable mark/reclamation, task publication, resume or
+activation. Mac12:00 remains unreachable; native qualification is not waived.
+Main32-input source remains exact and upstream matched after12:02fetch.
+
+September19,11:56UTC: C2 ran eight tests, with3passes/5failures caused by
+overlapping scratch reservations. C3 defers graph decode scratch until the
+source traversal has released its own workspace; the unchanged tests reached
+6passes/2failures. The remaining failures were fixture setup: a fixed-width
+state in the SHA-512 case and a supposedly later ASMT sequence2 below original7.
+Both failure packets are local and strictly verified. C4 corrects those fixture
+inputs without changing assertions or runtime and adds seven phase/resource
+targets; its57-input manifest is
+`a2c0db60b9494f4c61b4214c4eb4bb4fe50e6cf9ead145de81a17a0ec0cb1f4d`.
+The fifteen-target run is active. B-tree/streamed-media drafts and full affected,
+static, audit and native-platform qualification remain outstanding.
+
+September19,11:42UTC: the selected-task RED1 run failed both intended tests
+at11:11:58; all seven artifacts are local and strictly verified. Candidate1
+stopped at compilation11:30:47 because the catalog branch lacked an enum import;
+no tests ran. All seven failure artifacts are preserved and verified. Candidate2
+changes only that import, preserving all original tests and other55inputs:
+`f432e0bdbee7bd26bd3b475a529c4fae67023aab451f03c0e2e6c173cb6e338e`.
+The eight initial targets are running. Later-phase/corruption/binding targets
+are drafted but not registered or executed. Runtime graph branches are present,
+not yet qualified; task publication and production operations remain disabled.
+
+September19,11:11UTC: shared captured-root preflight passed formatting,
+strict Clippy and the1,501-identity audit by11:01:44; all22raw artifacts are
+local and strictly verified. A50-input selected-task graph RED1 packet is now
+running, manifest`f2f0c1f8fdd780cc8de4126e6a5a9861c2ea004e7848fab39d55f074855c32de`.
+It adds a refusing read-only entry and two actual-file composition targets,
+preserving all48parent inputs except module/type registration. No graph
+implementation is claimed yet. The tests combine selected task/source controls,
+historical admitted base, staged ordinary file/link and released/absent cases.
+Compiling/pruning/output/module branches and full fault/resource coverage remain
+required before any completed graph claim. Task publication is still disabled.
+
+September19,11:00UTC: captured namespace authority candidate1 passed all
+1,417tests at10:56:26 (980library and437affected); all seven raw artifacts are
+local and strictly verified. Its48-input manifest is
+`623a42e553f1debde71446dc6e3d49bd44dbca67b5c51b8f756869a020b84eaf`.
+The runtime change is a mechanically checked extraction of the existing reader;
+seven new cases cover captured historical roots and failure boundaries. Static
+preflight1 is active under invocation88e6515ae98349af831a9ffe65742a59.
+The full recursive task graph and publication/recovery remain outstanding.
+Mac11:00still timed out through both routes; no platform gate has been waived.
+
+September19,10:43UTC: corrected physical-entry qualification passed1,393tests
+at10:34:51 and formatting/Clippy/audit by10:38:02. All29raw artifacts are local
+and strictly verified. The audit inventory is byte-identical to the earlier
+staging inventory, with1,501identities/reviews unchanged. The next arbitrary-root
+reader's47-input RED1 packet is
+`392be5cb52847eefe4d25d9aee3447975b6fcddca2d4e1d5bd2f420be403a49c`.
+It contains only a refusing private helper, a scoped captured test harness and
+two positive tests over the unchanged foundation. The failing-first run is
+being launched; five boundary drafts remain unregistered. No new public API,
+task publication or recursive closure result is claimed. Upstream/main still
+matcha1f0b3ed after10:35fetch; main32inputs remain exact. Mac10:30timed out
+through both routes; its qualification gate remains open.
+
+September19,10:30UTC: all1,393physical-entry/affected tests passed10:19:43;
+all seven raw artifacts are local and verified. Static preflight passed
+formatting but failed strict Clippy on the callback field's type complexity.
+All15failure artifacts are preserved locally. Candidate3 adds only a private
+callback type alias; the other45inputs are unchanged and original-reader
+extraction still passes. Its46-input manifest is
+`feeb567bab5cfc158a57499870b4753bab57300a96a08eade92ec1a4de9a5b32`.
+The full affected/static/audit rerun is being launched. The next arbitrary-root
+lookup extraction has two drafted positive tests and a refusing private helper
+in a separate overlay; no implementation or execution is claimed for it yet.
+
+September19,10:18UTC: the physical-entry implementation passed all1,386tests
+at10:08:03; all seven raw artifacts are local and strictly verified. Candidate2
+adds seven boundary tests and architecture assertions without changing runtime
+or either original target. Its46-input manifest is
+`d76210c82396e7f2ffedc6e5538faa0da73d7dfb6b827a26b7544c1eb96a6683`.
+The973library+420affected run is active. Formatting/Clippy/audit preflight is
+prepared, not executed. Native task publication/recovery/retention remain open.
+
+September19,10:05UTC: physical-entry RED1 actually failed both intended
+targets09:53:03; all seven artifacts are local and verified. Candidate1 adds
+the optional observer to the existing paired traversal. Exact extraction checks
+restore the entire previous reader and cursor; all43other inputs are unchanged.
+Its45-input manifest is
+`feba2c94abcf03edb33fe1efa5ef0849dd1aebd6ff08f4bbf2bb4dd209baa69f`.
+The966library+420affected run is active. Seven additional boundary tests remain
+drafts, not execution evidence. Mac is still unreachable10:00 through both routes.
+
+September19,09:52UTC: corrected staging preflight passed1,384tests09:43:53
+and all static/audit checks09:46:36. All29raw artifacts are local and strictly
+verified; the1,501audit identities/reviews remain unchanged. The next isolated
+physical-entry reader's45-input RED1 manifest is
+`2b076c76ba328fd74ce29d2705ead57efbec7de4aa38c0cf6fc9ce67c872846e`.
+Only a refusing method and two positive targets are added to the unchanged
+foundation. Their failing-first run is being launched; no traversal implementation
+or successful source-retention result is claimed yet.
+
+September19,09:40UTC: formatting passed; strict Clippy found one unnecessary
+unwrap in the original positive fixture09:32:42. All15failure artifacts are
+local and verified. Candidate3 replaces only that test's checked unwrap with a
+match; all runtime bytes remain unchanged. Its41-input manifest is
+`5db65bdc62f65d25b440aa612d3ade25f5dfa3fe63c3d2316ffe08560b4ebb05`.
+Preflight2 is running the full affected tests, formatting, Clippy and audit.
+The next physical-entry reader still consists only of a refusing stub and two
+unrun positive tests in a separate overlay; no new traversal is implemented.
+
+September19,09:32UTC: candidate2 passed all1,384tests09:30:07, including
+13owned-sink cases. All seven raw artifacts are local and strictly verified.
+Formatting/Clippy/audit preflight is now active on the unchanged41-input snapshot.
+Mac SSH again timed out through both routes; three-platform qualification
+remains incomplete. Next read-only retention work will expose the existing
+paired reader's exact physical read set, not introduce a second decoder or
+claim full selected-task/GC closure from the source branch alone.
+
+September19,09:26UTC: owned staging candidate1 passed1,375tests09:21:38;
+all seven artifacts are local and strict verification passes. Candidate2 adds
+nine boundary cases and architecture assertions only: implementation and the
+four original targets are unchanged. Its41-input manifest is
+`db0b614caa7e097fe63f22478ba243f4b0e69fdda8580b45c1d665c5b648f4fd`.
+The964library+420affected run is active under the desktop guard. Formatting,
+Clippy and audit scripts are prepared, not yet run. Main/platform status and
+durable task/retention/activation obligations are unchanged.
+
+September19,09:16UTC: the four owned-sink/read-meter targets actually failed
+at the intended missing implementation08:59:40; all seven raw artifacts are
+local and strict verification passes. Candidate1 changes only two runtime
+files, preserving all original targets and other38inputs. Mechanical extraction
+checks prove the existing retained-copy owner is unchanged apart from meter
+plumbing. The40-input manifest is
+`7b73374ec3bb58a42a6e155a40723958adf605a32d26c87fcec06e5ea0afffea`.
+Transfer/launch is next; no candidate success is claimed. macOS SSH timed out
+again09:00 through both routes; main remains frozen and production untouched.
+
+September19,08:59UTC: all22node-staging preflight artifacts are local and strict
+verification passes; the1,501audit identities/reviews remain unchanged, with
+only recorded source locations refreshed. The next isolated40-input snapshot
+adds four positive targets and refusing owned-sink/read-meter scaffolds only.
+Its manifest is
+`53ab95c82010d8c659e400f79fdd67edb630be5f56336fa1b190531143c4d31a`.
+The expected four behavioral failures are running before implementation; no new
+source staging or task selection behavior has been enabled by those stubs.
+
+September19,08:54UTC: isolated staging candidate3 passed1,371tests08:42:38:
+951library+420affected, including13node-staging and20source-union cases.
+All7raw artifacts are local and strict verification passes. The unchanged
+snapshot's formatting, strict Clippy and audit preflight finished successfully
+08:51:26; its raw artifacts are being preserved and checked. Main remains frozen
+pending macOS. A separately drafted four-test target addresses owned real sinks
+and cumulative source-validation/payload budgets; it is not yet registered or run.
+
+September19,08:42UTC: frozen source-union Windows qualification finished08:32:41,
+sealed08:35:39; all raw artifacts are local and independently checked against
+the exact final manifest:253focused,1,968affected,951library,185reference,
+18union cases, fixtures, Clippy and379format roots pass. Linux was already
+sealed; macOS remains unrun/unreachable, so no three-platform milestone lands.
+
+Isolated staging candidate2 passed1,367tests08:34:32 (947library+420affected),
+all7raw local/strictly verified. Candidate3 adds two real union-sink/reopen/error
+tests plus collision/concurrency tests. Its only runtime addition is the typed
+control-publication error variant; node staging stays byte-identical to C1.
+The37-input manifest is
+`59235f5ccd9a0d521017e8c0b17e9828921e64088f4ec8048d5f57e0da162739`.
+The full library/twelve affected suites are running; static preflight is prepared
+but not launched. Durable task/GC/restart/activation integration remains owed.
+
+September19,08:30UTC: isolated source-node staging candidate1 passed939library
+tests08:18:29, correcting the three observed RED1 failures. All7raw artifacts
+are local and the strict history verifier passes. Candidate2 adds eight boundary
+tests and ownership assertions only; all implementation bytes stay unchanged.
+Its35-input manifest is
+`2d9b68ff667a34591239561c80ae534919e92297424e4dca41da0f32e29f611d`;
+the library plus twelve affected suites are running under the desktop resource
+guard. These receipts do not establish durable task selection or retention.
+The frozen main source-union Windows run passed its affected targets08:21:16
+and is running the library. macOS SSH timed out again08:30; its final source
+has not been transferred or run. Linux final proof remains sealed/local.
+
+September19,08:04UTC: Linux final qualification completed08:00:40 and was
+sealed08:03:27. All66raw artifacts are local and the strict verifier accepts
+all nine Linux gates:253focused tests,1,975tests across123affected targets,
+936library,185reference,502independent fixtures, audit, formatting, Clippy and
+debt checks. The full verifier correctly stops at the absent macOS evidence;
+no three-platform proof or completed milestone is claimed. Windows remains
+active. The isolated three-test source-node staging RED is now being launched
+only after Linux's source/executable evidence has been preserved locally.
+
+September19,08:00UTC: identical-source native qualification is active. Linux
+has passed the253focused tests, all123affected targets, the1,501-entry audit
+and formatting. Windows passed253focused tests and is advancing through the
+affected targets. Remaining platform gates are not claimed complete. Mac SSH
+timed out again07:55; no macOS final run has been launched. Main runtime remains
+frozen. A separate source-node staging TDD snapshot contains three positive
+targets and a deliberately refusing scaffold; it has not run or enabled writes.
+Four further boundary cases are drafted separately, not counted as verification.
+
+September19,07:43UTC: candidate5 passes all936library tests (including18union
+cases), formatting, strict Clippy and the unchanged1,501-identity audit. All29
+raw artifacts are local and strictly verified. Candidate4's first Clippy run
+found duplicate test-fixture ownership and a redundant string conversion;
+that failed run is retained, and candidate5 changes only those test details.
+The verified29Rust inputs and location-only audit refresh are integrated and
+frozen for native qualification:32-input manifest
+`dc89f019288d83cee0eaeff95413cca9ad114237c878da1109393a5262a86518`.
+Linux/Windows final runners are being launched; macOS SSH is unavailable from
+both Linux hosts and the owner has been notified. Native qualification and
+durable task integration remain outstanding; this is not a completed U1 claim.
+
+September19,07:25UTC: candidate4 passed all1,356tests at07:22:13 (936library
+plus420across12affected targets), including all18source-union cases. All7raw
+artifacts are local and strictly verified. Its31-input manifest is
+`e67045119c30d2ab04ac5411240e80275bb9fd0525b7997a2856b1458bee697c`.
+The invalid-input distinction is checked exactly, alongside a separate valid
+but insufficient-capacity refusal/retry. Actual retained-copy publication in
+callbacks, captured reads after current replacement,302-row/3-node catalogs,
+namespace alias discovery and allocation failures all pass. Static preflight
+is running; final native qualification, landing and durable task integration
+remain outstanding. No production or installed binary was changed.
+
+September19,07:17UTC: boundary candidate2 stopped before tests because the new
+test file omitted its Cell import. Candidate3 corrected that import only and
+ran930passing library cases plus one failed test expectation07:08:13. The
+failure expected resource exhaustion for a storage ceiling below the32-byte
+run header; the existing helper correctly classifies that as invalid input.
+Both failures and all7raw artifacts per run are local and strictly verified;
+the12affected targets did not run after the candidate3 library failure.
+
+Candidate4 keeps the runtime unchanged apart from callback-accounting docs.
+It corrects the exact classification expectation, separately tests a valid but
+insufficient32-byte ceiling, adds namespace alias discovery, real retained-copy
+callbacks across current replacement, actual allocation refusal and302-path
+multi-leaf catalog/fingerprint coverage, and extends architecture assertions.
+It remains isolated pending its test/static/native qualification.
+
+September19,07:00UTC: source-union candidate1 passed all1,341tests06:57:10,
+including all three independent union oracles and eight prior cursor cases.
+All7raw artifacts are local and strictly verified. The29-input manifest is
+`9c66352f47fcaf37caae0e9871dd10223ff9b0c930276e2fb81aefd4404e16de`.
+The implementation composes one cumulative captured lookup, paired namespace
+states, both alias selections, private path ordering, paired catalogs and the
+complete base-identity fingerprint. Original callback/read errors survive the
+iterator adapters. Candidate2 adds ten boundary tests only; runtime is unchanged.
+Static/native qualification and durable task integration remain outstanding.
+
+September19,06:43UTC: captured-base candidates1/2 passed all1,333/1,338tests
+at06:21:13/06:30:17; all7raw artifacts per run are local and strictly verified.
+Candidate2 adds five boundary cases without changing the implementation. The
+complete source-union29-input RED1 then reached all three intended failures
+at06:35:24 (0passed,3failed,918filtered); its manifest is
+`3d3bacf1f6a074af2d7453ee0f6eb22cedf8017afa3e126a07e38cc16d633bf3`.
+All7raw artifacts are local and verified against unchanged foundation inputs
+apart from registration and one module-order formatting correction. Composition
+implementation is next, with no standalone captured-base release claimed.
+
+September19,06:24UTC: source-union prerequisite candidate4 passed all1,219tests,
+formatting, Clippy and audit at05:57:50UTC; all29raw artifacts are local and
+strictly verified with unchanged1,501audit identities/reviews. The captured-base
+first attempt stopped at a private test-helper import, with no tests executed;
+the corrected26-input RED2 then failed all three intended behaviors06:11:17UTC.
+Its unchanged runtime scaffold and corrected fixture are source-bound locally.
+
+Captured-base candidate1 factors the existing root/state/admission validation
+over the shared lookup, preserving the live reader's header/locking order and
+all prior checks/error text. It reads the selected generation from that same
+lookup, retains capture/accounting and rejects missing generation or wrong base.
+Its26-input manifest is
+`fd416a29db21441521bea3ca893777b6d363f78022cbfec21b87ddc0d7a1c6c5`.
+The library and twelve affected suites are running, including migration and
+index-recovery consumers. Five additional boundary tests are prepared separately;
+they and the full source-union composition are not yet qualified. No source-base
+public API or standalone helper release is being introduced.
+
+September19,05:59UTC: candidate3 formatting and Clippy passed, but audit2
+correctly refused one new discarded counter value (1,502 versus the unchanged
+1,501 reviewed ceiling). The generated inventory was not updated; all produced
+raw artifacts are local and the failure history is strictly checked. Candidate4
+retains that previous I/O counter in the resource diagnostic and adds an exact
+counter/overflow/refusal/retry test; no budget or audit policy is relaxed.
+Its24-input manifest is
+`0459d1849d47f143cacb5f1547a80c33dd8fff78a9acde021ccf0f0bee3c1099`.
+Preflight3 is active with tests, formatting, Clippy and audit. The captured
+base/generation three-test refusing scaffold is prepared separately but unrun;
+the live selected-authority loader has not been changed. All runtime work stays
+in isolated scratch overlays pending complete source-union integration.
+
+September19,05:44UTC: corrected selected-plugin RED2 reached all three intended
+failures at05:21:24. Candidate1 passed1,213tests at05:27:53. Candidate2 adds
+five boundary cases and explicitly forwards errors while poisoning failed
+cursor/workspace state; all1,218tests passed05:37:00. Source-bound raw history
+is local and verified, including preserved original tests and both helpers.
+Formatting then found only test-module registration order; Clippy/audit did
+not run in that attempt. Candidate3 changes that order only (24-input manifest
+`4f7e7c5afe62806d4bb0793a6b7b9c34ad9986be69d833d16e0e8519ac1c412f`).
+Its formatting/Clippy/audit preflight is active. Full source-union composition,
+captured base/generation binding and later durable task integration remain owed.
+
+September19,05:20UTC: cursor candidate2 passed1,192tests at05:07:22;
+all8cursor cases and16namespace cases passed, with unchanged implementation.
+The source-bound history is local and verified. Its11-input manifest is
+`7c7351e030abc19fb5ae47478d7da46ecf48f2c08327daa664fb4116d9f21d4e`.
+The next isolated overlay combines it with the verified18-case path workspace.
+Selected-plugin RED1 reached two missing-selection behaviors, while a third
+test failed during fixture setup because its retained-copy staging required
+initial authority. All raw evidence is preserved. RED2 adds that initialization
+only; no implementation has begun. This mixed initial failure is not recorded
+as three demonstrated product regressions.
+
+September19,05:06UTC: pausable traversal RED1 actually failed all three new
+tests at04:50:24 before implementation. Candidate1 changes only the namespace
+traversal owner; the visitor delegates to the cursor, whose cumulative budget
+and captured view survive successive calls. All1,187tests passed05:03:21
+(878library plus309affected), including all16prior namespace regressions.
+Both raw histories are local and strictly verified. Candidate2 adds five tests
+for cumulative work/read limits, constructor/body allocation failures and old
+captures after publication; production implementation is unchanged. These
+isolated prerequisites still do not establish a complete source union or U1.
+
+September19,04:48UTC: the namespace reader landed and was pushed as
+`a1f0b3ed`; all three qualification checkouts advanced with their previous
+source state preserved. The workspace prerequisite remains isolated. Its
+candidate5 preflight passed all1,202tests, formatting and strict Clippy at
+04:48:04UTC. All prior behavioral regressions remain; the additional peak
+measurement spans sorting, merging and finished reads. An initially impossible
+64KiB/seven-input/1KiB-path test fixture is now explicitly checked for refusal,
+then exercised with128KiB; production behavior was not relaxed.
+
+Candidate5's22-input manifest is
+`46c5b2f133454c06aac0c4db4efa69cd65eccaf631e9c88a927ec844625784a3`.
+The next three pausable-namespace tests are prepared with a refusing scaffold
+at the committed namespace revision. They will run only after workspace raw
+evidence is local and verified. No cursor implementation has begun, and no
+standalone workspace readiness or complete source-union claim is made.
+
 September19,04:30UTC: namespace final qualification has passed on all three
 native platforms. Windows completed04:28:02UTC and was sealed04:28:42UTC;
 its raw artifacts are local. The frozen14-input manifest is unchanged.

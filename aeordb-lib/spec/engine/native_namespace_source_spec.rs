@@ -1,5 +1,13 @@
 //! Actual captured files with independently specified record and child bytes.
+#[path = "native_semantic_task_graph_spec.rs"]
+mod task_graph;
 use super::*;
+#[path = "native_namespace_cursor_spec.rs"]
+mod cursor;
+#[path = "native_namespace_cursor_boundary_spec.rs"]
+mod cursor_boundary;
+#[path = "native_semantic_source_union_spec.rs"]
+mod source_union;
 #[path = "native_namespace_source_structure_spec.rs"]
 mod structure;
 #[path = "native_namespace_source_validation_spec.rs"]

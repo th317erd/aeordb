@@ -1,5 +1,11 @@
 //! Captured namespace configuration inputs, separate from protected staging.
 use super::*;
+#[path = "semantic_source_union_native.rs"]
+mod source_union;
+pub use source_union::{
+  NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
+  NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,
+};
 use crate::engine::btree::BTreeNode;
 use crate::engine::v4::namespace_seek::{
   LoadedNamespaceSeekNodeV1, NamespaceSeekFailureV1, namespace_seek_workspace_bytes_v1, next_namespace_child_by_path_v1,
@@ -128,52 +134,22 @@ impl NativeSemanticMutationInventoryV1<'_> {
     mut visitor: impl FnMut(&NativeSemanticNamespaceSourceV1<'_>) -> Result<bool, NativeSemanticNamespaceSourceErrorV1>,
     before_complete: impl FnOnce(),
   ) -> Result<NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceErrorV1> {
-    let operation = NamespaceSourceOperationV1::new(self, request)?;
-    let mut stack = Vec::new();
-    stack.try_reserve_exact(request.bounds.maximum_path_depth + 1).map_err(namespace_allocation)?;
-    stack.push(NamespaceDirectoryFrameV1 { path: String::from("/"), hash: copy_namespace_bytes(request.tree_root)?, lower: None });
+    let mut cursor = self.open_namespace_configuration_cursor(request)?;
     let mut configurations = 0u64;
-    while let Some(frame) = stack.last_mut() {
+    while let Some(source) = cursor.next_source()? {
+      configurations = configurations
+        .checked_add(1)
+        .ok_or_else(|| invalid("semantic_namespace_source_count", "namespace configuration count overflowed"))?;
+      let keep_going = visitor(&source)?;
+      let operation = &cursor.operation;
       operation.check()?;
-      let next = next_namespace_child_by_path_v1(frame.lower.as_deref(), |name, inclusive| {
-        seek_namespace_child_v1(&frame.hash, name, inclusive, request.bounds.maximum_btree_depth, |hash, lower, upper, btree_child| {
-          operation.load_node(hash, &frame.path, lower, upper, btree_child)
-        })
-      })?;
-      let Some((key, child)) = next else {
-        stack.pop();
-        continue;
-      };
-      operation.lookup.charge_work(1).map_err(map_namespace_read_error)?;
-      let path = join_selected_path(&frame.path, &child.name, request.bounds.maximum_path_bytes)?;
-      frame.lower = Some(key);
-      if stack.len() > request.bounds.maximum_path_depth {
-        return Err(resource("semantic_namespace_source_depth", "namespace source traversal exceeds its path-depth bound").into());
-      }
-      let configuration = is_namespace_source_path(&path, operation.algorithm())?;
-      if configuration {
-        if child.entry_type != EntryTypeV4::FileRecord.to_u8() {
-          return Err(invalid("semantic_namespace_source_role", "namespace configuration path is not a FileRecord").into());
-        }
-        let source = self.read_namespace_source_from_lookup(&path, &child.hash, request.bounds.sources, &operation.lookup)?;
-        validate_selected_file_record_metadata(source.record(), &child, &path).map_err(NativeSelectedNamespaceReadErrorV1::from)?;
-        configurations = configurations
-          .checked_add(1)
-          .ok_or_else(|| invalid("semantic_namespace_source_count", "namespace configuration count overflowed"))?;
-        let keep_going = visitor(&source)?;
+      if !keep_going {
+        before_complete();
         operation.check()?;
-        if !keep_going {
-          before_complete();
-          operation.check()?;
-          return Ok(NativeSemanticNamespaceSourceSummaryV1 { configurations, complete: false });
-        }
-      } else if child.entry_type == EntryTypeV4::DirectoryIndex.to_u8() {
-        if stack.iter().any(|ancestor| ancestor.hash == child.hash) {
-          return Err(invalid("semantic_namespace_source_cycle", "namespace directory repeats an ancestor").into());
-        }
-        stack.push(NamespaceDirectoryFrameV1 { path, hash: child.hash, lower: None });
+        return Ok(NativeSemanticNamespaceSourceSummaryV1 { configurations, complete: false });
       }
     }
+    let operation = &cursor.operation;
     before_complete();
     operation.check()?;
     Ok(NativeSemanticNamespaceSourceSummaryV1 { configurations, complete: true })
@@ -184,6 +160,112 @@ struct NamespaceDirectoryFrameV1 {
   path: String,
   hash: Vec<u8>,
   lower: Option<String>,
+}
+
+/// Pausable traversal over one captured tree, not admission or complete capture.
+/// Rows retain their source capture independently of this cursor. Errors are
+/// terminal; an incomplete prefix never proves absence or completed traversal.
+pub struct NativeSemanticNamespaceSourceCursorV1<'a> {
+  operation: NamespaceSourceOperationV1<'a>,
+  state: NamespaceSourceStateV1,
+}
+
+struct NamespaceSourceStateV1 {
+  stack: Vec<NamespaceDirectoryFrameV1>,
+  failed: bool,
+}
+
+impl<'a> NativeSemanticNamespaceSourceCursorV1<'a> {
+  pub fn next_source(&mut self) -> Result<Option<NativeSemanticNamespaceSourceV1<'a>>, NativeSemanticNamespaceSourceErrorV1> {
+    self.state.next_source(&self.operation)
+  }
+}
+
+impl NamespaceSourceStateV1 {
+  fn new(operation: &NamespaceSourceOperationV1<'_>, tree_root: &[u8]) -> Result<Self, NativeSemanticNamespaceSourceErrorV1> {
+    operation.check()?;
+    if tree_root.len() != operation.algorithm().hash_length() || tree_root.iter().all(|byte| *byte == 0) {
+      return Err(
+        invalid("semantic_namespace_source_root", "namespace traversal requires a nonzero selected-width directory identity").into(),
+      );
+    }
+    let mut stack = Vec::new();
+    stack.try_reserve_exact(operation.bounds.maximum_path_depth + 1).map_err(namespace_allocation)?;
+    stack.push(NamespaceDirectoryFrameV1 { path: String::from("/"), hash: copy_namespace_bytes(tree_root)?, lower: None });
+    operation.check()?;
+    Ok(Self { stack, failed: false })
+  }
+
+  fn next_source<'a>(
+    &mut self,
+    operation: &NamespaceSourceOperationV1<'a>,
+  ) -> Result<Option<NativeSemanticNamespaceSourceV1<'a>>, NativeSemanticNamespaceSourceErrorV1> {
+    if self.failed {
+      return Err(invalid("semantic_namespace_cursor_failed", "namespace source cursor cannot continue after failure").into());
+    }
+    let result = self.next_source_inner(operation);
+    match result {
+      Ok(value) => Ok(value),
+      Err(error) => {
+        self.failed = true;
+        Err(error)
+      }
+    }
+  }
+
+  fn next_source_inner<'a>(
+    &mut self,
+    operation: &NamespaceSourceOperationV1<'a>,
+  ) -> Result<Option<NativeSemanticNamespaceSourceV1<'a>>, NativeSemanticNamespaceSourceErrorV1> {
+    operation.check()?;
+    while let Some(frame) = self.stack.last_mut() {
+      operation.check()?;
+      let next = next_namespace_child_by_path_v1(frame.lower.as_deref(), |name, inclusive| {
+        seek_namespace_child_v1(&frame.hash, name, inclusive, operation.bounds.maximum_btree_depth, |hash, lower, upper, btree_child| {
+          operation.load_node(hash, &frame.path, lower, upper, btree_child)
+        })
+      })?;
+      let Some((key, child)) = next else {
+        self.stack.pop();
+        continue;
+      };
+      operation.lookup.charge_work(1).map_err(map_namespace_read_error)?;
+      let path = join_selected_path(&frame.path, &child.name, operation.bounds.maximum_path_bytes)?;
+      frame.lower = Some(key);
+      if self.stack.len() > operation.bounds.maximum_path_depth {
+        return Err(resource("semantic_namespace_source_depth", "namespace source traversal exceeds its path-depth bound").into());
+      }
+      if is_namespace_source_path(&path, operation.algorithm())? {
+        if child.entry_type != EntryTypeV4::FileRecord.to_u8() {
+          return Err(invalid("semantic_namespace_source_role", "namespace configuration path is not a FileRecord").into());
+        }
+        let capture = operation.capture;
+        let source = capture.read_namespace_source_from_lookup(&path, &child.hash, operation.bounds.sources, &operation.lookup)?;
+        validate_selected_file_record_metadata(source.record(), &child, &path).map_err(NativeSelectedNamespaceReadErrorV1::from)?;
+        operation.check()?;
+        return Ok(Some(source));
+      }
+      if child.entry_type == EntryTypeV4::DirectoryIndex.to_u8() {
+        if self.stack.iter().any(|ancestor| ancestor.hash == child.hash) {
+          return Err(invalid("semantic_namespace_source_cycle", "namespace directory repeats an ancestor").into());
+        }
+        self.stack.push(NamespaceDirectoryFrameV1 { path, hash: child.hash, lower: None });
+      }
+    }
+    operation.check()?;
+    Ok(None)
+  }
+}
+
+impl NativeSemanticMutationInventoryV1<'_> {
+  pub fn open_namespace_configuration_cursor(
+    &self,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+  ) -> Result<NativeSemanticNamespaceSourceCursorV1<'_>, NativeSemanticNamespaceSourceErrorV1> {
+    let operation = NamespaceSourceOperationV1::new(self, request)?;
+    let state = NamespaceSourceStateV1::new(&operation, request.tree_root)?;
+    Ok(NativeSemanticNamespaceSourceCursorV1 { operation, state })
+  }
 }
 
 struct NamespaceSourceLookupV1<'a> {

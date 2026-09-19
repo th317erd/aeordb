@@ -1,6 +1,10 @@
 //! Captured raw-source regressions and retained-source catalog integration.
+#[path = "plugin_artifact_identity_fixtures.rs"]
+mod plugin_fixtures;
 #[path = "native_retained_source_catalog_spec.rs"]
 mod retained_source_spec;
+#[path = "native_source_control_staging_spec.rs"]
+mod source_control_staging_spec;
 use super::*;
 #[path = "native_namespace_source_spec.rs"]
 mod namespace_source_spec;

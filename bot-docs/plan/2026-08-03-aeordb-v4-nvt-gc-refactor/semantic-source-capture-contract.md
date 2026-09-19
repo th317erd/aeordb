@@ -1,5 +1,11 @@
 # Durable protected semantic sources — U1 reader contract
 
+September19 update: the complete captured union, guarded native sinks, physical
+observation and read-only selected task graph passed
+[combined Linux/macOS/Windows qualification](evidence/user-facing-v4-u1-captured-task-integration-proof-20260919.json).
+Earlier isolated qualification notes below remain historical. Durable task
+publication, restart/resume, GC retention and atomic activation are still open.
+
 Status: structural readers, byte-only writers, native catalog readers, guarded
 source staging and paired ordered catalog assembly qualified on Linux, macOS
 and Windows, September17.
@@ -1363,3 +1369,217 @@ rechecks. Reuse the current plugin-pair identity/schema owners for both sides;
 do not silently resolve a requested replacement through the current alias. The
 eventual capture result must feed the existing paired catalogs and fingerprint
 before durable task/GC integration can rely on it.
+
+### Selected plugin inputs within the source-union owner
+
+The current plugin-pair reader and prepared alias snapshot already share the
+artifact inspector and dependency encoder. Preserve that ownership when adding
+requested/retained selection: extract an internal pair reader which asks its
+caller for the exact alias source, then the artifact source named by that alias.
+The caller supplies already-accounted source observations from the same capture;
+this is not a public callback that grants capture or publication authority.
+Reject another capture or a mismatched path. Never replace an explicit absence
+or selection error with a current-path lookup. Reuse the existing inspector,
+source bounds, result lifetime and final cancellation/admission checks.
+
+The ordinary current-source adapter supplies its existing cumulative lookup.
+The full source-union owner must supply its own cumulative lookup and explicit
+base/request policy; a callback does not itself prove membership, absence,
+global work limits, or complete capture. Likewise the retained catalog adapter
+must distinguish an unlisted path from its explicitly absent row.
+
+Falsifying cases precede extraction: retained alias/module A must produce A's
+exact dependency records while the same capture's current alias is B; explicit
+selected alias absence must not consult current B; a selected artifact read
+error must survive unchanged, release reservations, and permit a fresh retry.
+Run these with real native files, both identity widths and independent expected
+dependency bytes. Extend with wrong-capture/path, late cancellation/pressure,
+allocation and cumulative-budget cases before integration. Existing current
+pair and prepared-snapshot tests stay unchanged. Unit/property tests cover the
+selection and bounds; native files cover the actual read path. Public service
+behavior remains U2–U7 work, not a claim from this internal extraction. All
+small cases use bounded fixture work and the established timed desktop runner.
+
+### Source-union composition: execution outline and remaining entry proof
+
+The next composition must join the qualified pieces rather than introduce
+another schema or scratch-record format. This outline is not an implemented
+capture API or permission to publish tasks.
+
+1. Validate a bounded immutable request: expected base NamespaceRoot, staged
+   DirectoryIndex identity and a strictly path-ordered list of protected source
+   replacements/deletions. The replacement list is request-sized, not a map of
+   the database. Present replacements name immutable FileRecord revisions which
+   must already exist in the same capture; omitted entries use captured current
+   state, while an explicit deletion means absence. Do not load future staged
+   objects through an older capture. Include changed protected paths as request
+   inputs, without enumerating every unrelated installed alias/module.
+2. Bind the base to the captured header's HEAD and its actual namespace closure,
+   and read the exact semantic generation through captured A/B controls. Reuse
+   the existing root/state/admission decoders and control readers.
+   The current `load_namespace_authority_at_captured_header` method consults live
+   KV under a lock, so it is not a substitute for the settled inventory lookup.
+   Missing generation is an error, not invented generation zero. The initial
+   source-union result must remain distinct from a durable task/resume permit.
+3. Keep one operation's read/work counters across discovery and output passes.
+   Separate each namespace traversal's ancestor stack from that common operation
+   so two ordered trees can advance independently without resetting quotas.
+   Resolve both mandatory globals and both sides of namespace configurations
+   with the existing schema/alias visitor. For a discovered alias, resolve both
+   base and requested selections through the shared plugin-pair reader; append
+   its canonical alias path and each selected module path to the bounded path
+   workspace. Do not lose removed dependencies or substitute current inputs.
+4. Count namespace union paths by merging the two already-ordered streams, with
+   at most one retained row per tree. Do not put namespace identities into the
+   path-only sorter. Finish the protected-path workspace and use its unique count
+   for paired catalog assembly. Read base/request sources for each protected path
+   through the same cumulative lookup and pass their exact revisions/absence to
+   the existing catalog builder. A source callback may stage retained copies
+   under the held staging guard, but partial callbacks never mean completion.
+5. Feed the existing fingerprint builder a strict ordered merge of protected
+   paths and both namespace streams, using only BASE revisions or explicit
+   absence. The count is protected paths plus unique namespace paths. Validate
+   every iterator's successful EOF; retain concrete source errors through any
+   iterator adapter instead of turning them into absence/count mismatches.
+   Preserve the requested identities separately in the paired catalogs/tree.
+6. Return accounted roots/fingerprint and the captured binding only after all
+   checks complete. Guard lifetime, later durable source/catalog retention,
+   checkpoint/task selection, restart/GC proof and activation's exact base and
+   generation recheck remain mandatory following integration. This preparation
+   cannot authorize an early HEAD change or expose staged data in listing/SSE.
+
+Entry tests should compare the complete emitted pair set and fingerprint against
+an independently constructed small map/preimage: empty trees with both absent
+globals; overlapping/added/removed namespace configurations; changed protected
+configuration and alias/module revisions on both sides; duplicated aliases across
+tiny sort runs; and an alias removed by the requested configuration. Then test
+wrong base/generation, unknown staged revisions, deletion versus failed read,
+callback failure, shared-budget exhaustion across both trees/passes, final EOF
+cancellation, allocator refusal, and private scratch cleanup. Existing retained
+catalog readers must read emitted nodes and preserved source revisions; later
+durable task tests must exercise actual restart and GC. No global collection,
+second mutable database owner or per-path namespace rescan is acceptable.
+
+Further source inspection narrows step2: `decode_immutable_namespace_authority`
+calls `decode_namespace_tree_root_v0`, which still deserializes/reserializes an
+entire root node through the older directory API. Do not reintroduce that path
+into bounded source discovery. The existing selected-semantic-authority loader
+already validates the fixed root, semantic state and HEAD admission without
+materializing the tree. Factor its lookup-independent body over the existing
+entity-lookup trait, keeping its live caller's current guard and validation
+unchanged; the source owner can supply its settled lookup and accounting. Check
+the directory itself through the qualified bounded namespace traversal. Add
+captured-base and malformed-root/state/admission tests around that shared seam.
+This refinement follows executable callees, not an assertion that the legacy
+whole-root decoder has been globally replaced or qualified for this new path.
+
+Captured-base entry detail: retain the exact selected generation control, not
+only its integer, so the later task/activation owner can compare the established
+slot/digest expectation. The internal base loader accepts the composition's one
+lookup rather than creating a fresh quota. Its result retains capture and memory
+but is not a public task or activation token. Keep the ordinary loader's healthy
+header check before locking KV, with the shared validation body also checking
+its supplied observation; do not weaken the live failure ordering to share code.
+
+Account the actual canonical-control loader caps:64KiB bounds a FileRecord
+entity, not the control payload. Root-admission and generation framing currently
+admit up to1MiB before typed validation. Reserve the shared loaders' overlapping
+slot bodies/copies and root/state scratch before reading, then retain only a
+conservative bounded metadata charge plus the actual selected control capacity.
+This inherits the shared loaders' existing allocator limitations; it is not a
+new claim that all transitive allocations can recover from host OOM. Regressions
+must cover the actual fallible root-entity allocation and post-load refusal.
+
+Composition implementation uses `prepare_semantic_source_union`: its owned
+result retains the original inventory, selected base/generation, requested tree,
+paired catalog roots and fingerprint. The captured header sequence is the
+inventory header sequence, not the root's older admission sequence. A paired
+namespace cursor reuses the existing state machine with one shared lookup and a
+separately accounted second traversal stack. All internal source/base/tree reads
+and both passes consume that one read/work budget; alias occurrences also have
+a global ceiling, including missing aliases whose lookup reads no entity.
+Caller callbacks are arbitrary explicit operations: their retained sink storage,
+additional I/O/publication and work must be budgeted by their owner. Preparation
+quotas do not purport to meter external callback effects. Callback output remains
+provisional, with its original concrete errors retained by iterator adapters.
+No ASCM/task control, durable retention or activation is granted by this result.
+
+### Guarded node persistence and the source-union sink — September19
+
+The following integration is isolated while the preceding source-union native
+qualification finishes. It is part of durable task integration, not a separate
+claim that task selection, recovery or retention is ready.
+
+`NativeSemanticMutationInventoryV1::stage_semantic_source_nodes` accepts one
+node or one paired emission. It requires the original capture's live protection,
+healthy selected HEAD, unchanged logical/physical identity and writer fence,
+non-regressing physical frontier, and captured/current reader/writer declarations
+for both capabilities25/27. It never sets those bits or advertises support.
+
+Decode both inputs before writes, require ASCN for the captured database, bound
+their encoded size and workspace, and deduplicate an exactly equal pair. Keep
+the existing root guard across canonical existing-body readback and the sole
+locked immutable entity publisher; release the KV guard before calling that
+publisher. The shared system-file preparer and receipt translator remain the
+owners of wrapper bytes and physical outcomes. No independent transaction,
+framing parser or general semantic-control permission is introduced.
+
+An ASCN identity can recur across captures with a different requested timestamp.
+Reusing it must preserve its original FileRecord timestamps and compare the
+complete canonical stored representation, not regenerate a conflicting wrapper.
+A fully existing exact repeat returns before the generic publisher's KV flush,
+preserving physical bytes. Mixed old/new pairs preserve old identities while
+publishing only the missing entities through the same transaction owner.
+
+Cancellation, accounting and pressure are rechecked at entry and immediately
+before publication. Once a transaction commits, its success or committed-error
+receipt is preserved; later cancellation cannot imply rollback. The source-union
+error has a distinct control-publication variant so its iterator/callback bridge
+does not erase that outcome. Whole-task cumulative publication/read/work quotas
+remain the enclosing task owner's responsibility, not a per-pair sink claim.
+
+Falsifying evidence: three actual positive-target failures precede implementation;
+candidate1 passes939library cases. Candidate2 adds eight refusal/resource/fault
+cases and passes947library plus420affected cases without runtime changes.
+Candidate3's additional real union-sink/reopen, committed-error, exact collision
+and concurrent-capture cases are under qualification. Ordinary semantic task
+publishers remain refused. Complete durable typed retention and actual task
+checkpoint selection/resume/activation must be qualified before that changes.
+
+### Owned staging and physical-entry observation — September19 integration
+
+`prepare_and_stage_semantic_source_union` owns both native sinks and returns a
+privately constructed result that borrows the original capture/protection. It
+bounds cumulative source-copy attempts, logical payload attempts and actual live
+chunk-validation read bytes, plus per-pair node workspace. Equal base/request
+revisions share one copy attempt per path; retries still consume their actual
+read budget. Discovery retains its separate cumulative budget. These counters
+do not claim total physical KV-flush or wrapper I/O accounting.
+
+The retained-copy implementation is factored through a private metered entry;
+the existing API, representation checks, transaction owner and committed errors
+are preserved. Failures can leave unselected immutable dependencies, never a
+selected task or admitted root. Interruptions after a dependency commit refuse
+whole-operation completion without claiming rollback. Exact-bound, cold partial
+write, larger-plugin, pressure/cancellation and zero-chunk tests accompany the
+original reopen targets. Linux qualification passes1,384tests plus strict static
+and audit gates; no all-platform or durable-task readiness follows from that.
+
+The following `visit_captured_source_physical_entries` observation exposes the
+same paired reader's physical reads: companion/checkpoint wrappers and chunks,
+both catalog-node closures, exact retained FileRecords and their actual chunks.
+It has no second parser, file owner or whole-set dedup table. Callbacks may repeat
+and are provisional until the existing complete paired validation succeeds.
+Original callback errors and immediate cancellation/admission failures remain
+typed; late corruption or count disagreement invalidates all prior visits.
+This is one source branch only, not selected task, namespace, resume, activation
+or complete GC authority. Its two positive targets failed before implementation;
+nine focused cases now pass, including exact cumulative budgets, repeated shared
+references, first/final callback cancellation and pressure, actual allocation
+failure, late corruption, late count mismatch and later catalog replacement.
+The isolated Linux run passes1,393library/affected tests plus formatting, strict
+Clippy and the unchanged1,501-entry audit. A private callback type alias resolves
+the observed Clippy complexity diagnostic without suppressing it. Broader native
+and enclosing task qualification remain outstanding. Ordinary large-file
+retention must use bounded typed metadata traversal, not this materializing
+semantic-source reader.

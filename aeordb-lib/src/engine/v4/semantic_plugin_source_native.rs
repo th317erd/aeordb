@@ -89,6 +89,28 @@ impl NativeSemanticMutationInventoryV1<'_> {
     lookup: &impl FirstAuthorityEntityLookupV1,
     before_complete: impl FnOnce(),
   ) -> Result<Option<NativeSemanticPluginSourcesV1<'_>>, NativeSemanticPluginSourceErrorV1> {
+    self.read_plugin_sources_with_selected_reader(
+      alias,
+      bounds,
+      |path, bounds| self.read_source_from_lookup(path, None, bounds, lookup, || {}),
+      before_complete,
+    )
+  }
+
+  /// Internal composition boundary. The source owner must use one cumulative
+  /// lookup and establish its current/requested/retained selection explicitly.
+  /// Returned observations must belong to this capture and the requested path;
+  /// this callback does not establish complete membership or durable retention.
+  pub(in crate::engine::v4::first_authority) fn read_plugin_sources_with_selected_reader<'a>(
+    &'a self,
+    alias: &str,
+    bounds: NativeSemanticPluginSourceBoundsV1,
+    mut read_source: impl FnMut(
+      &str,
+      NativeSemanticSourceReadBoundsV1,
+    ) -> Result<Option<NativeProtectedSemanticSourceV1<'a>>, SemanticMutationObservationErrorV1>,
+    before_complete: impl FnOnce(),
+  ) -> Result<Option<NativeSemanticPluginSourcesV1<'a>>, NativeSemanticPluginSourceErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     validate_plugin_source_bounds(bounds)?;
@@ -98,16 +120,10 @@ impl NativeSemanticMutationInventoryV1<'_> {
       .map_err(SemanticMutationObservationErrorV1::from)?;
     let alias_path = plugin_alias_path_v1(alias).map_err(SemanticMutationObservationErrorV1::from)?;
     let source_bounds = plugin_source_read_bounds(bounds);
-    // One captured lookup and one cumulative physical-read counter for both
-    // sources. Per-source chunk ceilings never reset the paired byte budget.
-    let Some(alias_source) = self.read_source_from_lookup(
-      &alias_path,
-      None,
-      NativeSemanticSourceReadBoundsV1 { maximum_body_bytes: ALIAS_MAX_LENGTH, ..source_bounds },
-      lookup,
-      || {},
-    )?
-    else {
+    let alias_bounds = NativeSemanticSourceReadBoundsV1 { maximum_body_bytes: ALIAS_MAX_LENGTH, ..source_bounds };
+    let alias_source = read_source(&alias_path, alias_bounds)?;
+    self.check_selected_plugin_source(&alias_path, alias_source.as_ref(), alias_bounds, &memory)?;
+    let Some(alias_source) = alias_source else {
       before_complete();
       check_cancelled(&self.cancellation)?;
       memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
@@ -118,9 +134,10 @@ impl NativeSemanticMutationInventoryV1<'_> {
       return Err(resource("semantic_plugin_source_module_bound", "declared plugin module exceeds its body limit").into());
     }
     let artifact_path = plugin_artifact_path_v1(alias_record.artifact_fingerprint).map_err(SemanticMutationObservationErrorV1::from)?;
-    let artifact = self
-      .read_source_from_lookup(&artifact_path, None, source_bounds, lookup, || {})?
-      .ok_or_else(|| invalid("semantic_plugin_source_module_missing", "captured plugin alias references an absent raw module"))?;
+    let artifact = read_source(&artifact_path, source_bounds)?;
+    self.check_selected_plugin_source(&artifact_path, artifact.as_ref(), source_bounds, &memory)?;
+    let artifact =
+      artifact.ok_or_else(|| invalid("semantic_plugin_source_module_missing", "captured plugin alias references an absent raw module"))?;
     let identity = inspect_plugin_artifact_identity_v1(
       PluginArtifactIdentityRequestV1 {
         alias_bytes: alias_source.body(),
@@ -164,6 +181,31 @@ impl NativeSemanticMutationInventoryV1<'_> {
     memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     Ok(Some(NativeSemanticPluginSourcesV1 { alias: alias_source, artifact, parser, mapper, _memory: memory }))
   }
+
+  fn check_selected_plugin_source(
+    &self,
+    path: &str,
+    source: Option<&NativeProtectedSemanticSourceV1<'_>>,
+    bounds: NativeSemanticSourceReadBoundsV1,
+    memory: &MemoryReservation,
+  ) -> Result<(), SemanticMutationObservationErrorV1> {
+    check_cancelled(&self.cancellation)?;
+    self._memory.check_admission()?;
+    memory.check_admission()?;
+    if let Some(source) = source {
+      if !std::ptr::eq(source._capture, self) {
+        return Err(invalid("semantic_plugin_source_capture", "selected plugin input belongs to another capture"));
+      }
+      if source.record().path != path {
+        return Err(invalid("semantic_plugin_source_path", "selected plugin input names another source path"));
+      }
+      if source.body().len() > bounds.maximum_body_bytes || source.record().chunk_hashes.len() as u64 > bounds.maximum_chunks {
+        return Err(resource("semantic_source_body_bound", "selected plugin source exceeds admitted body or chunk work limits"));
+      }
+      source._memory.check_admission()?;
+    }
+    Ok(())
+  }
 }
 
 fn plugin_source_read_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> NativeSemanticSourceReadBoundsV1 {
@@ -175,7 +217,7 @@ fn plugin_source_read_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> Nati
   }
 }
 
-fn validate_plugin_source_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> Result<(), NativeSemanticPluginSourceErrorV1> {
+pub(super) fn validate_plugin_source_bounds(bounds: NativeSemanticPluginSourceBoundsV1) -> Result<(), NativeSemanticPluginSourceErrorV1> {
   if !(1..=MAXIMUM_SOURCE_BODY_BYTES).contains(&bounds.maximum_module_bytes)
     || !(1..=MAXIMUM_CHUNK_ENTITY_BYTES).contains(&bounds.maximum_chunk_entity_bytes)
     || bounds.maximum_source_chunks == 0

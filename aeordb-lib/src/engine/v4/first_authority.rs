@@ -2,6 +2,16 @@
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
+pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
+pub use semantic_mutation_observation::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
+pub use semantic_mutation_observation::{
+  NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1,
+};
+pub use semantic_mutation_observation::NativeSemanticNamespaceSourceCursorV1;
+pub use semantic_mutation_observation::{
+  NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
+  NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,
+};
 pub use semantic_mutation_observation::{
   NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
   NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
@@ -2939,96 +2949,10 @@ impl V4FirstAuthorityPublisher {
 
   fn load_selected_semantic_authority_locked(&self) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
     let observation = self.observe()?;
-    let header = &observation.selected.header;
-    if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_header",
-        "runtime recovery requires a non-degraded selected v4 HEAD",
-      ));
-    }
-
+    let header = selected_semantic_authority_header(&observation)?;
     let kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, header)?;
-    let root_locator = kv.get(&header.head_hash)?.ok_or_else(|| {
-      FirstAuthorityPublicationErrorV1::invalid("selected_semantic_authority_root_missing", "selected HEAD NamespaceRoot is absent")
-    })?;
-    if root_locator.type_flags != KV_TYPE_DIRECTORY {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_root_role",
-        "selected HEAD identity resolves to another KV role",
-      ));
-    }
-    let root_bytes =
-      read_entity_bounded(&self.file, &kv, &header.head_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
-        .ok_or_else(|| {
-          FirstAuthorityPublicationErrorV1::invalid(
-            "selected_semantic_authority_root_changed",
-            "selected HEAD NamespaceRoot disappeared after its locator was observed",
-          )
-        })?;
-    let root = decode_namespace_root_entity(&root_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
-    if root.root_hash != header.head_hash {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_root_identity",
-        "selected NamespaceRoot bytes disagree with the v4 HEAD",
-      ));
-    }
-
-    let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
-    let semantic = load_canonical_system_file_at_path(
-      &self.file,
-      &kv,
-      header,
-      &semantic_path,
-      SEMANTIC_OBJECT_CONTENT_TYPE,
-      super::semantic_store::semantic_object_cap(1)?,
-    )?
-    .ok_or_else(|| {
-      FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_state_missing",
-        "selected NamespaceRoot semantic-state object is absent",
-      )
-    })?;
-    let semantic = decode_semantic_object(&semantic.body, header.hash_algorithm)?;
-    if semantic.object_id != root.semantic_state_root || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_state_identity",
-        "selected semantic-state object disagrees with the NamespaceRoot edge",
-      ));
-    }
-    let semantic_state = semantic.semantic_state.ok_or_else(|| {
-      FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_state_fields",
-        "selected semantic-state object omitted its typed state fields",
-      )
-    })?;
-
-    let admission_bytes = load_system_file(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, &header.head_hash)?;
-    let admission = decode_root_admission_commit(&admission_bytes, header.hash_algorithm)?;
-    if admission.database_id != header.database_id
-      || admission.namespace_root != header.head_hash
-      || admission.authority_kind != RootAuthorityKindV1::Head
-      || admission.authority_after != header.head_hash
-      || admission.selected_header_slot_sequence > header.slot_sequence
-      || admission.publication_sequence == 0
-    {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "selected_semantic_authority_admission",
-        "selected HEAD admission witness does not close over the current v4 authority",
-      ));
-    }
-
-    Ok(SelectedSemanticAuthorityV1 {
-      database_id: header.database_id,
-      physical_instance_id: header.physical_instance_id,
-      root_hash: root.root_hash,
-      namespace_tree_root: root.namespace_tree_root,
-      semantic_state,
-      system_family_registry_fingerprint: header.system_family_registry_fingerprint.clone(),
-      selected_header_slot_sequence: admission.selected_header_slot_sequence,
-      write_sequence_high_water: header.write_sequence_high_water,
-      root_publication_sequence: admission.publication_sequence,
-    })
+    load_selected_semantic_authority_from_lookup(&self.file, &kv, &observation)
   }
 
   pub fn locator(&self, key: &[u8]) -> Result<Option<KVEntry>, FirstAuthorityPublicationErrorV1> {
@@ -3363,82 +3287,7 @@ impl V4FirstAuthorityPublisher {
 
     let kv = self.lock_kv()?;
     validate_kv_header_alignment(&kv, &current.selected.header)?;
-    let root_locator = kv.get(root_hash)?;
-    ensure_captured_authority_not_cancelled(cancellation)?;
-    let Some(root_locator) = root_locator else {
-      return Ok(None);
-    };
-    if root_locator.type_flags != KV_TYPE_DIRECTORY {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "captured_authority_root_role",
-        "requested namespace root identity resolves to another KV role",
-      ));
-    }
-    ensure_captured_authority_not_cancelled(cancellation)?;
-
-    let header = &captured.header;
-    let root_entity =
-      read_entity_bounded(&self.file, &kv, root_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
-        .ok_or_else(|| {
-          FirstAuthorityPublicationErrorV1::invalid(
-            "captured_authority_root_changed",
-            "requested NamespaceRoot disappeared after its locator was observed",
-          )
-        })?;
-    let root = decode_namespace_root_entity(&root_entity, header.hash_algorithm, header.write_sequence_high_water)?;
-    if root.root_hash != root_hash {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "captured_authority_root_identity",
-        "decoded NamespaceRoot does not match the requested root identity",
-      ));
-    }
-    ensure_captured_authority_not_cancelled(cancellation)?;
-
-    let namespace_tree_entity = read_entity_bounded(
-      &self.file,
-      &kv,
-      &root.namespace_tree_root,
-      FIRST_AUTHORITY_NAMESPACE_TREE_CAP,
-      header.write_sequence_high_water,
-    )?;
-    ensure_captured_authority_not_cancelled(cancellation)?;
-
-    let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
-    let semantic_state = load_canonical_system_file_at_path(
-      &self.file,
-      &kv,
-      header,
-      &semantic_path,
-      SEMANTIC_OBJECT_CONTENT_TYPE,
-      super::semantic_store::semantic_object_cap(1)?,
-    )?;
-    ensure_captured_authority_not_cancelled(cancellation)?;
-
-    let admission =
-      load_system_file_slot(&self.file, &kv, header, SystemControlKindV1::RootAdmissionCommit, root_hash, SystemControlSlotV1::Immutable)?;
-    ensure_captured_authority_not_cancelled(cancellation)?;
-
-    let authority = decode_immutable_namespace_authority(
-      ImmutableNamespaceAuthorityInputV1 {
-        expected_root_hash: root_hash,
-        expected_database_id: &header.database_id,
-        root_entity: Some(&root_entity),
-        namespace_tree_entity: namespace_tree_entity.as_deref(),
-        semantic_state_object: semantic_state.as_ref().map(|loaded| loaded.body.as_slice()),
-        admission_control: admission.as_ref().map(|loaded| loaded.body.as_slice()),
-      },
-      header.hash_algorithm,
-      header.write_sequence_high_water,
-    )
-    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
-    if authority.admission.selected_header_slot_sequence > header.slot_sequence || authority.admission.publication_sequence == 0 {
-      return Err(FirstAuthorityPublicationErrorV1::invalid(
-        "captured_authority_admission_sequence",
-        "root admission witness has no durable publication or exceeds the captured header history",
-      ));
-    }
-    ensure_captured_authority_not_cancelled(cancellation)?;
-    Ok(Some(authority))
+    load_namespace_authority_from_lookup(&self.file, &*kv, captured, root_hash, cancellation)
   }
 
   /// Observe the current lifecycle state for one already-admitted namespace
@@ -13266,6 +13115,86 @@ fn validate_kv_header_alignment(kv: &DiskKVStore, header: &DatabaseHeaderV4) -> 
   Ok(())
 }
 
+// Shared arbitrary-root read boundary; the caller owns physical capture and memory.
+fn load_namespace_authority_from_lookup(
+  file: &File,
+  kv: &impl FirstAuthorityEntityLookupV1,
+  captured: &SelectedDatabaseHeaderV4,
+  root_hash: &[u8],
+  cancellation: &CancellationToken,
+) -> Result<Option<ImmutableNamespaceAuthorityV1>, FirstAuthorityPublicationErrorV1> {
+  let root_locator = kv.get(root_hash)?;
+  ensure_captured_authority_not_cancelled(cancellation)?;
+  let Some(root_locator) = root_locator else {
+    return Ok(None);
+  };
+  if root_locator.type_flags != KV_TYPE_DIRECTORY {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_root_role",
+      "requested namespace root identity resolves to another KV role",
+    ));
+  }
+  ensure_captured_authority_not_cancelled(cancellation)?;
+
+  let header = &captured.header;
+  let root_entity = read_entity_bounded(file, kv, root_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
+    .ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "captured_authority_root_changed",
+        "requested NamespaceRoot disappeared after its locator was observed",
+      )
+    })?;
+  let root = decode_namespace_root_entity(&root_entity, header.hash_algorithm, header.write_sequence_high_water)?;
+  if root.root_hash != root_hash {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_root_identity",
+      "decoded NamespaceRoot does not match the requested root identity",
+    ));
+  }
+  ensure_captured_authority_not_cancelled(cancellation)?;
+
+  let namespace_tree_entity =
+    read_entity_bounded(file, kv, &root.namespace_tree_root, FIRST_AUTHORITY_NAMESPACE_TREE_CAP, header.write_sequence_high_water)?;
+  ensure_captured_authority_not_cancelled(cancellation)?;
+
+  let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
+  let semantic_state = load_canonical_system_file_at_path(
+    file,
+    kv,
+    header,
+    &semantic_path,
+    SEMANTIC_OBJECT_CONTENT_TYPE,
+    super::semantic_store::semantic_object_cap(1)?,
+  )?;
+  ensure_captured_authority_not_cancelled(cancellation)?;
+
+  let admission =
+    load_system_file_slot(file, kv, header, SystemControlKindV1::RootAdmissionCommit, root_hash, SystemControlSlotV1::Immutable)?;
+  ensure_captured_authority_not_cancelled(cancellation)?;
+
+  let authority = decode_immutable_namespace_authority(
+    ImmutableNamespaceAuthorityInputV1 {
+      expected_root_hash: root_hash,
+      expected_database_id: &header.database_id,
+      root_entity: Some(&root_entity),
+      namespace_tree_entity: namespace_tree_entity.as_deref(),
+      semantic_state_object: semantic_state.as_ref().map(|loaded| loaded.body.as_slice()),
+      admission_control: admission.as_ref().map(|loaded| loaded.body.as_slice()),
+    },
+    header.hash_algorithm,
+    header.write_sequence_high_water,
+  )
+  .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
+  if authority.admission.selected_header_slot_sequence > header.slot_sequence || authority.admission.publication_sequence == 0 {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "captured_authority_admission_sequence",
+      "root admission witness has no durable publication or exceeds the captured header history",
+    ));
+  }
+  ensure_captured_authority_not_cancelled(cancellation)?;
+  Ok(Some(authority))
+}
+
 fn ensure_captured_authority_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {
   if cancellation.is_cancelled() {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
@@ -13517,6 +13446,109 @@ fn immutable_entity_exists_for_authority(
     Ok(existing) => Ok(existing.is_some()),
     Err(error) => Err(FirstAuthorityPublicationErrorV1::invalid(error.code(), error.to_string())),
   }
+}
+
+fn selected_semantic_authority_header(
+  observation: &DatabaseHeaderObservationV4,
+) -> Result<&DatabaseHeaderV4, FirstAuthorityPublicationErrorV1> {
+  let header = &observation.selected.header;
+  if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_header",
+      "runtime recovery requires a non-degraded selected v4 HEAD",
+    ));
+  }
+  Ok(header)
+}
+
+// The live caller retains its existing guards; captured callers supply their
+// settled lookup and one cumulative operation budget. Neither owns a new KV.
+fn load_selected_semantic_authority_from_lookup(
+  file: &File,
+  kv: &impl FirstAuthorityEntityLookupV1,
+  observation: &DatabaseHeaderObservationV4,
+) -> Result<SelectedSemanticAuthorityV1, FirstAuthorityPublicationErrorV1> {
+  let header = selected_semantic_authority_header(observation)?;
+  let root_locator = kv.get(&header.head_hash)?.ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid("selected_semantic_authority_root_missing", "selected HEAD NamespaceRoot is absent")
+  })?;
+  if root_locator.type_flags != KV_TYPE_DIRECTORY {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_root_role",
+      "selected HEAD identity resolves to another KV role",
+    ));
+  }
+  let root_bytes =
+    read_entity_bounded(file, kv, &header.head_hash, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP, header.write_sequence_high_water)?
+      .ok_or_else(|| {
+        FirstAuthorityPublicationErrorV1::invalid(
+          "selected_semantic_authority_root_changed",
+          "selected HEAD NamespaceRoot disappeared after its locator was observed",
+        )
+      })?;
+  let root = decode_namespace_root_entity(&root_bytes, header.hash_algorithm, header.write_sequence_high_water)?;
+  if root.root_hash != header.head_hash {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_root_identity",
+      "selected NamespaceRoot bytes disagree with the v4 HEAD",
+    ));
+  }
+
+  let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
+  let semantic = load_canonical_system_file_at_path(
+    file,
+    kv,
+    header,
+    &semantic_path,
+    SEMANTIC_OBJECT_CONTENT_TYPE,
+    super::semantic_store::semantic_object_cap(1)?,
+  )?
+  .ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_state_missing",
+      "selected NamespaceRoot semantic-state object is absent",
+    )
+  })?;
+  let semantic = decode_semantic_object(&semantic.body, header.hash_algorithm)?;
+  if semantic.object_id != root.semantic_state_root || !matches!(semantic.kind, SemanticObjectKind::State { .. }) {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_state_identity",
+      "selected semantic-state object disagrees with the NamespaceRoot edge",
+    ));
+  }
+  let semantic_state = semantic.semantic_state.ok_or_else(|| {
+    FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_state_fields",
+      "selected semantic-state object omitted its typed state fields",
+    )
+  })?;
+
+  let admission_bytes = load_system_file(file, kv, header, SystemControlKindV1::RootAdmissionCommit, &header.head_hash)?;
+  let admission = decode_root_admission_commit(&admission_bytes, header.hash_algorithm)?;
+  if admission.database_id != header.database_id
+    || admission.namespace_root != header.head_hash
+    || admission.authority_kind != RootAuthorityKindV1::Head
+    || admission.authority_after != header.head_hash
+    || admission.selected_header_slot_sequence > header.slot_sequence
+    || admission.publication_sequence == 0
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "selected_semantic_authority_admission",
+      "selected HEAD admission witness does not close over the current v4 authority",
+    ));
+  }
+
+  Ok(SelectedSemanticAuthorityV1 {
+    database_id: header.database_id,
+    physical_instance_id: header.physical_instance_id,
+    root_hash: root.root_hash,
+    namespace_tree_root: root.namespace_tree_root,
+    semantic_state,
+    system_family_registry_fingerprint: header.system_family_registry_fingerprint.clone(),
+    selected_header_slot_sequence: admission.selected_header_slot_sequence,
+    write_sequence_high_water: header.write_sequence_high_water,
+    root_publication_sequence: admission.publication_sequence,
+  })
 }
 
 /// One lookup boundary for the live owner and retained, bounded captures.
@@ -14093,7 +14125,7 @@ fn active_pointer_manifest_kind_matches(kind: ActivePointerKindV1, manifest_kind
 
 fn load_system_file(
   file: &File,
-  kv: &DiskKVStore,
+  kv: &impl FirstAuthorityEntityLookupV1,
   header: &DatabaseHeaderV4,
   kind: SystemControlKindV1,
   identity: &[u8],

@@ -5,7 +5,7 @@ use crate::engine::v4::namespace_seek::{child_bounds, LoadedNamespaceSeekNodeV1}
 use crate::engine::v4::semantic_source_capture::decode_semantic_source_node_v1;
 
 pub(super) fn load_catalog_node(
-  operation: &CatalogReadOperationV1<'_>,
+  operation: &CatalogReadOperationV1<'_, '_>,
   hash: &[u8],
   lower: Option<&str>,
   upper: Option<&str>,
@@ -132,7 +132,7 @@ impl SourceCatalogCursorV1 {
 
   pub(super) fn next_row(
     &mut self,
-    operation: &CatalogReadOperationV1<'_>,
+    operation: &CatalogReadOperationV1<'_, '_>,
   ) -> Result<Option<ChildEntry>, SemanticMutationObservationErrorV1> {
     self.advance(
       |row| {
