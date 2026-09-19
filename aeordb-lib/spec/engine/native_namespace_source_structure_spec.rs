@@ -1,5 +1,7 @@
 //! Independent directory frames, ordinary source roles and shared metadata.
 use super::*;
+#[path = "native_namespace_cursor_seek_structure_spec.rs"]
+mod cursor_seek_structure;
 
 #[test]
 fn native_namespace_source_reads_version_zero_records_and_empty_bodies_at_both_widths() {

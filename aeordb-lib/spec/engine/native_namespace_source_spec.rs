@@ -6,6 +6,10 @@ use super::*;
 mod cursor;
 #[path = "native_namespace_cursor_boundary_spec.rs"]
 mod cursor_boundary;
+#[path = "native_namespace_cursor_seek_spec.rs"]
+mod cursor_seek;
+#[path = "native_namespace_cursor_seek_boundary_spec.rs"]
+mod cursor_seek_boundary;
 #[path = "native_semantic_source_union_spec.rs"]
 mod source_union;
 #[path = "native_namespace_source_structure_spec.rs"]

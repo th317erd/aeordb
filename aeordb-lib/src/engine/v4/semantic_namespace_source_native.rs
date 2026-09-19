@@ -196,6 +196,43 @@ impl NamespaceSourceStateV1 {
     Ok(Self { stack, failed: false })
   }
 
+  /// Seed only ancestors of the exclusive full-file bound. A missing/non-
+  /// directory component is a valid suffix boundary, not source-prefix proof.
+  fn seek_after(
+    &mut self,
+    operation: &NamespaceSourceOperationV1<'_>,
+    after_path: &str,
+  ) -> Result<(), NativeSemanticNamespaceSourceErrorV1> {
+    let mut relative =
+      after_path.strip_prefix('/').ok_or_else(|| invalid("semantic_namespace_source_path", "seek bound is not absolute"))?;
+    while let Some(frame) = self.stack.last_mut() {
+      operation.check()?;
+      frame.lower = Some(copy_namespace_path(relative)?);
+      let Some((component, remaining)) = relative.split_once('/') else {
+        break;
+      };
+      let child =
+        seek_namespace_child_v1(&frame.hash, component, true, operation.bounds.maximum_btree_depth, |hash, lower, upper, btree_child| {
+          operation.load_node(hash, &frame.path, lower, upper, btree_child)
+        })?;
+      let Some(child) = child.filter(|child| child.name == component && child.entry_type == EntryTypeV4::DirectoryIndex.to_u8()) else {
+        break;
+      };
+      operation.lookup.charge_work(1).map_err(map_namespace_read_error)?;
+      let path = join_selected_path(&frame.path, &child.name, operation.bounds.maximum_path_bytes)?;
+      if self.stack.len() >= operation.bounds.maximum_path_depth {
+        return Err(resource("semantic_namespace_source_depth", "namespace seek exceeds its path-depth bound").into());
+      }
+      if self.stack.iter().any(|ancestor| ancestor.hash == child.hash) {
+        return Err(invalid("semantic_namespace_source_cycle", "namespace directory repeats an ancestor").into());
+      }
+      self.stack.push(NamespaceDirectoryFrameV1 { path, hash: child.hash, lower: None });
+      relative = remaining;
+    }
+    operation.check()?;
+    Ok(())
+  }
+
   fn next_source<'a>(
     &mut self,
     operation: &NamespaceSourceOperationV1<'a>,
@@ -264,6 +301,28 @@ impl NativeSemanticMutationInventoryV1<'_> {
   ) -> Result<NativeSemanticNamespaceSourceCursorV1<'_>, NativeSemanticNamespaceSourceErrorV1> {
     let operation = NamespaceSourceOperationV1::new(self, request)?;
     let state = NamespaceSourceStateV1::new(&operation, request.tree_root)?;
+    Ok(NativeSemanticNamespaceSourceCursorV1 { operation, state })
+  }
+
+  /// Start strictly after a canonical namespace configuration FILE path,
+  /// even if that file or one of its ancestors is absent from this capture.
+  /// The bound is not a configuration-owner path or proof of processed work.
+  /// Seeks and later reads share one budget and never consult live locators.
+  pub fn open_namespace_configuration_cursor_after(
+    &self,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+    after_path: &str,
+  ) -> Result<NativeSemanticNamespaceSourceCursorV1<'_>, NativeSemanticNamespaceSourceErrorV1> {
+    let operation = NamespaceSourceOperationV1::new(self, request)?;
+    validate_namespace_source_path(after_path, operation.algorithm())?;
+    if after_path.len() > operation.bounds.maximum_path_bytes {
+      return Err(resource("semantic_namespace_source_path_bound", "namespace seek exceeds its path-byte bound").into());
+    }
+    if after_path.split('/').skip(1).count() > operation.bounds.maximum_path_depth {
+      return Err(resource("semantic_namespace_source_depth", "namespace seek exceeds its path-depth bound").into());
+    }
+    let mut state = NamespaceSourceStateV1::new(&operation, request.tree_root)?;
+    state.seek_after(&operation, after_path)?;
     Ok(NativeSemanticNamespaceSourceCursorV1 { operation, state })
   }
 }
@@ -452,6 +511,13 @@ fn copy_namespace_bytes(bytes: &[u8]) -> Result<Vec<u8>, SemanticMutationObserva
   let mut copy = Vec::new();
   copy.try_reserve_exact(bytes.len()).map_err(namespace_allocation)?;
   copy.extend_from_slice(bytes);
+  Ok(copy)
+}
+
+fn copy_namespace_path(path: &str) -> Result<String, SemanticMutationObservationErrorV1> {
+  let mut copy = String::new();
+  copy.try_reserve_exact(path.len()).map_err(namespace_allocation)?;
+  copy.push_str(path);
   Ok(copy)
 }
 

@@ -26,6 +26,66 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,17:35UTC: the exclusive namespace cursor passed all final gates on
+Linux, macOS and native Windows. Windows finished17:29:08, sealed17:34:12; every
+raw artifact is local. The strict combined
+[83-input cursor proof](../evidence/user-facing-v4-u1-namespace-cursor-seek-proof-20260919.json)
+passes against MAIN. Linux1528library/affected, Mac256narrow/422affected/1022lib,
+Windows256narrow/422affected/1037lib; all three passed185reference tests and
+502independent fixtures, required formatting/static gates and unchanged audit.
+All12new cases passed Linux individual10second deadlines, slowest656ms. Final
+review preserves the from-start cursor, paired union and existing source loaders;
+no source-prefix, task, fence, retention or activation authority is inferred.
+The coherent cursor milestone is ready for its scoped commit/push. U1 and
+U2-U7 remain open. Isolated continuation candidate1 is not part of this landing.
+
+September19,17:33UTC: cursor final Linux extra passed17:07:31 and sealed17:13:47;
+all24additional raw artifacts are local and strictly verified. Mac passed all
+nine gates17:15:43, sealed17:17:01; all66raw artifacts are local and verified:
+256narrow,422affected,1022library,185reference and502independent fixtures.
+Windows passed focused/affected and1037library cases by17:26:02; later stages
+remain pending. MAIN retains the exact83cursor inputs, uncommitted.
+
+The isolated following continuation slice has actual87-input failing-first
+evidence: two intended callable refusals17:19:57, all7raw artifacts local.
+Candidate1 has89inputs, seven new functions covering whole steps, drop/admit/
+restart, phases, registry/request binding and shared dependencies. It is running
+on the desktop under invocation3ec078f8441f496581926d8116b8fdb5. Further fault,
+resource/performance and native-reopen coverage is not yet executed. No
+continuation implementation is integrated or qualified yet.
+
+September19,17:08UTC: exclusive cursor candidate3 passed all Linux preflight
+gates by17:01:07:93focused cases,12individual ten-second deadlines (slowest656ms),
+formatting, strict all-target Clippy,1528library/affected cases (1022library and
+506across16targets), and unchanged1501audit. All43raw artifacts are local and
+the strict Linux preflight verifier passed. Seven exact source/test files are
+now integrated uncommitted; all83manifest hashes match. Original runtime and
+fixtures remain byte-identical after removing only the named additive changes.
+
+Final source-bound qualification is running: Linux reference/contracts/debt
+under invocation6eb86391b54f49df920ede77e30d8141, Mac driver4384, Windows7332.
+No final platform proof or cursor completion claim yet. The following compiler
+continuation has only two unregistered test drafts and design notes in the task
+cache. No durable task writer, source-prefix proof or service was enabled.
+
+September19,16:56UTC: catalog-only partial admission is committed/pushed as
+`46b37ff32e4800fee953dfc331558d81f81d2720`. Exclusive namespace cursor seeking
+is isolated in compiler-cursor-overlay, not integrated yet. Actual80-input RED
+failed both intended callable-refusal cases16:30:55. Candidate1 passed92focused
+namespace/capture/task-graph cases16:39:17; candidate2 passed93cases16:47:12.
+Both pass packets and all raw logs are local. Runtime is unchanged since C1.
+
+Individual test deadlines exposed an order-dependent allocator probe:8cases
+passed, then the root-copy probe hit a cold registry singleton's inherited
+32byte allocation and aborted. Candidate3 explicitly initializes that registry
+before targeting the fallible root copy, and strengthens the expected error
+code. The failed preflight remains preserved. Candidate3's83inputs are
+`28dde04d0d748070508461fdb29b61889808457cd86e65f65c8cd78cfe28a489`;
+its focused/deadline/broad/static preflight is running under desktop invocation
+763df1e186384b638ed1d38d9e9c513e. No passing C3 or native-platform result yet.
+The original from-start cursor, paired union and shared seek owners are unchanged.
+The new read primitive grants no processed-prefix or durable task permission.
+
 September19,16:26UTC: partial catalog admission passed final exact-source
 qualification on Linux, macOS and Windows. Windows completed all seven stages
 16:19:38 and was sealed16:24:06; every raw artifact is now local. The strict

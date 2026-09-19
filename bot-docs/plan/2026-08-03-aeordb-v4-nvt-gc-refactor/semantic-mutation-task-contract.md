@@ -792,3 +792,40 @@ The [September19 three-platform proof](evidence/user-facing-v4-u1-catalog-progre
 qualifies these exact catalog-only inputs on Linux, macOS and native Windows,
 including the unchanged strict Complete admission regressions. This closes the
 partial-catalog prerequisite, not the enclosing continuation/retention owner.
+
+### Compiler continuation prerequisite: exclusive namespace source seek
+
+`open_namespace_configuration_cursor_after` is an additive constructor on the
+existing captured inventory reader. Its exclusive lower bound is the canonical
+configuration **file** path, not its owner directory. The bound may be absent,
+including an absent/non-directory ancestor; its lexical suffix is still defined.
+Global protected configuration is not a namespace input. ASMC's configuration-
+owner cursor must be converted to the full file path by the enclosing compiler
+owner; owner ordering alone differs around punctuation before `/`.
+
+The constructor seeds only matching directory ancestors using the existing
+validated seek/load chain. The existing successor cursor then reads the suffix
+with one cumulative work/read budget, bounded stack and charged path copies.
+Canonical/family/byte/depth limits, inherited B-tree ranges, captured-only
+locators, cancellation and pressure checks remain enforced. Original from-start
+and paired-source-union traversal are unchanged. A cursor error is terminal;
+retry requires a fresh cursor and cannot reuse partially advanced state.
+
+Seeking deliberately does not read or validate skipped configuration bodies.
+A successful suffix therefore grants no processed-prefix equivalence, catalog
+progress, task ownership, retention or activation permission. The captured
+inventory and staging-protection lifetimes remain mandatory. This introduces
+neither a persisted cursor encoding nor a second physical or traversal owner.
+
+Qualification uses native disposable files, independently sorted full paths,
+present/deleted/absent bounds, punctuation/UTF8, malformed branches, missing or
+corrupt successors, cancellation/pressure and shared budgets. A late seek must
+finish within768work units while enumeration from the beginning actually fails
+that same limit. A missing skipped body is not reread or falsely certified.
+Root-copy allocation injection explicitly initializes existing registry
+singletons first; the isolated cold-registry failure is retained and does not
+become a universal or cold-start allocation-recovery claim. The
+[September19 exact-source proof](evidence/user-facing-v4-u1-namespace-cursor-seek-proof-20260919.json)
+qualifies this primitive on Linux, macOS and native Windows. All twelve new
+cases also pass individual ten-second Linux deadlines (slowest656ms). Catalog
+continuation, source-prefix binding and durable task integration remain open.

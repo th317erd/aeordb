@@ -715,6 +715,9 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "whileletSome(source)=cursor.next_source()?",
     "operation:NamespaceSourceOperationV1",
     "stack:Vec<NamespaceDirectoryFrameV1>",
+    "pubfnopen_namespace_configuration_cursor_after(",
+    "state.seek_after(&operation,after_path)?",
+    "frame.lower=Some(copy_namespace_path(relative)?)",
     "Err(error)=>{self.failed=true;Err(error)}",
   ] {
     assert!(namespace_source.contains(required), "pausable namespace traversal lost its bounded owner: {required}");
