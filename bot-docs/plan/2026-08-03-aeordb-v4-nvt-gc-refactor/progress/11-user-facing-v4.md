@@ -26,6 +26,70 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19: the committed-control receipt correction passed final-source
+qualification on all three platforms. Windows finished14:50:27, sealed14:54:31;
+every raw artifact is local and the strict combined verifier passed. The
+[receipt correction proof](../evidence/user-facing-v4-u1-committed-control-receipt-proof-20260919.json)
+binds the62inputs, three failing-first rounds, six corrected regression cases,
+source archives, native executables, resource readings and all platform gates.
+Linux/macOS each passed253narrow,1995affected,1010library and185reference tests;
+Windows passed253narrow,1988affected,1025library and185reference tests. Format,
+strict Clippy and502independent fixtures passed; all1501audit identities/reviews
+are preserved, with only source locations refreshed.
+
+Only post-commit readback/error classification changes: mutable controls,
+the index-operation adapter and active pointers retain their committed receipts
+when later reads fail. The receipt keeps the last proven authority plus any
+proven hard-retirement sequence; it does not invent successful readback or repair
+damaged bytes. No task publisher, capability advertisement or service is enabled.
+The separate69-input first-record helper is now in native-platform qualification;
+compiler continuation, durable task publication and U2-U7 remain unfinished.
+
+September19,14:52UTC: first-record candidate2 passed all five desktop gates by
+14:48:39: actual-file reopen/error/retry check, formatting, strict all-target
+Clippy,1401tests (1010library plus391 across13affected targets), and1501audit
+identities. All36raw artifacts are local and strictly verified against69inputs:
+`2b2e57fb310dfecc0c6d95588f70e825bf075bdf55c038b5cdb60cfee8255bf5`.
+The original68candidate inputs are unchanged; only the existing native catalog
+fixture gains assertions for both retained/updated roots at every hash width.
+The13-target inventory covers compiler/update/admission, COW, resource failure,
+native/read/index adapters and physical staging; task graph tests run in the
+full library. Native Mac/Windows and final reference/contracts remain pending.
+Windows receipt correction passed125affected targets14:39:22 and is running
+its library suite; its source remains the separate62-input snapshot.
+
+September19,14:38UTC: receipt correction Linux and macOS each passed all9stages
+on the same62inputs; Mac finished14:15:54 and sealed14:22:07. Both platforms'
+66raw artifacts are local and strictly verified. Windows affected suites are
+still running14:35:02, with safe disk/RAM floors. Main remains frozen; no receipt
+completion or production-readiness claim yet.
+
+The separate first-record helper's actual RED failed both intended cases
+14:16:56. Its initial candidate command failed before compilation because two
+listed names were child modules, not Cargo targets. The unchanged68-input retry
+passed14:31:34, including all22lookup and77resource cases plus compiler/mutation
+targets. Original admission/update cases run inside the compiler target. All
+raw packets are preserved locally; broad/static preflight is being launched.
+This establishes a reader primitive, not durable task resume or activation.
+
+September19,14:16UTC: captured-task prerequisite committed and pushed as
+`8d8e97d3f6fc00b6ffef0e3b2db4b6c35291f87d`. The main checkout now contains only
+the exact62-input receipt correction (five scoped changed/new files), still
+uncommitted while native qualification runs. Linux passed all9stages14:11:57,
+including253narrow,1995affected,1010library and185reference tests. Sealed14:14:32;
+all66raw artifacts are local and strictly verified before reusing its target.
+Mac has passed through contracts14:15:21; Windows affected is running14:15:44
+with42.45GBsystem/51.35GBtest free and13.11GBfreeRAM. No all-platform receipt
+completion claim yet; the final verifier is prepared, not run.
+
+The next compiler-continuation helper is isolated in a separate overlay: a
+bounded first-record lookup through the existing Patricia reader, not raw-ID
+ordering or per-dependency full scans. Its two positive independent-oracle tests
+are running against a refusing scaffold;65-input RED manifest is
+`4e229ae8b75714e522050000f0bf8e872d8334876af6f6ba59e6d34eadaaf3b9`.
+Boundary, COW-progression and actual allocation-refusal tests are drafts, not
+executed evidence. Durable checkpoint admission and task activation remain open.
+
 September19,14:00UTC: the combined captured-task prerequisite passed all final
 Linux/macOS/Windows gates on the exact59-input manifest. Windows finished
 13:54:24 and was sealed13:56:14; all raw platform evidence is local. Strict

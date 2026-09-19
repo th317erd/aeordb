@@ -3961,10 +3961,11 @@ impl V4FirstAuthorityPublisher {
       }
     };
     let selected =
-      load_mutable_system_control_pair(&self.file, &kv, &publication_observation.selected.header, request.kind, request.identity)?.selected;
+      load_mutable_system_control_pair(&self.file, &kv, &publication_observation.selected.header, request.kind, request.identity)
+        .map(|pair| pair.selected);
     let incoming_digest = mutable_system_control_digest(header.hash_algorithm, request.encoded_control);
     let readback_failure = match selected {
-      Some(ref selected)
+      Ok(Some(ref selected))
         if selected.selected_slot == target_slot
           && selected.control_sequence == incoming.sequence
           && selected.control_digest == incoming_digest
@@ -3972,8 +3973,9 @@ impl V4FirstAuthorityPublisher {
       {
         None
       }
-      Some(_) => Some("published mutable system control was not selected exactly".to_string()),
-      None => Some("published mutable system control is absent".to_string()),
+      Ok(Some(_)) => Some("published mutable system control was not selected exactly".to_string()),
+      Ok(None) => Some("published mutable system control is absent".to_string()),
+      Err(source) => Some(source.to_string()),
     };
     drop(kv);
     drop(authority);
@@ -4001,7 +4003,16 @@ impl V4FirstAuthorityPublisher {
         ));
       }
       receipt.retirement_hard_publication_sequence = Some(hard_sequence);
-      receipt.observation = self.observe()?;
+      receipt.observation = match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          return Err(MutableSystemControlPublicationErrorV1::committed(
+            "mutable_control_committed_readback",
+            format!("control and hard retirement committed, but final header observation failed: {source}"),
+            receipt,
+          ));
+        }
+      };
     }
     if let Some((failure, message)) = committed_failure {
       return Err(MutableSystemControlPublicationErrorV1::committed(
@@ -5227,7 +5238,16 @@ impl V4FirstAuthorityPublisher {
         ));
       }
       receipt.retirement_hard_publication_sequence = Some(hard_sequence);
-      receipt.observation = self.observe()?;
+      receipt.observation = match self.observe() {
+        Ok(observation) => observation,
+        Err(source) => {
+          return Err(IndexActivePointerPublicationErrorV1::committed(
+            "index_active_pointer_committed_readback",
+            format!("active pointer and hard retirement committed, but final header observation failed: {source}"),
+            receipt,
+          ));
+        }
+      };
     }
     if let Some((failure, message)) = committed_failure {
       return Err(IndexActivePointerPublicationErrorV1::committed(index_active_pointer_committed_failure_code(failure), message, receipt));

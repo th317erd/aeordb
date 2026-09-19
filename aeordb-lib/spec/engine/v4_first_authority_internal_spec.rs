@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "mutable_control_receipt_spec.rs"]
+mod mutable_control_receipt_spec;
+
+#[path = "mutable_control_observation_receipt_spec.rs"]
+mod mutable_control_observation_receipt_spec;
+
 #[path = "semantic_mutation_observation_spec.rs"]
 mod semantic_mutation_observation_spec;
 
