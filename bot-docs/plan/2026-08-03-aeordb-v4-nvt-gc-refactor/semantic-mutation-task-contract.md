@@ -729,3 +729,30 @@ does not claim universal recovery from inherited inner allocation failures.
 Actual durable checkpoint publication, retention discovery across restart,
 compiler-owned cursor restoration and atomic task/generation/HEAD activation
 remain mandatory before ordinary task publication or capability advertisement.
+
+### Compiler continuation prerequisite: bounded first binding — September19
+
+`SemanticCatalogReaderV1::with_first_record` selects the first binding in a
+previously admitted nonempty catalog using the existing exact/ordinal descent.
+Order is catalog lookup digest then full key, not raw dependency ID; no ordinal
+becomes persisted identity. It reads at most H+1nodes and retains one body plus
+H-sized path metadata. The caller admits scratch/callback output and retains
+physical protection. Untouched subtrees still require prior complete admission.
+
+The [three-platform proof](evidence/user-facing-v4-u1-catalog-first-record-proof-20260919.json)
+preserves original lookup tests and the initial failing targets; it covers all
+registered hashes, independent Patricia ordering/COW progression, source and
+allocation refusals, cancellation/error priority, and old/updated catalog reads
+after actual native close/reopen. It does not implement durable pruning or
+resume. A later remaining-candidate-root strategy may use cursor-kind0 during
+Pruning, already allowed by frozen ASMC bytes, but must select both updated
+catalog roots only after a complete bounded step and prove their typed closure.
+
+Partial catalog admission must remain separate from Complete state admission.
+Current configuration count can differ from final expected count while compiling;
+ASMC mutation_count is an accepted logical-operation count, not a processed-
+configuration cursor. Candidate dependencies must match exact main bindings;
+Pruning candidates must additionally be unused. Neither those graph checks nor
+plausible counters prove source-position correctness or grant task ownership.
+Source/cursor binding, fences, retention and atomic activation remain mandatory
+in the enclosing continuation owner.

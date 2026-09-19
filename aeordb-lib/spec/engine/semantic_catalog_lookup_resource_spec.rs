@@ -13,6 +13,29 @@ impl SemanticCatalogObjectSourceV1 for NoStorage {
 }
 
 #[test]
+fn first_record_identity_and_prefix_allocation_refusals_are_recoverable_before_storage() {
+  for algorithm in
+    [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]
+  {
+    let root = vec![1; algorithm.hash_length()];
+    for occurrence in [1, 2] {
+      let (result, allocations) = measure_nth(algorithm.hash_length(), occurrence, || {
+        SemanticCatalogReaderV1::new(algorithm, &NoStorage).with_first_record(
+          &root,
+          SemanticCatalogTraversalBoundsV1::new(1, 1).unwrap(),
+          &|| false,
+          |_| Ok(()),
+        )
+      });
+      assert!(allocations.injected_failure, "allocation {occurrence} was not exercised");
+      let error = result.unwrap_err();
+      assert_eq!(error.class(), SemanticCatalogReadErrorClassV1::ResourceLimit);
+      assert_eq!(error.code(), "semantic_catalog_allocation");
+    }
+  }
+}
+
+#[test]
 fn lookup_digest_allocation_refusal_is_recoverable_before_storage_access() {
   for algorithm in
     [HashAlgorithm::Blake3_256, HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha3_256, HashAlgorithm::Sha3_512]

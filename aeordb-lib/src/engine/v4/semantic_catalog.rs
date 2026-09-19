@@ -323,7 +323,31 @@ pub fn walk_semantic_catalog_with_mutable_source_v1<S: SemanticCatalogObjectSour
   Ok(stats)
 }
 
+#[derive(Clone, Copy)]
+enum CatalogRecordSelectionV1<'a> {
+  First,
+  Exact { record_kind: u16, owner_key: &'a [u8], lookup: &'a [u8] },
+}
+
 impl SemanticCatalogReaderV1<'_> {
+  /// Inspect the first binding in an already-admitted nonempty catalog.
+  /// Ordering is by catalog lookup digest, not raw owner or dependency ID.
+  /// Untouched subtrees require prior validation, as for exact-key lookup.
+  /// Reads at most H+1 nodes, retaining one body and H-sized path metadata.
+  /// The caller admits that scratch and any retained callback output.
+  pub fn with_first_record<T>(
+    &self,
+    catalog_root: &[u8],
+    bounds: SemanticCatalogTraversalBoundsV1,
+    is_cancelled: &dyn Fn() -> bool,
+    inspect: impl FnOnce(SemanticCatalogRecordV1<'_>) -> Result<T, SemanticCatalogReadErrorV1>,
+  ) -> Result<T, SemanticCatalogReadErrorV1> {
+    self.validate_lookup_root(catalog_root, is_cancelled)?;
+    self
+      .with_selected_record(catalog_root, bounds, CatalogRecordSelectionV1::First, is_cancelled, |_, record| inspect(record))?
+      .ok_or_else(|| SemanticCatalogReadErrorV1::corrupt("semantic_catalog_first_record_missing", "nonempty catalog has no first binding"))
+  }
+
   /// Inspect an exact full key through at most H+1 catalog nodes. The supplied
   /// root/counts and untouched subtrees must already be admitted. A missing key
   /// does not certify the rest of the catalog. Only one node body and H-sized
@@ -353,17 +377,40 @@ impl SemanticCatalogReaderV1<'_> {
     is_cancelled: &dyn Fn() -> bool,
     inspect: impl FnOnce(u64, SemanticCatalogRecordV1<'_>) -> Result<T, SemanticCatalogReadErrorV1>,
   ) -> Result<Option<T>, SemanticCatalogReadErrorV1> {
-    check_cancelled(is_cancelled)?;
-    let width = self.hash_algorithm.hash_length();
-    if catalog_root.len() != width || catalog_root.iter().all(|byte| *byte == 0) {
-      return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_root", "lookup requires a nonzero database-width root"));
-    }
+    let width = self.validate_lookup_root(catalog_root, is_cancelled)?;
     validate_catalog_owner_key(record_kind, owner_key, width).map_err(format_error)?;
     if matches!(record_kind, 3..=7) && owner_key.iter().all(|byte| *byte == 0) {
       return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_owner", "lookup definition owner must be nonzero"));
     }
     let lookup = try_digest_parts(self.hash_algorithm, &[b"aeordb.semantic-catalog-key.v1\0", &record_kind.to_le_bytes(), owner_key])
       .map_err(|error| SemanticCatalogReadErrorV1::resource("semantic_catalog_allocation", error.to_string()))?;
+    self.with_selected_record(
+      catalog_root,
+      bounds,
+      CatalogRecordSelectionV1::Exact { record_kind, owner_key, lookup: &lookup },
+      is_cancelled,
+      inspect,
+    )
+  }
+
+  fn validate_lookup_root(&self, catalog_root: &[u8], is_cancelled: &dyn Fn() -> bool) -> Result<usize, SemanticCatalogReadErrorV1> {
+    check_cancelled(is_cancelled)?;
+    let width = self.hash_algorithm.hash_length();
+    if catalog_root.len() != width || catalog_root.iter().all(|byte| *byte == 0) {
+      return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_root", "lookup requires a nonzero database-width root"));
+    }
+    Ok(width)
+  }
+
+  fn with_selected_record<T>(
+    &self,
+    catalog_root: &[u8],
+    bounds: SemanticCatalogTraversalBoundsV1,
+    selection: CatalogRecordSelectionV1<'_>,
+    is_cancelled: &dyn Fn() -> bool,
+    inspect: impl FnOnce(u64, SemanticCatalogRecordV1<'_>) -> Result<T, SemanticCatalogReadErrorV1>,
+  ) -> Result<Option<T>, SemanticCatalogReadErrorV1> {
+    let width = self.hash_algorithm.hash_length();
     let mut identity = copy_lookup_bytes(catalog_root)?;
     let mut prefix = Vec::new();
     prefix
@@ -385,11 +432,21 @@ impl SemanticCatalogReaderV1<'_> {
           if !leaf.lookup_digest().starts_with(&prefix) || u64::from(leaf.record_count()) != expected_records {
             return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_leaf_closure", "lookup leaf disagrees with parent closure"));
           }
-          if leaf.lookup_digest() == lookup {
+          let matches_leaf = match selection {
+            CatalogRecordSelectionV1::First => true,
+            CatalogRecordSelectionV1::Exact { lookup, .. } => leaf.lookup_digest() == lookup,
+          };
+          if matches_leaf {
             for record in leaf.records() {
               check_cancelled(is_cancelled)?;
               let record = record.map_err(format_error)?;
-              if record.record_kind == record_kind && record.owner_key == owner_key {
+              let matches_record = match selection {
+                CatalogRecordSelectionV1::First => true,
+                CatalogRecordSelectionV1::Exact { record_kind, owner_key, .. } => {
+                  record.record_kind == record_kind && record.owner_key == owner_key
+                }
+              };
+              if matches_record {
                 let result = inspect(ordinal, record)?;
                 check_cancelled(is_cancelled)?;
                 return Ok(Some(result));
@@ -409,14 +466,20 @@ impl SemanticCatalogReaderV1<'_> {
             ));
           }
           let end = depth + internal.prefix().len();
-          if lookup[depth..end] != *internal.prefix() {
-            check_cancelled(is_cancelled)?;
-            return Ok(None);
+          if let CatalogRecordSelectionV1::Exact { lookup, .. } = selection {
+            if lookup[depth..end] != *internal.prefix() {
+              check_cancelled(is_cancelled)?;
+              return Ok(None);
+            }
           }
           let mut selected = None;
           for child in internal.children() {
             let child = child.map_err(format_error)?;
-            if child.edge == lookup[end] {
+            let matches_edge = match selection {
+              CatalogRecordSelectionV1::First => true,
+              CatalogRecordSelectionV1::Exact { lookup, .. } => child.edge == lookup[end],
+            };
+            if matches_edge {
               selected = Some(child);
               break;
             }

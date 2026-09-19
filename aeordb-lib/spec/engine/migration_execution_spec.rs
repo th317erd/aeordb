@@ -2116,6 +2116,7 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
     let reopened = V4FirstAuthorityPublisher::open(directory.path().join("migration-execution.aeordb")).unwrap();
     assert_eq!(reopened.observe().unwrap(), updated_observation);
     let protection = reopened.acquire_staging_protection(&memory, &cancellation).unwrap();
+    let before_first_reads = std::fs::read(directory.path().join("migration-execution.aeordb")).unwrap();
     for candidate in [&admitted, &update] {
       assert_eq!(
         reopened.load_semantic_object(1, &candidate.semantic_state().object_id).unwrap().unwrap(),
@@ -2133,15 +2134,38 @@ fn compiled_catalog_stages_through_native_authority_reopens_and_never_selects_he
       )
       .unwrap();
       let reader = SemanticCatalogReaderV1::new(algorithm, &source);
+      let bounds = SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap();
+      let mut first_binding = None;
       reader
-        .walk_catalog(
-          &catalog_root,
-          SemanticCatalogTraversalBoundsV1::new(catalog_record_count, catalog_node_count).unwrap(),
-          &|| false,
-          |record| reader.with_definition(record, &|| false, |_| Ok(())),
-        )
+        .walk_catalog(&catalog_root, bounds, &|| false, |record| {
+          if first_binding.is_none() {
+            first_binding =
+              Some((record.record_kind, record.owner_key.to_vec(), record.semantic_id.to_vec(), record.definition_object_id.to_vec()));
+          }
+          reader.with_definition(record, &|| false, |_| Ok(()))
+        })
         .unwrap();
+      let read_first = || {
+        reader
+          .with_first_record(&catalog_root, bounds, &|| false, |record| {
+            Ok((record.record_kind, record.owner_key.to_vec(), record.semantic_id.to_vec(), record.definition_object_id.to_vec()))
+          })
+          .unwrap()
+      };
+      assert_eq!(Some(read_first()), first_binding, "reopened first lookup differs from full native catalog traversal");
+      use aeordb::engine::v4::semantic_catalog::{SemanticCatalogReadErrorClassV1, SemanticCatalogReadErrorV1};
+      let cancelled = reader.with_first_record(&catalog_root, bounds, &|| true, |_| Ok(())).unwrap_err();
+      assert_eq!(cancelled.class(), SemanticCatalogReadErrorClassV1::Cancelled);
+      let refused = reader
+        .with_first_record(&catalog_root, bounds, &|| false, |_| -> Result<(), SemanticCatalogReadErrorV1> {
+          Err(SemanticCatalogReadErrorV1::resource("native_first_callback", "caller refused output"))
+        })
+        .unwrap_err();
+      assert_eq!((refused.class(), refused.code()), (SemanticCatalogReadErrorClassV1::ResourceLimit, "native_first_callback"));
+      assert_eq!(Some(read_first()), first_binding, "a refused native read changed the next result");
     }
+    assert_eq!(std::fs::read(directory.path().join("migration-execution.aeordb")).unwrap(), before_first_reads);
+    assert_eq!(reopened.observe().unwrap(), updated_observation);
     drop(empty);
     drop(update);
     assert!(NativeSemanticCatalogStagingStoreV1::new(&protection, [0; 16], 1, &cancellation).is_err());

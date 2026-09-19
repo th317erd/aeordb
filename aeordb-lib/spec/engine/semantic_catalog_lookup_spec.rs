@@ -2,6 +2,9 @@
 #[path = "../helpers/semantic_catalog_oracle.rs"]
 mod catalog_oracle;
 
+#[path = "semantic_catalog_first_record_spec.rs"]
+mod first_record;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 

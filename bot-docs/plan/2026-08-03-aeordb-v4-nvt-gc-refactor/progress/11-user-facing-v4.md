@@ -26,6 +26,29 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,15:19UTC: the bounded first-record reader passed final exact-source
+Linux/macOS/Windows qualification. Windows finished15:14:50 and sealed15:17:31;
+Mac finished15:01:08 and sealed15:06:07. Every raw artifact is local; the strict
+[69-input reader proof](../evidence/user-facing-v4-u1-catalog-first-record-proof-20260919.json)
+passed. Linux passed1401library/affected cases plus its direct native fixture;
+Mac passed254narrow,391affected and1010library; Windows passed254narrow,
+391affected and1025library. Each passed185reference cases and502independent
+fixtures, with required formatting/static checks and unchanged1501audit.
+
+The reader shares exact/ordinal descent and selects the first canonical binding
+within H+1nodes, with bounded path metadata. Ten new reader cases, allocator
+refusals and actual-file reopen/retry checks preserve original lookup behavior.
+It neither validates untouched subtrees nor grants durable compiler/task rights.
+The receipt correction is already committed/pushed as1237c397.
+
+The next catalog-only partial-admission slice is isolated in compiler-progress-
+overlay. Its actual73-input RED failed both positive targets15:07:46,0passed/
+2failed/53filtered, at the intended unimplemented entry; all7raw artifacts are
+local and verified. Candidate1 shares the existing complete graph/bitmap proof
+and adds exact candidate-dependency accounting, without fabricating a Complete
+state. Its74-input run is active; additional malformed/resource/native progress
+coverage and final qualification remain owed. This is not a resume permit.
+
 September19: the committed-control receipt correction passed final-source
 qualification on all three platforms. Windows finished14:50:27, sealed14:54:31;
 every raw artifact is local and the strict combined verifier passed. The
