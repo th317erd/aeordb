@@ -314,11 +314,72 @@ pub struct ImmutableNamespaceAuthorityV1 {
   pub admission: RootAdmissionCommitV1,
 }
 
+/// Metadata binding only. The caller must independently validate the named
+/// namespace tree; this is deliberately not ImmutableNamespaceAuthorityV1.
+pub(super) struct NamespaceSemanticBindingV1 {
+  pub root: NamespaceRootV1,
+  pub semantic_state: SemanticStateV1,
+  pub admission: RootAdmissionCommitV1,
+}
+
+pub(super) struct NamespaceSemanticBindingInputV1<'a> {
+  pub expected_root_hash: &'a [u8],
+  pub expected_database_id: &'a [u8; 16],
+  pub root_entity: Option<&'a [u8]>,
+  pub semantic_state_object: Option<&'a [u8]>,
+  pub admission_control: Option<&'a [u8]>,
+}
+
 pub fn decode_immutable_namespace_authority(
   input: ImmutableNamespaceAuthorityInputV1<'_>,
   hash_algorithm: HashAlgorithm,
   write_sequence_high_water: u64,
 ) -> Result<ImmutableNamespaceAuthorityV1, RootAuthorityReadError> {
+  let (binding, namespace_tree) = decode_namespace_semantic_binding_with_tree(
+    NamespaceSemanticBindingInputV1 {
+      expected_root_hash: input.expected_root_hash,
+      expected_database_id: input.expected_database_id,
+      root_entity: input.root_entity,
+      semantic_state_object: input.semantic_state_object,
+      admission_control: input.admission_control,
+    },
+    hash_algorithm,
+    write_sequence_high_water,
+    |root| {
+      let namespace_tree_bytes =
+        required(input.namespace_tree_entity, RootAuthorityReferenceRoleV1::NamespaceTreeRoot, &root.namespace_tree_root)?;
+      map_invalid(
+        RootAuthorityReferenceRoleV1::NamespaceTreeRoot,
+        &root.namespace_tree_root,
+        decode_namespace_tree_root_v0(namespace_tree_bytes, &root.namespace_tree_root, hash_algorithm, write_sequence_high_water),
+      )
+    },
+  )?;
+  Ok(ImmutableNamespaceAuthorityV1 {
+    root: binding.root,
+    namespace_tree,
+    semantic_state: binding.semantic_state,
+    admission: binding.admission,
+  })
+}
+
+pub(super) fn decode_namespace_semantic_binding(
+  input: NamespaceSemanticBindingInputV1<'_>,
+  hash_algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> Result<NamespaceSemanticBindingV1, RootAuthorityReadError> {
+  let (binding, ()) = decode_namespace_semantic_binding_with_tree(input, hash_algorithm, write_sequence_high_water, |_| Ok(()))?;
+  Ok(binding)
+}
+
+// Keep the full decoder's root -> tree -> state -> admission error ordering.
+// Metadata-only callers replace only the tree step with their bounded reader.
+fn decode_namespace_semantic_binding_with_tree<T>(
+  input: NamespaceSemanticBindingInputV1<'_>,
+  hash_algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+  decode_tree: impl FnOnce(&NamespaceRootV1) -> Result<T, RootAuthorityReadError>,
+) -> Result<(NamespaceSemanticBindingV1, T), RootAuthorityReadError> {
   let hash_width = hash_algorithm.hash_length();
   if input.expected_root_hash.len() != hash_width {
     return invalid(
@@ -345,13 +406,7 @@ pub fn decode_immutable_namespace_authority(
     );
   }
 
-  let namespace_tree_bytes =
-    required(input.namespace_tree_entity, RootAuthorityReferenceRoleV1::NamespaceTreeRoot, &root.namespace_tree_root)?;
-  let namespace_tree = map_invalid(
-    RootAuthorityReferenceRoleV1::NamespaceTreeRoot,
-    &root.namespace_tree_root,
-    decode_namespace_tree_root_v0(namespace_tree_bytes, &root.namespace_tree_root, hash_algorithm, write_sequence_high_water),
-  )?;
+  let namespace_tree = decode_tree(&root)?;
 
   let semantic_bytes = required(input.semantic_state_object, RootAuthorityReferenceRoleV1::SemanticStateRoot, &root.semantic_state_root)?;
   let semantic_object = map_invalid(
@@ -412,7 +467,7 @@ pub fn decode_immutable_namespace_authority(
     );
   }
 
-  Ok(ImmutableNamespaceAuthorityV1 { root, namespace_tree, semantic_state, admission })
+  Ok((NamespaceSemanticBindingV1 { root, semantic_state, admission }, namespace_tree))
 }
 
 fn required<'a>(value: Option<&'a [u8]>, role: RootAuthorityReferenceRoleV1, identity: &[u8]) -> Result<&'a [u8], RootAuthorityReadError> {

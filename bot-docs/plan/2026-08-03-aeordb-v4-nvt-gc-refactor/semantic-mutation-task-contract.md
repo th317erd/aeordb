@@ -930,3 +930,68 @@ the original RED, two incorrect new-test error expectations and new-fixture
 Clippy failure remain recorded. No runtime relaxation was used to resolve them.
 This closes retained alias preparation only, not source-prefix admission,
 durable task selection/recovery, activation or ordinary-v4 service readiness.
+
+### Retained source-union validation — implementation entry18111638
+
+Before restoring compiler progress, validate its declared retained source set
+through the captured native inventory. Add
+`validate_captured_semantic_source_union(task_id, checkpoint_sequence, bounds)`
+as a read-only observation, not a task-selection, compiler-prefix or GC permit.
+Its summary reports protected and namespace union paths, actual base/requested
+configuration counts, total physical read bytes and separate cumulative catalog
+and namespace work. No source bodies survive in the summary. Physical protection
+and the exact captured view remain the enclosing caller's responsibility.
+
+The validation bounds contain the existing catalog and namespace bounds plus
+module/workspace, aggregate alias-occurrence and fingerprint-workspace ceilings.
+The catalog read-byte budget covers controls, root metadata, catalog/source reads
+and both namespace passes together. Namespace reads also obey their existing
+local ceiling; logical catalog and namespace work keep separately named limits.
+Do not reset a quota for each alias, configuration, tree or fingerprint pass.
+
+Bind one immutable ASCM/ASMC pair and completely validate both protected catalogs
+using their existing ordered reader. Resolve the historical admitted base through
+root/state/admission metadata validation, without fabricating current HEAD or
+loading an unbounded directory representation. Share the old metadata rules and
+preserve the existing full-reader and live-HEAD validation/error ordering; use
+the bounded namespace reader for both base and staged DirectoryIndex trees.
+
+Use the existing schema alias visitor and selected plugin pair reader to require
+every referenced alias and module on both retained sides. Explicit alias absence
+is preserved; Unlisted is an error, never current fallback. Validate every
+declared protected row. Additional declared paths may represent explicitly named
+unchanged or unused replacements; do not infer or discard the original accepted
+logical operation list from the minimum set of configuration references.
+
+Merge the already ordered protected catalog and paired namespace streams to
+reconstruct the frozen BASE source fingerprint, including explicit absence for
+requested-only namespace paths. No new scratch format, world-sized set or
+per-path namespace restart is needed. Count actual requested configurations,
+including the protected global index source separately, and compare ASMC's
+expected final configuration count. Namespace union count is not that count.
+Absent existing global configuration remains absent, not a new-database default.
+
+The initial failing-first native targets cover empty/absent inputs and changed
+base/requested configurations after actual close/reopen and current authority
+advance. Independent ordered-map/preimage expectations precede implementation.
+Required additions include all five hashes, retained plugin revision differences,
+omitted required aliases/modules, incorrect namespace-inclusive fingerprint,
+wrong final count, malformed/missing root admission and source/namespace data,
+late cancellation, memory/budget refusal, retry and complete reservation release.
+Retain original current-source, namespace, graph, catalog and compiler fixtures.
+Use individual ten-second native-fixture deadlines and final exact-source
+Linux/macOS/Windows, static/reference/architecture qualification before landing.
+
+This slice does not choose fresh/incremental compilation, certify a saved
+configuration cursor, select a durable checkpoint, advance a task fence or
+publish HEAD. Those remain coupled following source-prefix/task work. All
+generic semantic-control publication refusals and capability advertisement stay
+unchanged. No production database or service operation is part of this unit.
+
+The [three-platform qualification](evidence/user-facing-v4-u1-source-union-validation-proof-20260919.json)
+now covers fifteen native validation cases, independent source preimages and
+physical-read/work ceilings, real reopen/current-authority advancement, both-side
+plugin membership, metadata/source failures and cancellation/resource release.
+The exact105-input candidate preserves the existing full-root and source-reader
+regressions and1501audit reviews. This completes only the retained source-set
+observation prerequisite; source-prefix and durable task authority remain open.

@@ -26,6 +26,80 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,22:49UTC: Windows completed every final gate22:47:20 and was
+sealed22:48:50. All raw evidence is local. The combined
+[105-input source-union validation proof](../evidence/user-facing-v4-u1-source-union-validation-proof-20260919.json)
+passes against MAIN: Linux1650library/affected,231targeted and15individual
+deadlines (slowest586ms); Mac257narrow/519affected/1047library;
+Windows257narrow/519affected/1062library. Each platform passed185reference
+tests,502independent fixtures and its required static/format gates. Shared
+old-reader behavior,1501audit reviews and generic task-publication refusals
+remain intact. Latest fetch has0/0drift. This21-file coherent milestone is ready
+for scoped commit/push; U1 and U2–U7 remain open. Following source-prefix design
+and a test-only characterization draft remain isolated and unexecuted.
+
+September19,22:34UTC: final Linux reference/contracts/debt passed22:22:10,
+sealed22:26:54; all24raw artifacts local and verified. Mac passed all9gates
+22:30:20, sealed22:32:37; all66raw artifacts local and verified:257narrow,
+519affected,1047library,185reference and502independent fixtures. Windows
+affected passed22:31:27 and its library is running; no Windows completion or
+combined proof is claimed. MAIN remains the exact105-input C6 candidate.
+
+September19,22:22UTC: C6/preflight2 completed22:15:21 and its strict Linux
+proof passes:1650library/affected,231targeted,15individual deadlines, formatting,
+strictClippy and unchanged1501audit. All43raw artifacts are local. The exact
+18overlay files are integrated via apply_patch and all105inputs match MAIN.
+Final gates launched22:21:50: desktop extra invocation
+fabb43e4a0804c639fba32e65a35f5c0/PID325377, MacPID68977, WindowsPID9600.
+Their outcomes and combined proof are still pending. Full source review found
+no weakened old-reader checks or new task/activation authority. U1/U2–U7 open.
+
+September19,22:07UTC: C4 passed all fifteen new native cases. Its audit preview
+retains all1501occurrences, IDs and reviews; only thirteen line numbers changed.
+C5 incorporates that metadata and passed231targeted cases plus fifteen individual
+ten-second deadlines. Preflight1 stopped at formatting: a test-module declaration
+needed canonical ordering. All raw artifacts through this failure are local and
+strictly verified. C6 changes only that ordering, not runtime or test bodies;
+its105-input manifest is
+`1be931ef236670844d2651d22ac39ecdfc5540e0a7a362d16df36539a7dd0557`.
+Desktop invocation65032df7a2e8412a80e6596853eea076/PID309408 launched22:07:11.
+Broader regression/static gates and final native-platform qualification remain
+pending. Shared historical metadata/full-reader and catalog-loop preservation
+checks pass; no source is integrated into MAIN yet. U1 and U2–U7 remain open.
+
+September19,21:39UTC: RED3 executed both intended callable refusals;0pass/2fail
+and1032filtered in0.10seconds. All raw evidence is local. The source validator
+is now drafted in the isolated overlay. C1 stopped at two opaque-lifetime
+declarations and one alias-visitor return mismatch; its seven raw artifacts
+are local and verified. C2 corrects those compile errors and includes eight
+new native cases. Its103-input manifest is
+`48141b0c29cc1b7efad1b5dc93d5f6e24c7ec7ef19fc8751f5489ad478fb59f7`;
+desktop invocationcc0201fd89cd4d23b227fd165f154282/PID285130 launched21:39:08.
+Following local-only tests add exact physical-byte/logical-work limits,
+allocation refusal, entry/final cancellation and pressure, unused-row/pair
+validation and operational-limit retry. These are not yet executed. No new
+runtime source is integrated into MAIN; U1 and all later units remain open.
+
+September19,20:55UTC: the first two retained source-union attempts stopped at
+test-fixture compilation, so neither is a behavioral RED. All fourteen raw
+artifacts are local and strictly verified. RED2 omitted a newly overlaid helper
+from its transfer packet; RED3 adds that exact test-only file and asserts every
+overlay file is included. The101-input packet is
+`e1389db2cd91c83e100d87db0e842c77462114b7aef85eeed2d48aa24a3a5a64`.
+Desktop invocation81ae2c6a685d45d8a027df0f0d916681, PID246776, started20:55:16.
+The runtime remains a refusing scaffold pending actual execution of both tests.
+
+September19: retained alias preparation is committed/pushed as18111638,
+with clean tracked source and0/0upstream drift. The next retained source-union
+validation entry is documented in the task contract and cache entry review.
+Two positive native tests and a callable refusing scaffold are isolated from
+MAIN in source-union-validation-overlay. Their100-input RED packet is
+`12228cf20d48a1c90ccaec7207fa8375f43c91f62e8d7389a2ce6f5b30dc9148`.
+The bounded desktop run launched under invocation
+4bf1656c01d64f48b9fd46c4ed190c87, PID228812. No test result or runtime validation
+behavior is claimed yet. Desktop preflight had93.97GB home and325.78GB Data
+free, with27.06GB available memory. No following runtime code is integrated.
+
 September19: Windows completed every final gate20:03:53UTC and was sealed
 20:09:31; all raw evidence is now local. The combined
 [98-input retained-alias proof](../evidence/user-facing-v4-u1-retained-alias-proof-20260919.json)

@@ -99,7 +99,7 @@ fn retained_source_resource_and_allocation_failures_preserve_causes_and_retry() 
 
 // Test-only physical assembly, retaining the exact original FileRecord body.
 // This is deliberately not a production captured-copy operation.
-fn seed_retained_revision(publisher: &V4FirstAuthorityPublisher, path: &str) -> Vec<u8> {
+pub(super) fn seed_retained_revision(publisher: &V4FirstAuthorityPublisher, path: &str) -> Vec<u8> {
   let _guard = publisher.root_state.lock().unwrap();
   let mut header = publisher.observe().unwrap().selected.header;
   let algorithm = header.hash_algorithm;

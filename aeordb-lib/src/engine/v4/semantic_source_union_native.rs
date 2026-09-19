@@ -1,4 +1,7 @@
 //! Complete source preparation under one captured view; no durable task grant.
+#[path = "semantic_source_union_validation.rs"]
+mod validation;
+pub use validation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 use super::*;
 use super::super::super::source_base::NativeSemanticSourceBaseV1;
 use crate::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
@@ -54,6 +57,8 @@ pub struct NativeSemanticSourceUnionRequestV1<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeSemanticSourceUnionErrorV1 {
+  #[error(transparent)]
+  RootAuthority(#[from] crate::engine::v4::root_authority::RootAuthorityReadError),
   #[error(transparent)]
   Source(#[from] SemanticMutationObservationErrorV1),
   #[error(transparent)]
@@ -449,7 +454,7 @@ struct NamespaceSourcePairCursorV1<'a> {
 }
 
 impl<'a> NamespaceSourcePairCursorV1<'a> {
-  fn new(operation: &NamespaceSourceOperationV1<'a>, base: &[u8], requested: &[u8]) -> UnionResult<Self> {
+  fn new<A: NamespaceReadAdmissionV1>(operation: &NamespaceSourceOperationV1<'a, A>, base: &[u8], requested: &[u8]) -> UnionResult<Self> {
     let scratch = namespace_seek_workspace_bytes_v1(
       operation.bounds.maximum_path_bytes as u64,
       operation.bounds.maximum_path_depth as u64,
@@ -475,7 +480,10 @@ impl<'a> NamespaceSourcePairCursorV1<'a> {
     })
   }
 
-  fn next_pair(&mut self, operation: &NamespaceSourceOperationV1<'a>) -> UnionResult<Option<NamespaceSourcePairV1<'a>>> {
+  fn next_pair<A: NamespaceReadAdmissionV1>(
+    &mut self,
+    operation: &NamespaceSourceOperationV1<'a, A>,
+  ) -> UnionResult<Option<NamespaceSourcePairV1<'a>>> {
     operation.check()?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     if self.base_next.is_none() && !self.base_ended {

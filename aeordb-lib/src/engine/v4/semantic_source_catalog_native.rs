@@ -3,10 +3,13 @@ use super::*;
 use std::cell::RefCell;
 use crate::engine::directory_entry::ChildEntry;
 use crate::engine::v4::namespace_seek::{namespace_seek_workspace_bytes_v1, seek_namespace_child_v1, NamespaceSeekFailureV1};
-use crate::engine::v4::semantic_source_capture::{decode_semantic_source_capture_binding_v1, decode_semantic_source_capture_v1};
+use crate::engine::v4::semantic_source_capture::{
+  decode_semantic_source_capture_binding_v1, decode_semantic_source_capture_v1, SemanticSourceCaptureV1,
+};
 #[path = "semantic_source_catalog_cursor.rs"]
 mod cursor;
-use cursor::{load_catalog_node, SourceCatalogCursorV1};
+use cursor::load_catalog_node;
+pub(super) use cursor::SourceCatalogCursorV1;
 
 #[derive(Clone, Copy, Debug)]
 pub struct NativeSemanticSourceCatalogBoundsV1 {
@@ -44,6 +47,9 @@ impl<'a> NativeSemanticSourceLookupV1<'a> {
   }
   pub fn source(&self) -> Option<&NativeProtectedSemanticSourceV1<'a>> {
     self.source.as_ref()
+  }
+  pub(super) fn into_source(self) -> Option<NativeProtectedSemanticSourceV1<'a>> {
+    self.source
   }
 }
 
@@ -174,7 +180,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     checkpoint_sequence: u64,
     bounds: NativeSemanticSourceCatalogBoundsV1,
     observer: Option<&dyn CatalogPhysicalEntryObserverV1>,
-    mut visitor: impl FnMut(
+    visitor: impl FnMut(
       &str,
       Option<&NativeProtectedSemanticSourceV1<'_>>,
       Option<&NativeProtectedSemanticSourceV1<'_>>,
@@ -183,25 +189,36 @@ impl NativeSemanticMutationInventoryV1<'_> {
     let operation = CatalogReadOperationV1::new(self, bounds, observer)?;
     let companion = operation.load_companion(task_id, checkpoint_sequence)?;
     let manifest = decode_semantic_source_capture_v1(&companion.bytes, operation.algorithm())?;
-    let mut base = SourceCatalogCursorV1::new(manifest.base_source_catalog, bounds.maximum_depth)?;
-    let mut requested = SourceCatalogCursorV1::new(manifest.requested_source_catalog, bounds.maximum_depth)?;
+    operation.visit_pairs(&manifest, visitor)
+  }
+}
+
+impl<'a> CatalogReadOperationV1<'a, '_> {
+  pub(super) fn visit_pairs<E: From<SemanticMutationObservationErrorV1>>(
+    &self,
+    manifest: &SemanticSourceCaptureV1<'_>,
+    mut visitor: impl FnMut(&str, Option<&NativeProtectedSemanticSourceV1<'a>>, Option<&NativeProtectedSemanticSourceV1<'a>>) -> Result<bool, E>,
+  ) -> Result<SemanticSourceCatalogSummaryV1, E> {
+    let operation = self;
+    let mut base = SourceCatalogCursorV1::new(manifest.base_source_catalog, self.bounds.maximum_depth)?;
+    let mut requested = SourceCatalogCursorV1::new(manifest.requested_source_catalog, self.bounds.maximum_depth)?;
     let mut paths = 0u64;
     let mut index_present = false;
     let mut parser_present = false;
     loop {
       operation.check()?;
-      let pair = (base.next_row(&operation)?, requested.next_row(&operation)?);
+      let pair = (base.next_row(operation)?, requested.next_row(operation)?);
       let (left, right) = match pair {
         (None, None) => break,
         (Some(left), Some(right)) if left.name == right.name => (left, right),
-        _ => return Err(invalid("semantic_source_catalog_paths", "base and requested source catalogs enumerate different paths")),
+        _ => return Err(invalid("semantic_source_catalog_paths", "base and requested source catalogs enumerate different paths").into()),
       };
       paths = paths.checked_add(1).ok_or_else(|| invalid("semantic_source_catalog_counts", "source path count overflowed"))?;
       if paths > manifest.protected_path_count
         || base.nodes > manifest.base_catalog_node_count
         || requested.nodes > manifest.requested_catalog_node_count
       {
-        return Err(invalid("semantic_source_catalog_counts", "visited source catalogs exceed their declared counts"));
+        return Err(invalid("semantic_source_catalog_counts", "visited source catalogs exceed their declared counts").into());
       }
       index_present |= left.name == "/.aeordb-config/indexes.json";
       parser_present |= left.name == "/.aeordb-config/parsers.json";
@@ -219,16 +236,16 @@ impl NativeSemanticMutationInventoryV1<'_> {
       || base.nodes != manifest.base_catalog_node_count
       || requested.nodes != manifest.requested_catalog_node_count
     {
-      return Err(invalid("semantic_source_catalog_counts", "complete source catalogs disagree with their declared counts"));
+      return Err(invalid("semantic_source_catalog_counts", "complete source catalogs disagree with their declared counts").into());
     }
     if !index_present || !parser_present {
-      return Err(invalid("semantic_source_catalog_required_paths", "source capture omits the root index or parser input"));
+      return Err(invalid("semantic_source_catalog_required_paths", "source capture omits the root index or parser input").into());
     }
     Ok(SemanticSourceCatalogSummaryV1 { paths, base_nodes: base.nodes, requested_nodes: requested.nodes, complete: true })
   }
 }
 
-trait CatalogPhysicalEntryObserverV1 {
+pub(super) trait CatalogPhysicalEntryObserverV1 {
   fn observe(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1>;
 }
 
@@ -264,7 +281,7 @@ impl CatalogPhysicalEntryObserverV1 for CatalogPhysicalVisitorV1<'_> {
   }
 }
 
-struct CatalogLookupV1<'a, 'observer> {
+pub(super) struct CatalogLookupV1<'a, 'observer> {
   captured: CapturedEntityLookupV1<'a>,
   remaining_work: Cell<u64>,
   observer: Option<&'observer dyn CatalogPhysicalEntryObserverV1>,
@@ -297,20 +314,20 @@ impl FirstAuthorityEntityLookupV1 for CatalogLookupV1<'_, '_> {
   }
 }
 
-struct CatalogReadOperationV1<'a, 'observer> {
+pub(super) struct CatalogReadOperationV1<'a, 'observer> {
   capture: &'a NativeSemanticMutationInventoryV1<'a>,
   bounds: NativeSemanticSourceCatalogBoundsV1,
   lookup: CatalogLookupV1<'a, 'observer>,
   _memory: MemoryReservation,
 }
 
-struct CatalogCompanionV1 {
-  bytes: Vec<u8>,
+pub(super) struct CatalogCompanionV1 {
+  pub(super) bytes: Vec<u8>,
   _memory: MemoryReservation,
 }
 
 impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
-  fn new(
+  pub(super) fn new(
     capture: &'a NativeSemanticMutationInventoryV1<'a>,
     bounds: NativeSemanticSourceCatalogBoundsV1,
     observer: Option<&'observer dyn CatalogPhysicalEntryObserverV1>,
@@ -351,17 +368,26 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
     Ok(Self { capture, bounds, lookup, _memory: memory })
   }
 
-  fn algorithm(&self) -> HashAlgorithm {
+  pub(super) fn algorithm(&self) -> HashAlgorithm {
     self.capture.header.selected.header.hash_algorithm
   }
 
-  fn check(&self) -> Result<(), SemanticMutationObservationErrorV1> {
+  pub(super) fn check(&self) -> Result<(), SemanticMutationObservationErrorV1> {
     check_cancelled(&self.capture.cancellation)?;
     self._memory.check_admission()?;
     Ok(())
   }
 
   fn load_companion(&self, task_id: &[u8; 16], sequence: u64) -> Result<CatalogCompanionV1, SemanticMutationObservationErrorV1> {
+    let (companion, _) = self.load_companion_and_checkpoint(task_id, sequence)?;
+    Ok(companion)
+  }
+
+  pub(super) fn load_companion_and_checkpoint(
+    &self,
+    task_id: &[u8; 16],
+    sequence: u64,
+  ) -> Result<(CatalogCompanionV1, Vec<u8>), SemanticMutationObservationErrorV1> {
     self.check()?;
     if task_id.iter().all(|byte| *byte == 0) || sequence == 0 {
       return Err(invalid("semantic_source_catalog_identity", "source capture requires a nonzero task and checkpoint sequence"));
@@ -401,10 +427,10 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
     decode_semantic_source_capture_binding_v1(&companion.bytes, &checkpoint.bytes, self.algorithm())?;
     self.check()?;
     memory.check_admission()?;
-    Ok(CatalogCompanionV1 { bytes: companion.bytes, _memory: memory })
+    Ok((CatalogCompanionV1 { bytes: companion.bytes, _memory: memory }, checkpoint.bytes))
   }
 
-  fn read_selected(
+  pub(super) fn read_selected(
     &self,
     root: &[u8],
     path: &str,
@@ -422,6 +448,22 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
     self.check()?;
     let disposition = if source.is_some() { SemanticSourceLookupDispositionV1::Present } else { SemanticSourceLookupDispositionV1::Absent };
     Ok(NativeSemanticSourceLookupV1 { disposition, source })
+  }
+
+  pub(super) fn lookup(&self) -> &CatalogLookupV1<'a, 'observer> {
+    &self.lookup
+  }
+
+  /// Share physical bytes without charging namespace work to the catalog.
+  pub(super) fn read_admission(&self) -> &CapturedEntityLookupV1<'a> {
+    &self.lookup.captured
+  }
+
+  pub(super) fn statistics(&self) -> (u64, u64) {
+    (
+      self.bounds.maximum_read_bytes - self.lookup.captured.remaining_read_bytes.get(),
+      self.bounds.maximum_work - self.lookup.remaining_work.get(),
+    )
   }
 
   fn source_bounds(&self) -> NativeSemanticSourceReadBoundsV1 {
@@ -459,7 +501,7 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
   }
 }
 
-fn catalog_read_error(source: FirstAuthorityPublicationErrorV1) -> SemanticMutationObservationErrorV1 {
+pub(super) fn catalog_read_error(source: FirstAuthorityPublicationErrorV1) -> SemanticMutationObservationErrorV1 {
   let code = match source.code() {
     "semantic_source_catalog_work_bound" => "semantic_source_catalog_work_bound",
     "semantic_task_inventory_read_bound" => "semantic_source_catalog_read_bound",

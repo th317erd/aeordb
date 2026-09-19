@@ -1,6 +1,8 @@
 //! Complete small-map oracles with real captured files and independent preimages.
 #[path = "native_semantic_source_union_boundary_spec.rs"]
 mod boundary;
+#[path = "native_semantic_source_union_validation_spec.rs"]
+mod retained_validation;
 #[path = "native_staged_source_union_spec.rs"]
 mod staged_source;
 #[path = "native_semantic_source_union_staging_spec.rs"]

@@ -2,6 +2,9 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+#[path = "native_semantic_source_union_validation_architecture_spec.rs"]
+mod retained_source_validation_architecture;
+
 use aeordb::engine::durability_coordinator::DurabilityCoordinator;
 use aeordb::engine::kv_stages::initial_block_size;
 use aeordb::engine::v4::database_header::{encode_database_header_slot, DatabaseHeaderV4, DATABASE_HEADER_V4_DATA_OFFSET};

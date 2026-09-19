@@ -112,7 +112,7 @@ struct SourceCatalogFrameV1 {
   _memory: MemoryReservation,
 }
 
-pub(super) struct SourceCatalogCursorV1 {
+pub(in super::super) struct SourceCatalogCursorV1 {
   stack: Vec<SourceCatalogFrameV1>,
   leaf: Option<(std::vec::IntoIter<ChildEntry>, MemoryReservation)>,
   next_node: Option<(Vec<u8>, Option<String>, Option<String>)>,
@@ -122,7 +122,7 @@ pub(super) struct SourceCatalogCursorV1 {
 }
 
 impl SourceCatalogCursorV1 {
-  pub(super) fn new(root: &[u8], maximum_depth: usize) -> Result<Self, SemanticMutationObservationErrorV1> {
+  pub(in super::super) fn new(root: &[u8], maximum_depth: usize) -> Result<Self, SemanticMutationObservationErrorV1> {
     let mut stack = Vec::new();
     stack
       .try_reserve_exact(maximum_depth)
@@ -130,7 +130,7 @@ impl SourceCatalogCursorV1 {
     Ok(Self { stack, leaf: None, next_node: Some((copy_bytes(root)?, None, None)), previous: None, nodes: 0, maximum_depth })
   }
 
-  pub(super) fn next_row(
+  pub(in super::super) fn next_row(
     &mut self,
     operation: &CatalogReadOperationV1<'_, '_>,
   ) -> Result<Option<ChildEntry>, SemanticMutationObservationErrorV1> {

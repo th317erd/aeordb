@@ -2,6 +2,7 @@
 use super::*;
 #[path = "semantic_source_union_native.rs"]
 mod source_union;
+pub use source_union::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use source_union::{
   NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
   NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,
@@ -182,7 +183,10 @@ impl<'a> NativeSemanticNamespaceSourceCursorV1<'a> {
 }
 
 impl NamespaceSourceStateV1 {
-  fn new(operation: &NamespaceSourceOperationV1<'_>, tree_root: &[u8]) -> Result<Self, NativeSemanticNamespaceSourceErrorV1> {
+  fn new<A: NamespaceReadAdmissionV1>(
+    operation: &NamespaceSourceOperationV1<'_, A>,
+    tree_root: &[u8],
+  ) -> Result<Self, NativeSemanticNamespaceSourceErrorV1> {
     operation.check()?;
     if tree_root.len() != operation.algorithm().hash_length() || tree_root.iter().all(|byte| *byte == 0) {
       return Err(
@@ -198,9 +202,9 @@ impl NamespaceSourceStateV1 {
 
   /// Seed only ancestors of the exclusive full-file bound. A missing/non-
   /// directory component is a valid suffix boundary, not source-prefix proof.
-  fn seek_after(
+  fn seek_after<A: NamespaceReadAdmissionV1>(
     &mut self,
-    operation: &NamespaceSourceOperationV1<'_>,
+    operation: &NamespaceSourceOperationV1<'_, A>,
     after_path: &str,
   ) -> Result<(), NativeSemanticNamespaceSourceErrorV1> {
     let mut relative =
@@ -233,9 +237,9 @@ impl NamespaceSourceStateV1 {
     Ok(())
   }
 
-  fn next_source<'a>(
+  fn next_source<'a, A: NamespaceReadAdmissionV1>(
     &mut self,
-    operation: &NamespaceSourceOperationV1<'a>,
+    operation: &NamespaceSourceOperationV1<'a, A>,
   ) -> Result<Option<NativeSemanticNamespaceSourceV1<'a>>, NativeSemanticNamespaceSourceErrorV1> {
     if self.failed {
       return Err(invalid("semantic_namespace_cursor_failed", "namespace source cursor cannot continue after failure").into());
@@ -250,9 +254,9 @@ impl NamespaceSourceStateV1 {
     }
   }
 
-  fn next_source_inner<'a>(
+  fn next_source_inner<'a, A: NamespaceReadAdmissionV1>(
     &mut self,
-    operation: &NamespaceSourceOperationV1<'a>,
+    operation: &NamespaceSourceOperationV1<'a, A>,
   ) -> Result<Option<NativeSemanticNamespaceSourceV1<'a>>, NativeSemanticNamespaceSourceErrorV1> {
     operation.check()?;
     while let Some(frame) = self.stack.last_mut() {
@@ -327,12 +331,32 @@ impl NativeSemanticMutationInventoryV1<'_> {
   }
 }
 
-struct NamespaceSourceLookupV1<'a> {
-  captured: CapturedEntityLookupV1<'a>,
-  remaining_work: Cell<u64>,
+// Generic only over an additional enclosing read allowance. Standalone cursors
+// retain their original owned budget and auto traits; they do not acquire a
+// shared Cell/dynamic callback merely because another caller composes budgets.
+trait NamespaceReadAdmissionV1 {
+  fn admit(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1>;
 }
 
-impl NamespaceSourceLookupV1<'_> {
+impl NamespaceReadAdmissionV1 for () {
+  fn admit(&self, _locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    Ok(())
+  }
+}
+
+impl<T: FirstAuthorityEntityLookupV1> NamespaceReadAdmissionV1 for &T {
+  fn admit(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    FirstAuthorityEntityLookupV1::admit_read(*self, locator)
+  }
+}
+
+struct NamespaceSourceLookupV1<'a, A> {
+  captured: CapturedEntityLookupV1<'a>,
+  remaining_work: Cell<u64>,
+  additional_read_admission: A,
+}
+
+impl<A> NamespaceSourceLookupV1<'_, A> {
   fn charge_work(&self, amount: u64) -> Result<(), FirstAuthorityPublicationErrorV1> {
     let remaining = self.remaining_work.get().checked_sub(amount).ok_or_else(|| {
       FirstAuthorityPublicationErrorV1::invalid(
@@ -345,7 +369,7 @@ impl NamespaceSourceLookupV1<'_> {
   }
 }
 
-impl FirstAuthorityEntityLookupV1 for NamespaceSourceLookupV1<'_> {
+impl<A: NamespaceReadAdmissionV1> FirstAuthorityEntityLookupV1 for NamespaceSourceLookupV1<'_, A> {
   fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
     self.captured.get(key)
   }
@@ -354,14 +378,15 @@ impl FirstAuthorityEntityLookupV1 for NamespaceSourceLookupV1<'_> {
   }
   fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
     self.charge_work(1)?;
-    self.captured.admit_read(locator)
+    self.captured.admit_read(locator)?;
+    self.additional_read_admission.admit(locator)
   }
 }
 
-struct NamespaceSourceOperationV1<'a> {
+struct NamespaceSourceOperationV1<'a, A = ()> {
   capture: &'a NativeSemanticMutationInventoryV1<'a>,
   bounds: NativeSemanticNamespaceSourceBoundsV1,
-  lookup: NamespaceSourceLookupV1<'a>,
+  lookup: NamespaceSourceLookupV1<'a, A>,
   _memory: MemoryReservation,
 }
 
@@ -369,6 +394,16 @@ impl<'a> NamespaceSourceOperationV1<'a> {
   fn new(
     capture: &'a NativeSemanticMutationInventoryV1<'a>,
     request: NativeSemanticNamespaceSourceRequestV1<'_>,
+  ) -> Result<Self, SemanticMutationObservationErrorV1> {
+    Self::with_read_admission(capture, request, ())
+  }
+}
+
+impl<'a, A: NamespaceReadAdmissionV1> NamespaceSourceOperationV1<'a, A> {
+  fn with_read_admission(
+    capture: &'a NativeSemanticMutationInventoryV1<'a>,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+    additional_read_admission: A,
   ) -> Result<Self, SemanticMutationObservationErrorV1> {
     check_cancelled(&capture.cancellation)?;
     capture._memory.check_admission()?;
@@ -413,6 +448,7 @@ impl<'a> NamespaceSourceOperationV1<'a> {
         remaining_read_bytes: Cell::new(bounds.sources.maximum_read_bytes),
       },
       remaining_work: Cell::new(bounds.maximum_work),
+      additional_read_admission,
     };
     Ok(Self { capture, bounds, lookup, _memory: memory })
   }

@@ -2,6 +2,7 @@
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
+pub use semantic_mutation_observation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use semantic_mutation_observation::{
@@ -13143,6 +13144,49 @@ fn load_namespace_authority_from_lookup(
   root_hash: &[u8],
   cancellation: &CancellationToken,
 ) -> Result<Option<ImmutableNamespaceAuthorityV1>, FirstAuthorityPublicationErrorV1> {
+  let header = &captured.header;
+  let Some(parts) = load_namespace_authority_parts_from_lookup(file, kv, captured, root_hash, cancellation, |root| {
+    read_entity_bounded(file, kv, &root.namespace_tree_root, FIRST_AUTHORITY_NAMESPACE_TREE_CAP, header.write_sequence_high_water)
+  })?
+  else {
+    return Ok(None);
+  };
+  let authority = decode_immutable_namespace_authority(
+    ImmutableNamespaceAuthorityInputV1 {
+      expected_root_hash: root_hash,
+      expected_database_id: &header.database_id,
+      root_entity: Some(&parts.root_entity),
+      namespace_tree_entity: parts.namespace_tree_entity.as_deref(),
+      semantic_state_object: parts.semantic_state.as_ref().map(|loaded| loaded.body.as_slice()),
+      admission_control: parts.admission.as_ref().map(|loaded| loaded.body.as_slice()),
+    },
+    header.hash_algorithm,
+    header.write_sequence_high_water,
+  )
+  .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
+  validate_captured_root_admission_sequence(&authority.admission, header)?;
+  ensure_captured_authority_not_cancelled(cancellation)?;
+  Ok(Some(authority))
+}
+
+struct LoadedNamespaceAuthorityPartsV1<T> {
+  root_entity: Vec<u8>,
+  namespace_tree_entity: T,
+  semantic_state: Option<LoadedSystemFileV1>,
+  admission: Option<LoadedSystemFileV1>,
+}
+
+// Shared physical metadata reads. Only the full-root reader loads an entire
+// tree entity here; retained source validation traverses it through its bounded
+// namespace cursor. The callback preserves the original full-reader I/O order.
+fn load_namespace_authority_parts_from_lookup<T>(
+  file: &File,
+  kv: &impl FirstAuthorityEntityLookupV1,
+  captured: &SelectedDatabaseHeaderV4,
+  root_hash: &[u8],
+  cancellation: &CancellationToken,
+  read_tree: impl FnOnce(&super::namespace::NamespaceRootV1) -> Result<T, FirstAuthorityPublicationErrorV1>,
+) -> Result<Option<LoadedNamespaceAuthorityPartsV1<T>>, FirstAuthorityPublicationErrorV1> {
   let root_locator = kv.get(root_hash)?;
   ensure_captured_authority_not_cancelled(cancellation)?;
   let Some(root_locator) = root_locator else {
@@ -13173,8 +13217,7 @@ fn load_namespace_authority_from_lookup(
   }
   ensure_captured_authority_not_cancelled(cancellation)?;
 
-  let namespace_tree_entity =
-    read_entity_bounded(file, kv, &root.namespace_tree_root, FIRST_AUTHORITY_NAMESPACE_TREE_CAP, header.write_sequence_high_water)?;
+  let namespace_tree_entity = read_tree(&root)?;
   ensure_captured_authority_not_cancelled(cancellation)?;
 
   let semantic_path = semantic_object_path(header.hash_algorithm, 1, &root.semantic_state_root)?;
@@ -13192,27 +13235,20 @@ fn load_namespace_authority_from_lookup(
     load_system_file_slot(file, kv, header, SystemControlKindV1::RootAdmissionCommit, root_hash, SystemControlSlotV1::Immutable)?;
   ensure_captured_authority_not_cancelled(cancellation)?;
 
-  let authority = decode_immutable_namespace_authority(
-    ImmutableNamespaceAuthorityInputV1 {
-      expected_root_hash: root_hash,
-      expected_database_id: &header.database_id,
-      root_entity: Some(&root_entity),
-      namespace_tree_entity: namespace_tree_entity.as_deref(),
-      semantic_state_object: semantic_state.as_ref().map(|loaded| loaded.body.as_slice()),
-      admission_control: admission.as_ref().map(|loaded| loaded.body.as_slice()),
-    },
-    header.hash_algorithm,
-    header.write_sequence_high_water,
-  )
-  .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("captured_authority_closure", error.to_string()))?;
-  if authority.admission.selected_header_slot_sequence > header.slot_sequence || authority.admission.publication_sequence == 0 {
+  Ok(Some(LoadedNamespaceAuthorityPartsV1 { root_entity, namespace_tree_entity, semantic_state, admission }))
+}
+
+fn validate_captured_root_admission_sequence(
+  admission: &RootAdmissionCommitV1,
+  header: &DatabaseHeaderV4,
+) -> Result<(), FirstAuthorityPublicationErrorV1> {
+  if admission.selected_header_slot_sequence > header.slot_sequence || admission.publication_sequence == 0 {
     return Err(FirstAuthorityPublicationErrorV1::invalid(
       "captured_authority_admission_sequence",
       "root admission witness has no durable publication or exceeds the captured header history",
     ));
   }
-  ensure_captured_authority_not_cancelled(cancellation)?;
-  Ok(Some(authority))
+  Ok(())
 }
 
 fn ensure_captured_authority_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {
