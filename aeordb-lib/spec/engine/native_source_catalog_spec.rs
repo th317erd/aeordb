@@ -3,6 +3,8 @@
 mod assembly;
 #[path = "native_source_physical_entries_spec.rs"]
 mod physical_entries;
+#[path = "native_retained_alias_snapshot_spec.rs"]
+mod retained_alias_snapshot;
 use super::*;
 #[path = "native_source_catalog_resource_spec.rs"]
 mod resource_spec;

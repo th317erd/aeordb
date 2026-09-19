@@ -882,3 +882,51 @@ and library gates, strict formatting/Clippy,185reference tests and502independent
 fixtures passed with all raw evidence local. Earlier fixture, duplicate-module
 and formatting failures are retained as history, not waived. This closes the
 catalog stepper prerequisite, not the enclosing source/task integration.
+
+### Retained-side prepared compiler inputs — September19
+
+`prepare_captured_semantic_alias_snapshot` prepares the existing parser/mapper
+borrow interfaces from one explicitly selected Base or Requested source catalog.
+It validates the ASCM/ASMC pair even for empty or unused inputs, then uses one
+catalog operation for the whole preparation. An unlisted required alias or
+artifact is an error; explicitly captured alias absence remains absence. Neither
+case consults the current path. Present revisions require their exact retained
+FileRecords, canonical paths, chunks and plugin identity checks.
+
+Current and retained preparation share the original two-pass alias discovery,
+role deduplication, bounded table construction, fallible dependency copies and
+borrowed resolution. Only names and dependency records survive preparation, not
+module bodies or catalog buffers. The existing staging/capture lifetime remains
+required; cancellation or memory pressure refuses preparation and later borrows.
+
+The minimum catalog/plugin read-byte ceiling covers the companion/checkpoint,
+catalog traversal and every unique alias/module pair cumulatively. Catalog work
+also spans the whole operation. Body/chunk/count ceilings are intersected with
+the selected source owner's limits. Existing point/pair readers keep their
+original bounds and error classification; a raw source-read limit does not
+become a catalog-read limit merely because selection used a catalog.
+
+This adapter accepts caller-owned configuration bytes. It does not bind those
+bytes to a source revision, prove whole source-union completeness or processed-
+prefix equivalence, select a task, retain objects across restart, fence a writer
+or activate HEAD. Those remain explicit obligations of the enclosing source/task
+owner. The internal selected-reader callback grants no additional authority.
+
+Qualification includes real registry/configuration compilation and native reopen
+at all five hashes; independent expected dependency bytes and physical budget
+costs; absence/unlisted/missing/misbound/malformed input; physical integrity;
+large-module release, actual dependency-copy allocation refusals, operational
+bounds, cancellation, pressure and retry. Allocation injection targets the two
+final dependency copies, not universal inherited allocation recovery. Existing
+current-snapshot late-completion tests exercise the unchanged shared checks.
+
+The [exact-source retained-alias proof](evidence/user-facing-v4-u1-retained-alias-proof-20260919.json)
+qualifies this adapter on Linux, macOS and native Windows. All ten new cases
+passed individual ten-second Linux deadlines, slowest400ms. Linux passed1617
+library/affected cases; Mac passed1032library and501affected; Windows passed1047
+library and501affected. All three passed185reference tests,502independent
+fixtures and their required format/static gates. Every raw artifact is local;
+the original RED, two incorrect new-test error expectations and new-fixture
+Clippy failure remain recorded. No runtime relaxation was used to resolve them.
+This closes retained alias preparation only, not source-prefix admission,
+durable task selection/recovery, activation or ordinary-v4 service readiness.

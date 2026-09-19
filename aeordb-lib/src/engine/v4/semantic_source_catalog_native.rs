@@ -56,6 +56,58 @@ pub struct SemanticSourceCatalogSummaryV1 {
 }
 
 impl NativeSemanticMutationInventoryV1<'_> {
+  /// Prepare compiler borrows from one ASCM/ASMC-bound catalog side. Unlisted
+  /// inputs refuse; explicit absence never falls back to current aliases.
+  /// The lesser catalog/plugin read-byte ceiling covers controls, catalog paths
+  /// and all unique alias/module reads cumulatively. Per-body/chunk ceilings
+  /// remain the intersection of both owners' limits. This does not prove source
+  /// union completeness, supplied configuration identity or task ownership.
+  pub fn prepare_captured_semantic_alias_snapshot(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    side: SemanticSourceCatalogSideV1,
+    request: NativeSemanticAliasSnapshotRequestV1<'_>,
+    bounds: NativeSemanticSourceCatalogBoundsV1,
+  ) -> Result<NativeSemanticAliasSnapshotV1<'_>, NativeSemanticPluginSourceErrorV1> {
+    let bounds = NativeSemanticSourceCatalogBoundsV1 {
+      maximum_read_bytes: bounds.maximum_read_bytes.min(request.plugins.maximum_read_bytes),
+      ..bounds
+    };
+    let operation = CatalogReadOperationV1::new(self, bounds, None)?;
+    let companion = operation.load_companion(task_id, checkpoint_sequence)?;
+    let manifest =
+      decode_semantic_source_capture_v1(&companion.bytes, operation.algorithm()).map_err(SemanticMutationObservationErrorV1::from)?;
+    let root = match side {
+      SemanticSourceCatalogSideV1::Base => manifest.base_source_catalog,
+      SemanticSourceCatalogSideV1::Requested => manifest.requested_source_catalog,
+    };
+    let prepared = self.prepare_semantic_alias_snapshot_with_selected_reader(
+      request,
+      |alias| {
+        self.read_plugin_sources_with_selected_reader(
+          alias,
+          request.plugins,
+          |path, source_bounds| {
+            protected_sources::validate_source_path(path, operation.algorithm())?;
+            let selected = operation.read_selected(root, path, source_bounds)?;
+            if selected.disposition == SemanticSourceLookupDispositionV1::Unlisted {
+              return Err(invalid(
+                "semantic_source_catalog_unlisted",
+                "required compiler input is not listed in its retained source catalog",
+              ));
+            }
+            Ok(selected.source)
+          },
+          || {},
+        )
+      },
+      || {},
+    )?;
+    operation.check()?;
+    Ok(prepared)
+  }
+
   /// Stream provisional physical entries for one complete source-capture branch.
   /// This is not selected task, namespace, resume or complete GC authority.
   /// Entries may repeat and are visited before payload validation. Only complete
@@ -97,18 +149,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
       SemanticSourceCatalogSideV1::Base => manifest.base_source_catalog,
       SemanticSourceCatalogSideV1::Requested => manifest.requested_source_catalog,
     };
-    let selected = seek_namespace_child_v1(root, path, true, bounds.maximum_depth, |hash, lower, upper, _| {
-      load_catalog_node(&operation, hash, lower, upper)
-    })?;
-    operation.check()?;
-    let Some(row) = selected.filter(|row| row.name == path) else {
-      return Ok(NativeSemanticSourceLookupV1 { disposition: SemanticSourceLookupDispositionV1::Unlisted, source: None });
-    };
-    operation.lookup.charge_work().map_err(catalog_read_error)?;
-    let source = operation.read_row(&row)?;
-    operation.check()?;
-    let disposition = if source.is_some() { SemanticSourceLookupDispositionV1::Present } else { SemanticSourceLookupDispositionV1::Absent };
-    Ok(NativeSemanticSourceLookupV1 { disposition, source })
+    operation.read_selected(root, path, operation.source_bounds())
   }
 
   /// Callbacks are provisional until complete=true. Even a complete paired
@@ -363,16 +404,53 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
     Ok(CatalogCompanionV1 { bytes: companion.bytes, _memory: memory })
   }
 
+  fn read_selected(
+    &self,
+    root: &[u8],
+    path: &str,
+    bounds: NativeSemanticSourceReadBoundsV1,
+  ) -> Result<NativeSemanticSourceLookupV1<'a>, SemanticMutationObservationErrorV1> {
+    let selected = seek_namespace_child_v1(root, path, true, self.bounds.maximum_depth, |hash, lower, upper, _| {
+      load_catalog_node(self, hash, lower, upper)
+    })?;
+    self.check()?;
+    let Some(row) = selected.filter(|row| row.name == path) else {
+      return Ok(NativeSemanticSourceLookupV1 { disposition: SemanticSourceLookupDispositionV1::Unlisted, source: None });
+    };
+    self.lookup.charge_work().map_err(catalog_read_error)?;
+    let source = self.read_row_bounded(&row, bounds)?;
+    self.check()?;
+    let disposition = if source.is_some() { SemanticSourceLookupDispositionV1::Present } else { SemanticSourceLookupDispositionV1::Absent };
+    Ok(NativeSemanticSourceLookupV1 { disposition, source })
+  }
+
+  fn source_bounds(&self) -> NativeSemanticSourceReadBoundsV1 {
+    NativeSemanticSourceReadBoundsV1 {
+      maximum_body_bytes: self.bounds.maximum_source_bytes,
+      maximum_chunk_entity_bytes: self.bounds.maximum_chunk_entity_bytes,
+      maximum_chunks: self.bounds.maximum_source_chunks,
+      maximum_read_bytes: self.bounds.maximum_read_bytes,
+    }
+  }
+
   fn read_row(&self, row: &ChildEntry) -> Result<Option<NativeProtectedSemanticSourceV1<'a>>, SemanticMutationObservationErrorV1> {
+    self.read_row_bounded(row, self.source_bounds())
+  }
+
+  fn read_row_bounded(
+    &self,
+    row: &ChildEntry,
+    bounds: NativeSemanticSourceReadBoundsV1,
+  ) -> Result<Option<NativeProtectedSemanticSourceV1<'a>>, SemanticMutationObservationErrorV1> {
     self.check()?;
     if row.hash.iter().all(|byte| *byte == 0) {
       return Ok(None);
     }
     let bounds = NativeSemanticSourceReadBoundsV1 {
-      maximum_body_bytes: self.bounds.maximum_source_bytes,
-      maximum_chunk_entity_bytes: self.bounds.maximum_chunk_entity_bytes,
-      maximum_chunks: self.bounds.maximum_source_chunks,
-      maximum_read_bytes: self.bounds.maximum_read_bytes,
+      maximum_body_bytes: self.bounds.maximum_source_bytes.min(bounds.maximum_body_bytes),
+      maximum_chunk_entity_bytes: self.bounds.maximum_chunk_entity_bytes.min(bounds.maximum_chunk_entity_bytes),
+      maximum_chunks: self.bounds.maximum_source_chunks.min(bounds.maximum_chunks),
+      maximum_read_bytes: self.bounds.maximum_read_bytes.min(bounds.maximum_read_bytes),
     };
     self.capture.read_source_from_lookup(&row.name, Some(&row.hash), bounds, &self.lookup, || {}).map_err(|error| match error {
       SemanticMutationObservationErrorV1::Authority(source) => catalog_read_error(source),

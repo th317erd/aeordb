@@ -26,6 +26,66 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19: Windows completed every final gate20:03:53UTC and was sealed
+20:09:31; all raw evidence is now local. The combined
+[98-input retained-alias proof](../evidence/user-facing-v4-u1-retained-alias-proof-20260919.json)
+passes against MAIN: Linux1617library/affected,216targeted and10individual
+deadlines (slowest400ms); Mac257narrow/501affected/1032library;
+Windows257narrow/501affected/1047library. All platforms passed185reference,
+502independent fixtures and required formatting/static gates. Final source
+review preserves original readers, fixture bodies, budget/error ownership and
+generic task publication refusals. Fetch again found0/0upstream drift. The
+eleven-file coherent milestone is ready for scoped commit/push; U1 and U2–U7
+remain open. Following source/task work is still read-only design and inventory,
+not a settled resume API or newly enabled task writer. Production is untouched.
+
+September19,19:58UTC: Linux final reference/contracts/debt completed19:39:29,
+sealed19:46:19; all24additional raw artifacts local and verified. Mac passed
+all9stages19:47:05, sealed19:51:57; all66raw artifacts local and verified:
+257narrow,501affected,1032library,185reference and502independent fixtures.
+Windows affected passed19:49:14; the library was still progressing19:57:02
+with healthy disk/RAM headroom. MAIN remains the exact98-input C5 adapter,
+uncommitted pending full native Windows qualification and combined proof.
+
+September19,19:39UTC: C5/preflight2 passed all Linux gates19:32:15. Every raw
+artifact is local; the strict Linux verifier passed:216targeted, ten individual
+deadlines (slowest400ms), formatting, strictClippy,1617library/affected and the
+unchanged1501audit. The exact eight source/test files are now integrated via
+manual patch tooling; all98manifest inputs match MAIN. Upstream fetch19:33:26
+matched HEAD29872776 with0/0drift. Final gates launched19:38:50: desktop extra
+invocatione343687aca034c9daf9c39a52dfdc4e5, Mac driver33564, native Windows
+preparation/driver launch. No final native-platform completion claim yet.
+
+September19,19:32UTC: C4 passed216targeted cases and all10individual deadlines,
+then preflight1 stopped at strictClippy's useless_vec in one new fixture. All29
+raw artifacts are local and verified. C5 replaces only that four-row vector
+with an array; runtime remains identical to C2. Its98-input manifest is
+`b531952e975aa7e8435d644c99d8d6fef54590f71d73f899f23e533f5070c23a`.
+C5 passed216targeted cases19:26:03, ten individual deadlines19:26:05, formatting
+19:26:12 and strictClippy19:28:26. These28raw artifacts are local. The full
+library/20affected-target stage remains running; no broader or native-platform
+result is claimed. Desktop free space at19:30:23 was96.31GB home/325.78GB Data.
+All following source changes remain isolated pending the complete preflight.
+
+September19,19:18UTC: continuation is committed/pushed as29872776. The retained
+alias adapter remains isolated in the task cache. C2 finished18:51:48 with211
+passes and one new assertion expecting the wrong read-error owner. C3 finished
+19:09:24 with215passes and one new assertion expecting identity classification
+for an alias CRC error. Both correctly refused their inputs; error behavior is
+unchanged, assertions corrected, all14raw artifacts local and strictly verified.
+C3's added resource tests passed, including2MiB module release, both actual
+dependency-copy allocation refusals and nine operational-limit/retry modes.
+
+C4 has98inputs
+`93e9b007799544db500329636df007cc33c102d8315d696ea273cc1a8f2250c2`;
+runtime is identical to C2. Desktop invocationf7a0095d16d4443b96210143b4b6a0f7
+launched19:15:45, followed conditionally by ten individual10second tests,
+formatting, strict Clippy, library/20affected targets and audit. No passing C4
+or final platform result is claimed. The three new fixture files contain ten
+tests; real compiler/reopen and exact cumulative-budget cases now cover all
+five hashes. Existing fixture bodies and shared table/copy/resolution behavior
+are mechanically preserved. U1 and U2-U7 remain open; production untouched.
+
 September19,18:52UTC: catalog continuation passed final qualification on all
 three platforms. Windows finished18:46:59, sealed18:51:18; all raw evidence is
 local. The strict combined

@@ -23,9 +23,9 @@ struct PreparedAliasV1 {
   mapper: Option<Vec<u8>>,
 }
 
-/// Current sources from one capture only. Requested replacements and retained
-/// catalog sides require their own adapter; this is neither their substitute nor
-/// complete source-union, namespace, durable task or executor availability proof.
+/// Per-source dependencies from one explicit captured selection. Neither
+/// current nor retained-side preparation proves complete source membership,
+/// namespace authority, durable task ownership or executor availability.
 pub struct NativeSemanticAliasSnapshotV1<'a> {
   capture: &'a NativeSemanticMutationInventoryV1<'a>,
   aliases: Vec<PreparedAliasV1>,
@@ -45,6 +45,23 @@ impl NativeSemanticMutationInventoryV1<'_> {
     request: NativeSemanticAliasSnapshotRequestV1<'_>,
     before_complete: impl FnOnce(),
   ) -> Result<NativeSemanticAliasSnapshotV1<'_>, NativeSemanticPluginSourceErrorV1> {
+    let lookup = self.source_lookup(plugin_source_read_bounds(request.plugins));
+    self.prepare_semantic_alias_snapshot_with_selected_reader(
+      request,
+      |alias| self.read_protected_plugin_sources_from_lookup(alias, request.plugins, &lookup, || {}),
+      before_complete,
+    )
+  }
+
+  /// Internal selection seam: the source owner supplies one cumulative reader,
+  /// preserving explicit absence and concrete failures. No callback grants
+  /// complete capture or task authority, and no module body is retained here.
+  pub(in crate::engine::v4::first_authority) fn prepare_semantic_alias_snapshot_with_selected_reader<'a>(
+    &'a self,
+    request: NativeSemanticAliasSnapshotRequestV1<'_>,
+    mut read_alias: impl FnMut(&str) -> Result<Option<NativeSemanticPluginSourcesV1<'a>>, NativeSemanticPluginSourceErrorV1>,
+    before_complete: impl FnOnce(),
+  ) -> Result<NativeSemanticAliasSnapshotV1<'a>, NativeSemanticPluginSourceErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     validate_plugin_source_bounds(request.plugins)?;
@@ -110,10 +127,9 @@ impl NativeSemanticMutationInventoryV1<'_> {
     });
     // Retain the admitted occurrence capacity conservatively after deduplication.
     // No module bodies or captured FileRecords remain in the finished table.
-    let lookup = self.source_lookup(plugin_source_read_bounds(request.plugins));
     for alias in &mut aliases {
       check_snapshot(self, &reservation)?;
-      let pair = self.read_protected_plugin_sources_from_lookup(&alias.alias, request.plugins, &lookup, || {})?;
+      let pair = read_alias(&alias.alias)?;
       if let Some(pair) = pair {
         for (role, destination) in
           [(SemanticSourceAliasRoleV1::Parser, &mut alias.parser), (SemanticSourceAliasRoleV1::Mapper, &mut alias.mapper)]

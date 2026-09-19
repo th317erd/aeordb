@@ -2,7 +2,7 @@
 use super::*;
 use crate::engine::v4::semantic_source_capture::{decode_semantic_source_capture_v1, decode_semantic_source_node_v1};
 
-fn file_read_cost(publisher: &V4FirstAuthorityPublisher, key: &[u8]) -> (u64, u64) {
+pub(super) fn file_read_cost(publisher: &V4FirstAuthorityPublisher, key: &[u8]) -> (u64, u64) {
   let header = publisher.observe().unwrap().selected.header;
   let kv = publisher.lock_kv().unwrap();
   let locator = kv.get(key).unwrap().unwrap();
@@ -16,7 +16,7 @@ fn file_read_cost(publisher: &V4FirstAuthorityPublisher, key: &[u8]) -> (u64, u6
   (bytes, 1 + record.chunk_hashes.len() as u64)
 }
 
-fn control_read_cost(publisher: &V4FirstAuthorityPublisher, kind: SystemControlKindV1, id: &[u8]) -> (Vec<u8>, u64, u64) {
+pub(super) fn control_read_cost(publisher: &V4FirstAuthorityPublisher, kind: SystemControlKindV1, id: &[u8]) -> (Vec<u8>, u64, u64) {
   let header = publisher.observe().unwrap().selected.header;
   let path = system_control_path(kind, id, SystemControlSlotV1::Immutable).unwrap();
   let (bytes, reads) = file_read_cost(publisher, &first_authority_file_path_hash(&path, header.hash_algorithm));
