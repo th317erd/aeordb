@@ -3,6 +3,8 @@
 mod admission_spec;
 #[path = "../helpers/semantic_catalog_oracle.rs"]
 mod catalog_oracle;
+#[path = "semantic_catalog_continuation_spec.rs"]
+mod continuation_spec;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

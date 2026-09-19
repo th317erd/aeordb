@@ -1,4 +1,8 @@
 //! Actual allocator refusal on the incremental compiler's retained buffers.
+#[path = "semantic_catalog_continuation_resource_spec.rs"]
+mod continuation;
+#[path = "../support/semantic_progress_checkpoint.rs"]
+mod input;
 #[path = "semantic_catalog_progress_resource_spec.rs"]
 mod progress;
 

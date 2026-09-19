@@ -21,6 +21,16 @@ pub struct AdmittedSemanticCatalogProgressV1 {
 }
 
 impl AdmittedSemanticCatalogProgressV1 {
+  pub(super) fn validate_continuation_request(&self, request: SemanticCatalogCompilationRequestV1) -> Result<()> {
+    if request.hash_algorithm != self.request.hash_algorithm
+      || request.expected_configuration_count != self.request.expected_configuration_count
+      || request.required_capabilities != self.request.required_capabilities
+    {
+      return Err(invalid("semantic_catalog_progress_request", "continuation request differs from admitted catalog progress"));
+    }
+    self._memory.check_admission().map_err(|error| resource("semantic_catalog_memory", error.to_string()))
+  }
+
   pub const fn hash_algorithm(&self) -> HashAlgorithm {
     self.request.hash_algorithm
   }

@@ -7,6 +7,10 @@ use super::super::scope::validate_canonical_absolute_path;
 use super::super::semantic_catalog::walk_semantic_catalog_with_mutable_source_v1;
 use super::super::value_store::decode_value_store_definition;
 
+#[path = "semantic_catalog_continuation.rs"]
+mod continuation;
+pub use continuation::SemanticCatalogContinuationV1;
+
 #[derive(Clone, Copy, Debug)]
 pub struct SemanticCatalogUpdateRequestV1 {
   /// The configuration count describes the final candidate, not this stream.
@@ -38,23 +42,7 @@ pub fn update_semantic_catalog_v1(
   is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CompiledSemanticCatalogV1> {
   let mut compiler = Compiler::new(request.compilation, registry, memory, is_cancelled)?;
-  if previous.hash_algorithm != request.compilation.hash_algorithm {
-    return Err(invalid("semantic_catalog_base_algorithm", "base was compiled with another hash algorithm"));
-  }
-  compiler.root = previous.catalog_root.as_deref().map(copy_bytes).transpose()?;
-  compiler.records = previous.record_count;
-  compiler.nodes = previous.node_count;
-  compiler.dependencies = previous.dependency_count;
-  compiler.configurations = previous.configuration_count;
-  compiler.validate_definition(2, registry.projection())?;
-  let projection = compiler
-    .definition(2, b"\x02\x00/.aeordb-config/parsers.json", store)?
-    .ok_or_else(|| corrupt("semantic_catalog_registry", "compiler base has no registry binding"))?;
-  let expected = decode_semantic_definition_record(&registry.projection().object.value, previous.hash_algorithm).map_err(format_error)?;
-  if projection != expected.definition {
-    return Err(invalid("semantic_catalog_registry_changed", "incremental configuration changes require the captured registry"));
-  }
-  drop(projection);
+  compiler.inherit_complete(previous, registry, store)?;
   let mut candidates = DependencyCandidates::default();
   let mut mutations = mutations.into_iter();
   let mut count = 0u64;
@@ -67,32 +55,7 @@ pub fn update_semantic_catalog_v1(
     if count >= request.expected_mutation_count {
       return Err(invalid("semantic_catalog_mutation_count", "source enumerated more mutations than captured"));
     }
-    match mutation {
-      SemanticCatalogConfigurationMutationV1::Upsert(configuration) => {
-        if configuration.registry_projection_id() != compiler.registry_projection_id {
-          return Err(invalid("semantic_catalog_configuration_registry", "configuration was compiled against another registry projection"));
-        }
-        let scope = decode_scope_definition(&configuration.scope().value, previous.hash_algorithm).map_err(format_error)?;
-        compiler.remove_configuration(scope.owner_path, &mut candidates, store)?;
-        compiler.configuration(&configuration, store)?;
-        // These exact dependencies are now proven live without a catalog
-        // scan. A later removal in this stream will nominate them again.
-        for dependency in configuration.dependencies() {
-          if candidates.root.is_none() {
-            break;
-          }
-          let definition = decode_semantic_definition_record(&dependency.object.value, previous.hash_algorithm).map_err(format_error)?;
-          candidates.mutate(
-            &compiler,
-            SemanticCatalogMutationV1::Remove { record_kind: definition.class, owner_key: &dependency.semantic_id },
-            store,
-          )?;
-        }
-        compiler.configurations =
-          compiler.configurations.checked_add(1).ok_or_else(|| resource("semantic_catalog_counts", "configuration count overflow"))?;
-      }
-      SemanticCatalogConfigurationMutationV1::Remove(path) => compiler.remove_configuration(&path, &mut candidates, store)?,
-    }
+    compiler.apply_configuration_mutation(mutation, &mut candidates, store)?;
     count += 1;
   }
   if count != request.expected_mutation_count || compiler.configurations != request.compilation.expected_configuration_count {
@@ -107,6 +70,72 @@ pub fn update_semantic_catalog_v1(
 }
 
 impl Compiler<'_> {
+  fn inherit_complete(
+    &mut self,
+    previous: &CompiledSemanticCatalogV1,
+    registry: &CompiledParserRegistryV1,
+    store: &dyn SemanticCatalogStagingStoreV1,
+  ) -> Result<()> {
+    if previous.hash_algorithm != self.request.hash_algorithm {
+      return Err(invalid("semantic_catalog_base_algorithm", "base was compiled with another hash algorithm"));
+    }
+    self.root = previous.catalog_root.as_deref().map(copy_bytes).transpose()?;
+    self.records = previous.record_count;
+    self.nodes = previous.node_count;
+    self.dependencies = previous.dependency_count;
+    self.configurations = previous.configuration_count;
+    self.validate_captured_registry(registry, store)
+  }
+
+  fn validate_captured_registry(&self, registry: &CompiledParserRegistryV1, store: &dyn SemanticCatalogStagingStoreV1) -> Result<()> {
+    self.validate_definition(2, registry.projection())?;
+    let projection = self
+      .definition(2, b"\x02\x00/.aeordb-config/parsers.json", store)?
+      .ok_or_else(|| corrupt("semantic_catalog_registry", "compiler base has no registry binding"))?;
+    let expected =
+      decode_semantic_definition_record(&registry.projection().object.value, self.request.hash_algorithm).map_err(format_error)?;
+    if projection != expected.definition {
+      return Err(invalid("semantic_catalog_registry_changed", "incremental configuration changes require the captured registry"));
+    }
+    Ok(())
+  }
+
+  fn apply_configuration_mutation(
+    &mut self,
+    mutation: SemanticCatalogConfigurationMutationV1,
+    candidates: &mut DependencyCandidates,
+    store: &mut dyn SemanticCatalogStagingStoreV1,
+  ) -> Result<()> {
+    match mutation {
+      SemanticCatalogConfigurationMutationV1::Upsert(configuration) => {
+        if configuration.registry_projection_id() != self.registry_projection_id {
+          return Err(invalid("semantic_catalog_configuration_registry", "configuration was compiled against another registry projection"));
+        }
+        let scope = decode_scope_definition(&configuration.scope().value, self.request.hash_algorithm).map_err(format_error)?;
+        self.remove_configuration(scope.owner_path, candidates, store)?;
+        self.configuration(&configuration, store)?;
+        // These exact dependencies are now proven live without a catalog
+        // scan. A later removal in this stream will nominate them again.
+        for dependency in configuration.dependencies() {
+          if candidates.root.is_none() {
+            break;
+          }
+          let definition =
+            decode_semantic_definition_record(&dependency.object.value, self.request.hash_algorithm).map_err(format_error)?;
+          candidates.mutate(
+            self,
+            SemanticCatalogMutationV1::Remove { record_kind: definition.class, owner_key: &dependency.semantic_id },
+            store,
+          )?;
+        }
+        self.configurations =
+          self.configurations.checked_add(1).ok_or_else(|| resource("semantic_catalog_counts", "configuration count overflow"))?;
+      }
+      SemanticCatalogConfigurationMutationV1::Remove(path) => self.remove_configuration(&path, candidates, store)?,
+    }
+    Ok(())
+  }
+
   fn definition(&self, class: u16, owner: &[u8], store: &dyn SemanticCatalogStagingStoreV1) -> Result<Option<Vec<u8>>> {
     self.check()?;
     let Some(root) = self.root.as_deref() else { return Ok(None) };
@@ -240,6 +269,23 @@ impl Compiler<'_> {
   }
 
   fn prune_dependencies(&mut self, candidates: &mut DependencyCandidates, store: &mut dyn SemanticCatalogStagingStoreV1) -> Result<()> {
+    self.exclude_live_candidates(candidates, store)?;
+    let Some(root) = candidates.root.as_deref() else {
+      return self.check();
+    };
+    let is_cancelled = self.is_cancelled;
+    walk_semantic_catalog_with_mutable_source_v1(
+      self.request.hash_algorithm,
+      store,
+      root,
+      SemanticCatalogTraversalBoundsV1::new(candidates.records, candidates.nodes)?,
+      is_cancelled,
+      |record, store| self.remove_binding(record.record_kind, record.owner_key, store).map_err(catalog_check_error),
+    )?;
+    self.check()
+  }
+
+  fn exclude_live_candidates(&self, candidates: &mut DependencyCandidates, store: &mut dyn SemanticCatalogStagingStoreV1) -> Result<()> {
     if candidates.root.is_none() {
       return self.check();
     }
@@ -264,18 +310,6 @@ impl Compiler<'_> {
         })
         .map_err(catalog_check_error)
       },
-    )?;
-    let Some(root) = candidates.root.as_deref() else {
-      return self.check();
-    };
-    let is_cancelled = self.is_cancelled;
-    walk_semantic_catalog_with_mutable_source_v1(
-      algorithm,
-      store,
-      root,
-      SemanticCatalogTraversalBoundsV1::new(candidates.records, candidates.nodes)?,
-      is_cancelled,
-      |record, store| self.remove_binding(record.record_kind, record.owner_key, store).map_err(catalog_check_error),
     )?;
     self.check()
   }

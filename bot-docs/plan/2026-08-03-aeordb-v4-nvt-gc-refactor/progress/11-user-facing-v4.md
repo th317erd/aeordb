@@ -26,6 +26,73 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,18:52UTC: catalog continuation passed final qualification on all
+three platforms. Windows finished18:46:59, sealed18:51:18; all raw evidence is
+local. The strict combined
+[93-input continuation proof](../evidence/user-facing-v4-u1-catalog-continuation-proof-20260919.json)
+passes against MAIN: Linux1549library/affected, Mac257narrow/443affected/1022lib,
+Windows257narrow/443affected/1037lib; all185reference/502independent fixtures,
+required formatting/static gates and unchanged audit. All21new individual Linux
+deadlines passed, slowest2019ms. Original compiler/graph/old fixture behavior is
+preserved; the consuming stepper grants no source-prefix, retention, fencing,
+task selection or activation authority. Its18-file coherent milestone is ready
+for scoped commit/push. U1 and U2–U7 remain open.
+
+Following retained-alias RED actually failed both intended callable refusals
+18:35:32 (0pass/2fail/1022filtered); candidate1 passed17current/retained cases
+18:44:27. All14raw artifacts are local and verified. Candidate2 remains isolated,
+97inputs `211787de4a2270370418172310352c8c6cf7d40ca34dd6ab1f989c3d71010a05`,
+running the protected-source regressions under desktop invocation
+c3e66ecad8154ba0a8ad98194a3fcc53. No following adapter source is in this commit.
+
+September19,18:36UTC: final Linux reference/contracts/debt passed18:24:32,
+sealed18:30:01; all raw evidence is local and verified. Mac passed all9gates
+18:32:12, sealed18:35:17; all66raw artifacts are local and strictly verified:
+257narrow,443affected,1022library,185reference,502independent fixtures. Linux's
+21new individual10second cases had a slowest2019ms. Windows affected passed
+18:32:40; its library is running. No all-platform completion claim yet.
+
+The following retained-alias adapter remains isolated from MAIN. Its94-input
+refusing scaffold and two positive native/compiler tests are running on the
+desktop after the continuation's Linux evidence was sealed and copied locally.
+Manifest `f50448d7cd6dfd9f9e41dcf5c7a51bc2efd06fd85acb3e9fca359c5127f64aac`;
+invocation445fd0a4d80844308617dcedc63a6929. No result or adapter behavior yet.
+
+September19,18:25UTC: C6 passed187targeted cases,21individual deadlines,
+formatting, strict all-target Clippy,1549library/affected cases and the unchanged
+1501audit. Preflight3 finished18:22:12; all43raw artifacts are local and the
+strict Linux verifier passed. Its exact93inputs now match MAIN, including the
+15integrated source/test files. No final continuation completion is claimed yet.
+Final Linux reference/contracts/debt, macOS and Windows gates launched18:24;
+desktop invocation bd78012fac8743159ec2ffc003eeed6d, Mac PID13061, Windows PID4732.
+Upstream fetch matches entry dedad2c8e. All earlier failures remain preserved.
+
+September19,18:20UTC: C5 passed187targeted and21individual deadlines, then
+preflight2 formatting failed solely on the shared test-module declaration order.
+No C5 Clippy/broad/audit gate ran. All22raw artifacts are local and verified.
+C6 changes only that declaration ordering; runtime remains identical to C1.
+Its93-input manifest is
+`a31d0ab13261737b2984909903cdd548aafff03e8cd87e91040f6e9156c33813`.
+Desktop invocation bf2a420c8777479c9572f58925bfadc7 runs the targeted cases and
+new preflight3. Earlier failures are retained, with no lint/test waiver.
+Integration and final native-platform qualification remain pending.
+
+September19,18:07UTC: cursor milestone is committed/pushed as
+`dedad2c8e34d54dbe10ede3f8c937f8d8b4ece8f`. Catalog continuation remains isolated;
+actual87-input RED had two intended failures. C1 passed71compiler cases, C2
+passed77including exhaustive observed read/publication faults. C3's last-prune
+fixture incorrectly demanded new-object publication; C4 proved zero writes for
+the existing-root reuse case and passed187targeted cases plus21individual
+ten-second deadlines (slowest1999ms). All raw evidence is local and verified.
+
+C4 formatting passed, but strict Clippy rejected duplicate loading of a shared
+test helper. C5 shares that fixture at its existing parent without changing
+runtime or test bodies. Its93-input manifest is
+`d576a3d0ff6bcf12b70862399295d4fbc34ec0012d58202941da716c164726c3`;
+the targeted/deadline/broad/static preflight is running under desktop invocation
+e0ea40a3d72a4c61b4bb6b416935bf77. No passing C5, integration, final native-platform
+proof or continuation completion is claimed. No task or service writer enabled.
+
 September19,17:35UTC: the exclusive namespace cursor passed all final gates on
 Linux, macOS and native Windows. Windows finished17:29:08, sealed17:34:12; every
 raw artifact is local. The strict combined

@@ -1,4 +1,6 @@
 //! Actual partial-catalog persistence without selecting a task or HEAD.
+#[path = "semantic_catalog_continuation_native_spec.rs"]
+mod continuation;
 use super::*;
 use aeordb::engine::memory_coordinator::{MemoryCoordinator, MemoryPolicy};
 use aeordb::engine::v4::index_configuration_compiler::{

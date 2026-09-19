@@ -3,8 +3,6 @@ use super::*;
 use aeordb::engine::v4::namespace::SemanticAvailabilityV1;
 use aeordb::engine::v4::semantic_catalog_mutation::SemanticCatalogSnapshotV1;
 use aeordb::engine::v4::semantic_catalog_compiler::admit_semantic_catalog_progress_v1;
-#[path = "../support/semantic_progress_checkpoint.rs"]
-mod input;
 
 #[test]
 fn progress_candidate_root_copy_refuses_after_graph_validation_and_releases_every_charge() {

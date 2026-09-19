@@ -829,3 +829,56 @@ become a universal or cold-start allocation-recovery claim. The
 qualifies this primitive on Linux, macOS and native Windows. All twelve new
 cases also pass individual ten-second Linux deadlines (slowest656ms). Catalog
 continuation, source-prefix binding and durable task integration remain open.
+
+### Catalog-only compiler continuation — September19
+
+`SemanticCatalogContinuationV1` owns the existing compiler and auxiliary COW
+candidate tree; it is not a second semantic or physical writer. Fresh start
+stages the registry. Incremental start uses the existing opaque Complete-base
+inheritance and exact registry check. Restart consumes catalog-only partial
+admission, checks the same hash/final-count/capability request and exact registry,
+and admits a fresh32MiB lease to the supplied memory coordinator. Both the old
+admission lease and new lease are charged during rebinding; the old lease is
+released on success or refusal, never silently moved between budgets.
+
+Configuration application, phase transition and single-dependency pruning
+consume the continuation. A failure cannot return reusable half-updated work.
+The preceding immutable checkpoint remains the retry point, and the enclosing
+owner must retain its objects and select the main/candidate root pair together
+only after the complete step succeeds. Snapshot getters grant no durable
+selection, physical retention, task fence, source position or HEAD authority.
+
+The old ordered bulk updater and the continuation share configuration mutation,
+base inheritance and live-dependency exclusion. Mutation-count and final-count
+checks remain in the bulk API. ASMC `mutation_count` still counts accepted
+logical operations, not configurations processed by this catalog primitive.
+A changed parser registry requires fresh composition; source-owner decisions
+about changed aliases or other protected inputs remain outside this primitive.
+
+`finish_configurations` checks the final configuration count, completes the
+existing live-candidate exclusion pass, then enters Pruning. Do not select an
+intermediate exclusion result. With no nominated candidates it performs no
+catalog scan. `prune_one` finds one remaining binding through bounded tree paths,
+checks its exact main binding, removes both entries and returns only after both
+updates succeed. Removing the final dependency can reuse the registry leaf and
+empty the candidate root without publishing any new object. `finish` requires
+Pruning with no candidates and emits an unselected Complete semantic state.
+
+Qualification must include independent expected bindings/Patricia bytes,
+fresh-composition parity, Complete admission, drop/admit/continue at each phase,
+shared live dependencies, every observed read/publication fault in six step
+fixtures, sampled cancellation boundaries, per-publication memory pressure,
+numeric no-rescan bounds and native close/reopen at all registered hashes.
+Targeted allocation probes cover both partial-root copies after registry
+initialization, not universal host-OOM recovery. Native fixtures keep HEAD
+unchanged and hold ASMC bytes in the harness; they do not prove selected durable
+task recovery. Source-prefix equivalence, task publication/retention discovery,
+fencing and atomic activation remain required enclosing runtime work.
+
+The [exact-source continuation proof](evidence/user-facing-v4-u1-catalog-continuation-proof-20260919.json)
+qualifies this catalog-only slice on Linux, macOS and native Windows. All21new
+cases passed individual10second Linux deadlines, slowest2019ms. Full affected
+and library gates, strict formatting/Clippy,185reference tests and502independent
+fixtures passed with all raw evidence local. Earlier fixture, duplicate-module
+and formatting failures are retained as history, not waived. This closes the
+catalog stepper prerequisite, not the enclosing source/task integration.
