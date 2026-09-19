@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "semantic_catalog_progress_spec.rs"]
+mod progress_spec;
 use aeordb::engine::v4::semantic_catalog_compiler::{
   admit_semantic_catalog_v1, update_semantic_catalog_v1, SemanticCatalogConfigurationMutationV1, SemanticCatalogUpdateRequestV1,
 };

@@ -1,3 +1,6 @@
+#[path = "semantic_catalog_progress_native_spec.rs"]
+mod progress;
+
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;

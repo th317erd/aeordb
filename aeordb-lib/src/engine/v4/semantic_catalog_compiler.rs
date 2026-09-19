@@ -466,3 +466,7 @@ pub use update::{SemanticCatalogConfigurationMutationV1, SemanticCatalogUpdateRe
 #[path = "semantic_catalog_admission.rs"]
 mod admission;
 pub use admission::admit_semantic_catalog_v1;
+
+#[path = "semantic_catalog_progress.rs"]
+mod progress;
+pub use progress::{AdmittedSemanticCatalogProgressV1, admit_semantic_catalog_progress_v1};

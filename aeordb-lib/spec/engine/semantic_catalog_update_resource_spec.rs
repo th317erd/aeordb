@@ -1,4 +1,7 @@
 //! Actual allocator refusal on the incremental compiler's retained buffers.
+#[path = "semantic_catalog_progress_resource_spec.rs"]
+mod progress;
+
 use std::cell::Cell;
 use super::*;
 use super::super::{FAIL_OCCURRENCE, FAIL_SIZE};

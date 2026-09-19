@@ -60,6 +60,42 @@ pub fn admit_semantic_catalog_v1(
   if definition_count != catalog_record_count {
     return Err(corrupt("semantic_catalog_counts", "compiler catalog must bind one distinct definition per record"));
   }
+  compiler.root = Some(catalog_root);
+  compiler.records = catalog_record_count;
+  compiler.nodes = catalog_node_count;
+  compiler.dependencies = dependency_count;
+  compiler.configurations = request.expected_configuration_count;
+  validate_catalog_closure(&mut compiler, registry, source, None)?;
+  Ok(CompiledSemanticCatalogV1 {
+    semantic_state: EncodedSemanticObjectV1 { object_id: state.object_id, value: bytes },
+    hash_algorithm: request.hash_algorithm,
+    catalog_root: compiler.root,
+    record_count: compiler.records,
+    node_count: compiler.nodes,
+    dependency_count: compiler.dependencies,
+    configuration_count: compiler.configurations,
+    _memory: compiler.reservation,
+  })
+}
+
+pub(super) struct CatalogCandidateAdmissionV1<'a> {
+  pub(super) snapshot: SemanticCatalogSnapshotV1<'a>,
+  pub(super) require_unused: bool,
+}
+
+/// Shared complete/partial catalog proof. The caller owns a fresh compiler;
+/// any error discards it, including its temporary reachability reservation.
+pub(super) fn validate_catalog_closure(
+  compiler: &mut Compiler<'_>,
+  registry: &CompiledParserRegistryV1,
+  source: &dyn SemanticCatalogObjectSourceV1,
+  candidates: Option<CatalogCandidateAdmissionV1<'_>>,
+) -> Result<()> {
+  let request = compiler.request;
+  let is_cancelled = compiler.is_cancelled;
+  let catalog_record_count = compiler.records;
+  let catalog_node_count = compiler.nodes;
+  let catalog_root = compiler.root.as_deref().ok_or_else(|| corrupt("semantic_catalog_root", "catalog has no registry root"))?;
   // Refuse impossible claimed geometry before scanning the catalog, but do not
   // allocate from unverified counts. The complete walk below must first agree.
   let rounded_records = catalog_record_count
@@ -74,15 +110,15 @@ pub fn admit_semantic_catalog_v1(
   let reader = SemanticCatalogReaderV1::new(request.hash_algorithm, source);
   // First establish the whole tree's counts/identities. A subsequent point
   // lookup may then trust untouched subtrees, including their ordinal weights.
-  let stats = reader.walk_catalog(&catalog_root, bounds, is_cancelled, |record| {
+  let stats = reader.walk_catalog(catalog_root, bounds, is_cancelled, |record| {
     compiler.check().map_err(catalog_check_error)?;
     reader.with_definition(record, is_cancelled, |definition| {
       validate_binding(record, definition, request.hash_algorithm).map_err(catalog_check_error)
     })
   })?;
-  if stats.class_counts[1] != request.expected_configuration_count
+  if stats.class_counts[1] != compiler.configurations
     || stats.class_counts[2] != 1
-    || stats.class_counts[6].checked_add(stats.class_counts[7]) != Some(dependency_count)
+    || stats.class_counts[6].checked_add(stats.class_counts[7]) != Some(compiler.dependencies)
   {
     return Err(corrupt("semantic_catalog_counts", "actual configuration, registry or dependency count differs"));
   }
@@ -91,13 +127,8 @@ pub fn admit_semantic_catalog_v1(
   let mut bitmap = Vec::new();
   bitmap.try_reserve_exact(bitmap_length).map_err(|error| resource("semantic_catalog_reachability_memory", error.to_string()))?;
   bitmap.resize(bitmap_length, 0);
-  compiler.root = Some(catalog_root);
-  compiler.records = catalog_record_count;
-  compiler.nodes = catalog_node_count;
-  compiler.dependencies = dependency_count;
-  compiler.configurations = request.expected_configuration_count;
   let mut graph = AdmissionGraph {
-    compiler: &compiler,
+    compiler,
     reader: SemanticCatalogReaderV1::new(request.hash_algorithm, source),
     bounds,
     registry,
@@ -115,22 +146,51 @@ pub fn admit_semantic_catalog_v1(
     }
     Ok(())
   })?;
+  if let Some(candidates) = candidates {
+    let snapshot = candidates.snapshot;
+    if snapshot.record_count > compiler.dependencies {
+      return Err(corrupt("semantic_catalog_progress_candidates", "candidate count exceeds actual dependency count"));
+    }
+    match snapshot.root_object_id {
+      Some(candidate_root) => {
+        let candidate_bounds = SemanticCatalogTraversalBoundsV1::new(snapshot.record_count, snapshot.node_count)?;
+        reader.walk_catalog(candidate_root, candidate_bounds, is_cancelled, |record| {
+          compiler.check().map_err(catalog_check_error)?;
+          if !matches!(record.record_kind, 6 | 7) {
+            return Err(SemanticCatalogReadErrorV1::corrupt("semantic_catalog_progress_candidate_kind", "candidate is not a dependency"));
+          }
+          let ordinal = reader
+            .with_record_ordinal(root, bounds, record.record_kind, record.owner_key, is_cancelled, |ordinal, retained| {
+              if retained.semantic_id != record.semantic_id || retained.definition_object_id != record.definition_object_id {
+                return Err(SemanticCatalogReadErrorV1::corrupt(
+                  "semantic_catalog_progress_candidate_binding",
+                  "candidate differs from its exact main-catalog binding",
+                ));
+              }
+              Ok(ordinal)
+            })?
+            .ok_or_else(|| {
+              SemanticCatalogReadErrorV1::corrupt("semantic_catalog_progress_candidate_missing", "candidate is absent from main catalog")
+            })?;
+          if candidates.require_unused && graph.is_marked(ordinal).map_err(catalog_check_error)? {
+            return Err(SemanticCatalogReadErrorV1::corrupt(
+              "semantic_catalog_progress_live_candidate",
+              "pruning candidate is still reachable",
+            ));
+          }
+          graph.mark(ordinal).map_err(catalog_check_error)
+        })?;
+      }
+      None if snapshot.record_count == 0 && snapshot.node_count == 0 => {}
+      None => return Err(corrupt("semantic_catalog_progress_candidates", "absent candidate root has nonzero counts")),
+    }
+  }
   if graph.marked != catalog_record_count {
     return Err(corrupt("semantic_catalog_orphan", "catalog retains definitions not reachable from configuration and registry owners"));
   }
   drop(bitmap);
   compiler.reservation.shrink(bitmap_length as u64).map_err(|error| resource("semantic_catalog_reachability_memory", error.to_string()))?;
-  compiler.check()?;
-  Ok(CompiledSemanticCatalogV1 {
-    semantic_state: EncodedSemanticObjectV1 { object_id: state.object_id, value: bytes },
-    hash_algorithm: request.hash_algorithm,
-    catalog_root: compiler.root,
-    record_count: compiler.records,
-    node_count: compiler.nodes,
-    dependency_count: compiler.dependencies,
-    configuration_count: compiler.configurations,
-    _memory: compiler.reservation,
-  })
+  compiler.check()
 }
 
 struct AdmissionGraph<'a, 'source> {
@@ -145,6 +205,18 @@ struct AdmissionGraph<'a, 'source> {
 impl AdmissionGraph<'_, '_> {
   fn root(&self) -> Result<&[u8]> {
     self.compiler.root.as_deref().ok_or_else(|| corrupt("semantic_catalog_root", "admitted catalog has no registry root"))
+  }
+
+  fn is_marked(&self, ordinal: u64) -> Result<bool> {
+    self.compiler.check()?;
+    if ordinal >= self.compiler.records {
+      return Err(corrupt("semantic_catalog_ordinal", "reachability position is outside the validated catalog"));
+    }
+    let byte = self
+      .bitmap
+      .get((ordinal / 8) as usize)
+      .ok_or_else(|| corrupt("semantic_catalog_ordinal", "reachability position exceeds the admitted bitmap"))?;
+    Ok(*byte & (1 << (ordinal % 8)) != 0)
   }
 
   fn mark(&mut self, ordinal: u64) -> Result<()> {

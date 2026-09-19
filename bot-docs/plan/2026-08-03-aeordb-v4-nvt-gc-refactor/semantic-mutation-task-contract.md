@@ -756,3 +756,39 @@ Pruning candidates must additionally be unused. Neither those graph checks nor
 plausible counters prove source-position correctness or grant task ownership.
 Source/cursor binding, fences, retention and atomic activation remain mandatory
 in the enclosing continuation owner.
+
+### Compiler continuation prerequisite: partial catalog admission
+
+`admit_semantic_catalog_progress_v1` accepts an exact ASMC envelope, the captured
+compiled parser registry, compilation request and bounded object source. It
+uses the existing checkpoint decoder and checks supported compiler/registry
+profiles and expected final configuration count. Only nonempty post-registry
+Compiling and Pruning snapshots are admitted here; Pruning additionally requires
+the actual configuration count to equal the final count.
+
+The operation shares Complete admission's full tree, actual count, typed
+definition/ownership and reachability proof. Candidate records must be dependency
+classes6/7 with exact matching main-catalog bindings; every otherwise unreachable
+record must be accounted for. Compiling may still have live candidate dependencies;
+Pruning candidates must be unused. Complete admission has no candidate allowance
+and remains strict. No Complete semantic state is synthesized for unfinished work.
+
+The non-Clone `AdmittedSemanticCatalogProgressV1` owns charged metadata and exposes
+borrowed main/candidate snapshots, phase and counts. It does not grant source-
+position correctness, task ownership, fencing, executor availability, durable
+retention, namespace admission or publication. Physical protection and bounded
+reads remain the caller's responsibility. Captured, Ready and Activated require
+their own enclosing runtime decisions, not this partial-catalog operation.
+
+Independent unit fixtures construct ASMC and Patricia bytes. Native composition
+tests separately stage unused dependency catalogs through the existing guarded
+physical owner, close/reopen and check read-only admission/refusal/retry at all
+five hashes. Their in-memory checkpoint identities are not a selected durable
+task. Actual allocator tests target decoder identity, both retained root copies
+and the reachability bitmap; inherited infallible digest allocations are not a
+claim of universal host-OOM recovery. Full task continuation remains unfinished.
+
+The [September19 three-platform proof](evidence/user-facing-v4-u1-catalog-progress-proof-20260919.json)
+qualifies these exact catalog-only inputs on Linux, macOS and native Windows,
+including the unchanged strict Complete admission regressions. This closes the
+partial-catalog prerequisite, not the enclosing continuation/retention owner.

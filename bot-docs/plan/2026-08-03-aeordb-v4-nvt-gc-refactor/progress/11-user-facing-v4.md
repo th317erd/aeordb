@@ -26,6 +26,63 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,16:26UTC: partial catalog admission passed final exact-source
+qualification on Linux, macOS and Windows. Windows completed all seven stages
+16:19:38 and was sealed16:24:06; every raw artifact is now local. The strict
+[79-input admission proof](../evidence/user-facing-v4-u1-catalog-progress-proof-20260919.json)
+passed against the integrated checkout. Linux passed1499library/affected cases;
+Mac passed256narrow,405affected and1010library; Windows passed256narrow,
+405affected and1025library. All three passed185reference tests and502independent
+fixtures, with required formatting/static gates and unchanged1501audit.
+Actual failing-first evidence and all four candidate rounds are retained.
+
+The change shares Complete admission's graph proof without relaxing its orphan
+rule. Partial results prove only current catalog/candidate closure, not a source
+cursor, selected task, fence, retention or publication permission. Next is the
+bounded exclusive namespace configuration cursor seek, followed by the compiler
+stepper and durable task integration. U1 and U2-U7 remain unfinished. No
+production, service, installation or retained FS-Server1 database was touched.
+
+September19,16:03UTC: partial catalog candidate4 passed204 focused tests15:48:03
+and all four preflight gates15:53:22: formatting, strictClippy,1499tests
+(1010library plus489across14affected targets), and unchanged1501audit.
+Every raw artifact is local and exact-source verification passed. The final
+79-input manifest is
+`23eade9340e8ec5f3f7b7afac2aa2c54a30d10f2535839622f12fc9588563f91`.
+Those exact inputs are now integrated in the main checkout, uncommitted. The
+original admission graph routines remain byte-identical; complete admission
+retains strict orphan rejection. Fourteen new functions cover partial closure,
+phase/profile/count/registry/malformed input, read/cancel/pressure boundaries,
+four actual allocation targets and native partial-catalog reopen at all hashes.
+
+Final Linux reference/contracts/debt passed15:59:24 and was sealed16:05:33;
+all24additional raw artifacts are local. Mac passed all9gates16:07:01 and was
+sealed16:10:48; all66raw artifacts are local. The strict combined verifier's
+Unix-only preflight passed, preserving the full Windows completion requirement.
+Windows affected passed16:06:21; its library was running at16:10:22 with safe
+42.44GBsystem/51.42GBtest disk and13.04GBfreeRAM. No complete platform proof yet.
+Upstream matches HEADcaa72451 after fetch. The following exclusive namespace
+seek is only two positive and three boundary test drafts plus territory review
+in compiler-cursor-overlay; no cursor runtime change or passing evidence exists.
+
+September19,15:44UTC: bounded-reader milestone committed/pushed as
+`caa72451bdd72398bc5807f03f842085c73f69d5`. Partial catalog admission remains
+isolated in compiler-progress-overlay. Candidate1 passed192 cases15:19:09;
+candidate2 passed198 cases15:29:07. Both exact-source packets and all14raw
+artifacts are local and strictly verified. Candidate2's75inputs are
+`03781f0c34a1249ca578d389ad0d8bf57b3383d60d49e7f2bb85072c7e191f78`.
+Its six boundary tests cover all hashes, exact candidate closure, live-versus-
+unused dependencies, counts/profiles, every source failure and cancellation.
+
+Candidate3's79-input tests-only extension is running on the desktop under
+invocation8315b49093ab4282b58900c350a095f8, launched15:41:05. It adds unsupported
+phases, malformed checkpoints, captured-registry/pressure checks, actual host
+allocation refusal and an actual-file partial-catalog close/reopen fixture.
+No result is yet claimed. One further candidate-root allocation-refusal test
+is drafted separately after freezing C3. Broad/static and native-platform
+qualification remain required; no compiler resume, task publication or ordinary
+v4 service readiness is implied. No production/service/install actions occurred.
+
 September19,15:19UTC: the bounded first-record reader passed final exact-source
 Linux/macOS/Windows qualification. Windows finished15:14:50 and sealed15:17:31;
 Mac finished15:01:08 and sealed15:06:07. Every raw artifact is local; the strict
