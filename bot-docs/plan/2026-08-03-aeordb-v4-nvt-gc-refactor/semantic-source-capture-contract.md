@@ -1222,3 +1222,144 @@ allocation; legacy decoder behavior and canonical formats are unchanged.
 Existing child-string, internal-key and canonical serialization allocations
 remain inherited limitations, not a claim of universal allocation recovery.
 The namespace adapter described above is still the next implementation unit.
+
+### Namespace adapter implementation and review — September19
+
+The three native-file entry failures were observed before implementation.
+The adapter now shares the private decoded-source value while preserving the
+protected result and its family validator. Directory identity and all five
+directory-to-FileRecord metadata comparisons are shared with selected readers;
+the existing bounded directory decoder and ordered seek remain their owners.
+Current namespace discovery retains the original captured header/KV snapshot,
+one cumulative physical-read/work counter, bounded ancestor frames and only
+the current source. Ordinary file bodies are outside this enumeration.
+
+Candidate2 passed1,182tests, including fourteen namespace cases; formatting,
+strict Clippy and the unchanged1,501reviewed audit identities passed. Review
+then added a work-budget sweep and entry/callback cancellation/pressure checks.
+That sweep reproduced a FileRecord-read work refusal as the wrong error variant
+at budget13. A namespace-only result mapping corrects it without changing the
+protected decoder; candidate4 is under final preflight. The16namespace cases
+and native final gates must all pass before this adapter is considered qualified.
+Original failures and every subsequent source packet/raw result are retained.
+
+### Complete-union entry audit — not yet an implementation design
+
+The protected catalog and full fingerprint have different path sets. ASCN
+archives protected non-HEAD sources only; the fingerprint also includes
+namespace-resident configurations. A future union owner must not put namespace
+rows into the protected reader merely because the byte-only node encoder accepts
+canonical paths. Complete ordered traversal of both trees establishes namespace
+presence/absence; failed or partial reads cannot establish absence.
+
+Current plugin-pair and prepared-alias adapters resolve current sources within
+one capture. They do not apply requested protected replacements or resolve a
+retained catalog side. The next integration must reuse their identity/schema
+owners while selecting exact base/request revisions explicitly. Include aliases
+and modules referenced by either side, even when the requested configuration
+removes the old reference; explicit absence still needs a completed lookup.
+
+Staging protection prevents reclamation, not concurrent publication. A root
+published after a KV capture is not readable through that older capture. The
+request's complete staged tree and protected source revisions need an explicit
+capture/publication order plus base/generation rechecks; substituting current
+locators or calling a second capture silently is not an acceptable workaround.
+
+The inspected scratch sorters are domain-specific: directory repair sorts
+ChildEntry/depth records and cleans stale prefixes; KV rebuild sorts fixed hashes
+with replacement chronology; native query ordering sorts FileKeys with query
+record payloads; migration root maps sort fixed root identities. None directly
+implements canonical variable-length source-path union. Reuse the shared
+`v4/private_workspace.rs` path/file/capacity primitives. Any new source-union
+spool must bound row bytes, sort windows, run metadata, merge fan-in, disk use and
+all I/O/work, and must not load the entire source set into a map. A spool is
+disposable scratch, not a new persisted database format or restart authority.
+Exact API, ownership and failing-first union tests remain the next entry gate.
+
+### Next bounded prerequisite: disposable source-path ordering
+
+The source-set owner needs a canonical, deduplicated path stream before it can
+resolve every base/request identity and feed the existing fingerprint/catalog
+builders. Alias occurrences arrive in schema order, may repeat across many
+configurations and may refer to different modules on the two sides. Namespace
+traversal order alone therefore cannot order the complete source set.
+
+Implement a private source-path workspace beneath the capture module, using
+the existing private-directory/file/capacity helpers. This is a permanent
+domain helper for disposable scratch, not a second database owner, portable
+format, durable task checkpoint, compiler snapshot or complete-union token.
+Do not change any existing repair/query/migration workspace representation.
+
+Its builder accepts canonical absolute UTF-8 paths under explicit input-count,
+path-byte, sort-memory, stored-byte, cumulative-I/O and minimum-free-space
+limits. Own one small sort window, bounded merge fan-in and logarithmically
+bounded run descriptors; never retain all input paths or all initial runs.
+Fallible allocations and memory admission precede their work. Sort by complete
+path bytes and deduplicate without losing any unique path. Empty input is valid
+for this helper, but cannot stand in for a complete capture's mandatory globals.
+The captured-source owner, not the sorter, establishes membership and absence.
+
+Use a private versioned, counted, checksummed scratch frame with bounded path
+length. No unchecked count may drive allocation. A run must validate its complete
+framing, order, count and end before declaring success. Merge output is admitted
+before writing while charging simultaneous input/output storage; retire only
+exact owned run files after their replacement completes. Unique private task
+directories avoid stale-prefix cleanup and collision with unrelated work.
+I/O/cancellation/pressure failure poisons unfinished work; no failed build may
+return a finished set. Finished cursors borrow their workspace lifetime, retain
+bounded accounted scratch and preserve errors rather than shortening the stream.
+The workspace is not resumable; higher-level durable capture owns restart.
+
+`test_protocol`: first observe failures for (1) unsorted duplicate paths split
+across tiny runs yielding one exact independent sorted set, (2) prefix/Unicode
+ordering and independent repeated cursors, and (3) empty/boundary input with
+memory release and a preserved unrelated sibling. Then cover every truncated
+frame/header, checksum/count/order/trailing-byte mismatch, canonical path limits,
+input/sort/storage/I/O/free-space limits, real allocation refusal, cancellation,
+pressure, partial writes and unusable-after-failure behavior. Compare varied
+partitions and merge fan-in against a test-only ordered set, and assert peak
+retained descriptors, open inputs and admitted bytes. Native temporary-file
+tests use existing bounded runners; each small deterministic case should finish
+within ten seconds. No external service or production fixture is needed.
+
+After that prerequisite, finish the actual source owner: discover both sides
+through the shared schema readers, resolve exact protected replacements and
+retained source selections, merge namespace identities separately, and bind the
+complete result to the existing paired catalogs and source fingerprint. Those
+integration APIs and capture ordering still require their own concrete tests;
+the path workspace alone does not close U1 or enable task publication.
+
+### Composition refinement: preserve existing namespace ordering
+
+September19 review of the actual traversal finds a useful next boundary:
+`visit_namespace_configuration_sources` already owns a bounded ancestor stack,
+one cumulative lookup/work budget, exact metadata checks and complete-path
+ordering. The protected catalog has a separate ordered cursor. Do not copy
+namespace identities into a second unordered whole-world map, discard their
+revisions into a path-only sort, or repeatedly rescan the tree for each path.
+
+The path workspace can order the protected globals, aliases and module paths.
+The two namespace streams are already ordered. Expose a pausable cursor through
+the existing namespace traversal owner, then merge base namespace, requested
+namespace and protected-path streams with one head from each. Equal namespace
+paths pair their exact revisions; a path appearing on only one side establishes
+absence on the other only after that ordered cursor advances past it or finishes.
+Failed reads are errors, never absences. This preserves the different protected
+catalog and full-fingerprint membership contracts without another disk format.
+
+Keep the existing visitor as an adapter over that same cursor, preserving its
+callbacks, early-stop result and final cancellation/pressure checks. Returned
+source rows retain the captured inventory and their own memory; cursor state
+retains only ancestors and its cumulative budget. A failed cursor is terminal,
+and even a successful cursor is not root admission or complete source-set proof.
+Verify interleaved independent cursors, old captures after publication, retained
+rows, empty/end/failure lifecycle, prefix order and exact read/work bounds, plus
+all existing namespace visitor regressions. This extraction remains part of the
+source-union integration milestone, not a separate user-facing completion claim.
+
+The remaining entry decisions are explicit requested-source selection, immutable
+staged-tree publication-before-capture ordering, and exact base/generation
+rechecks. Reuse the current plugin-pair identity/schema owners for both sides;
+do not silently resolve a requested replacement through the current alias. The
+eventual capture result must feed the existing paired catalogs and fingerprint
+before durable task/GC integration can rely on it.

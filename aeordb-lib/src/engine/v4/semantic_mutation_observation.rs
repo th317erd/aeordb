@@ -1,6 +1,10 @@
 //! A coherent read of durable task controls, never a resume or retention permit.
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
+pub use inventory::{
+  NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
+  NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
+};
 pub use inventory::{NativeSemanticAliasSnapshotRequestV1, NativeSemanticAliasSnapshotV1};
 pub use inventory::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 pub use inventory::{

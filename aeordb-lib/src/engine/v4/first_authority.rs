@@ -2,6 +2,10 @@
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
+pub use semantic_mutation_observation::{
+  NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
+  NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
+};
 pub use semantic_mutation_observation::{NativeSemanticAliasSnapshotRequestV1, NativeSemanticAliasSnapshotV1};
 pub use semantic_mutation_observation::{NativeSemanticPluginSourceBoundsV1, NativeSemanticPluginSourceErrorV1, NativeSemanticPluginSourcesV1};
 #[path = "staging_protection.rs"]

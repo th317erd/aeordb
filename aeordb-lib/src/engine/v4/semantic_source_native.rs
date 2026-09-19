@@ -1,6 +1,12 @@
 //! Protected raw inputs read from the same capture as semantic task inventory.
 //! Neither a source observation nor its bytes grant durable retention or resume.
 use super::*;
+#[path = "semantic_namespace_source_native.rs"]
+mod namespace_sources;
+pub use namespace_sources::{
+  NativeSemanticNamespaceSourceBoundsV1, NativeSemanticNamespaceSourceErrorV1, NativeSemanticNamespaceSourceRequestV1,
+  NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceV1,
+};
 #[path = "semantic_plugin_source_native.rs"]
 mod plugin_sources;
 pub use plugin_sources::{NativeSemanticAliasSnapshotRequestV1, NativeSemanticAliasSnapshotV1};
@@ -28,6 +34,25 @@ pub struct NativeSemanticSourceReadBoundsV1 {
 
 pub struct NativeProtectedSemanticSourceV1<'a> {
   _capture: &'a NativeSemanticMutationInventoryV1<'a>,
+  record: FileRecord,
+  encoded_record: Vec<u8>,
+  body: Vec<u8>,
+  revision: Vec<u8>,
+  entity_version: u8,
+  flags: u8,
+  chunk_representation_fingerprint: [u8; 32],
+  _memory: MemoryReservation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SemanticSourceKindV1 {
+  Protected,
+  Namespace,
+}
+
+// Decoded values do not grant publication. Only the existing protected result
+// can be constructed by the protected path/family branch and expose staging.
+struct DecodedSemanticSourceV1 {
   record: FileRecord,
   encoded_record: Vec<u8>,
   body: Vec<u8>,
@@ -119,21 +144,48 @@ impl NativeSemanticMutationInventoryV1<'_> {
     retained_revision: Option<&[u8]>,
     bounds: NativeSemanticSourceReadBoundsV1,
     lookup: &impl FirstAuthorityEntityLookupV1,
-    mut after_chunk: impl FnMut(),
+    after_chunk: impl FnMut(),
   ) -> Result<Option<NativeProtectedSemanticSourceV1<'_>>, SemanticMutationObservationErrorV1> {
+    self.read_decoded_source_from_lookup(path, retained_revision, bounds, lookup, SemanticSourceKindV1::Protected, after_chunk).map(
+      |source| {
+        source.map(|source| NativeProtectedSemanticSourceV1 {
+          _capture: self,
+          record: source.record,
+          encoded_record: source.encoded_record,
+          body: source.body,
+          revision: source.revision,
+          entity_version: source.entity_version,
+          flags: source.flags,
+          chunk_representation_fingerprint: source.chunk_representation_fingerprint,
+          _memory: source._memory,
+        })
+      },
+    )
+  }
+
+  fn read_decoded_source_from_lookup(
+    &self,
+    path: &str,
+    retained_revision: Option<&[u8]>,
+    bounds: NativeSemanticSourceReadBoundsV1,
+    lookup: &impl FirstAuthorityEntityLookupV1,
+    kind: SemanticSourceKindV1,
+    mut after_chunk: impl FnMut(),
+  ) -> Result<Option<DecodedSemanticSourceV1>, SemanticMutationObservationErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission()?;
-    if bounds.maximum_body_bytes > MAXIMUM_SOURCE_BODY_BYTES
-      || bounds.maximum_chunk_entity_bytes == 0
-      || bounds.maximum_chunk_entity_bytes > MAXIMUM_CHUNK_ENTITY_BYTES
-      || bounds.maximum_chunks == 0
-      || bounds.maximum_read_bytes == 0
-    {
-      return Err(invalid("semantic_source_bounds", "protected source read requires valid bounded work and byte limits"));
-    }
+    validate_source_read_bounds(bounds)?;
     let header = &self.header.selected.header;
     let algorithm = header.hash_algorithm;
-    validate_source_path(path, algorithm)?;
+    match kind {
+      SemanticSourceKindV1::Protected => validate_source_path(path, algorithm)?,
+      SemanticSourceKindV1::Namespace => {
+        namespace_sources::validate_namespace_source_path(path, algorithm)?;
+        if retained_revision.is_none() {
+          return Err(invalid("semantic_namespace_source_revision", "namespace source requires an exact content revision"));
+        }
+      }
+    }
     if retained_revision.is_some_and(|revision| revision.len() != algorithm.hash_length() || revision.iter().all(|byte| *byte == 0)) {
       return Err(invalid("semantic_source_retained_identity", "retained source requires a nonzero selected-width revision"));
     }
@@ -172,6 +224,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     if entity.entry_type != EntryTypeV4::FileRecord
       || !matches!(entity.entity_version, 0 | 1)
       || entity.compression_algorithm != CompressionAlgorithm::None
+      || (kind == SemanticSourceKindV1::Namespace && entity.flags != 0)
     {
       return Err(invalid("semantic_source_record_representation", "protected source FileRecord representation is invalid"));
     }
@@ -207,7 +260,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     for chunk_key in &record.chunk_hashes {
       check_cancelled(&self.cancellation)?;
       memory.check_admission()?;
-      let count = self.read_source_chunk(lookup, chunk_key, &mut body[written..], bounds, &mut representations)?;
+      let count = self.read_source_chunk(lookup, chunk_key, &mut body[written..], bounds, &mut representations, kind)?;
       content.update(&body[written..written + count]);
       written += count;
       after_chunk();
@@ -236,8 +289,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     encoded_record.extend_from_slice(entity.stored_value);
     check_cancelled(&self.cancellation)?;
     memory.check_admission()?;
-    Ok(Some(NativeProtectedSemanticSourceV1 {
-      _capture: self,
+    Ok(Some(DecodedSemanticSourceV1 {
       record,
       encoded_record,
       body,
@@ -256,6 +308,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     output: &mut [u8],
     bounds: NativeSemanticSourceReadBoundsV1,
     representations: &mut blake3::Hasher,
+    kind: SemanticSourceKindV1,
   ) -> Result<usize, SemanticMutationObservationErrorV1> {
     let locator = lookup
       .get(key)
@@ -280,7 +333,10 @@ impl NativeSemanticMutationInventoryV1<'_> {
     .map_err(map_source_read_error)?
     .ok_or_else(|| invalid("semantic_source_chunk_missing", "protected source chunk disappeared from the same snapshot"))?;
     let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
-    if entity.entry_type != EntryTypeV4::Chunk || entity.entity_version != 0 {
+    if entity.entry_type != EntryTypeV4::Chunk
+      || entity.entity_version != 0
+      || (kind == SemanticSourceKindV1::Namespace && entity.flags != 0)
+    {
       return Err(invalid("semantic_source_chunk_representation", "protected source chunk representation is invalid"));
     }
     let written = match entity.compression_algorithm {
@@ -314,6 +370,18 @@ impl NativeSemanticMutationInventoryV1<'_> {
     staging::fingerprint_chunk_representation(representations, &entity);
     Ok(written)
   }
+}
+
+fn validate_source_read_bounds(bounds: NativeSemanticSourceReadBoundsV1) -> Result<(), SemanticMutationObservationErrorV1> {
+  if bounds.maximum_body_bytes > MAXIMUM_SOURCE_BODY_BYTES
+    || bounds.maximum_chunk_entity_bytes == 0
+    || bounds.maximum_chunk_entity_bytes > MAXIMUM_CHUNK_ENTITY_BYTES
+    || bounds.maximum_chunks == 0
+    || bounds.maximum_read_bytes == 0
+  {
+    return Err(invalid("semantic_source_bounds", "protected source read requires valid bounded work and byte limits"));
+  }
+  Ok(())
 }
 
 pub(super) fn validate_source_path(path: &str, algorithm: HashAlgorithm) -> Result<(), SemanticMutationObservationErrorV1> {

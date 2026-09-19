@@ -26,6 +26,83 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,04:30UTC: namespace final qualification has passed on all three
+native platforms. Windows completed04:28:02UTC and was sealed04:28:42UTC;
+its raw artifacts are local. The frozen14-input manifest is unchanged.
+The [final source-bound proof](../evidence/user-facing-v4-u1-native-namespace-source-proof-20260919.json)
+was generated and independently checked successfully. It records253narrow
+tests,122affected targets (1,971Unix/1,964Windows),875Unix/890Windows library
+tests,185reference tests,502independent fixtures, formatting, strict Clippy,
+applicable contract checks and1,501unchanged reviewed audit identities.
+The sixteen namespace cases and both observed regression histories are bound
+to the exact source and executed binaries. This reader milestone is ready to
+land; the full source union and user-facing runtime remain unfinished.
+
+Workspace candidate2 passed1,197tests. An additional measured regression then
+showed65,632bytes reserved against a65,536-byte sort ceiling. Candidate3 fixes
+the window/merge accounting and adds partial-write, collision and partitioning
+checks; all1,201tests passed04:26:29UTC (892library plus309affected).
+All raw results are local and strict history verification passes. Its22-input
+manifest is`2cf427a431763cdc374aa0f0bfa56903d3c6435c148af4a6cd8684410db9ec14`.
+Formatting/Clippy preflight is running. This helper remains isolated scratch
+work, not part of the namespace reader commit or a finished source-union owner.
+
+September19,04:12UTC: namespace final Linux and macOS passed every gate,
+finished03:49:48and03:53:09respectively. Both platforms'66raw artifacts are
+sealed and local. The final verifier passes both Unix platforms and stops at
+the still-missing Windows receipt; Windows remains active in its affected
+suites. The14-input namespace source remains frozen, with no final proof or
+commit yet.
+
+The next path-workspace prerequisite is isolated under the campaign cache,
+not integrated into the main tree. RED2 demonstrated all three missing
+behaviors at03:54:13; candidate1 then passed all1,187tests at04:07:24
+(878library plus309in seven targets). Both sets of raw artifacts are local;
+strict verification preserves the original tests and namespace foundation.
+Candidate1's17-input manifest is
+`b163ec3d54a874626e1cc7510588757b267dafaafa077a05435e3df95a6ae9b7`.
+Candidate2 changes tests/registration only, adding ten boundary and allocator
+cases. Its20-input manifest is
+`c5c8e5cc1b5faa8bcc0b8e020a3f28b925984e3d2699f8828be27f8ba8d11ade`;
+the run is active. The scratch sorter is not complete source-union authority,
+task publication, or user-facing readiness. FullU1–U7 remain active.
+
+September19,03:36UTC: the additional work-budget regression failed at budget13
+with the wrong error category, while the other15namespace tests passed. Its
+raw artifacts are local and verified. Candidate4 changes only the namespace
+adapter's error mapping; every test from the failing packet is unchanged.
+Preflight2 passed all1,184tests (875library plus309in seven targets), formatting,
+strict Clippy and all1,501unchanged reviewed audit identities at03:31:39UTC.
+All29raw artifacts are local and the strict verifier passes.
+
+Final1 is frozen at14inputs, manifest
+`854dc771fc2dd991c6f0521525ae9fc71f060eecec5adb71bfd21ae06e58ece1`.
+Linux and macOS final runs started03:36UTC; Windows launch is being completed.
+The three affected-target lists agree exactly on122targets. Sixteen namespace
+cases now cover the original behavior and the additional resource/lifecycle
+boundaries. Native final results and sealing are pending; no readiness claim.
+
+September19,03:14UTC: bounded directory decoding landed and was pushed as
+`9a248dc6`; all three qualification checkouts advanced with their prior source
+state preserved. Namespace-source RED1 demonstrated three actual missing
+behaviors before implementation; all raw artifacts are local and verified.
+Candidate1 passed1,171tests. Candidate2 preserves its runtime and adds eleven
+boundary/structure tests plus architecture assertions; all1,182tests passed
+03:10:21UTC (873library plus309across seven complete targets). Its13-input
+manifest is`30eaa8532a6bca35b7541db568683adde2c8055f2c3c4f5b4e94349445d3ba05`.
+All seven raw artifacts are local; strict history verification passes.
+
+The new reader uses the captured directory/KV state, exact configuration
+revisions, cumulative physical-read/work limits and the existing bounded
+directory and FileRecord/chunk decoders. Namespace results cannot stage
+protected sources. Fourteen tests cover ordering, old captures, 32/64-byte
+identities, v0/v1 records, metadata consistency, B-tree ranges/depth, missing
+records, flags, allocation refusal, limits, final cancellation/pressure and
+read-only behavior. Static/audit preflight1 is running. Review additionally
+requires a targeted regression for the resource-error category when the work
+budget expires inside a source-body read. Native final qualification and
+the full source union/task integration remain outstanding; U1–U7 continue.
+
 September19,02:43UTC: resumed after the unrelated document task. Bounded
 directory final qualification is complete: Linux finished September18,02:50:10,
 macOS02:45:48, and Windows03:21:38UTC. All raw evidence is now local; source

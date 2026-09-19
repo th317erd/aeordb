@@ -1,0 +1,386 @@
+//! Captured namespace configuration inputs, separate from protected staging.
+use super::*;
+use crate::engine::btree::BTreeNode;
+use crate::engine::v4::namespace_seek::{
+  LoadedNamespaceSeekNodeV1, NamespaceSeekFailureV1, namespace_seek_workspace_bytes_v1, next_namespace_child_by_path_v1,
+  seek_namespace_child_v1,
+};
+use crate::engine::v4::read_view_native::{
+  MAX_DIRECTORY_ENTITY_BYTES, NativeSelectedNamespaceReadErrorV1, decode_validated_selected_directory_node, join_selected_path,
+  validate_selected_directory_entity, validate_selected_file_record_metadata,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSemanticNamespaceSourceBoundsV1 {
+  pub maximum_path_bytes: usize,
+  pub maximum_path_depth: usize,
+  pub maximum_btree_depth: usize,
+  pub maximum_directory_entity_bytes: usize,
+  /// Charge physical reads, decoded directory elements and selected children.
+  pub maximum_work: u64,
+  /// Body/chunk limits are per file; read bytes span all directories and files.
+  pub sources: NativeSemanticSourceReadBoundsV1,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSemanticNamespaceSourceRequestV1<'a> {
+  /// Exact DirectoryIndex content identity, not root admission or permission.
+  pub tree_root: &'a [u8],
+  pub bounds: NativeSemanticNamespaceSourceBoundsV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSemanticNamespaceSourceSummaryV1 {
+  pub configurations: u64,
+  pub complete: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NativeSemanticNamespaceSourceErrorV1 {
+  #[error(transparent)]
+  Source(#[from] SemanticMutationObservationErrorV1),
+  #[error(transparent)]
+  Directory(#[from] NativeSelectedNamespaceReadErrorV1),
+}
+
+impl NativeSemanticNamespaceSourceErrorV1 {
+  pub fn code(&self) -> &'static str {
+    match self {
+      Self::Source(error) => error.code(),
+      Self::Directory(error) => error.code(),
+    }
+  }
+}
+
+impl From<NamespaceSeekFailureV1> for NativeSemanticNamespaceSourceErrorV1 {
+  fn from(error: NamespaceSeekFailureV1) -> Self {
+    Self::Directory(error.into())
+  }
+}
+
+/// Exact namespace bytes never expose protected-source staging operations.
+pub struct NativeSemanticNamespaceSourceV1<'a> {
+  _capture: &'a NativeSemanticMutationInventoryV1<'a>,
+  value: DecodedSemanticSourceV1,
+}
+
+impl NativeSemanticNamespaceSourceV1<'_> {
+  pub fn record(&self) -> &FileRecord {
+    &self.value.record
+  }
+  pub fn encoded_record(&self) -> &[u8] {
+    &self.value.encoded_record
+  }
+  pub fn body(&self) -> &[u8] {
+    &self.value.body
+  }
+  pub fn revision(&self) -> &[u8] {
+    &self.value.revision
+  }
+  pub fn entity_version(&self) -> u8 {
+    self.value.entity_version
+  }
+  pub fn flags(&self) -> u8 {
+    self.value.flags
+  }
+}
+
+impl NativeSemanticMutationInventoryV1<'_> {
+  pub fn read_namespace_configuration_source(
+    &self,
+    path: &str,
+    revision: &[u8],
+    bounds: NativeSemanticSourceReadBoundsV1,
+  ) -> Result<NativeSemanticNamespaceSourceV1<'_>, NativeSemanticNamespaceSourceErrorV1> {
+    self.read_namespace_source_from_lookup(path, revision, bounds, &self.source_lookup(bounds))
+  }
+
+  fn read_namespace_source_from_lookup(
+    &self,
+    path: &str,
+    revision: &[u8],
+    bounds: NativeSemanticSourceReadBoundsV1,
+    lookup: &impl FirstAuthorityEntityLookupV1,
+  ) -> Result<NativeSemanticNamespaceSourceV1<'_>, NativeSemanticNamespaceSourceErrorV1> {
+    let value = self
+      .read_decoded_source_from_lookup(path, Some(revision), bounds, lookup, SemanticSourceKindV1::Namespace, || {})
+      .map_err(|error| match error {
+        SemanticMutationObservationErrorV1::Authority(source) => map_namespace_read_error(source),
+        other => other,
+      })?
+      .ok_or_else(|| invalid("semantic_namespace_source_missing", "captured namespace source is missing"))?;
+    Ok(NativeSemanticNamespaceSourceV1 { _capture: self, value })
+  }
+
+  /// Callbacks are provisional until complete=true. This visits configurations,
+  /// not every ordinary file's dependency closure or user read permissions.
+  pub fn visit_namespace_configuration_sources(
+    &self,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+    visitor: impl FnMut(&NativeSemanticNamespaceSourceV1<'_>) -> Result<bool, NativeSemanticNamespaceSourceErrorV1>,
+  ) -> Result<NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceErrorV1> {
+    self.visit_namespace_configuration_sources_observed(request, visitor, || {})
+  }
+
+  pub(crate) fn visit_namespace_configuration_sources_observed(
+    &self,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+    mut visitor: impl FnMut(&NativeSemanticNamespaceSourceV1<'_>) -> Result<bool, NativeSemanticNamespaceSourceErrorV1>,
+    before_complete: impl FnOnce(),
+  ) -> Result<NativeSemanticNamespaceSourceSummaryV1, NativeSemanticNamespaceSourceErrorV1> {
+    let operation = NamespaceSourceOperationV1::new(self, request)?;
+    let mut stack = Vec::new();
+    stack.try_reserve_exact(request.bounds.maximum_path_depth + 1).map_err(namespace_allocation)?;
+    stack.push(NamespaceDirectoryFrameV1 { path: String::from("/"), hash: copy_namespace_bytes(request.tree_root)?, lower: None });
+    let mut configurations = 0u64;
+    while let Some(frame) = stack.last_mut() {
+      operation.check()?;
+      let next = next_namespace_child_by_path_v1(frame.lower.as_deref(), |name, inclusive| {
+        seek_namespace_child_v1(&frame.hash, name, inclusive, request.bounds.maximum_btree_depth, |hash, lower, upper, btree_child| {
+          operation.load_node(hash, &frame.path, lower, upper, btree_child)
+        })
+      })?;
+      let Some((key, child)) = next else {
+        stack.pop();
+        continue;
+      };
+      operation.lookup.charge_work(1).map_err(map_namespace_read_error)?;
+      let path = join_selected_path(&frame.path, &child.name, request.bounds.maximum_path_bytes)?;
+      frame.lower = Some(key);
+      if stack.len() > request.bounds.maximum_path_depth {
+        return Err(resource("semantic_namespace_source_depth", "namespace source traversal exceeds its path-depth bound").into());
+      }
+      let configuration = is_namespace_source_path(&path, operation.algorithm())?;
+      if configuration {
+        if child.entry_type != EntryTypeV4::FileRecord.to_u8() {
+          return Err(invalid("semantic_namespace_source_role", "namespace configuration path is not a FileRecord").into());
+        }
+        let source = self.read_namespace_source_from_lookup(&path, &child.hash, request.bounds.sources, &operation.lookup)?;
+        validate_selected_file_record_metadata(source.record(), &child, &path).map_err(NativeSelectedNamespaceReadErrorV1::from)?;
+        configurations = configurations
+          .checked_add(1)
+          .ok_or_else(|| invalid("semantic_namespace_source_count", "namespace configuration count overflowed"))?;
+        let keep_going = visitor(&source)?;
+        operation.check()?;
+        if !keep_going {
+          before_complete();
+          operation.check()?;
+          return Ok(NativeSemanticNamespaceSourceSummaryV1 { configurations, complete: false });
+        }
+      } else if child.entry_type == EntryTypeV4::DirectoryIndex.to_u8() {
+        if stack.iter().any(|ancestor| ancestor.hash == child.hash) {
+          return Err(invalid("semantic_namespace_source_cycle", "namespace directory repeats an ancestor").into());
+        }
+        stack.push(NamespaceDirectoryFrameV1 { path, hash: child.hash, lower: None });
+      }
+    }
+    before_complete();
+    operation.check()?;
+    Ok(NativeSemanticNamespaceSourceSummaryV1 { configurations, complete: true })
+  }
+}
+
+struct NamespaceDirectoryFrameV1 {
+  path: String,
+  hash: Vec<u8>,
+  lower: Option<String>,
+}
+
+struct NamespaceSourceLookupV1<'a> {
+  captured: CapturedEntityLookupV1<'a>,
+  remaining_work: Cell<u64>,
+}
+
+impl NamespaceSourceLookupV1<'_> {
+  fn charge_work(&self, amount: u64) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    let remaining = self.remaining_work.get().checked_sub(amount).ok_or_else(|| {
+      FirstAuthorityPublicationErrorV1::invalid(
+        "semantic_namespace_source_work_bound",
+        "namespace source traversal exhausted its work bound",
+      )
+    })?;
+    self.remaining_work.set(remaining);
+    Ok(())
+  }
+}
+
+impl FirstAuthorityEntityLookupV1 for NamespaceSourceLookupV1<'_> {
+  fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
+    self.captured.get(key)
+  }
+  fn hash_algo(&self) -> HashAlgorithm {
+    self.captured.hash_algo()
+  }
+  fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    self.charge_work(1)?;
+    self.captured.admit_read(locator)
+  }
+}
+
+struct NamespaceSourceOperationV1<'a> {
+  capture: &'a NativeSemanticMutationInventoryV1<'a>,
+  bounds: NativeSemanticNamespaceSourceBoundsV1,
+  lookup: NamespaceSourceLookupV1<'a>,
+  _memory: MemoryReservation,
+}
+
+impl<'a> NamespaceSourceOperationV1<'a> {
+  fn new(
+    capture: &'a NativeSemanticMutationInventoryV1<'a>,
+    request: NativeSemanticNamespaceSourceRequestV1<'_>,
+  ) -> Result<Self, SemanticMutationObservationErrorV1> {
+    check_cancelled(&capture.cancellation)?;
+    capture._memory.check_admission()?;
+    let bounds = request.bounds;
+    validate_source_read_bounds(bounds.sources)?;
+    if bounds.maximum_path_bytes == 0
+      || bounds.maximum_path_bytes > u16::MAX as usize
+      || bounds.maximum_path_depth == 0
+      || bounds.maximum_path_depth > 256
+      || bounds.maximum_btree_depth == 0
+      || bounds.maximum_btree_depth > 256
+      || bounds.maximum_directory_entity_bytes == 0
+      || bounds.maximum_directory_entity_bytes > MAX_DIRECTORY_ENTITY_BYTES
+      || bounds.maximum_work == 0
+    {
+      return Err(invalid("semantic_namespace_source_bounds", "namespace source traversal requires valid bounded paths, nodes and work"));
+    }
+    let header = &capture.header.selected.header;
+    if request.tree_root.len() != header.hash_algorithm.hash_length() || request.tree_root.iter().all(|byte| *byte == 0) {
+      return Err(invalid("semantic_namespace_source_root", "namespace traversal requires a nonzero selected-width directory identity"));
+    }
+    let scratch = namespace_seek_workspace_bytes_v1(
+      bounds.maximum_path_bytes as u64,
+      bounds.maximum_path_depth as u64,
+      bounds.maximum_btree_depth as u64,
+      header.hash_algorithm.hash_length() as u64,
+    )
+    .ok_or_else(|| resource("semantic_namespace_source_memory", "namespace source workspace accounting overflowed"))?;
+    let memory = capture.memory.reserve(MemoryOwner::Task, scratch, AdmissionClass::Maintenance)?;
+    let lookup = NamespaceSourceLookupV1 {
+      captured: CapturedEntityLookupV1 {
+        snapshot: &capture.snapshot,
+        header,
+        bounds: NativeSemanticMutationInventoryBoundsV1 {
+          maximum_work: bounds.maximum_work,
+          maximum_entity_bytes: MAXIMUM_FILE_RECORD_BYTES
+            .max(bounds.maximum_directory_entity_bytes)
+            .max(bounds.sources.maximum_chunk_entity_bytes),
+          maximum_read_bytes: bounds.sources.maximum_read_bytes,
+        },
+        cancellation: &capture.cancellation,
+        remaining_read_bytes: Cell::new(bounds.sources.maximum_read_bytes),
+      },
+      remaining_work: Cell::new(bounds.maximum_work),
+    };
+    Ok(Self { capture, bounds, lookup, _memory: memory })
+  }
+
+  fn algorithm(&self) -> HashAlgorithm {
+    self.capture.header.selected.header.hash_algorithm
+  }
+
+  fn check(&self) -> Result<(), SemanticMutationObservationErrorV1> {
+    check_cancelled(&self.capture.cancellation)?;
+    self.capture._memory.check_admission()?;
+    self._memory.check_admission()?;
+    Ok(())
+  }
+
+  fn load_node(
+    &self,
+    hash: &[u8],
+    path: &str,
+    lower: Option<&str>,
+    upper: Option<&str>,
+    btree_child: bool,
+  ) -> Result<LoadedNamespaceSeekNodeV1, NativeSemanticNamespaceSourceErrorV1> {
+    self.check()?;
+    let locator = self
+      .lookup
+      .get(hash)
+      .map_err(FirstAuthorityPublicationErrorV1::from)
+      .map_err(SemanticMutationObservationErrorV1::from)?
+      .ok_or_else(|| invalid("semantic_namespace_source_directory_missing", "captured namespace directory is missing"))?;
+    if locator.type_flags != KV_TYPE_DIRECTORY {
+      return Err(invalid("semantic_namespace_source_directory_role", "namespace directory key resolves to another KV role").into());
+    }
+    if locator.total_length as usize > self.bounds.maximum_directory_entity_bytes {
+      return Err(resource("semantic_namespace_source_directory_bound", "namespace directory exceeds its entity byte bound").into());
+    }
+    let memory = self
+      .capture
+      .memory
+      .reserve(MemoryOwner::Task, u64::from(locator.total_length) * 4 + SOURCE_SCRATCH_BYTES, AdmissionClass::Maintenance)
+      .map_err(SemanticMutationObservationErrorV1::from)?;
+    let header = &self.capture.header.selected.header;
+    let bytes = read_entity_bounded(
+      &self.capture._protection.publisher().file,
+      &self.lookup,
+      hash,
+      self.bounds.maximum_directory_entity_bytes,
+      header.write_sequence_high_water,
+    )
+    .map_err(map_namespace_read_error)?
+    .ok_or_else(|| invalid("semantic_namespace_source_directory_missing", "captured namespace directory disappeared"))?;
+    let value =
+      decode_whole_entity(&bytes, self.algorithm(), header.write_sequence_high_water).map_err(SemanticMutationObservationErrorV1::from)?;
+    let entity = LoadedImmutableEntityV1 {
+      entity_version: value.entity_version,
+      entry_type: value.entry_type,
+      flags: value.flags,
+      compression_algorithm: value.compression_algorithm,
+      timestamp_ms: value.timestamp_ms,
+      write_sequence: value.write_sequence,
+      key: copy_namespace_bytes(value.key)?,
+      stored_value: copy_namespace_bytes(value.stored_value)?,
+    };
+    validate_selected_directory_entity(&entity, self.algorithm(), hash).map_err(NativeSelectedNamespaceReadErrorV1::from)?;
+    let node = decode_validated_selected_directory_node(&entity, self.algorithm().hash_length(), path, lower, upper, btree_child)?;
+    let decoded_work = match &node {
+      BTreeNode::Leaf(leaf) => leaf.entries.len(),
+      BTreeNode::Internal(internal) => internal.keys.len(),
+    };
+    self.lookup.charge_work(decoded_work as u64).map_err(map_namespace_read_error)?;
+    self.check()?;
+    memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
+    Ok(LoadedNamespaceSeekNodeV1 { node, _memory: memory })
+  }
+}
+
+pub(super) fn validate_namespace_source_path(path: &str, algorithm: HashAlgorithm) -> Result<(), SemanticMutationObservationErrorV1> {
+  validate_canonical_absolute_path(path)?;
+  if path.len() > u16::MAX as usize {
+    return Err(invalid("semantic_namespace_source_path", "namespace source path exceeds the FileRecord path width"));
+  }
+  if !is_namespace_source_path(path, algorithm)? {
+    return Err(invalid("semantic_namespace_source_family", "path is not a descendant namespace configuration input"));
+  }
+  Ok(())
+}
+
+fn is_namespace_source_path(path: &str, algorithm: HashAlgorithm) -> Result<bool, SemanticMutationObservationErrorV1> {
+  Ok(matches!(
+    SystemFamilyPolicyResolverV1::embedded(algorithm)?.policy(SystemFamilySubjectV1::Path(path), "captured namespace source")?,
+    SystemFamilyPolicyDecisionV1::Known { family_id: 0x0002, .. }
+  ))
+}
+
+fn copy_namespace_bytes(bytes: &[u8]) -> Result<Vec<u8>, SemanticMutationObservationErrorV1> {
+  let mut copy = Vec::new();
+  copy.try_reserve_exact(bytes.len()).map_err(namespace_allocation)?;
+  copy.extend_from_slice(bytes);
+  Ok(copy)
+}
+
+fn namespace_allocation(source: std::collections::TryReserveError) -> SemanticMutationObservationErrorV1 {
+  SemanticMutationObservationErrorV1::Allocation { code: "semantic_namespace_source_allocation", source }
+}
+
+fn map_namespace_read_error(source: FirstAuthorityPublicationErrorV1) -> SemanticMutationObservationErrorV1 {
+  if source.code() == "semantic_namespace_source_work_bound" {
+    SemanticMutationObservationErrorV1::ResourceRead { code: "semantic_namespace_source_work_bound", source }
+  } else {
+    map_source_read_error(source)
+  }
+}

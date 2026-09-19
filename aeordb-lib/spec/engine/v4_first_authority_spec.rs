@@ -484,6 +484,54 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   }
   let source_reader = std::fs::read_to_string(&semantic_source_native_path).unwrap();
   let source_reader: String = source_reader.split_whitespace().collect();
+  let namespace_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_namespace_source_native.rs")).unwrap();
+  let namespace_source: String = namespace_source.split_whitespace().collect();
+  for required in [
+    "snapshot:&capture.snapshot",
+    "read_entity_bounded(",
+    "read_decoded_source_from_lookup(",
+    "SemanticSourceKindV1::Namespace",
+    "next_namespace_child_by_path_v1(",
+    "seek_namespace_child_v1(",
+    "namespace_seek_workspace_bytes_v1(",
+    "decode_validated_selected_directory_node(",
+    "validate_selected_directory_entity(",
+    "validate_selected_file_record_metadata(",
+    "join_selected_path(",
+    "remaining_work:Cell<u64>",
+    "remaining_read_bytes:Cell::new(bounds.sources.maximum_read_bytes)",
+    "before_complete();operation.check()?;",
+    "value:DecodedSemanticSourceV1",
+  ] {
+    assert!(namespace_source.contains(required), "namespace sources lost shared captured readers: {required}");
+  }
+  for forbidden in [
+    "NativeProtectedSemanticSourceV1",
+    "stage_retained_copy",
+    "StorageEngine",
+    "DiskKVStore",
+    "OpenOptions",
+    "File::",
+    "publish_",
+    "write_file",
+    "lock_kv(",
+    "capture_settled_snapshot(",
+    "capture_semantic_mutation_inventory(",
+    "FileRecord::deserialize",
+    "FileRecord::serialize",
+    "node.serialize(",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!namespace_source.contains(forbidden), "namespace sources gained an independent owner or staging API: {forbidden}");
+  }
+  assert_eq!(source_reader.matches("FileRecord::deserialize(").count(), 1);
+  assert!(source_reader.contains("SemanticSourceKindV1::Protected=>validate_source_path(path,algorithm)?"));
+  assert_eq!(source_reader.matches("kind==SemanticSourceKindV1::Namespace&&entity.flags!=0").count(), 2);
   for required in [
     "_capture:&'aNativeSemanticMutationInventoryV1<'a>",
     "_memory:MemoryReservation",

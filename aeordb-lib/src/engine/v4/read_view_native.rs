@@ -76,7 +76,7 @@ use super::index_page::OrderedIndexRoleV1;
 const AUTHORITY_PEAK_RESERVATION_BYTES: u64 = 128 * 1024 * 1024;
 const AUTHORITY_RETAINED_BASE_BYTES: u64 = 16 * 1024;
 const PERMISSION_WORKSPACE_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_DIRECTORY_ENTITY_BYTES: usize = 48 * 1024 * 1024;
+pub(super) const MAX_DIRECTORY_ENTITY_BYTES: usize = 48 * 1024 * 1024;
 const MAX_FILE_RECORD_ENTITY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHUNK_ENTITY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PERMISSION_DOCUMENT_BYTES: usize = 1024 * 1024;
@@ -2892,18 +2892,7 @@ impl NativeReadViewSourceV1 {
     let entity = self
       .load_entity_at_header(header, hash, MAX_DIRECTORY_ENTITY_BYTES, cancellation)?
       .ok_or_else(|| selected_corrupt(&hex::encode(hash), "selected directory entity is missing"))?;
-    if entity.entry_type != EntryTypeV4::DirectoryIndex
-      || entity.entity_version != 0
-      || entity.flags != 0
-      || entity.compression_algorithm != CompressionAlgorithm::None
-      || entity.key != hash
-    {
-      return Err(selected_corrupt(&hex::encode(hash), "selected directory entity representation is noncanonical"));
-    }
-    let domain = if is_btree_format(&entity.stored_value) { b"btree:".as_slice() } else { b"dirc:".as_slice() };
-    if digest_parts(header.header.hash_algorithm, &[domain, &entity.stored_value]) != hash {
-      return Err(selected_corrupt(&hex::encode(hash), "selected directory content identity is invalid"));
-    }
+    validate_selected_directory_entity(&entity, header.header.hash_algorithm, hash)?;
     Ok(entity)
   }
 
@@ -2972,14 +2961,7 @@ impl NativeReadViewSourceV1 {
     }
     let record = deserialize_file_record_v0_v1(&entity.stored_value, header.header.hash_algorithm, entity.entity_version)
       .map_err(|error| selected_corrupt(expected_path, error))?;
-    if record.path != expected_path
-      || record.total_size != entry.total_size
-      || record.content_type != entry.content_type
-      || record.created_at != entry.created_at
-      || record.updated_at != entry.updated_at
-    {
-      return Err(selected_corrupt(expected_path, "selected FileRecord metadata does not match its directory entry"));
-    }
+    validate_selected_file_record_metadata(&record, entry, expected_path)?;
     Ok(LoadedSelectedFileRecordV1 { entity_version: entity.entity_version, record })
   }
 
@@ -3219,7 +3201,11 @@ fn canonical_selected_authorization_scope(path: &str) -> Result<&str, NativeSele
   Ok(scope)
 }
 
-fn join_selected_path(parent: &str, child: &str, maximum_path_bytes: usize) -> Result<String, NativeSelectedNamespaceReadErrorV1> {
+pub(super) fn join_selected_path(
+  parent: &str,
+  child: &str,
+  maximum_path_bytes: usize,
+) -> Result<String, NativeSelectedNamespaceReadErrorV1> {
   if child.is_empty() || matches!(child, "." | "..") || child.contains('/') || child.as_bytes().contains(&0) {
     return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
       "selected_namespace_child_name",
@@ -3475,6 +3461,42 @@ fn directory_child(hash: Vec<u8>, name: String) -> ChildEntry {
     virtual_time: 0,
     node_id: 0,
   }
+}
+
+pub(super) fn validate_selected_directory_entity(
+  entity: &LoadedImmutableEntityV1,
+  algorithm: HashAlgorithm,
+  hash: &[u8],
+) -> Result<(), ReadViewAuthorizationFailureV1> {
+  if entity.entry_type != EntryTypeV4::DirectoryIndex
+    || entity.entity_version != 0
+    || entity.flags != 0
+    || entity.compression_algorithm != CompressionAlgorithm::None
+    || entity.key != hash
+  {
+    return Err(selected_corrupt(&hex::encode(hash), "selected directory entity representation is noncanonical"));
+  }
+  let domain = if is_btree_format(&entity.stored_value) { b"btree:".as_slice() } else { b"dirc:".as_slice() };
+  if digest_parts(algorithm, &[domain, &entity.stored_value]) != hash {
+    return Err(selected_corrupt(&hex::encode(hash), "selected directory content identity is invalid"));
+  }
+  Ok(())
+}
+
+pub(super) fn validate_selected_file_record_metadata(
+  record: &FileRecord,
+  entry: &ChildEntry,
+  expected_path: &str,
+) -> Result<(), ReadViewAuthorizationFailureV1> {
+  if record.path != expected_path
+    || record.total_size != entry.total_size
+    || record.content_type != entry.content_type
+    || record.created_at != entry.created_at
+    || record.updated_at != entry.updated_at
+  {
+    return Err(selected_corrupt(expected_path, "selected FileRecord metadata does not match its directory entry"));
+  }
+  Ok(())
 }
 
 fn decode_canonical_btree_node(
