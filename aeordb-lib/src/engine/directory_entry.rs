@@ -110,6 +110,33 @@ pub fn deserialize_child_entries(data: &[u8], hash_length: usize, version: u8) -
   }
 }
 
+/// Collect bounded children through the same decoder used by streaming readers.
+/// The retained table is admitted before decoding; the visitor refuses a child
+/// past the limit before allocating any of that child's fields.
+pub(crate) fn deserialize_bounded_child_entries(
+  data: &[u8],
+  hash_length: usize,
+  version: u8,
+  maximum_entries: usize,
+) -> EngineResult<Vec<ChildEntry>> {
+  if version != 0 {
+    return Err(EngineError::InvalidEntryVersion(version));
+  }
+  // v0's fixed prefix and lengths, excluding optional trailing clock fields.
+  let minimum_entry_bytes =
+    hash_length.checked_add(29).ok_or_else(|| EngineError::InvalidInput("directory hash width overflows the entry size".to_string()))?;
+  let capacity = maximum_entries.min(data.len() / minimum_entry_bytes);
+  let mut entries = Vec::new();
+  entries
+    .try_reserve_exact(capacity)
+    .map_err(|error| EngineError::ResourceExhausted(format!("cannot reserve bounded directory children: {error}")))?;
+  visit_bounded_child_entries(data, hash_length, version, maximum_entries, |child| {
+    entries.push(child);
+    Ok(true)
+  })?;
+  Ok(entries)
+}
+
 /// Visit a flat directory without retaining its complete child collection.
 ///
 /// The caller supplies the structural count bound appropriate to its owner.

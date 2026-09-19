@@ -1161,3 +1161,64 @@ have no network/stdin; use the bounded native test runner. Keep the RED and
 candidate separate from the frozen prepared-snapshot qualification. Include the
 adjacent prepared-snapshot table/name allocation probes in this follow-up before
 fullU1readiness; they are not claimed by the earlier record-copy probes.
+
+### Following namespace integration: shared values, distinct source results
+
+September18 read-only map confirms that the protected source result is also the
+receiver of`stage_retained_copy`. Merely admitting descendant configuration
+family0x0002in`validate_source_path` would therefore change that publication
+boundary. Do not do so. The existing protected families1/3/31/32and their
+result type remain distinct from a namespace configuration read result.
+
+The next reader must use the inventory's settled KV snapshot and captured
+header, not the selected service reader's current locator lookup. Reuse the
+existing physical read, whole-entity, FileRecord/chunk, SystemFamily and
+directory validation owners. A private shared decoded-source value can support
+both public result types; only the protected wrapper retains the staging API.
+Preserve original path/family, exact content revision, version/flags, bounded
+chunk decoding and cumulative physical-read accounting. A namespace revision
+is read by its supplied immutable content key, never by the current path key.
+The supplied tree/revision alone is not root admission or user read permission.
+
+For namespace discovery, reuse`namespace_seek`for ordered child navigation and
+the selected directory rules for fanout, canonical bytes, names and inherited
+ranges. Keep directory identity validation shared as well. An iterative bounded
+path/depth traversal emits descendant configuration paths/revisions in complete
+path-byte order, including directory-prefix ordering; callbacks are provisional
+until successful completion. One lookup/work counter spans every visited node
+and configuration body. Retain only bounded ancestors and the current source;
+no whole-tree map or independent format parser. Final cancellation/admission
+checks apply to empty, complete and early-stop outcomes.
+
+Entry tests must use real small native files with independently specified
+source bytes:32/64-byte trees, flat/B-tree nesting and prefix-order cases,
+old/fresh captures across changes, exact revisions despite current-path changes,
+missing/malformed referenced entities, irrelevant ordinary files, explicit
+namespace/protected-result separation, exact work/read/body limits, partial
+visits, allocation failures, cancellation and release/retry. Preserve all
+protected staging, selected-reader and compiler regressions. This is the next
+integration design, not implemented functionality or a full-union claim.
+
+The selected namespace reader also requires unflagged ordinary FileRecord and
+chunk representations. Its configuration adapter must preserve that rule;
+the protected reader's support for SYSTEM source/chunk forms cannot silently
+broaden namespace reads. Keep the existing protected return signatures and
+accessors, with an internal source-kind parameter at the shared decode boundary
+and a private shared value. Do not expose a conversion from the namespace
+result to the protected staging result. Existing protected-read validation
+order and error details are compatibility checks in this extraction.
+
+Traversal must also preserve the selected FileRecord-to-directory comparison:
+path, total size, content type, creation time and update time all agree before
+emitting a configuration. The standalone exact-revision read does not assert
+that additional directory relationship. Keep the comparison shared, and test
+each mismatch rather than treating a valid content hash alone as sufficient.
+
+September19 qualification update: the directory prerequisite is now supported
+by the original three measured failures, nine new regression cases and final
+Linux/macOS/Windows results against the same frozen source. The bounded table
+collector and B-tree entry enforce existing limits before excessive collection
+allocation; legacy decoder behavior and canonical formats are unchanged.
+Existing child-string, internal-key and canonical serialization allocations
+remain inherited limitations, not a claim of universal allocation recovery.
+The namespace adapter described above is still the next implementation unit.

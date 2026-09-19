@@ -1,4 +1,4 @@
-use crate::engine::directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries};
+use crate::engine::directory_entry::{ChildEntry, serialize_child_entries, deserialize_child_entries, deserialize_bounded_child_entries};
 use crate::engine::entry_type::EntryType;
 use crate::engine::errors::{EngineError, EngineResult};
 use crate::engine::hash_algorithm::HashAlgorithm;
@@ -290,6 +290,36 @@ impl BTreeNode {
     match version {
       0 => Self::deserialize_v0(data, hash_length),
       _ => Err(EngineError::InvalidEntryVersion(version)),
+    }
+  }
+
+  /// Decode with canonical fanout ceilings before allocating collections.
+  /// Legacy callers retain `deserialize`; selected readers still validate the
+  /// complete canonical encoding, ordering and inherited ranges afterward.
+  pub(crate) fn deserialize_bounded(data: &[u8], hash_length: usize, version: u8) -> EngineResult<Self> {
+    if version != 0 {
+      return Err(EngineError::InvalidEntryVersion(version));
+    }
+    let Some(header) = data.get(..3) else {
+      return Self::deserialize(data, hash_length, version);
+    };
+    let count = usize::from(u16::from_le_bytes([header[1], header[2]]));
+    match header[0] {
+      BTREE_LEAF_MARKER => {
+        if count > BTREE_MAX_LEAF_ENTRIES {
+          return Err(EngineError::CorruptEntry { offset: 0, reason: "B-tree leaf exceeds its canonical fanout".to_string() });
+        }
+        let entries = if count == 0 {
+          Vec::new()
+        } else {
+          deserialize_bounded_child_entries(&data[3..], hash_length, version, BTREE_MAX_LEAF_ENTRIES)?
+        };
+        Ok(Self::Leaf(LeafNode { entries }))
+      }
+      BTREE_INTERNAL_MARKER if count > BTREE_MAX_INTERNAL_KEYS => {
+        Err(EngineError::CorruptEntry { offset: 0, reason: "B-tree internal node exceeds its canonical fanout".to_string() })
+      }
+      _ => Self::deserialize(data, hash_length, version),
     }
   }
 

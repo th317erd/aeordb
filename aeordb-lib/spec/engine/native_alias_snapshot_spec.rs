@@ -1,5 +1,7 @@
 //! Real captured native inputs feed both existing compiler snapshot traits.
 use super::*;
+#[path = "native_alias_table_allocation_spec.rs"]
+mod table_allocation;
 #[path = "native_alias_snapshot_validation_spec.rs"]
 mod validation;
 use crate::engine::v4::dependency::encode_dependency_record;

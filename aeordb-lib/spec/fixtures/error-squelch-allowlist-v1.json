@@ -2204,7 +2204,7 @@
     {
       "id": "esq-v1-3c7f8d43a96981d79267-00",
       "file": "aeordb-lib/src/engine/btree.rs",
-      "line": 393,
+      "line": 423,
       "column": 5,
       "enclosing_item": "impl LeafNode::find",
       "kind": "result_to_option",
@@ -2214,7 +2214,7 @@
     {
       "id": "esq-v1-cb7e50cd8f4d7a2152fd-00",
       "file": "aeordb-lib/src/engine/btree.rs",
-      "line": 626,
+      "line": 656,
       "column": 32,
       "enclosing_item": "btree_from_entries",
       "kind": "error_conversion",

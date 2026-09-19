@@ -6,6 +6,8 @@ mod allocation_probe;
 mod inventory_spec;
 #[path = "native_protected_source_spec.rs"]
 mod protected_source_spec;
+#[path = "selected_directory_allocation_spec.rs"]
+mod selected_directory_allocation_spec;
 use allocation_probe::measure;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationPhaseV1, SemanticMutationTaskStateV1};
 

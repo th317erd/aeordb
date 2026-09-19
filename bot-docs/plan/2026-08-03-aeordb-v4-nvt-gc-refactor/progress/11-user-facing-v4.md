@@ -26,6 +26,38 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September19,02:43UTC: resumed after the unrelated document task. Bounded
+directory final qualification is complete: Linux finished September18,02:50:10,
+macOS02:45:48, and Windows03:21:38UTC. All raw evidence is now local; source
+and environment records were sealed September19,02:43UTC. The strict verifier
+passed the original failures, candidate/preflight history, unchanged legacy
+decoders, source manifests, executable records, resource bounds and final gates.
+The [bounded-directory proof](../evidence/user-facing-v4-u1-bounded-directory-decode-proof-20260918.json)
+records253narrow tests,122affected targets (1,971Unix/1,964Windows tests),
+859Unix/874Windows library tests,185reference tests and502independent fixtures.
+Formatting, strict Clippy and applicable contract/audit checks pass; all1,501
+reviewed audit identities are unchanged. This unit is ready to land.
+
+Next: the prepared namespace-source regression packet uses a separate worktree
+at`f13bedd5` plus the exact qualified decoder foundation. Its three initial
+native-file tests must demonstrate the missing behavior before implementation.
+FullU1, runtime integration andU2–U7 remain unfinished. No production actions,
+installed binaries, VM configuration changes or retained-database operations
+were performed. The homeschool documents remain unrelated untracked exports.
+
+September18,02:32UTC: snapshot milestone landed/pushed as`f13bedd5` and all
+three test checkouts advanced with previous state preserved. Decoder preflight2
+passed1,219tests and every static/audit gate02:25:38UTC; all36raw artifacts
+are local and strictly verified. The audit changes only two B-tree locations,
+not any of its1,501reviewed identities.
+
+The seven decoder/test Rust files and audit refresh are integrated and frozen
+with both lockfiles in10-input packet
+`851651eae8beff6d6213d875780ce588fc155df81b7a79a7bf2da4d4e1869c78`.
+Final Linux/macOS/Windows runs started02:31UTC. The affected list now includes
+122targets, adding the four legacy B-tree/directory/tree-walker suites; all
+three launchers use the identical list. Final results remain pending.
+
 September18,02:20UTC: prepared native alias snapshots passed every final
 Linux/macOS/Windows gate. Windows completed22:40:24UTC onSeptember17;
 after the interrupted session resumed, its environment was sealed02:17:16UTC

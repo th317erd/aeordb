@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::btree::{BTREE_MAX_INTERNAL_KEYS, BTREE_MAX_LEAF_ENTRIES, BTreeNode, is_btree_format};
-use crate::engine::directory_entry::{ChildEntry, deserialize_child_entries};
+use crate::engine::directory_entry::{ChildEntry, deserialize_bounded_child_entries};
+use crate::engine::errors::EngineError;
 use crate::engine::file_record::FileRecord;
 use crate::engine::memory_coordinator::{AdmissionClass, MemoryCoordinator, MemoryOwner, MemoryReservation};
 use crate::engine::permission_resolver::{evaluate_ordered_path_permissions, normalize_permission_path};
@@ -3481,8 +3482,10 @@ fn decode_canonical_btree_node(
   hash_width: usize,
   path: &str,
 ) -> Result<BTreeNode, ReadViewAuthorizationFailureV1> {
-  let node =
-    BTreeNode::deserialize(&entity.stored_value, hash_width, entity.entity_version).map_err(|error| selected_corrupt(path, error))?;
+  let node = BTreeNode::deserialize_bounded(&entity.stored_value, hash_width, entity.entity_version).map_err(|error| match error {
+    EngineError::ResourceExhausted(_) => selected_unavailable(path, error),
+    _ => selected_corrupt(path, error),
+  })?;
   let canonical = node.serialize(hash_width).map_err(|error| selected_corrupt(path, error))?;
   if canonical != entity.stored_value {
     return Err(selected_corrupt(path, "selected B-tree node is not canonically encoded"));
@@ -3511,7 +3514,7 @@ fn decode_canonical_btree_node(
   Ok(node)
 }
 
-fn decode_validated_selected_directory_node(
+pub(super) fn decode_validated_selected_directory_node(
   entity: &LoadedImmutableEntityV1,
   hash_width: usize,
   context: &str,
@@ -3526,8 +3529,13 @@ fn decode_validated_selected_directory_node(
         "selected B-tree child uses a flat directory representation",
       ));
     }
-    let entries = deserialize_child_entries(&entity.stored_value, hash_width, entity.entity_version)
-      .map_err(|error| NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_directory", error.to_string()))?;
+    let entries = deserialize_bounded_child_entries(&entity.stored_value, hash_width, entity.entity_version, MAX_FLAT_DIRECTORY_ENTRIES)
+      .map_err(|error| match error {
+        EngineError::ResourceExhausted(_) => {
+          NativeSelectedNamespaceReadErrorV1::unavailable("selected_namespace_directory", error.to_string())
+        }
+        _ => NativeSelectedNamespaceReadErrorV1::corrupt("selected_namespace_directory", error.to_string()),
+      })?;
     if entries.len() > MAX_FLAT_DIRECTORY_ENTRIES {
       return Err(NativeSelectedNamespaceReadErrorV1::corrupt(
         "selected_namespace_directory",
