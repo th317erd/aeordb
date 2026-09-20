@@ -514,7 +514,7 @@ pub(crate) fn decode_physical_incarnation(profile: HashProfile, bytes: &[u8]) ->
     || wal_offset == 0
     || entity_length == 0
     || !(1..=0x0a).contains(&entry_type)
-    || (entity_version == 0) != (write_sequence == 0)
+    || (write_sequence == 0 && entity_version != 0)
     || bytes[2 * h + 22..].iter().any(|byte| *byte != 0)
     || wal_offset.checked_add(u64::from(entity_length)).is_none()
   {
@@ -716,6 +716,35 @@ mod tests {
       let mut bad_reserved = baseline.clone();
       bad_reserved[2 * h + 22] = 1;
       assert_eq!(decode_physical_incarnation(profile, &bad_reserved).err(), Some("physical_incarnation_fields"));
+    }
+  }
+
+  #[test]
+  fn physical_incarnation_accepts_frozen_v4_directory_with_version_zero_body() {
+    for profile in [HashProfile::Blake3_256, HashProfile::Sha512] {
+      let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../aeordb-lib/spec/fixtures/v4/whole-entity-v1")
+        .join(format!("entity-{}-directory-tree-v0-empty-valid.bin", profile.label()));
+      let entity = std::fs::read(path).unwrap();
+      let (observation, _) = crate::core::observe(crate::core::CoreFormat::WholeEntityV1, profile, &entity);
+      assert_eq!(observation, "entity:version=0:entry-type=0x03");
+      let h = profile.width();
+      let header_length = 77 + h;
+      let sequence = u64::from_le_bytes(entity[33..41].try_into().unwrap());
+      assert!(sequence > 0);
+      // Copy independently frozen WholeEntity fields into the literal GC row layout.
+      let mut row = vec![0; 24 + 2 * h];
+      row[..h].copy_from_slice(&entity[header_length..header_length + h]);
+      row[h..2 * h].copy_from_slice(&entity[41..41 + h]);
+      row[2 * h..2 * h + 8].copy_from_slice(&8192u64.to_le_bytes());
+      row[2 * h + 8..2 * h + 16].copy_from_slice(&entity[33..41]);
+      row[2 * h + 16..2 * h + 20].copy_from_slice(&entity[8..12]);
+      row[2 * h + 20] = entity[5];
+      row[2 * h + 21] = entity[4];
+      let incarnation = decode_physical_incarnation(profile, &row).expect("payload version0 does not imply zero physical write sequence");
+      assert_eq!(incarnation.entity_version, 0);
+      assert_eq!(incarnation.write_sequence, sequence);
+      assert_eq!(encode_physical_incarnation(profile, &incarnation), row);
     }
   }
 

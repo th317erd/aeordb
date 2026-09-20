@@ -26,6 +26,405 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20 final physical-exclusion qualification: Windows final2 C16 completed
+13:59:14UTC, all seven stages passed; both collector and bridge finished
+14:00:41 with complete/exit0. Every raw artifact is local and strict platform
+verification passes. Counts:257narrow,1138affected,1177library,186reference,
+502fixtures,strict Clippy and complete batched formatting. The C16 quarantine
+executable differs from C15 as required for the changed allocation test.
+
+The combined three-platform and historical-failure verifier passes against
+MAIN158-input SHA`71417b888c8121135643096083515ea5eb7bd9181c907b77f18bd5d20a5eb673`.
+The [final proof](../evidence/user-facing-v4-u1-task-physical-exclusion-proof-20260920.json)
+contains the exact raw gates and explicit limits. Linux2302/186/502 and39case
+deadlines; Mac1162library/1140affected/257narrow/allocation1/186/502; required
+static/resource gates passed. Source remains24owned files plus these two plan
+records and the proof. Fresh14:01 origin fetch is0/0; unrelated WIP is preserved.
+
+Integrated review covered final guard ordering, owner/frontier/kind/key binding,
+independent merge order and framing, interruption/resource release, exact retry,
+old/current incarnations and the unchanged external GC authority requirements.
+No further correction was identified. The milestone closes this task-only
+quarantine/sweep predicate, not actual service removal or bulk throughput.
+U1 remains open, U2–U7 remain required, and no production/service action occurred.
+Next: execute the12prepared failing-first unselected-checkpoint graph tests,
+reuse the existing source-pair and graph owners, then continue native task
+selection/fencing and coupled activation. Prepared drafts/runners are unrun.
+
+September20,13:49UTC: Windows final2 C16 has passed257narrow and1138affected
+cases (affected completed13:41:22); the13:48:29 scheduled check observed626
+library cases completed. The sole six-minute collector remains live under
+managed bridge exec10052, next check approximately13:54:30. No whole-run pass
+yet. MAIN remains the exact Linux/Mac-qualified snapshot, and refreshed fetch
+at13:28 showed0/0 upstream drift. Integrated24-file review identified no further
+correction; its scoped conclusions/limitations are in scratch
+`task-physical-exclusion-final-review.md`.
+
+Next-unit preparation consists of12unregistered/unrun checkpoint-graph tests
+in three scratch drafts and syntax-checked source-only snapshot/launch/RED
+scripts. They are not part of current qualification and have not been launched
+or copied to another host. Coverage drafts include real initial staging,
+all-hash exact physical graphs after reopen, absent-task distinction, old
+capture isolation, ASCM binding mismatch, ordinary opaque/missing leaves,
+all phases including rebased unadmitted candidates, late output failures,
+exact resource limits and callback/cancellation precedence. Task ownership,
+generation and atomic activation remain following work.
+
+September20,13:25UTC: Windows final1 (C15) completed13:20:30 with all seven
+stages passing:257narrow,1138affected,1177library,Clippy,186reference,
+502fixtures and batched formatting. Its six-minute collector observed completion
+13:23:53, sealed the environment, collected every raw artifact and passed the
+strict local platform verifier. Collector receipt is complete/exit0.
+
+The managed bridge (exec10052/PID238515) then launched final2 C16 at13:24:21,
+Windows CIMPID8772, and started its sole six-minute collector. Next ordinary
+remote check is approximately13:30:25. No duplicate monitor or launch is needed.
+The current C16 MAIN source remains byte-identical to the already-passing Linux
+and macOS snapshots; final combined evidence and commit await this Windows run.
+Read-only full-diff review and unregistered next-unit test drafts may proceed
+without changing the frozen candidate. No operational service action occurred.
+
+September20,13:09UTC: C16 source is integrated in MAIN without commit; all158
+inputs match the frozen candidate byte-for-byte and git diff--check passes.
+The patch identity check caught and corrected one repeated-context fixture field
+placement; no tested source bytes were changed. Twenty-four owned source/test
+files plus the existing plan records are the only intended changes; unrelated
+WIP remains untouched. Final commit waits for Windows exact-source qualification.
+
+C16 Linux completed13:03:45 and Mac final2 completed13:02:10. Both environment
+and tool identities are sealed; remaining raw collections are complete. Linux
+retains2302/186/502 plus all targeted gates; Mac has1162library,1140affected66,
+257narrow,allocation1,reference186,502fixtures,format,audit1501,Clippy,debt.
+All whole-run raw artifacts and strict local verifiers passed. Linux's39exact
+deadlines max611/258ms, minimumhome86.551GB, Data325.254GB, peak6GiB;
+Mac maximumRSS3.636GB, minimumhome239.936GB and zero reported process swaps.
+Desktop/Mac jobs are stopped; the Windows final gate remains open.
+
+Windows final1 remains C15. Collector13:05:50 observed affected success and
+602library cases completed; nextordinarypoll13:11:50. Final2 source/scripts are
+transferred, not launched. Its new launcher preserves timestamps only for inputs
+whose hashes match the verified preceding snapshot, refreshing every changed
+input so Cargo cannot reuse a stale changed test. All final2 suites still run.
+The platform proof accounts for the existing GC workspace target's three
+Unix-only versus one Windows-only tests:13onUnix,11onWindows, total1138affected
+Windows versus1140Unix. No test was removed or changed for this accounting.
+
+September20,12:51UTC: C15 Linux completed12:45:10; all78raw artifacts local and
+strictly verified. PASS2302tests across67targets,reference186,fixtures502,
+native12,quarantine37,architecture5,39deadlines(max515/247ms),format,audit1501,
+Clippy and debt-selftest. Peak reached the6GiB cap; minimumhome84.359GB and
+Data325.398GB remained abovefloors. C15 is Linux-qualified, not all-platform.
+
+Mac final1 passed narrow257 then stopped12:41:40 after21affected targets:
+277passed/1failed. Its quarantine allocation child `64:predecessor` terminated;
+the other9children/36quarantine cases passed. All15raw artifacts local/strict.
+Pinned tokio-util calls std::Mutex on the first cancellation check. A bounded
+standalone Mac diagnostic with the unchanged probe measured64bytes at the first
+mutex lock and0on the second. LLDB lacked noninteractive permission; no settings
+changed. C16 initializes this fixture token before measuring GC buffers; all
+failure injections, typed-error/release assertions and deadlines remain.
+Details: scratch`task-physical-exclusion-macos-allocation-review.md`.
+
+C16 changes only that test setup,158-input SHA
+`71417b888c8121135643096083515ea5eb7bd9181c907b77f18bd5d20a5eb673`.
+Mac final2 launched12:48:53 PID74567 with an additional allocation-first gate;
+nextpoll>=12:54:03. Linux C16 launched12:49:20, invocation
+`d3053e4df7e145598a1a10521246468a`, PID1330002;
+unit`aeordb-v4-task-physical-exclusion-candidate16-20260920`, nextpoll>=12:54:30.
+Windows final1 remains C15: collector observed narrow257passed and affected
+running12:47:46. Detached local collector attempts did not persist; managed exec
+session96493/PID218702 is confirmed live and polls every6min (next12:53:46).
+Prepared Windows final2 scripts require final1 complete/sealed; NOT launched.
+Both platforms use separate immutable final2 evidence/control. MAIN unchanged.
+
+September20,12:40UTC: C15 passed native/affected/39deadline cases,format,audit
+and strict workspace-all-target Clippy (finished12:36:40). Broad Linux suite
+is running; no whole-run receipt yet. Last desktop poll12:37:06, next>=12:42:16.
+All49completed-stage raw artifacts have been collected locally, pending final
+driver verification. C15 source transferred to Mac/Windows with no target trees.
+Mac final1 launched12:37:27 PID71769; Windows final1 CIM launch returned0,
+PID9500. Both entry scripts verified predecessor source, refreshed source mtimes,
+rechecked158hashes and admitted resources. Next Mac ordinary poll>=12:42:37;
+Windows collection uses the prepared six-minute cadence. No platform result
+is inferred from successful launch. Fresh origin fetch at12:39 shows0/0 drift.
+
+September20,12:32UTC: C14 passed12native,37quarantine,5architecture,39exact
+deadlines(max519/251ms),format and audit1501; Clippy stopped12:24:35 on two
+test-helper style errors (return-type complexity and modulo predicate). All50
+raw artifacts are local/strict; peak6.227GB, disk floors passed. No later gate
+ran. C15 changes only that helper's type alias and equivalent is_multiple_of
+expression. Its158-input SHA is
+`094e25625f393d369c92a58ebbf8cda51a64b660e50004c1de0188de0708e25e`.
+Launched12:31:39, unit`aeordb-v4-task-physical-exclusion-candidate15-20260920`,
+invocation`fda5b56fd3974fafbfc7b1fdd289891f`, PID1281612; same full driver and
+bounded freshness launcher. Next ordinary desktop poll>=12:36:49.
+
+Mac/Windows readiness was checked12:22: both reachable, no Rust jobs, and free
+disk/RAM above admission floors. Windows VM was already running. C14 source
+and physical-final1 scripts/control were transferred to platform scratch only;
+neither platform qualification nor collector launched. Their sources remain
+the sealed root-C6 predecessor. Transfer C15 before launching; old C14 packet
+is retained. MAIN runtime remains755ad3f5, no operational action.
+
+September20,12:20UTC: C13's last Clippy gate failed only on a test's
+`.err().expect()` expression at12:13:37. All71raw artifacts are local/strict;
+the run is a failed preflight despite its passing behavioral gates. The test
+now uses `expect_err` (its completion type already supports Debug). Clippy's
+cgroup peak reached its enforced6GiB cap; preceding stages peaked3.722GB.
+
+C14 combines only that assertion spelling and13reviewed audit line updates;
+all runtime bytes remain C13. Its158-input SHA is
+`07540b4ca55350c53f3ba5c24bd904d542e9f0359bf849e1658b1e9e7b03674c`.
+The final Linux driver `run-task-physical-exclusion-full.sh` is launching with
+the same disk/CPU/memory limits and timestamp-fresh input validation. It runs
+native/affected/deadline gates,format,audit **check**,Clippy,the2302-test broad
+inventory,reference186,contracts/502fixtures and debt-selftest. Native-platform
+scripts are still prepared only; no platform job/collector is launched yet.
+
+September20,12:17UTC: C13 passed12native (including the expanded all-hash native
+limits/missing-support/retry assertions),37quarantine,5architecture,39deadlines
+(max532/251ms),format,audit preview,1162library,186reference and376tests across
+all37GC/format targets. All63completed-stage raw artifacts are local and checked;
+peak3.722GB, disk floors passed. Last desktop observation12:13:20 showed Clippy
+running with no driver receipt yet; next ordinary poll>=12:18:30. No whole-run
+pass is claimed until that final stage and receipt are collected.
+
+The audit preview is local and compared against the frozen root baseline:
+1501identical reviewed occurrences/policies, exactly13line-only updates. Those
+13updates are applied only to the local overlay, retaining the existing final
+newline (the JSON writer's preview omits it). Desktop source remains C13 until
+its driver finishes. Final source is not yet frozen. Windows collector and
+platform-proof helpers are prepared, unrun; no native-platform jobs or monitor
+have been launched. C13 launch was12:07:49, invocation
+`a959e0a4e39a4e09b539d412c8574578`, PID1205026.
+
+September20,12:08UTC: C11 failed compilation(E0277) at11:54:18: the generic
+lookup returns EngineError, so its conversion through FirstAuthority error is
+required, not redundant. Restored that exact C10 expression. Its8raw artifacts
+are local/strict; no C11 tests or later stages ran. C12 restored compilation
+and passed11/12native; the expanded fixture failed during setup at12:01:43,
+republishing identical support artifacts with a newer minimum timestamp.
+Existing immutable publication correctly rejects that request. All8raw C12
+artifacts are local/strict. C13 constructs base-only and base+Set manifests over
+one published support graph; no production timestamp rule changed.
+
+C13 is158inputs SHA
+`58d24fd6016050e0e6432259e03b9796cecca6bc90c0cdbdea5d07f7c12cb3fc`.
+Same preflight4 and bounded desktop launcher; outcomes pending. C13 changes
+only the native fixture from C12; current runtime is C10 plus the explicit
+effective-merge error latch. Linux final expected counts were reconciled against
+both prior root and framing runs:2302tests across67targets(library+66), plus
+reference186,fixture502 and39individual deadlines. Final proof scripts are
+prepared but unrun; native platforms are still untouched.
+
+September20,11:55UTC: C10 again passed12native,37quarantine,5architecture,
+39individual deadlines (max539/251ms) and formatting. Audit-preview then refused
+baseline growth1501→1503 at11:47:37. All43raw artifacts are local/strict; later
+gates did not run. Read-only audit check identifies only two new result-status
+probes in effective merge observation methods. Both already returned the
+original error; the overlay now shares an explicit match-based failure latch
+that sets failed and returns that same error. No allowance or scanner changed.
+The newly generic support lookup also drops its redundant identity conversion.
+
+C11 froze158inputs SHA
+`887b26ba7c040d51e99a620800be5b1b47b1ee58be8bf20959d4604b4861d847`;
+desktop launched11:53:40, invocation`0c34581c7c6545d6aec233b559d3fbaf`,
+PID1186471. Same preflight4, next ordinary poll>=11:58:50. In the local overlay
+only, after this freeze, the existing all-hash unrelated-quarantine case now
+also checks native support/work/read limits, absent lifecycle/directory/delta,
+no writes or leaked reservations, and positive retry for a base+Set manifest.
+Those added assertions are not part of C11 and remain unrun.
+
+Three macOS and four Windows qualification scripts are prepared but not
+transferred/launched. They preserve the prior gates, expand affected targets
+to66 and refresh input timestamps after extraction; their entry checks expect
+the sealed root C6 predecessor. Final native-platform and integrated gates
+remain required. MAIN runtime remains unchanged; no production/service action.
+
+September20,11:46UTC: C9 passed12native,37quarantine,5architecture and all39
+exact-case ten-second deadlines (native max509ms, effective max259ms). The run
+then failed formatting on three expressions in two files at11:40:13; audit,
+library,reference,GC and Clippy were unrun. All36raw artifacts are local and
+strictly verified; peak3.656GB and disk floors passed. C10 makes only those
+format changes,158inputs SHA
+`c0bd778206dbd20f8e667c363bd126cd508a8ce4fc81f626de4c8ddc40e93aa8`.
+Desktop launched11:45:10, invocation`deb444abb6ba44859c2919093d09f11a`,
+PID1160114, same preflight4 driver. Next ordinary poll>=11:50:20.
+Final Linux broad inventory is the prior39affected targets union all36GC
+targets:66unique targets plus the library. That final driver is prepared,
+not launched; reviewed audit metadata and all-platform qualification remain.
+
+September20,11:39UTC: C9 is the first launched corrected candidate,158inputs,
+SHA`13e54ae3df84843db2df030c0cb50360d863497c1123c558cde3cad85d0a7977`.
+C7/C8 are preserved unrun preparation packets; C9 uses the actual workspace
+Rust2021 edition and repository formatting configuration. Launched11:37:54,
+unit `aeordb-v4-task-physical-exclusion-candidate9-20260920`, invocation
+`1575fca89012459391c2077602600be7`, PID1137880. Driver preflight4 runs native,
+quarantine/architecture,12/27individual deadlines,format,audit preview,library,
+reference,all36GCtargets+format fixture,and Clippy, stopping at first failure.
+Results pending; next ordinary poll>=11:43:04. Inputs were timestamp-refreshed
+and hash-rechecked before launch. No Mac/Windows job or production action.
+
+September20,11:36UTC: refreshed RED5 compiled and executed the allocation
+regression, finishing11:29:48 with0pass/1fail/36filtered. All seven raw artifacts
+are local/strict. Four child cases terminate on allocation refusal: fence88/152
+bytes and predecessor32/64bytes; the rebuilt binary differs from stale RED4.
+Peak3.430GB, disk floors passed. The overlay correction reserves24+3H bytes
+before two fallible allocations, retaining existing summary-growth accounting.
+Tests separately require constructor-budget refusal, post-constructor page
+growth refusal, failure latching and complete release. Successful allocation
+children must now report exactly one executed test, protecting against zero-test
+false positives. C7 was frozen but **never launched**: local formatting lacked
+the repository configuration. C8 supersedes it with explicit repository-format
+settings; all new runtime and test behavior still awaits execution.
+
+September20,11:30UTC: RED4 exited0 but selected **zero tests**,36filtered.
+All seven raw artifacts are local; the strict diagnostic verifier preserves it
+as invalid qualification. The archive had the correct new module bytes but
+retained root/module timestamps11:10:02, older than the reused11:11:07 test
+binary. Cargo consequently did not discover the new child test. Source hashes
+alone did not prove executable freshness. No runtime correction has been made.
+
+RED5 repeats exactly the158-input RED4 source and SHA. The v2 snapshot launcher
+refreshes every checked input timestamp after extraction and rechecks all bytes;
+future final-source qualification must use this freshness step. Launched11:28:42,
+unit `aeordb-v4-task-physical-exclusion-red5-20260920`, invocation
+`c10290a2feb5413ba89eed9e611ea4ff`, PID1128122. Next ordinary poll>=11:33:52.
+The old zero-test run and all preceding artifacts remain untouched. C7 is not
+yet frozen; its driver will require12native and27effective exact-case deadlines,
+plus architecture,format,audit preview,library,reference,GC and Clippy checks.
+
+September20,11:20UTC: C6 native12/12 completed11:10:09 (1.90s runtime), followed
+by36/36quarantine and4/5architecture at11:11:10. The sole architecture failure
+is the unregistered new physical-exclusion projection; all15raw artifacts are
+local/strict and the exact caller-list difference is verified. Later library,
+format and Clippy gates did not run. The overlay now explicitly reviews this
+projection and asserts publisher/frontier/kind/key binding, shared effective
+fold/metadata, no second storage owner/parser/set, and both root-guarded call
+sites preceding retry/external callbacks. No production bytes changed for that
+test update. The existing native empty-quarantine case now also checks malformed
+targets, stale retry refusal and fresh-proof idempotency; these additions remain
+unrun outside C6.
+
+Allocation RED4 is158inputs, SHA
+`e38edfbe8106f9133fb2eccc763a763554bbd780024984af8cc3a7fa558dd42b`.
+It adds a subprocess-bounded failure test plus the existing allocation probe;
+all runtime is still C4. Desktop launched11:16:22, invocation
+`f6a99e6cf23942268a6256b8d96d9c6a`, PID1116743; next ordinary poll>=11:21:32.
+The target expects typed refusal for validator fence/predecessor and effective
+identity/heap/cursor allocations at both widths. Each child has a9sdeadline;
+the runner disables core dumps. Results pending; constructor fix is not applied.
+
+September20,11:11UTC: native C4 passed4/4 at10:52:02, all seven raw artifacts
+local/strict, peak3.783GB and disk floors passed. C5 added six native cases but
+did not compile: two new fixture page descriptors used nonexistent fields.
+Its failed eight-artifact record is local/strict, no later gate ran. Those
+fields now use record_count/zero tombstones; an independently reviewed Clear
+fixture also needed its required zero timing/generation fields. No runtime
+change was needed. Two additional cases exercise older/current incarnations
+after reopen and the final sweep callback with exact/stale evidence.
+
+C6 retains all C4 runtime bytes and has156inputs, SHA
+`c0a99776c74b077c2a144f9eb2ccb427fa8e2f4a81dd1f1ae8a47d0a039902aa`.
+Desktop launch11:09:08, invocation`075b4d320de4425592d865b5a3f9d61d`, PID1104229.
+Driver runs12native cases, quarantine/architecture, library, format and strict
+Clippy; outcomes pending, next ordinary poll>=11:14:08. The reused validator
+constructor contains two infallible/unaccounted small Vec allocations; a
+bounded child-process allocation regression is drafted separately, not in C6.
+No production, service, install, Windows/Mac job, or task writer is enabled.
+
+September20,10:54UTC: native RED3 completed10:41:44 with exactly1pass/3fail,
+1150filtered. All seven raw artifacts are local and strictly verified. Both
+final native methods proceeded without task proof, and the empty-manifest
+factory refused as explicitly unavailable; compilation and fixture setup pass.
+
+Physical C4 drafted shared lookup/postorder support traversal and one checked
+metadata reader; target-bound factories validate effective quarantine candidates
+or sweep proposal rows and final methods require the proof before callbacks or
+exact retry. The proof retains only publisher/header/target/cancellation and a
+small memory reservation. No bitmap or snapshot is detached. Native C4 has
+154inputs SHA`b127dcabae45f792f7d8662dd8768e7bc2c7c0372d319a41d66f72eb75ebdb02`;
+desktop launch10:51:02, invocation`697a6928341c4291aac2c82f196093c2`, PID1085630.
+Its four-case narrow result is pending; next ordinary poll>=10:56:02.
+Additional all-hash physical-identity/resource/binding tests are drafted only
+in the working overlay, not in C4. No integrated/platform qualification yet.
+
+September20,10:43UTC: framing C1 completed the36quarantine and186reference
+tests and all37affected GC/format targets successfully. The preflight then
+failed formatting on two differences at10:29:09; strict Clippy did not run.
+All29raw artifacts are local and the verifier preserves this as a failed
+preflight, not qualification. The two formatting differences are corrected in
+the next isolated source, alongside a refusing native proof API and sweep
+regression. No final native guard is implemented yet.
+
+Native RED3 froze154inputs, SHA
+`f2362eb1b89db97dd36292e22a069d24d03f1b8a7cf626709144d7ba7295c610`.
+Desktop launch10:40:45, unit `aeordb-v4-task-physical-exclusion-red3-20260920`,
+invocation `61d2ff0bc08145b389004d72785ec1a6`, PID1075591.
+This run adds callable empty-quarantine proof and missing sweep-proof targets
+while retaining the legacy retry characterization and missing quarantine-proof
+target. Expected1pass/3fail; results pending, next ordinary poll>=10:45:45.
+MAIN remains755ad3f5; all new runtime code is isolated and unqualified.
+
+September20,10:30UTC: framing RED1 completed10:14:38 with1positive/4target
+failures in the production consumers. Independent reference RED2 completed
+10:20:49 with0passed/1failed/185filtered. Both sets of seven raw artifacts are
+local and strictly checked. Each target first verifies the existing v4
+WholeEntity fixture, then fails at the GC incarnation predicate—not compilation
+or malformed fixture setup. C1 permits typed version0 with a nonzero v4 sequence
+in the three production guards and reference; existing zero-sequence legacy
+rules and all range/key/reserve checks remain. One extra negative regression
+protects those refusals. No fixture bytes, row widths or digest domains changed.
+
+The153-input candidate SHA is
+`424d1138a29dc02dcd5ab2f75ea8780d65bd4c9f9cb55e688d0763905fa636d8`.
+Desktop preflight1 launched10:27:02, invocation
+`80bb7b8996804728a181f41f2ecfc11a`; outcomes pending. It runs the full quarantine
+target, full reference suite, all36GCtargets plus the format-fixture target,
+formatting and strict workspace Clippy. This is isolated preflight, not native
+quarantine/sweep integration or permission to enable task selection. The saved
+native missing-guard test remains deliberately unresolved in this next unit.
+
+September20,10:13UTC: effective-merge C2 and C3 completed successfully, with all
+seven raw artifacts local and strict source/resource/result checks passing.
+C2:23tests finished09:59:11. C3:30tests finished10:07:11,148inputs SHA
+`19441fd1bb3c873aeb95d3eeb2fc8c7d82d87dac620ffe7f4bd6879376dcc9bb`.
+The20new merge cases cover both frozen fixture widths, all five hashes through
+nested graphs, exact Set/Clear folding,8194input rows across64overlapping streams,
+256streams, measured work bounds, small retained cursor memory, callback failures,
+cancellation, malformed/oversized inputs, graph closure and resource refusal.
+All C1 production bytes remain unchanged; no native final-boundary completion.
+
+Native integration review found a separate apparent framing/version mismatch:
+the GC incarnation codec, inventory and transition guards equate typed version0
+with zero write sequence, although Round10 and frozen WholeEntity fixtures allow
+version0 directory bodies in v4 framing with a reserved sequence. A test-only
+149-input RED packet adds one characterization and four target cases using those
+existing verified fixture bytes; SHA
+`d995fd81a27c94b2f7c5e622b4348acf7e8242d873766961e076bc8d3ced491b`.
+The reproduction is being launched; no correction or changed format rule yet.
+All work remains in the isolated overlay, and MAIN remains root755ad3f5 plus
+ledger updates. Native quarantine/sweep/task ownership and U2–U7 remain required.
+
+September20,10:00UTC: the isolated effective-merge C1 raw evidence is local and
+strictly verified:12/12tests, unchanged inputs, resource guards passed. C2 adds
+eleven boundary/resource/work tests and shared fixture extraction; all production
+bytes remain C1. Its147-input SHA is
+`700ea5ff1da5160dfb39a6574ee951be757ee7804d32b705e01e15355fcd5027`.
+Desktop unit `aeordb-v4-task-physical-exclusion-candidate2-20260920` launched
+09:59:08, invocation `8f3510a805c147058df6c6b939a3930a`, PID1018915.
+Outcome is pending; earliest ordinary poll10:04:08. Root755ad3f5 is already pushed.
+The merge remains isolated from MAIN; native quarantine/sweep protection and
+U1/U2–U7 are not complete. No Windows/macOS job or monitor is active.
+
+September20,09:49UTC: root exclusion landed and pushed as
+`755ad3f52392cbfbb21896008306665c66444227` after the strict proof and its
+non-writing recheck passed; origin/development is0/0. MAIN tracked tree was
+clean immediately after landing and unrelated untracked work remains intact.
+The following isolated C1 effective-merge core finished09:45:01 with12/12tests
+passing. Its seven raw artifacts are being collected for strict checking;
+this is not native quarantine/sweep completion or broader resource qualification.
+
 September20,09:46UTC: the root-exclusion combined proof PASSED against all141
 unchanged MAIN inputs. Windows completed09:42:07 and its collector sealed,
 copied and strictly verified every artifact by09:44:19. Linux2049library/affected,

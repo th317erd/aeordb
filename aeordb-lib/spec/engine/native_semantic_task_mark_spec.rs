@@ -3,6 +3,8 @@
 mod boundary;
 #[path = "native_semantic_task_mark_interruption_spec.rs"]
 mod interruption;
+#[path = "native_semantic_task_physical_exclusion_spec.rs"]
+mod physical_exclusion;
 #[path = "native_semantic_task_root_exclusion_spec.rs"]
 mod root_exclusion;
 use super::*;

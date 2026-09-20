@@ -1,5 +1,12 @@
 use std::cmp::Ordering;
 
+#[path = "gc_quarantine_effective.rs"]
+mod effective;
+pub use effective::{
+  QuarantineEffectiveClosureErrorV1, QuarantineEffectiveClosureLimitsV1, QuarantineEffectiveClosureRequestV1,
+  QuarantineEffectiveClosureSummaryV1, QuarantineEffectiveClosureV1,
+};
+
 use super::gc::{
   EncodedImmutableGcArtifactV1, GcArtifactKindV1, ImmutableGcArtifactWriteV1, PhysicalIncarnationV1, compare_physical_incarnations_v1,
   checked_immutable_gc_artifact_encoded_length, decode_gc_artifact_envelope, decode_physical_incarnation, encode_immutable_gc_artifact,
@@ -396,6 +403,13 @@ impl<'a> QuarantineClosureValidatorV1<'a> {
     if support_artifact_count > limits.maximum_support_artifacts {
       return Err(QuarantineClosureErrorV1::ArtifactLimit);
     }
+    let fence_bytes = 24 + 2 * expected_width;
+    let reservation =
+      memory.reserve(MemoryOwner::GarbageCollection, u64::try_from(fence_bytes + expected_width)?, AdmissionClass::Maintenance)?;
+    let mut previous_upper_fence = Vec::new();
+    previous_upper_fence.try_reserve_exact(fence_bytes)?;
+    let mut previous_delta_hash = Vec::new();
+    previous_delta_hash.try_reserve_exact(expected_width)?;
     Ok(Self {
       manifest,
       directory,
@@ -403,19 +417,19 @@ impl<'a> QuarantineClosureValidatorV1<'a> {
       cancellation,
       maximum_support_artifacts: limits.maximum_support_artifacts,
       support_artifact_count,
-      memory: memory.reserve(MemoryOwner::GarbageCollection, 0, AdmissionClass::Maintenance)?,
+      memory: reservation,
       levels: std::array::from_fn(|_| Vec::new()),
       base_page_count: 0,
       base_record_count: 0,
       base_logical_bytes: 0,
       last_page_id: 0,
-      previous_upper_fence: Vec::with_capacity(24 + 2 * expected_width),
+      previous_upper_fence,
       delta_count: 0,
       delta_record_count: 0,
       delta_bytes: 0,
       last_delta_generation: 0,
       last_delta_ordinal: 0,
-      previous_delta_hash: Vec::with_capacity(expected_width),
+      previous_delta_hash,
       failed: false,
     })
   }

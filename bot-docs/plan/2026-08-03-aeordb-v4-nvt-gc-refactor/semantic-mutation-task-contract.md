@@ -1371,3 +1371,81 @@ All raw evidence is local and checked by the
 It retains the executed REDs and intermediate fixture, architecture and format
 failures. No task selector, quarantine/sweep completion or service readiness is
 implied by this independently qualified root-retention milestone.
+
+### Native physical task exclusion — following root exclusion
+
+This unit extends the existing quarantine-selection and sweep-removal final
+boundaries. Like the landed root proof, its opaque evidence retains the exact
+publisher, captured A/B region, artifact kind/key, cancellation and a small
+accounted reservation, not the captured bitmap or snapshot. It is a task-only
+predicate; all existing complete-mark, grace, lifecycle, pin, incarnation,
+durability, receipt and removal-authority checks remain mandatory.
+
+Quarantine qualification validates its complete effective candidate stream:
+ordered base pages plus ordered immutable Set/Clear deltas, latest operation
+winning for an identical physical incarnation. Reuse the existing closure
+validator and support loader/postorder walker. A bounded heap of borrowed delta
+cursors merges candidates without a whole-candidate map or repeated full-delta
+scan per candidate. Charge input rows and identity comparisons, cap immutable
+delta bodies/counts at their frozen bounds, and check cancellation and memory
+throughout. Any malformed closure or callback failure invalidates the result.
+
+Sweep qualification visits every candidate of the exact decoded proposal. Both
+paths check the actual physical prefix at the proposed offset before consulting
+captured-slot task membership: key, type, typed version, write sequence,
+integrity field and extent must agree. Factor the existing checked metadata
+reader; do not replace an older proposed incarnation with today's live locator.
+These prefix checks are not a full payload-integrity verification. Legacy
+physical framing and gap candidate classes not admitted by that shared reader
+remain refused; their enclosing U5 maintenance integration is still required.
+
+Use dynamic registered digest width throughout. A typed version0 body may have
+a nonzero v4 write sequence, as the independent frozen WholeEntity fixtures
+already demonstrate. Preserve the legacy zero-sequence/nonzero-version refusal;
+do not change fixture bytes, hash domains or row widths to reconcile consumers.
+
+At each final native boundary, require evidence when either capability mask
+declares bit25; always validate supplied evidence. Under the existing root lock,
+check owner, artifact kind/key, exact frontier, cancellation and memory before
+external callbacks and before an exact retry can return. Intervening publication
+invalidates prior evidence. Fresh evidence may restore a legitimate idempotent
+retry; it cannot bypass prior quarantine or sweep authority.
+
+Verification must retain the failing-first missing-guard and version/framing
+regressions, independent merge oracle, protected versus unrelated candidates,
+both fixture widths/all registered hashes, older/current incarnations after
+reopen, malformed identities/graphs, exact resource/work limits, cancellation,
+allocator refusal and complete release. Independently bound every added case.
+Preserve callback errors and typed task/merge causes. Static ownership checks
+must explicitly admit only this reader projection and guard both final sites.
+Final-source Linux, macOS and Windows, reference, fixture and error-audit gates
+precede landing. A zero-test run is not evidence; archive transfer must refresh
+Cargo source timestamps as well as verify bytes before reusing build output.
+
+September20 execution remains isolated and unqualified: native C6 passed12cases
+but failed its architecture registry; RED5 reproduced four process-terminating
+allocation refusals in the inherited validator constructor. C9 includes the
+reviewed reader boundary, fallible/accounted constructor scratch and retry
+regressions. Results and final qualification belong to ledger11, not this
+contract. No task writer, capability advertisement or service is enabled.
+
+Qualification September20 supersedes the earlier isolated-candidate status:
+all158 C16 inputs are integrated byte-for-byte and pass the complete Linux,
+macOS and Windows gates. Linux passed2302library/affected cases,186reference
+tests,502independent fixtures and39individual ten-second deadlines (maximum
+611ms). macOS passed1162library/1140affected/257narrow plus the separate targeted
+allocation gate. Windows passed1177library/1138affected/257narrow; its final
+driver completed13:59:14UTC and the six-minute collector finished14:00:41.
+Required format/static checks passed, including audit1501 and strict Clippy
+where prescribed. Windows's two-case affected-count difference is the existing
+Unix/Windows workspace-test inventory, not skipped regressions.
+
+The [combined proof](evidence/user-facing-v4-u1-task-physical-exclusion-proof-20260920.json)
+binds source/lock/tool/binary identities, all raw gates, original behavioral
+failures and the Mac allocation-target correction. That correction initializes
+the fixture cancellation mutex before measuring named GC buffers; all ten
+failure injections remain required. It does not claim arbitrary allocator
+recovery. The positive sweep fixture records callback outcomes without actual
+physical removal. Service-level GC execution, batching/convergence, unselected
+checkpoint validation and coupled task/generation/HEAD publication remain
+required. No task writer, runtime capability or production service is enabled.

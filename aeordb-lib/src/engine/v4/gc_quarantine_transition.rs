@@ -745,7 +745,7 @@ fn validate_incarnation(value: &PhysicalIncarnationV1<'_>, hash_width: usize) ->
     || value.wal_offset == 0
     || value.entity_length == 0
     || !(1..=0x0a).contains(&value.entry_type)
-    || (value.entity_version == 0) != (value.write_sequence == 0)
+    || (value.write_sequence == 0 && value.entity_version != 0)
     || value.wal_offset.checked_add(u64::from(value.entity_length)).is_none()
   {
     return Err(PhysicalQuarantineTransitionErrorV1::InvalidIncarnation);

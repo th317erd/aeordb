@@ -199,6 +199,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
   let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
   let semantic_task_root_exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
+  let semantic_task_physical_exclusion_path = source_root.join("engine/v4/semantic_task_physical_exclusion.rs");
   let staging_protection_path = source_root.join("engine/v4/staging_protection.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
@@ -364,7 +365,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     .split_whitespace()
     .collect();
   for required in [
-    "kv.admit_metadata_read(&locator,read_length)?",
+    "kv.admit_metadata_read(locator,read_length)?",
     "checked_whole_entity_encoded_length(algorithm,algorithm.hash_length(),0)?",
     "physical_end>physical_file_length",
     "read_file_at_native(file,locator.offset,&mutprefix[..read_length])",
@@ -994,6 +995,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &read_view_native_path,
       &semantic_catalog_native_path,
       &semantic_mutation_observation_path,
+      &semantic_task_physical_exclusion_path,
       &semantic_task_root_exclusion_path,
       &staging_protection_path,
     ],
@@ -1021,6 +1023,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &read_view_native_path,
     &semantic_catalog_native_path,
     &semantic_mutation_observation_path,
+    &semantic_task_physical_exclusion_path,
     &semantic_task_root_exclusion_path,
     &staging_protection_path,
   ] {
@@ -1072,6 +1075,67 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       }
       assert!(compact.contains("_memory:MemoryReservation"));
       assert!(compact.contains("decode_semantic_mutation_selection("));
+    } else if owner_path == &semantic_task_physical_exclusion_path {
+      let compact: String = owner_source.split_whitespace().collect();
+      for required in [
+        "publisher:&'publisherV4FirstAuthorityPublisher",
+        "frontier:[u8;DATABASE_HEADER_V4_REGION_LENGTH]",
+        "kind:GcArtifactKindV1",
+        "target_key:Vec<u8>",
+        "_memory:MemoryReservation",
+        "PhysicalQuarantineSupportReadContextV1",
+        "QuarantineEffectiveClosureV1::new(",
+        "read_locator_metadata(",
+        "mark.is_captured_locator_marked(&locator)?",
+        "std::ptr::eq(self,proof.publisher)",
+        "proof.kind!=kind||proof.target_key!=key",
+        "proof.frontier!=observation.region",
+        "_authority:&MutexGuard<'_,FirstAuthorityRootStateV1>",
+        "check_cancelled(&proof.cancellation)",
+        "proof._memory.check_admission()",
+        "header.required_reader_capabilities[index]&mask!=0||header.required_writer_capabilities[index]&mask!=0",
+      ] {
+        assert!(compact.contains(required), "physical task exclusion lost its checked target-bound projection: {required}");
+      }
+      for forbidden in [
+        "StorageEngine",
+        "DiskKVStore",
+        "DenseMarkBitmap",
+        "Arc<ReadSnapshot>",
+        "root_state.lock",
+        "lock_kv(",
+        "publish_",
+        ".flush(",
+        "std::fs",
+        "OpenOptions",
+        "read_file_at",
+        "decode_whole_entity_header_v1(",
+        "implCloneforNativeSemanticTaskPhysicalExclusionV1",
+        "HashMap",
+        "BTreeMap",
+        "HashSet",
+        "BTreeSet",
+      ] {
+        assert!(
+          !compact.contains(forbidden),
+          "physical task exclusion gained an independent owner, parser or whole-set cache: {forbidden}"
+        );
+      }
+      assert_eq!(authority_source.matches(".validate_semantic_task_physical_exclusion_locked(").count(), 2);
+      for (method, callback) in [
+        ("fn publish_physical_quarantine_excluded(", "authority_verifier.recheck_physical_quarantine_authority("),
+        ("pub fn execute_sweep_locator_removals(", "removal_authority.recheck_sweep_locator_removal_authority("),
+      ] {
+        let body = authority_source.split(method).nth(1).unwrap().split("\n  pub fn ").next().unwrap();
+        let lock = body.find("self.root_state.lock()").unwrap();
+        let check = body.find(".validate_semantic_task_physical_exclusion_locked(").unwrap();
+        assert!(lock < check && check < body.find(callback).unwrap(), "task evidence must precede external authority callbacks");
+        if method.contains("quarantine") {
+          assert!(check < body.find("let exact_retry").unwrap(), "quarantine retry must not reuse stale task proof");
+        } else {
+          assert!(check < body.find("removal_authority.remove_sweep_locators(").unwrap());
+        }
+      }
     } else if owner_path == &semantic_task_root_exclusion_path {
       // This projection borrows the existing publisher and returns a small
       // target-bound decision. It must not become another writer or snapshot.

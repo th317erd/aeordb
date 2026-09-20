@@ -2,6 +2,7 @@
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
 pub use inventory::NativeSemanticTaskRootExclusionV1;
+pub use inventory::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use inventory::NativeCapturedSemanticCheckpointRequestV1;
 pub use inventory::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use inventory::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};

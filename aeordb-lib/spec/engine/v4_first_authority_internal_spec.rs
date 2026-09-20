@@ -9638,6 +9638,7 @@ impl PreparedGuardedPhysicalQuarantineV1 {
       monotonic_now_ms: self.publication_timestamp_ms,
       cancellation,
       pin_coordinator,
+      task_exclusion: None,
     }
   }
 }
@@ -10021,6 +10022,21 @@ fn guarded_physical_quarantine_selects_control_last_and_exact_retry_skips_stale_
 
 #[test]
 fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is_retry_safe() {
+  guarded_sweep_fixture_for_task_capability(None);
+}
+
+fn guarded_sweep_fixture_for_task_capability(capabilities: Option<(bool, bool)>) {
+  guarded_sweep_fixture_for_task_proof(capabilities, None);
+}
+
+type TestPhysicalExclusionFactoryV1 = for<'publisher> fn(
+  &'publisher V4FirstAuthorityPublisher,
+  &EncodedImmutableGcArtifactV1,
+  &MemoryCoordinator,
+  &CancellationToken,
+) -> NativeSemanticTaskPhysicalExclusionV1<'publisher>;
+
+fn guarded_sweep_fixture_for_task_proof(capabilities: Option<(bool, bool)>, proof_factory: Option<TestPhysicalExclusionFactoryV1>) {
   let (_directory, _path, _coordinator, mut publisher) = create_environment("sweep-proposal-publication", None);
   let algorithm = HashAlgorithm::Blake3_256;
   let database_id = [0x31; 16];
@@ -10091,6 +10107,43 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
     entity_length: 512,
     entry_type: 1,
     entity_version: 1,
+  };
+  // The historical callback fixture uses symbolic ranges. A native proof needs
+  // one genuinely published, unrelated physical entity instead.
+  let actual_key = digest_parts(algorithm, &[b"chunk:", b"native sweep fixture candidate"]);
+  let actual = proof_factory.map(|_| {
+    publisher
+      .publish_immutable_entity_batch(ImmutableEntityBatchPublicationRequestV1 {
+        database_id: &database_id,
+        entities: &[ImmutableEntityWriteV1 {
+          entity_version: 0,
+          entry_type: EntryTypeV4::Chunk,
+          flags: 0,
+          key: &actual_key,
+          stored_value: b"native sweep fixture candidate",
+        }],
+        publication_timestamp_ms: publisher.observe().unwrap().selected.header.updated_at_ms + 1,
+      })
+      .unwrap();
+    let locator = publisher.locator(&actual_key).unwrap().unwrap();
+    let mut bytes = vec![0; locator.total_length as usize];
+    read_file_at_native(&publisher.file, locator.offset, &mut bytes).unwrap();
+    (locator, bytes)
+  });
+  let incarnation = match &actual {
+    Some((locator, bytes)) => {
+      let entity = decode_whole_entity(bytes, algorithm, u64::MAX).unwrap();
+      PhysicalIncarnationV1 {
+        logical_key: entity.key,
+        integrity_or_legacy_digest: entity.integrity_hash,
+        wal_offset: locator.offset,
+        write_sequence: entity.write_sequence,
+        entity_length: locator.total_length,
+        entry_type: entity.entry_type.to_u8(),
+        entity_version: entity.entity_version,
+      }
+    }
+    None => incarnation,
   };
   let PhysicalQuarantineTransitionV1::CandidateStarted(candidate) = candidate_model
     .observe(PhysicalQuarantineObservationV1 {
@@ -10374,14 +10427,63 @@ fn sweep_proposal_hard_publication_requires_the_exact_selected_quarantine_and_is
     hard_publication: &first,
     cancellation: &cancellation,
     pin_coordinator: &eligible_prepared.pin_coordinator,
+    task_exclusion: None,
   };
   let reclaimed = SweepLocatorRemovalOutcomeV1 {
     ordinal: 0,
     outcome: SweepOutcomeClassV1::Reclaimed,
     stable_reason_detail: 0,
-    resulting_void_offset: 8_192,
-    resulting_void_length: 512,
+    resulting_void_offset: incarnation.wal_offset,
+    resulting_void_length: incarnation.entity_length,
   };
+
+  if let Some((reader, writer)) = capabilities {
+    let mut header = publisher.observe().unwrap().selected.header;
+    header.slot_sequence += 1;
+    if reader {
+      header.required_reader_capabilities[3] |= 2;
+    }
+    if writer {
+      header.required_writer_capabilities[3] |= 2;
+    }
+    write_redundant_header(&publisher, &header);
+    {
+      let _guard = publisher.root_state.lock().unwrap();
+      publisher.lock_kv().unwrap().flush().unwrap();
+    }
+    let before = fs::read(&_path).unwrap();
+    let mut authority = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+    if let Some(factory) = proof_factory {
+      let proof = factory(&publisher, sweep_permit.proposal(), &memory, &cancellation);
+      let request = SweepLocatorRemovalRequestV1 { task_exclusion: Some(&proof), ..removal_request };
+      let completion = publisher.execute_sweep_locator_removals(request, &mut authority).unwrap();
+      assert_eq!(completion.outcomes(), &[reclaimed]);
+      assert_eq!(authority.recheck_calls, 1);
+      assert_eq!(authority.remove_calls, 1);
+      assert_eq!(fs::read(&_path).unwrap(), before, "callback fixture records outcomes but performs no storage removal");
+      let mut changed = publisher.observe().unwrap().selected.header;
+      changed.slot_sequence += 1;
+      write_redundant_header(&publisher, &changed);
+      let before = fs::read(&_path).unwrap();
+      let mut stale = test_sweep_locator_removal_authority(&eligible_prepared.manifest.key, 103, vec![reclaimed]);
+      assert_eq!(
+        publisher.execute_sweep_locator_removals(request, &mut stale).unwrap_err().code(),
+        "semantic_task_physical_exclusion_stale"
+      );
+      assert_eq!(stale.recheck_calls, 0);
+      assert_eq!(stale.remove_calls, 0);
+      assert_eq!(fs::read(&_path).unwrap(), before);
+      return;
+    }
+    let error = publisher
+      .execute_sweep_locator_removals(removal_request, &mut authority)
+      .expect_err("task-capable sweep requires captured native evidence before external removal");
+    assert_eq!(error.code(), "semantic_task_physical_exclusion_required");
+    assert_eq!(authority.recheck_calls, 0);
+    assert_eq!(authority.remove_calls, 0);
+    assert_eq!(fs::read(&_path).unwrap(), before);
+    return;
+  }
 
   let active_root = digest_parts(algorithm, &[b"active read while sweep removal waits"]);
   let staging = publisher.acquire_staging_protection(&memory, &cancellation).unwrap();

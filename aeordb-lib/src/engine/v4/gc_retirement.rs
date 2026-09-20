@@ -349,7 +349,7 @@ fn valid_inventory_incarnation_shape(algorithm: HashAlgorithm, incarnation: &Phy
     && incarnation.wal_offset != 0
     && incarnation.entity_length != 0
     && (1..=EntryTypeV4::GcArtifact.to_u8()).contains(&incarnation.entry_type)
-    && (incarnation.entity_version == 0) == (incarnation.write_sequence == 0)
+    && (incarnation.write_sequence != 0 || incarnation.entity_version == 0)
 }
 
 fn classification_matches_incarnation(observation: &PhysicalInventoryRetirementObservationV1<'_>) -> bool {

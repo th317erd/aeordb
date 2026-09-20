@@ -1,4 +1,8 @@
 use std::fs;
+#[path = "../support/allocation_probe.rs"]
+mod allocation_probe;
+#[path = "gc_v4_quarantine_effective_spec.rs"]
+mod effective;
 use std::path::{Path, PathBuf};
 
 use aeordb::engine::HashAlgorithm;
@@ -548,6 +552,23 @@ fn quarantine_closure_attributes_memory_observes_cancellation_and_latches_failur
   assert_eq!(canceled_mid_pass.observe_base_page(&page).unwrap_err().code(), "quarantine_closure_failed");
 
   let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(64, 128, 1, 16).unwrap());
+  assert_eq!(
+    QuarantineClosureValidatorV1::new(
+      &manifest,
+      Some(&directory),
+      &lifecycle,
+      algorithm,
+      CancellationToken::new(),
+      closure_limits(),
+      &constrained_memory,
+    )
+    .unwrap_err()
+    .code(),
+    "quarantine_closure_memory"
+  );
+  assert_eq!(constrained_memory.snapshot().unwrap().reserved_bytes, 0);
+  // Admit the now-accounted fixed scratch, but not a page's child summary.
+  let constrained_memory = MemoryCoordinator::new(MemoryPolicy::new(256, 384, 1, 16).unwrap());
   let mut memory_limited = QuarantineClosureValidatorV1::new(
     &manifest,
     Some(&directory),
@@ -558,6 +579,7 @@ fn quarantine_closure_attributes_memory_observes_cancellation_and_latches_failur
     &constrained_memory,
   )
   .unwrap();
+  assert_eq!(constrained_memory.snapshot().unwrap().reserved_bytes, (24 + 3 * algorithm.hash_length()) as u64);
   assert_eq!(memory_limited.observe_base_page(&page).unwrap_err().code(), "quarantine_closure_memory");
   assert_eq!(memory_limited.observe_base_page(&page).unwrap_err().code(), "quarantine_closure_failed");
   drop(memory_limited);

@@ -535,7 +535,9 @@ pub fn decode_physical_incarnation(bytes: &[u8], algorithm: HashAlgorithm) -> Fo
     || wal_offset == 0
     || entity_length == 0
     || !(1..=0x0a).contains(&entry_type)
-    || (entity_version == 0) != (write_sequence == 0)
+    // Typed version0 bodies also occur in v4 framing with a reserved sequence.
+    // Preserve the existing zero-sequence legacy representation separately.
+    || (write_sequence == 0 && entity_version != 0)
   {
     return Err(error(
       MalformedInputClass::IdentityKeyOrGenerationMismatch,

@@ -9,6 +9,7 @@ pub use semantic_mutation_observation::{
 };
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
+pub use semantic_mutation_observation::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use semantic_mutation_observation::{
   NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, NativeSemanticTaskRootExclusionV1, SemanticTaskMarkErrorV1,
   SemanticTaskMarkSummaryV1,
@@ -1227,6 +1228,7 @@ pub struct PhysicalQuarantinePublicationRequestV1<'a> {
   pub monotonic_now_ms: u64,
   pub cancellation: &'a CancellationToken,
   pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+  pub task_exclusion: Option<&'a NativeSemanticTaskPhysicalExclusionV1<'a>>,
 }
 
 pub type PhysicalQuarantineLineageStateV1 = RootRetirementLineageStateV1;
@@ -1264,6 +1266,7 @@ pub struct SweepLocatorRemovalRequestV1<'a> {
   pub hard_publication: &'a SweepProposalHardPublicationReceiptV1,
   pub cancellation: &'a CancellationToken,
   pub pin_coordinator: &'a RootReadPinCoordinatorV1,
+  pub task_exclusion: Option<&'a NativeSemanticTaskPhysicalExclusionV1<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1360,6 +1363,8 @@ pub enum PhysicalQuarantinePublicationErrorV1 {
   AuthorityRecheck(PhysicalQuarantineAuthorityRecheckErrorV1),
   RetirementAdmission(RetirementJournalReplacementAdmissionErrorV1),
   RetirementOwner(RetirementJournalOwnerErrorV1),
+  TaskRetention(SemanticTaskMarkErrorV1),
+  EffectiveCandidates(super::gc_quarantine::QuarantineEffectiveClosureErrorV1),
 }
 
 impl PhysicalQuarantinePublicationErrorV1 {
@@ -1372,6 +1377,8 @@ impl PhysicalQuarantinePublicationErrorV1 {
       Self::AuthorityRecheck(source) => source.code(),
       Self::RetirementAdmission(source) => source.code(),
       Self::RetirementOwner(source) => source.code(),
+      Self::TaskRetention(source) => source.code(),
+      Self::EffectiveCandidates(source) => source.code(),
     }
   }
 
@@ -1392,7 +1399,9 @@ impl PhysicalQuarantinePublicationErrorV1 {
       | Self::Pin(_)
       | Self::AuthorityRecheck(_)
       | Self::RetirementAdmission(_)
-      | Self::RetirementOwner(_) => None,
+      | Self::RetirementOwner(_)
+      | Self::TaskRetention(_)
+      | Self::EffectiveCandidates(_) => None,
     }
   }
 }
@@ -1412,6 +1421,8 @@ impl Display for PhysicalQuarantinePublicationErrorV1 {
       Self::AuthorityRecheck(source) => write!(formatter, "physical-quarantine external authority error: {source}"),
       Self::RetirementAdmission(source) => write!(formatter, "physical-quarantine lineage admission error: {source}"),
       Self::RetirementOwner(source) => write!(formatter, "physical-quarantine lineage owner error: {source}"),
+      Self::TaskRetention(source) => write!(formatter, "physical-quarantine task retention error: {source}"),
+      Self::EffectiveCandidates(source) => write!(formatter, "physical-quarantine effective candidate error: {source}"),
     }
   }
 }
@@ -1425,6 +1436,8 @@ impl Error for PhysicalQuarantinePublicationErrorV1 {
       Self::AuthorityRecheck(source) => Some(source),
       Self::RetirementAdmission(source) => Some(source),
       Self::RetirementOwner(source) => Some(source),
+      Self::TaskRetention(source) => Some(source),
+      Self::EffectiveCandidates(source) => Some(source),
       Self::Invalid { .. } | Self::Committed { .. } => None,
     }
   }
@@ -1433,6 +1446,18 @@ impl Error for PhysicalQuarantinePublicationErrorV1 {
 impl From<FormatError> for PhysicalQuarantinePublicationErrorV1 {
   fn from(source: FormatError) -> Self {
     Self::Format(source)
+  }
+}
+
+impl From<SemanticTaskMarkErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: SemanticTaskMarkErrorV1) -> Self {
+    Self::TaskRetention(source)
+  }
+}
+
+impl From<super::gc_quarantine::QuarantineEffectiveClosureErrorV1> for PhysicalQuarantinePublicationErrorV1 {
+  fn from(source: super::gc_quarantine::QuarantineEffectiveClosureErrorV1) -> Self {
+    Self::EffectiveCandidates(source)
   }
 }
 
@@ -6560,6 +6585,13 @@ impl V4FirstAuthorityPublisher {
         "physical-quarantine publication was canceled during final authority recheck",
       ));
     }
+    self.validate_semantic_task_physical_exclusion_locked(
+      &_authority,
+      request.task_exclusion,
+      &observation,
+      GcArtifactKindV1::QuarantineManifest,
+      &request.quarantine_manifest.key,
+    )?;
     self.verify_physical_quarantine_support_is_durable(request, validated)?;
     let selected_control = {
       let kv = self.lock_kv()?;
@@ -7444,6 +7476,13 @@ impl V4FirstAuthorityPublisher {
             "selected first authority is absent, degraded, or differs from the sweep proposal",
           ));
         }
+        self.validate_semantic_task_physical_exclusion_locked(
+          &_authority,
+          request.task_exclusion,
+          &observation,
+          GcArtifactKindV1::SweepProposal,
+          &request.permit.proposal().key,
+        )?;
 
         let kv = self.lock_kv()?;
         validate_kv_header_alignment(&kv, header)?;
@@ -11680,19 +11719,34 @@ struct ChargedPhysicalQuarantineSupportEntityV1 {
   _memory: MemoryReservation,
 }
 
-struct PhysicalQuarantineSupportReadContextV1<'a> {
+trait PhysicalQuarantineBaseObserverV1 {
+  fn observe_page(&mut self, page: &super::gc_state::GcStatePageV1<'_>) -> Result<(), PhysicalQuarantinePublicationErrorV1>;
+  fn observe_directory(&mut self, directory: &super::gc_state::GcStateDirectoryV1<'_>) -> Result<(), PhysicalQuarantinePublicationErrorV1>;
+}
+
+impl PhysicalQuarantineBaseObserverV1 for super::gc_quarantine::QuarantineClosureValidatorV1<'_> {
+  fn observe_page(&mut self, page: &super::gc_state::GcStatePageV1<'_>) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
+    self.observe_base_page(page).map_err(physical_quarantine_support_error)
+  }
+
+  fn observe_directory(&mut self, directory: &super::gc_state::GcStateDirectoryV1<'_>) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
+    self.observe_base_directory(directory).map_err(physical_quarantine_support_error)
+  }
+}
+
+struct PhysicalQuarantineSupportReadContextV1<'a, L: FirstAuthorityEntityLookupV1> {
   file: &'a File,
-  kv: &'a DiskKVStore,
+  kv: &'a L,
   header: &'a DatabaseHeaderV4,
   memory: &'a MemoryCoordinator,
 }
 
-impl PhysicalQuarantineSupportReadContextV1<'_> {
+impl<L: FirstAuthorityEntityLookupV1> PhysicalQuarantineSupportReadContextV1<'_, L> {
   fn revalidate_subtree(
     &self,
     directory: &super::gc_state::GcStateDirectoryV1<'_>,
     depth: u16,
-    validator: &mut super::gc_quarantine::QuarantineClosureValidatorV1<'_>,
+    validator: &mut impl PhysicalQuarantineBaseObserverV1,
   ) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
     if depth > 16 {
       return Err(PhysicalQuarantinePublicationErrorV1::invalid(
@@ -11725,7 +11779,7 @@ impl PhysicalQuarantineSupportReadContextV1<'_> {
           ));
         }
         self.revalidate_subtree(&child, depth + 1, validator)?;
-        validator.observe_base_directory(&child).map_err(physical_quarantine_support_error)?;
+        validator.observe_directory(&child)?;
       }
     }
     Ok(())
@@ -11734,7 +11788,7 @@ impl PhysicalQuarantineSupportReadContextV1<'_> {
   fn revalidate_page(
     &self,
     key: &[u8],
-    validator: &mut super::gc_quarantine::QuarantineClosureValidatorV1<'_>,
+    validator: &mut impl PhysicalQuarantineBaseObserverV1,
   ) -> Result<(), PhysicalQuarantinePublicationErrorV1> {
     let page_entity = self.load_entity(key, GcArtifactKindV1::CandidatePage)?;
     let page_whole = decode_whole_entity(&page_entity.bytes, self.header.hash_algorithm, self.header.write_sequence_high_water)?;
@@ -11750,7 +11804,7 @@ impl PhysicalQuarantineSupportReadContextV1<'_> {
         "durable candidate page identity or role differs from its parent descriptor",
       ));
     }
-    validator.observe_base_page(&page).map_err(physical_quarantine_support_error)
+    validator.observe_page(&page)
   }
 
   fn load_entity(
@@ -13738,6 +13792,24 @@ fn read_entity_metadata_type(
   let Some(locator) = kv.get(key)? else {
     return Ok(None);
   };
+  if locator.hash != key {
+    return Err(FirstAuthorityPublicationErrorV1::invalid("first_authority_locator_identity", "lookup returned another physical key"));
+  }
+  read_locator_metadata(file, kv, &locator, write_sequence_high_water, physical_file_length, |header| Ok(header.entry_type)).map(Some)
+}
+
+/// The same checked prefix reader also accepts an explicitly proposed older
+/// locator. Admission still comes from the captured lookup; no live KV lookup
+/// can silently substitute another incarnation for the requested range.
+fn read_locator_metadata<T>(
+  file: &File,
+  kv: &impl FirstAuthorityEntityLookupV1,
+  locator: &KVEntry,
+  write_sequence_high_water: u64,
+  physical_file_length: u64,
+  inspect: impl FnOnce(&super::entity::WholeEntityHeaderV1<'_>) -> Result<T, FirstAuthorityPublicationErrorV1>,
+) -> Result<T, FirstAuthorityPublicationErrorV1> {
+  let key = locator.hash.as_slice();
   let length = usize::try_from(locator.total_length).map_err(|error| {
     FirstAuthorityPublicationErrorV1::invalid("first_authority_locator_length", format!("locator length exceeds usize: {error}"))
   })?;
@@ -13748,7 +13820,7 @@ fn read_entity_metadata_type(
   if prefix_length > prefix.len() {
     return Err(FirstAuthorityPublicationErrorV1::invalid("first_authority_metadata_width", "registered metadata exceeds fixed scratch"));
   }
-  kv.admit_metadata_read(&locator, read_length)?;
+  kv.admit_metadata_read(locator, read_length)?;
   let physical_end = locator
     .offset
     .checked_add(u64::from(locator.total_length))
@@ -13768,7 +13840,7 @@ fn read_entity_metadata_type(
       "KV locator resolves to another WholeEntity key",
     ));
   }
-  Ok(Some(header.entry_type))
+  inspect(&header)
 }
 
 fn ensure_retirement_recovery_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {

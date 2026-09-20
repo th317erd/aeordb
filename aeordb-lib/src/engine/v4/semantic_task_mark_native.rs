@@ -2,6 +2,9 @@
 #[path = "semantic_task_root_exclusion.rs"]
 mod root_exclusion;
 pub use root_exclusion::NativeSemanticTaskRootExclusionV1;
+#[path = "semantic_task_physical_exclusion.rs"]
+mod physical_exclusion;
+pub use physical_exclusion::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 use super::*;
 use crate::engine::kv_pages::MAX_ENTRIES_PER_PAGE;
 use crate::engine::v4::gc_mark_runtime::{DenseMarkBitmapV1, MarkBitmapErrorV1};

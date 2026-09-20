@@ -8,6 +8,7 @@ pub use task_retention::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetent
 #[path = "semantic_task_mark_native.rs"]
 mod task_mark;
 pub use task_mark::NativeSemanticTaskRootExclusionV1;
+pub use task_mark::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use task_mark::{NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, SemanticTaskMarkErrorV1, SemanticTaskMarkSummaryV1};
 #[path = "semantic_source_capture_staging.rs"]
 mod source_capture_staging;
@@ -493,7 +494,14 @@ impl NativeSemanticMutationInventoryV1<'_> {
 }
 
 fn validate_inventory_role(locator: &KVEntry, entry_type: EntryTypeV4) -> Result<(), SemanticMutationObservationErrorV1> {
-  let expected_tag = match entry_type {
+  if locator.type_flags != inventory_kv_tag(entry_type) {
+    return Err(invalid("semantic_task_inventory_role", "captured KV role disagrees with its checked WholeEntity"));
+  }
+  Ok(())
+}
+
+fn inventory_kv_tag(entry_type: EntryTypeV4) -> u8 {
+  match entry_type {
     EntryTypeV4::Chunk => kv_tag::CHUNK,
     EntryTypeV4::FileRecord => kv_tag::FILE_RECORD,
     EntryTypeV4::DirectoryIndex => kv_tag::DIRECTORY,
@@ -504,11 +512,7 @@ fn validate_inventory_role(locator: &KVEntry, entry_type: EntryTypeV4) -> Result
     EntryTypeV4::Symlink => kv_tag::SYMLINK,
     EntryTypeV4::IndexArtifact => kv_tag::INDEX_ARTIFACT,
     EntryTypeV4::GcArtifact => kv_tag::GC_ARTIFACT,
-  };
-  if locator.type_flags != expected_tag {
-    return Err(invalid("semantic_task_inventory_role", "captured KV role disagrees with its checked WholeEntity"));
   }
-  Ok(())
 }
 
 fn parse_control_path(path: &str) -> Result<(SystemControlKindV1, SystemControlSlotV1, &str), SemanticMutationObservationErrorV1> {
