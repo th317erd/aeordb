@@ -5,6 +5,7 @@ pub use inventory::NativeCapturedSemanticCheckpointRequestV1;
 pub use inventory::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use inventory::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 pub use inventory::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
+pub use inventory::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
 pub use inventory::{NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1};
 pub use inventory::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use inventory::NativeSemanticNamespaceSourceCursorV1;

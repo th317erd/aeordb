@@ -419,25 +419,40 @@ impl ReadSnapshot {
     &self,
     cancellation: &CancellationToken,
     maximum_work: u64,
-    mut visitor: F,
+    visitor: F,
   ) -> EngineResult<CapturedKvEntriesVisitSummaryV1>
   where
     F: FnMut(&KVEntry) -> EngineResult<bool>,
   {
+    self.visit_captured_entries_admitted(cancellation, maximum_work, || Ok(()), visitor)
+  }
+
+  /// An enclosing read-only operation may add admission at the same work
+  /// boundaries. Keep the original local budget, validation and callback order.
+  pub(crate) fn visit_captured_entries_admitted<E: From<EngineError>>(
+    &self,
+    cancellation: &CancellationToken,
+    maximum_work: u64,
+    mut admit_work: impl FnMut() -> Result<(), E>,
+    mut visitor: impl FnMut(&KVEntry) -> Result<bool, E>,
+  ) -> Result<CapturedKvEntriesVisitSummaryV1, E> {
     check_captured_entries_cancellation(cancellation)?;
     if self.bucket_count == 0 || self.nvt.bucket_count() != self.bucket_count {
-      return Err(EngineError::CorruptEntry { offset: 0, reason: "captured KV entry scan has inconsistent NVT bucket count".to_string() });
+      return Err(
+        EngineError::CorruptEntry { offset: 0, reason: "captured KV entry scan has inconsistent NVT bucket count".to_string() }.into(),
+      );
     }
     if matches!(&self.pages, SnapshotPages::Resident(pages) if pages.len() != self.bucket_count) {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: "captured KV resident page count disagrees with snapshot layout".to_string(),
-      });
+      return Err(
+        EngineError::CorruptEntry { offset: 0, reason: "captured KV resident page count disagrees with snapshot layout".to_string() }
+          .into(),
+      );
     }
     let mut summary = CapturedKvEntriesVisitSummaryV1 { scanned_pages: 0, scanned_entries: 0, visited_entries: 0, complete: false };
     let mut remaining_work = maximum_work;
     for bucket in 0..self.bucket_count {
       charge_captured_entries_work(cancellation, &mut remaining_work)?;
+      admit_work()?;
       summary.scanned_pages += 1;
       let page_data = self.page(bucket)?;
       let entries = deserialize_page(&page_data, self.hash_algo.hash_length())?;
@@ -446,6 +461,7 @@ impl ReadSnapshot {
       self.validate_captured_page(bucket, &entries)?;
       for entry in &entries {
         charge_captured_entries_work(cancellation, &mut remaining_work)?;
+        admit_work()?;
         summary.scanned_entries += 1;
         if entry.is_deleted() || self.buffer.contains_key(entry.hash.as_slice()) {
           continue;
@@ -460,12 +476,16 @@ impl ReadSnapshot {
     }
     for (key, entry) in &self.buffer {
       charge_captured_entries_work(cancellation, &mut remaining_work)?;
+      admit_work()?;
       summary.scanned_entries += 1;
       if key.len() != self.hash_algo.hash_length() || key != &entry.hash || self.nvt.bucket_for_value(key) >= self.bucket_count {
-        return Err(EngineError::CorruptEntry {
-          offset: entry.offset,
-          reason: "captured KV buffer key disagrees with its entry or hash layout".to_string(),
-        });
+        return Err(
+          EngineError::CorruptEntry {
+            offset: entry.offset,
+            reason: "captured KV buffer key disagrees with its entry or hash layout".to_string(),
+          }
+          .into(),
+        );
       }
       if entry.is_deleted() {
         continue;
@@ -481,10 +501,13 @@ impl ReadSnapshot {
     let expected = u64::try_from(self.entry_count)
       .map_err(|source| EngineError::ResourceExhausted(format!("captured KV entry count exceeds u64: {source}")))?;
     if summary.visited_entries != expected {
-      return Err(EngineError::CorruptEntry {
-        offset: 0,
-        reason: format!("captured KV effective live count {} disagrees with snapshot entry count {expected}", summary.visited_entries),
-      });
+      return Err(
+        EngineError::CorruptEntry {
+          offset: 0,
+          reason: format!("captured KV effective live count {} disagrees with snapshot entry count {expected}", summary.visited_entries),
+        }
+        .into(),
+      );
     }
     summary.complete = true;
     Ok(summary)
@@ -722,6 +745,10 @@ fn charge_captured_entries_work(cancellation: &CancellationToken, remaining: &mu
   // the original u64 budget even when the caller supplies u64::MAX.
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../spec/engine/captured_entries_admission_spec.rs"]
+mod captured_entries_admission_spec;
 
 #[cfg(test)]
 mod tests {

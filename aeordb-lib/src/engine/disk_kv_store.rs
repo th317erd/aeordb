@@ -771,13 +771,14 @@ impl DiskKVStore {
   /// Insert or update an entry.
   pub fn insert(&mut self, entry: KVEntry) -> EngineResult<()> {
     self.require_no_atomic_visibility("ordinary KV insertion")?;
-    let is_new = !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_disk(&entry.hash)?;
+    let was_live = match self.write_buffer.get(&entry.hash) {
+      Some(previous) => !previous.is_deleted(),
+      None => self.entry_is_live_in_snapshot(&entry.hash)?,
+    };
+    let next_entry_count = self.next_live_entry_count(was_live, !entry.is_deleted())?;
 
     self.write_buffer.insert(entry.hash.clone(), entry.clone());
-
-    if is_new {
-      self.entry_count += 1;
-    }
+    self.entry_count = next_entry_count;
 
     // Journal to hot buffer
     if self.hot_tail_enabled {
@@ -908,15 +909,8 @@ impl DiskKVStore {
         state.maximum_unique_entries
       )));
     }
-    let is_new = !self.entry_exists_on_disk(&entry.hash)?;
-    let next_entry_count = if is_new {
-      self
-        .entry_count
-        .checked_add(1)
-        .ok_or_else(|| EngineError::ResourceExhausted("atomic KV visibility entry count overflow".to_string()))?
-    } else {
-      self.entry_count
-    };
+    let was_live = self.entry_is_live_in_snapshot(&entry.hash)?;
+    let next_entry_count = self.next_live_entry_count(was_live, !entry.is_deleted())?;
     self.write_buffer.insert(entry.hash.clone(), entry.clone());
     self.entry_count = next_entry_count;
     self.hot_buffer.push(entry);
@@ -989,10 +983,13 @@ impl DiskKVStore {
   pub fn bulk_insert(&mut self, entries: &[KVEntry]) -> EngineResult<()> {
     self.require_no_atomic_visibility("bulk KV insertion")?;
     for entry in entries {
-      if !self.write_buffer.contains_key(&entry.hash) && !self.entry_exists_on_current_layout(&entry.hash)? {
-        self.entry_count += 1;
-      }
+      let was_live = match self.write_buffer.get(&entry.hash) {
+        Some(previous) => !previous.is_deleted(),
+        None => self.entry_is_live_on_current_layout(&entry.hash)?,
+      };
+      let next_entry_count = self.next_live_entry_count(was_live, !entry.is_deleted())?;
       self.write_buffer.insert(entry.hash.clone(), entry.clone());
+      self.entry_count = next_entry_count;
 
       if self.write_buffer.len() >= WRITE_BUFFER_THRESHOLD {
         self.flush_no_snapshot()?;
@@ -1038,10 +1035,10 @@ impl DiskKVStore {
     }
   }
 
-  fn entry_exists_on_current_layout(&mut self, hash: &[u8]) -> EngineResult<bool> {
+  fn entry_is_live_on_current_layout(&mut self, hash: &[u8]) -> EngineResult<bool> {
     let bucket = self.nvt.bucket_for_value(hash);
     let page = self.current_page(bucket)?;
-    Ok(find_entry_in_page_data(&page, self.hash_algo.hash_length(), hash, true)?.is_some())
+    Ok(find_entry_in_page_data(&page, self.hash_algo.hash_length(), hash, false)?.is_some())
   }
 
   /// Build every replacement and detect overflow before any on-disk page is
@@ -1158,9 +1155,24 @@ impl DiskKVStore {
     Ok(prepared.replacements)
   }
 
-  fn entry_exists_on_disk(&self, hash: &[u8]) -> EngineResult<bool> {
+  fn entry_is_live_in_snapshot(&self, hash: &[u8]) -> EngineResult<bool> {
     let current = self.snapshot.load();
-    Ok(current.get_raw(hash)?.is_some())
+    Ok(current.get(hash)?.is_some())
+  }
+
+  /// Presence of a tombstone is not live membership. Compute the transition
+  /// before changing buffers or journals so arithmetic refusal has no effects.
+  fn next_live_entry_count(&self, was_live: bool, will_be_live: bool) -> EngineResult<usize> {
+    match (was_live, will_be_live) {
+      (false, true) => {
+        self.entry_count.checked_add(1).ok_or_else(|| EngineError::ResourceExhausted("KV live entry count overflow".to_string()))
+      }
+      (true, false) => self.entry_count.checked_sub(1).ok_or_else(|| EngineError::CorruptEntry {
+        offset: 0,
+        reason: "KV live entry count underflow while removing a live entry".to_string(),
+      }),
+      _ => Ok(self.entry_count),
+    }
   }
 
   /// Flush the write buffer to KV bucket pages.
@@ -1281,9 +1293,10 @@ impl DiskKVStore {
   pub fn mark_deleted(&mut self, hash: &[u8]) -> EngineResult<bool> {
     self.require_no_atomic_visibility("KV deletion")?;
     if let Some(mut entry) = self.get(hash)? {
+      let next_entry_count = self.next_live_entry_count(true, false)?;
       entry.type_flags |= KV_FLAG_DELETED;
       self.write_buffer.insert(hash.to_vec(), entry);
-      self.entry_count = self.entry_count.saturating_sub(1);
+      self.entry_count = next_entry_count;
       self.publish_buffer_only();
       Ok(true)
     } else {
@@ -1311,9 +1324,10 @@ impl DiskKVStore {
       } else {
         continue; // unknown hash — nothing to mark
       };
+      let next_entry_count = self.next_live_entry_count(true, false)?;
       entry.type_flags |= KV_FLAG_DELETED;
       self.write_buffer.insert(hash.clone(), entry);
-      self.entry_count = self.entry_count.saturating_sub(1);
+      self.entry_count = next_entry_count;
     }
     drop(snapshot);
 
@@ -1370,11 +1384,11 @@ impl DiskKVStore {
   /// before a single flush, preventing page clobbering across flush cycles.
   pub fn buffer_only(&mut self, entry: KVEntry) -> EngineResult<()> {
     self.require_no_atomic_visibility("unpublished KV buffering")?;
-    let is_new = !self.write_buffer.contains_key(&entry.hash);
+    // This rebuild primitive deliberately does not inspect old page contents.
+    let was_live = self.write_buffer.get(&entry.hash).is_some_and(|previous| !previous.is_deleted());
+    let next_entry_count = self.next_live_entry_count(was_live, !entry.is_deleted())?;
     self.write_buffer.insert(entry.hash.clone(), entry);
-    if is_new {
-      self.entry_count += 1;
-    }
+    self.entry_count = next_entry_count;
     Ok(())
   }
 
@@ -1383,7 +1397,9 @@ impl DiskKVStore {
     if let Some(mut entry) = self.get(hash)? {
       let entry_type = entry.type_flags & 0x0F;
       entry.type_flags = entry_type | (new_flags & 0xF0);
+      let next_entry_count = self.next_live_entry_count(true, !entry.is_deleted())?;
       self.write_buffer.insert(hash.to_vec(), entry);
+      self.entry_count = next_entry_count;
       self.publish_buffer_only();
       Ok(true)
     } else {

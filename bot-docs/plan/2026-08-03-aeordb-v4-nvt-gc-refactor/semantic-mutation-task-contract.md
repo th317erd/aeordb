@@ -1157,3 +1157,91 @@ The proof retains the initial fixture compilation failures and the later typed-
 cancellation assertion correction. No runtime changed after passing C3.
 Metadata completion still says nothing about opaque payload integrity, global
 mark closure, durable task ownership or activation. Those and U2–U7 remain open.
+
+### Captured all-task retention traversal — entry452d8dc5
+
+Compose the qualified metadata discovery and known-task metadata graph through
+one separately named read-only operation on NativeSemanticMutationInventoryV1:
+`visit_captured_semantic_task_retention_entries`. Stream selected task graphs
+against that same captured header/KV history without collecting task identities.
+Physical callbacks may repeat; every callback remains provisional until complete
+success. Return task count and consumed work/read-byte statistics, not a durable
+mark, task-selection, release, resume, namespace or activation permit. Released
+terminal tasks keep their existing control-only interpretation; unreleased tasks
+require the complete existing source/namespace/catalog/output graph.
+
+NativeSemanticTaskRetentionBoundsV1 supplies total maximum_work and
+maximum_read_bytes plus the existing per-graph bounds. The enclosing limits are
+intersected with the capture's limits; local per-body/depth/workspace bounds
+remain enforced. Physical bytes count discovery prefixes, every full read and
+all graph/source reads, including repeats. Work is the sum of original inventory
+page/raw-entry units, graph steps and source-catalog steps, including tombstones,
+overrides and source steps that do not read payloads. A source read contributes
+to its existing graph and catalog work categories, but physical bytes are charged
+exactly once. Admission precedes actual work/I/O; no per-task reset or post-hoc
+ceiling enforcement is allowed.
+
+Preserve the existing public single-operation entries, diagnostics and quotas.
+Use private optional admission around their existing readers and charging sites,
+not new parsers, an allocating shared counter, or another captured lookup owner.
+The KV entry visitor's existing page/raw-entry charging order and cancellation
+checks must survive factoring. Callback errors retain precedence over simultaneous
+cancellation/pressure; incomplete/error returns grant no usable partial result.
+Nested operations separately admit simultaneous scratch. No implicit KV flush,
+live fallback, world-sized set, bitmap, control write or runtime capability change.
+
+The test-only characterization proves two individually valid selected graphs
+cover26independently enumerated locators and exceed one per-task byte limit when
+combined. Its first attempt refused nested scratch at64MiBsoft/96MiBhard;
+using256KiB entity scratch for the small fixture passed without raising memory
+limits. Keep that refusal as history and qualify insufficient-workspace behavior.
+
+First execute callable REDs for two-task discovery/graph composition and exact
+combined ceilings. Cross-check read statistics against the independently qualified
+discovery threshold plus both individual graph counts. Add all-hash, empty,
+released/A-B/history, later-branch failure, header/opaque-payload, page/tombstone,
+callback/concurrency, cancellation, memory/allocation/retry and cumulative-source
+work cases. Preserve captured KV, inventory, graph, source catalog and architecture
+regressions; preflight their exact targets before final native-platform gates.
+Individual native deadlines and final Linux/macOS/Windows/static/reference proof
+precede landing. The global flushed-slot mark owner, durable retention/recovery,
+task selection/fencing and atomic activation remain following obligations.
+
+#### September20 discovered live-count dependency
+
+Retention C3's later-task failure test successfully refuses the missing companion
+after the first complete graph, but retry after restoring its locator fails:
+28effective live entries disagree with the snapshot's recorded27. The unchanged
+DiskKVStore::insert counts key presence rather than live/deleted transitions.
+Source tracing finds the same distinction in atomic staging, bulk insertion and
+flag deletion. Its separate unpublished buffer-only rebuild path also counts
+new tombstone rows as live. This is a physical KV bookkeeping dependency, not a
+reason to weaken captured-inventory count validation or discard the retry case.
+
+Extend this landing to a shared checked live-count transition and direct
+failing-first regressions. Preserve ordinary publication, atomic invisibility/
+abort, bulk's current-layout reads/deferred publication, and buffer-only's
+no-page-read rebuild contract (including the corrupt-page preservation test).
+For missing/live/deleted prior entries and live/deleted replacements, only
+effective live membership changes the count. Repeated updates must be idempotent;
+old snapshots retain their prior counts/content; reopen must agree with the
+published view. Overflow/underflow must refuse before changing that entry.
+Keep original count/deletion/snapshot/migration regressions, add disk-KV and
+concurrency/resize targets to preflight and all native final gates. This corrects
+bookkeeping only: no new task writer, automatic repair or production operation.
+
+#### Qualification — September20
+
+The frozen131-input C7 candidate and its Linux/macOS/Windows evidence are bound
+by `evidence/user-facing-v4-u1-task-retention-proof-20260920.json`. All24new
+native cases pass, including the original two composition REDs, five direct KV
+transition REDs and later-task restoration retry. Linux passed1988library/
+affected and659older-consumer cases; macOS passed1120library/784affected/
+659older consumers; Windows passed1135library/784affected/658older consumers.
+Native narrow,185reference,502fixture and format/static gates also pass.
+The24individual Linux deadlines peaked at477ms under the unchanged resource
+floors. All raw evidence is retained locally; failed scratch admission, original
+count failures, formatting and malformed audit-packet attempts remain history.
+The final audit keeps all1501reviewed occurrence identities and changes only
+their line metadata. This qualifies read-only composed traversal and the scoped
+KV bookkeeping correction, not durable task publication or global GC completion.

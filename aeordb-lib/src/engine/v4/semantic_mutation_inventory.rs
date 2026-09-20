@@ -2,6 +2,9 @@
 #[path = "semantic_task_graph_native.rs"]
 mod task_graph;
 pub use task_graph::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
+#[path = "semantic_task_retention_native.rs"]
+mod task_retention;
+pub use task_retention::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
 #[path = "semantic_source_capture_staging.rs"]
 mod source_capture_staging;
 pub use source_capture_staging::NativeCapturedSemanticCheckpointRequestV1;
@@ -37,6 +40,7 @@ pub use source_catalog::{
 };
 use super::*;
 use std::cell::Cell;
+use task_retention::TaskRetentionAdmissionV1;
 use crate::engine::kv_snapshot::ReadSnapshot;
 use crate::engine::kv_pages::page_size;
 use super::super::super::control_store::select_available_mutable_control_slots;
@@ -235,6 +239,37 @@ impl CapturedEntityLookupV1<'_> {
   }
 }
 
+struct InventoryLookupV1<'a> {
+  captured: CapturedEntityLookupV1<'a>,
+  admission: Option<&'a dyn TaskRetentionAdmissionV1>,
+}
+
+impl FirstAuthorityEntityLookupV1 for InventoryLookupV1<'_> {
+  fn get(&self, key: &[u8]) -> Result<Option<KVEntry>, EngineError> {
+    self.captured.get(key)
+  }
+
+  fn hash_algo(&self) -> HashAlgorithm {
+    self.captured.hash_algo()
+  }
+
+  fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    self.captured.admit_read(locator)?;
+    if let Some(admission) = self.admission {
+      admission.admit_read_bytes(u64::from(locator.total_length))?;
+    }
+    Ok(())
+  }
+
+  fn admit_metadata_read(&self, locator: &KVEntry, read_length: usize) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    self.captured.admit_metadata_read(locator, read_length)?;
+    if let Some(admission) = self.admission {
+      admission.admit_read_bytes(read_length as u64)?;
+    }
+    Ok(())
+  }
+}
+
 impl NativeSemanticMutationInventoryV1<'_> {
   /// Metadata-only discovery; opaque ordinary payloads are not integrity-verified.
   /// Checked physical headers and keys classify entries; every FileRecord and
@@ -244,7 +279,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     &self,
     visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
-    self.visit_entries(visitor, true)
+    self.visit_entries(visitor, true, None)
   }
 
   /// Stream provisional task observations. Only a complete successful result
@@ -255,13 +290,14 @@ impl NativeSemanticMutationInventoryV1<'_> {
     &self,
     visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
-    self.visit_entries(visitor, false)
+    self.visit_entries(visitor, false, None)
   }
 
   fn visit_entries(
     &self,
     mut visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
     metadata_only: bool,
+    admission: Option<&dyn TaskRetentionAdmissionV1>,
   ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission()?;
@@ -273,51 +309,60 @@ impl NativeSemanticMutationInventoryV1<'_> {
     } else {
       None
     };
-    let lookup = CapturedEntityLookupV1 {
+    let captured = CapturedEntityLookupV1 {
       snapshot: &self.snapshot,
       header: &self.header.selected.header,
       bounds: self.bounds,
       cancellation: &self.cancellation,
       remaining_read_bytes: Cell::new(self.bounds.maximum_read_bytes),
     };
+    let lookup = InventoryLookupV1 { captured, admission };
     let mut tasks = 0u64;
     let mut failure = None;
-    let result = self.snapshot.visit_captured_entries(&self.cancellation, self.bounds.maximum_work, |entry| {
-      let result = (|| {
-        scan_memory.check_admission()?;
-        if let Some(file_length) = physical_file_length {
-          let header = &self.header.selected.header;
-          let kind = read_entity_metadata_type(
-            &self._protection.publisher().file,
-            &lookup,
-            &entry.hash,
-            header.write_sequence_high_water,
-            file_length,
-          )?
-          .ok_or_else(|| invalid("semantic_task_inventory_missing", "captured live entry cannot be resolved from the same snapshot"))?;
-          validate_inventory_role(entry, kind)?;
-          if kind != EntryTypeV4::FileRecord {
+    let result = self.snapshot.visit_captured_entries_admitted::<FirstAuthorityPublicationErrorV1>(
+      &self.cancellation,
+      self.bounds.maximum_work,
+      || match admission {
+        Some(admission) => admission.admit_work(1),
+        None => Ok(()),
+      },
+      |entry| {
+        let result = (|| {
+          scan_memory.check_admission()?;
+          if let Some(file_length) = physical_file_length {
+            let header = &self.header.selected.header;
+            let kind = read_entity_metadata_type(
+              &self._protection.publisher().file,
+              &lookup,
+              &entry.hash,
+              header.write_sequence_high_water,
+              file_length,
+            )?
+            .ok_or_else(|| invalid("semantic_task_inventory_missing", "captured live entry cannot be resolved from the same snapshot"))?;
+            validate_inventory_role(entry, kind)?;
+            if kind != EntryTypeV4::FileRecord {
+              return Ok(true);
+            }
+          }
+          let Some(observation) = self.inspect_entry(&lookup, entry)? else {
             return Ok(true);
+          };
+          tasks = tasks.checked_add(1).ok_or_else(|| invalid("semantic_task_inventory_task_count", "captured task count overflowed"))?;
+          visitor(&observation)
+        })();
+        match result {
+          Ok(keep_scanning) => Ok(keep_scanning),
+          Err(error) => {
+            failure = Some(error);
+            Ok(false)
           }
         }
-        let Some(observation) = self.inspect_entry(&lookup, entry)? else {
-          return Ok(true);
-        };
-        tasks = tasks.checked_add(1).ok_or_else(|| invalid("semantic_task_inventory_task_count", "captured task count overflowed"))?;
-        visitor(&observation)
-      })();
-      match result {
-        Ok(keep_scanning) => Ok(keep_scanning),
-        Err(error) => {
-          failure = Some(error);
-          Ok(false)
-        }
-      }
-    });
+      },
+    );
     if let Some(error) = failure {
       return Err(error);
     }
-    let summary = result.map_err(FirstAuthorityPublicationErrorV1::from)?;
+    let summary = result?;
     check_cancelled(&self.cancellation)?;
     scan_memory.check_admission()?;
     Ok(SemanticMutationInventorySummaryV1 { tasks, complete: summary.complete })
@@ -325,7 +370,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
 
   fn inspect_entry(
     &self,
-    lookup: &CapturedEntityLookupV1<'_>,
+    lookup: &impl FirstAuthorityEntityLookupV1,
     locator: &KVEntry,
   ) -> Result<Option<SemanticMutationObservationV1>, SemanticMutationObservationErrorV1> {
     let header = &self.header.selected.header;
@@ -360,7 +405,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
 
   fn inspect_control(
     &self,
-    lookup: &CapturedEntityLookupV1<'_>,
+    lookup: &impl FirstAuthorityEntityLookupV1,
     path: &str,
   ) -> Result<Option<SemanticMutationObservationV1>, SemanticMutationObservationErrorV1> {
     let (kind, slot, parent) = parse_control_path(path)?;

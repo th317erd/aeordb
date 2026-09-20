@@ -5,6 +5,10 @@ mod boundary;
 mod metadata;
 #[path = "native_semantic_task_graph_phase_spec.rs"]
 mod phase;
+#[path = "native_semantic_task_retention_spec.rs"]
+mod retention;
+#[path = "native_semantic_task_retention_characterization_spec.rs"]
+mod retention_characterization;
 use super::*;
 use std::collections::BTreeMap;
 use crate::engine::v4::semantic_mutation_control::decode_semantic_mutation_checkpoint;

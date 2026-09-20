@@ -95,7 +95,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     bounds: NativeSemanticTaskGraphBoundsV1,
     visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticTaskGraphSummaryV1> {
-    self.visit_captured_task_entries(task_id, bounds, visitor, false)
+    self.visit_captured_task_entries(task_id, bounds, visitor, false, None)
   }
 
   /// Entries are provisional and may repeat. Only successful return reports
@@ -106,21 +106,22 @@ impl NativeSemanticMutationInventoryV1<'_> {
     bounds: NativeSemanticTaskGraphBoundsV1,
     visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticTaskGraphSummaryV1> {
-    self.visit_captured_task_entries(task_id, bounds, visitor, true)
+    self.visit_captured_task_entries(task_id, bounds, visitor, true, None)
   }
 
-  fn visit_captured_task_entries(
+  pub(super) fn visit_captured_task_entries(
     &self,
     task_id: &[u8; 16],
     bounds: NativeSemanticTaskGraphBoundsV1,
     mut visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
     inspect_ordinary_payloads: bool,
+    admission: Option<&dyn TaskRetentionAdmissionV1>,
   ) -> Result<SemanticTaskGraphSummaryV1> {
     check_cancelled(&self.cancellation)?;
     if task_id.iter().all(|byte| *byte == 0) {
       return Err(invalid("semantic_task_graph_identity", "task identity must be nonzero").into());
     }
-    let operation = GraphOperation::new(self, bounds, &mut visitor, inspect_ordinary_payloads)?;
+    let operation = GraphOperation::new(self, bounds, &mut visitor, inspect_ordinary_payloads, admission)?;
     let result = operation.read(task_id);
     let failure = operation.lookup.failure.borrow_mut().take();
     match failure {
@@ -132,6 +133,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
 
 struct GraphLookup<'a, 'visitor> {
   captured: CapturedEntityLookupV1<'a>,
+  admission: Option<&'a dyn TaskRetentionAdmissionV1>,
   visitor: RefCell<&'visitor mut PhysicalVisitor<'visitor>>,
   failure: RefCell<Option<SemanticMutationObservationErrorV1>>,
   work: Cell<u64>,
@@ -154,6 +156,9 @@ impl GraphLookup<'_, '_> {
         code: "semantic_task_graph_work_bound",
         message: "selected task graph exhausted its cumulative work limit",
       })?;
+    if let Some(admission) = self.admission {
+      admission.admit_work(count)?;
+    }
     self.work.set(next);
     Ok(())
   }
@@ -170,6 +175,9 @@ impl FirstAuthorityEntityLookupV1 for GraphLookup<'_, '_> {
     let result: std::result::Result<(), SemanticMutationObservationErrorV1> = (|| {
       self.step(1)?;
       self.captured.admit_read(locator)?;
+      if let Some(admission) = self.admission {
+        admission.admit_read_bytes(u64::from(locator.total_length))?;
+      }
       let next = self.reads.get().checked_add(1).ok_or_else(|| invalid("semantic_task_graph_counts", "physical read count overflowed"))?;
       self.reads.set(next);
       self.visitor.borrow_mut()(locator)?;
@@ -199,6 +207,7 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
     bounds: NativeSemanticTaskGraphBoundsV1,
     visitor: &'visitor mut PhysicalVisitor<'visitor>,
     inspect_ordinary_payloads: bool,
+    admission: Option<&'a dyn TaskRetentionAdmissionV1>,
   ) -> Result<Self> {
     capture._memory.check_admission()?;
     if bounds.maximum_work == 0
@@ -219,6 +228,7 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
     let memory = capture.memory.reserve(MemoryOwner::Task, scratch, AdmissionClass::Maintenance)?;
     let maximum_read_bytes = bounds.maximum_read_bytes.min(capture.bounds.maximum_read_bytes);
     let lookup = GraphLookup {
+      admission,
       captured: CapturedEntityLookupV1 {
         snapshot: &capture.snapshot,
         header: &capture.header.selected.header,
@@ -287,10 +297,13 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
       summary.checkpoint_sequence = Some(checkpoint.checkpoint_sequence);
       // Same capture, with an additional enclosing read admission on every
       // branch callback. The source reader retains its own logical work bound.
-      let sources =
-        self.capture.visit_captured_source_physical_entries(task_id, checkpoint.checkpoint_sequence, self.bounds.sources, |entry| {
-          self.lookup.admit_read(entry).map_err(SemanticMutationObservationErrorV1::from)
-        })?;
+      let sources = self.capture.visit_captured_source_physical_entries_admitted(
+        task_id,
+        checkpoint.checkpoint_sequence,
+        self.bounds.sources,
+        self.lookup.admission,
+        |entry| self.lookup.admit_read(entry).map_err(SemanticMutationObservationErrorV1::from),
+      )?;
       if !sources.complete {
         return Err(invalid("semantic_task_graph_source_incomplete", "source branch did not complete").into());
       }

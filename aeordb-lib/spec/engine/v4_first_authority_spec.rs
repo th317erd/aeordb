@@ -241,7 +241,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   for required in [
     "complete_semantic_mutation_observation(",
     "load_namespace_authority_from_lookup(",
-    "visit_captured_source_physical_entries(",
+    "visit_captured_source_physical_entries_admitted(",
     "remaining_read_bytes",
     "failure.borrow_mut().take()",
     "checkpoint.pruning_catalog_root",
@@ -278,7 +278,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "_memory:MemoryReservation",
     "scan_scratch_bytes:u64",
     "self.memory.reserve(MemoryOwner::Task,self.scan_scratch_bytes,AdmissionClass::Maintenance)",
-    ".visit_captured_entries(",
+    ".visit_captured_entries_admitted::<FirstAuthorityPublicationErrorV1>(",
     ".capture_settled_snapshot(",
     "read_entity_bounded(",
     "load_canonical_system_file_at_path(",
@@ -306,11 +306,45 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   ] {
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
+  let retention_source = std::fs::read_to_string(source_root.join("engine/v4/semantic_task_retention_native.rs")).unwrap();
+  let retention: String = retention_source.split_whitespace().collect();
+  for required in [
+    "visit_captured_semantic_task_retention_entries(",
+    "self.visit_entries(",
+    "self.visit_captured_task_entries(task_id,bounds.graphs,&mutvisitor,false,Some(&budget))?",
+    "bounds.maximum_work.min(self.bounds.maximum_work)",
+    "bounds.maximum_read_bytes.min(self.bounds.maximum_read_bytes)",
+    "ifletSome(original)=graph_failure{returnErr(original);}",
+    "if!discovery.complete",
+    "work:Cell<u64>",
+    "read_bytes:Cell<u64>",
+  ] {
+    assert!(retention.contains(required), "task retention lost captured composition/admission: {required}");
+  }
+  for forbidden in [
+    "StorageEngine",
+    "DiskKVStore",
+    "File::open",
+    "File::create",
+    "Vec<",
+    "HashSet",
+    "BTreeSet",
+    "Rc<",
+    "Arc<",
+    "DenseMarkBitmap",
+    ".flush(",
+    ".publish(",
+    "publish_successor",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!retention.contains(forbidden), "task retention gained another authority or population-sized owner: {forbidden}");
+  }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
   for required in [
     "pubfnvisit_metadata(",
-    "self.visit_entries(visitor,true)",
-    "self.visit_entries(visitor,false)",
+    "self.visit_entries(visitor,true,None)",
+    "self.visit_entries(visitor,false,None)",
     "read_entity_metadata_type(",
     "validate_inventory_role(entry,kind)?",
     "ifkind!=EntryTypeV4::FileRecord{returnOk(true);}",

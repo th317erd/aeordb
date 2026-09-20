@@ -123,9 +123,21 @@ impl NativeSemanticMutationInventoryV1<'_> {
     task_id: &[u8; 16],
     checkpoint_sequence: u64,
     bounds: NativeSemanticSourceCatalogBoundsV1,
+    visitor: impl FnMut(&KVEntry) -> Result<(), SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticSourceCatalogSummaryV1, SemanticMutationObservationErrorV1> {
+    self.visit_captured_source_physical_entries_admitted(task_id, checkpoint_sequence, bounds, None, visitor)
+  }
+
+  pub(super) fn visit_captured_source_physical_entries_admitted(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticSourceCatalogBoundsV1,
+    admission: Option<&dyn TaskRetentionAdmissionV1>,
     mut visitor: impl FnMut(&KVEntry) -> Result<(), SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticSourceCatalogSummaryV1, SemanticMutationObservationErrorV1> {
     let observer = CatalogPhysicalVisitorV1 {
+      admission,
       visitor: RefCell::new(&mut visitor),
       failure: RefCell::new(None),
       cancellation: &self.cancellation,
@@ -247,11 +259,15 @@ impl<'a> CatalogReadOperationV1<'a, '_> {
 
 pub(super) trait CatalogPhysicalEntryObserverV1 {
   fn observe(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1>;
+  fn admit_work(&self) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    Ok(())
+  }
 }
 
 type CatalogPhysicalCallbackV1<'a> = dyn FnMut(&KVEntry) -> Result<(), SemanticMutationObservationErrorV1> + 'a;
 
 struct CatalogPhysicalVisitorV1<'a> {
+  admission: Option<&'a dyn TaskRetentionAdmissionV1>,
   visitor: RefCell<&'a mut CatalogPhysicalCallbackV1<'a>>,
   failure: RefCell<Option<SemanticMutationObservationErrorV1>>,
   cancellation: &'a CancellationToken,
@@ -259,6 +275,13 @@ struct CatalogPhysicalVisitorV1<'a> {
 }
 
 impl CatalogPhysicalEntryObserverV1 for CatalogPhysicalVisitorV1<'_> {
+  fn admit_work(&self) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    match self.admission {
+      Some(admission) => admission.admit_work(1),
+      None => Ok(()),
+    }
+  }
+
   fn observe(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
     let result: Result<(), SemanticMutationObservationErrorV1> = (|| {
       check_cancelled(self.cancellation)?;
@@ -292,6 +315,9 @@ impl CatalogLookupV1<'_, '_> {
     let remaining = self.remaining_work.get().checked_sub(1).ok_or_else(|| {
       FirstAuthorityPublicationErrorV1::invalid("semantic_source_catalog_work_bound", "source catalog exhausted its cumulative work bound")
     })?;
+    if let Some(observer) = self.observer {
+      observer.admit_work()?;
+    }
     self.remaining_work.set(remaining);
     Ok(())
   }

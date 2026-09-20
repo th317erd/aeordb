@@ -26,6 +26,180 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,07:05UTC: retention C7 has now passed all three native platform gate
+sets. Windows completed06:58:18 and sealed07:03:20; all raw evidence is local.
+The combined
+[131-input proof](../evidence/user-facing-v4-u1-task-retention-proof-20260920.json)
+passed against unchanged MAIN; its non-writing recheck passed07:05:41 before the
+scoped22-file landing. Linux1988library/affected+659older consumers; macOS1120/
+784/659; Windows1135/784/658. All24new cases, static/reference/fixture gates pass;
+Linux individual deadlines peak477ms. Upstream comparison is refreshed before
+landing and still matches HEAD. No source edits were made during qualification.
+Final review retained the original reader/KV behavior and all executed REDs;
+this milestone neither publishes tasks nor changes production capabilities.
+
+The following isolated task-mark C3/preflight2 completed06:58:10 with all gates
+passing:14cases/deadlines(max368ms),62architecture/KV,368readers,126shared cases,
+format/audit-preview/strict workspace Clippy. All57raw artifacts are local and
+strictly checked. C4 adds only13reviewed audit-line relocations; all JSON parses
+and the audit value matches the preview. Frozen137-input SHA
+e8c8041fb5cea8548dcda895557b1fb4a81f8cb9e632ee956aaa9788da65662b.
+Linux full1 launched07:03:38, invocation968aa7522199419e9e0ab6a64d37a6a2/PID866972;
+Mac final1 driver42832 launched07:03UTC. Windows mark qualification has not
+started. MAIN still contains only retention C7; mark integration/landing waits
+for that milestone. All U1 enclosing task ownership and U2–U7 work remains open.
+
+September20,06:56UTC: retention C7 Windows passed its narrow, affected and older
+consumer stages; the06:51monitor saw641library cases complete. The existing
+six-minute collector still owns polling and final evidence verification.
+MAIN is unchanged from the frozen131-input candidate; no landing yet.
+
+The separate mark C1 passed all3cases. C2 passed13cases and individual deadlines
+(slowest385ms),62architecture/KV,367reader,126shared cases and formatting. All
+completed raw evidence is local and strictly checked, including its audit-preview
+failure: a new integer conversion discarded the original error, so the audit
+refused1501->1502occurrences. No baseline-growth approval was used. C3 retains
+that original cause in a typed error and adds an all-hash native reopen case,
+preserving all earlier test bodies.137inputs27b5f070b29ac8260c6d440b2fc79a1aca13e35696ed6f299613e2b63fea3db0.
+It passed14cases/deadlines and the subsequent architecture/reader/shared/format/
+audit-preview gates by06:54:48; Clippy remains running. Its reviewed preview has
+exactly13line-only relocations and all1501unchanged occurrence identities/reviews.
+No final mark packet, native final gates, MAIN integration or global GC permit
+has been created. Later qualification scripts are prepared only.
+
+September20,06:28UTC: Windows C6 completed all gates; its evidence is sealed,
+local and strictly verified (1135library,784affected,658older consumers,257narrow,
+185reference and502fixtures). The handoff initially stopped on its own summary
+printer after successful verification: the format-only gate has no test-count
+array. Correcting that printer did not weaken any gate. Preserved failure receipt
+and guarded resume launched C7final2 at06:09UTC, PID5848. The six-minute collector
+owns Windows polling, collection and combined-proof verification; no commit or
+production operation is delegated to it. MAIN remains exact frozen C7.
+
+The separate bitmap characterization deadline passed in149ms. Its following
+isolated callable RED completed06:19:39:1characterization passed,2target cases
+failed at the typed unavailable response; all seven raw artifacts are local and
+strictly verified.134-input SHA3f4c93646c3d0a318e1345a0fde271e38025719dd65bb89aff8a05065ba51161.
+Task-mark C1 now implements only the capture-bound bitmap adapter, preserving
+all three test bodies; launched06:26:34, invocationd717e84e8f5d478c84ff05c25fcc0dc1.
+It is isolated from MAIN; no outcome is claimed yet, and landing remains gated
+on the preceding retention milestone. Additional boundary cases are unregistered
+drafts. No global GC completion, durable selection or activation is enabled.
+
+September20,05:55UTC: Windows C6 has passed the older-consumer gate05:45:45;
+library reached622passing cases at the background monitor's05:54:11check.
+The guarded handoff checks every six minutes, then seals/copies/verifies C6
+before launching C7. No independent Windows status polls overlap that monitor.
+
+Separate test-only bitmap characterization completed05:48:59:1case/twohashes,
+0.16seconds; all seven raw artifacts local/strictly checked against132inputs
+2db1fc431319ea2a60ca6e3db2bb9b1bd1146bbe0cddc73e4f781b1cf2039684.
+It uses unchanged C7 runtime:26expected locators match the captured bitmap;
+replacing a task FileRecord keeps its key and slot but changes its offset, so
+the detached old bit alone would misidentify the new incarnation. Old captured
+references remain exact, and even an identical buffered override refuses slot
+access. Individual ten-second rerun launched05:54UTC, result pending. This is
+baseline evidence only; no native bitmap adapter or global GC permit exists.
+
+September20,05:41UTC: corrected C7 Linux full2 completed05:35:36, sealed05:39:41;
+Mac final2 completed05:35:56, sealed05:37:19. All raw evidence from both hosts
+is local and strictly checked. Linux passed1988library/affected and659older
+consumer cases,24individual deadlines(slowest477ms),185reference/502fixtures
+and all static gates. Mac passed1120library,784affected,659older consumers,
+257narrow,185reference/502fixtures and all static gates. Linux minimum home
+free87,787,204,608bytes/Data325,417,283,584bytes stayed above the floors;6GiB
+peak admitted without termination. Fetched origin still matches452d8dc5.
+Windows C6final1 passed257narrow/784affected; older consumers are running with
+measurable progress. C7final2 packet/scripts are uploaded, not launched until
+the current job completes and its evidence is sealed/collected. Combined proof
+and commit remain pending. Two next bitmap tests are unregistered cache drafts,
+not new implementation or executed evidence.
+
+September20,05:19UTC: C6 Linux final1 passed24cases/deadlines/format but stopped
+at audit05:09:42: the transferred audit JSON lacked its closing brace. All
+failed-run raw evidence is local and strictly checked. The C5 reviewed preview
+itself is valid. C7 restores exactly `}\n`; all other130inputs, including every
+runtime/test byte, are identical. Preparation now parses every JSON input and
+compares the full audit value to the reviewed preview before freezing.
+Final131-input SHA9efb488c0a9f4b332df309fe7e3cf0b264f4a24768244f12b0e8a017891cb35c.
+Linux full2 launched05:17:37, invocationb133c55f601f485bb2e61260321b5e15/PID721549.
+Mac/Windows C6 jobs are left to finish, then their raw evidence will be collected
+before C7 final2. No failure or previous snapshot is overwritten; U1 remains open.
+
+September20,05:10UTC: C5/preflight3 completed04:58:43 with every gate passing:
+24new cases and individual deadlines,5architecture,139KV,354reader and126shared
+regressions, formatting/audit preview/strict Clippy. All raw evidence is local
+and strictly checked. Final C6 changes only25audit line positions, retaining
+all1501occurrence identities and reviews. MAIN now exactly matches its131inputs,
+SHA8ae34922d27019f0308a79aefc9209cd21980ccec381b1fa4046f456b396f6e9.
+Three-platform final qualification launched05:09UTC: Linux invocation
+449cd8d287da45aa96ac1e485c645e37/PID714505, Mac29764, Windows9348. Results are
+pending; next status check no earlier than05:14:30. The final suites include
+fifteen older consumer targets for the KV bookkeeping change. No production or
+service action occurred; U1 and U2–U7 remain open.
+
+September20,04:55UTC: C5 passed24/24, including all original six KV-related
+failures and the restoration retry.24individual deadlines,5architecture and
+139captured-KV/disk/resize/concurrency/GC cases passed; completed raw artifacts
+are local and strictly verified. The expanded KV gate reached the6GiB cgroup
+ceiling but passed without termination; minimum home free85,747,556,352bytes
+and Data free325,742,780,416bytes remained above their floors. Preflight3 is
+still running remaining reader/shared/static gates; nextpoll>=04:59:01.
+
+September20,04:52UTC: C4 compiled and reproduced all five direct KV count
+regressions plus the unchanged restoration failure:15pass/6fail, completed
+04:42:56. Raw evidence local/strictly verified. C5 introduces one checked
+effective-live transition for ordinary/atomic/bulk/rebuild-buffer insertion and
+deletion/flag changes, preserving publication timing and refusing arithmetic
+failure before changing the current entry. It retains those six failures as
+regressions and adds all-hash reopen plus overflow/underflow boundaries.
+131inputscc4e16a5d19e6ca9d0d7e65ca1bfa0702fcb86fea9a4ba5d71d1fc415e164149,
+launched04:48:41, invocationc8b4d53cb5f44dd4b8399a2e81ed6585.24cases and
+preflight3 are pending. Runtime remains isolated; production untouched.
+
+The reviewed consumer path NamespaceMutation::apply -> mark_entry_deleted ->
+DiskKVStore::update_flags adds fifteen legacy consumer targets to final Linux,
+macOS and Windows qualification (directory, SDK, versioning, traversal, config,
+reindex, corruption, B-tree, tasks, sharing, facade/namespace and GC). Existing
+disk-KV, resize and concurrency gates are also included. No final job launched.
+
+September20,04:42UTC: C3 completed04:32:52 with15pass/1fail. The added later-task
+failure case proves refusal after the first graph, then exposes an existing
+DiskKVStore live-count defect during restoration:28live entries versus recorded27.
+All raw artifacts are local/strictly checked; preflight2 never started. Do not
+drop that retry assertion. Source review found related live/deleted transition
+gaps in bulk/atomic insert, flag deletion and buffer-only rebuild counting.
+C4 is test-only expansion with five direct transition cases; launched04:41UTC,
+results pending. The contract explicitly incorporates this prerequisite while
+retaining existing publication/abort/rebuild behavior. No writer fix exists yet.
+
+September20,04:33UTC: retention C1 passed all3starting cases. C2 passed15cases,
+15individual ten-second deadlines(slowest410ms),5architecture,57captured-KV/GC,
+353semantic reader and126shared reader/writer/migration cases. Preflight1 stopped
+only at formatting04:29:22: test module declarations needed ordering. All raw
+artifacts local and strictly verified, including that expected failed format gate.
+C3/preflight2 launched04:31:53, invocatione46be4f7f6ce4ec8ae577c41faa8e78d:
+128inputs98f1372131ba8352b75a43654dbf5cb1fc91ea8c72394022355f7297444b1eef.
+It formats owned files, preserves the underlying task-identity conversion error
+instead of discarding it, and adds a later-task missing-dependency/retry test.
+The sixteen-case result is pending. MAIN runtime remains452d8dc5; no native
+final qualification or following runtime slice has started.
+
+September20,04:14UTC: all-task retention RED1 compiled and executed: retained
+characterization passed; both target cases failed at the explicit
+`semantic_task_retention_unavailable` refusal. Completed04:08:22, invocation
+68229a69c9fd4b74846e87dd99535b61; all seven raw artifacts local and strict verifier
+passed. Frozen123-input packet057b83b2a7b1b2a91c4baa94fc1dc76b3642f9917fc594b297f30d33b6c4970b.
+No new behavior is yet implemented; the candidate remains isolated in cache.
+
+September20,04:03UTC: metadata milestone committed/pushed as
+452d8dc51d58ff7f4f9473778760bb9fb2b22772, upstream0/0. Both combined proof and
+non-writing recheck passed before the14-file landing. Next bounded entry is
+captured all-task retention traversal with one cumulative discovery/graph/source
+admission; exact contract appended, draft two-case RED prepared. No next behavior
+exists yet. The existing graph/inventory single-operation contracts are preserved;
+no bitmap or global GC permit is inferred. All prior native jobs completed.
+
 September20,04:01UTC: Windows final1 completed03:54:43 and sealed03:59:37;
 all96raw artifacts are local. The combined
 [120-input metadata proof](../evidence/user-facing-v4-u1-task-metadata-proof-20260920.json)

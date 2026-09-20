@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "disk_kv_live_count_spec.rs"]
+mod live_count;
+
 use crate::engine::durability_coordinator::{CommitClass, DurabilityCommitReceipt};
 use crate::engine::kv_store::KV_TYPE_CHUNK;
 use tempfile::tempdir;
