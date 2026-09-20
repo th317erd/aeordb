@@ -1301,3 +1301,73 @@ records the executed characterization, REDs, corrected audit failure, immutable
 source/binary identities, bounds and retained parent-only KV consumer evidence.
 This remains a read-only task contribution, not durable final reclamation
 enforcement or user-facing production readiness.
+
+### Native root-task exclusion — following captured task marking
+
+Two executed native REDs demonstrate the gap: a reopened unreleased ASMT marks
+its base root correctly, but the existing final root retirement accepted only a
+supplied external absence claim; task-capable physical reclaim likewise lacked
+native task evidence. Process-local staging protection is not durable task
+absence. This unit extends both existing final root boundaries, not the task
+writer or ordinary runtime.
+
+`V4FirstAuthorityPublisher::qualify_semantic_task_root_exclusion` qualifies one
+nonzero database-width root against a completed captured task contribution. Its
+opaque result borrows the independently supplied publisher, retains the captured
+A/B header region, dynamic root identity, cancellation and a small accounted
+reservation. It retains no bitmap or snapshot and may outlive capture/protection,
+but cannot outlive or cross the publisher. Resolve the target in that capture's
+validated slot; refuse a marked root or a key with another physical role.
+An absent key is permitted by this task-only predicate, not proof of root
+admission or completed reclaim. Every existing lifecycle/retention check survives.
+
+Both native root final operations require this evidence if either header mask
+declares capability25. Old headers without that declaration retain their prior
+no-proof contract; any supplied proof is always validated. Under the existing
+root lock, check its cancellation/reservation, exact publisher, target and A/B
+region before any lifecycle authority change, including exact retries. A later
+publication invalidates it even if the target locator or logical HEAD stayed
+the same. Do not recapture under the final lock, detach bits, invent another
+publisher, silently accept an external absence boolean, or block unrelated roots
+merely because some task exists.
+
+The existing pre-final retirement-lineage flush can invalidate prior evidence;
+settle pending lineage before capture or capture again. After a completed
+publication, exact retry likewise needs fresh evidence while retaining normal
+idempotency. Original typed mark/observation/memory causes remain nested in both
+root-publication errors and their shared conversion; pre-commit refusals have
+no committed receipt. Existing post-commit outcomes are unchanged.
+
+The target cases retain independent task/checkpoint envelopes and real native
+publication/reopen. They cover protected, unrelated, absent and released task
+states; both root final methods; copied identities with different publisher
+owners; changed targets/frontiers; new task selection after an empty capture;
+both capability masks; all registered hash widths; malformed identifiers/roles,
+allocation refusal/retry, bounded retained memory and separate proof interruption.
+Full prior native root/GC and captured-reader regressions, per-case deadlines,
+static/audit and final three-platform gates remain required before landing.
+
+Limitations remain explicit: fixture task controls are seeded because there is
+no admitted task writer yet. These low-level root tests are not the complete
+service GC pipeline. Quarantine/sweep target qualification, unselected checkpoint
+graph validation and coupled task/generation/HEAD publication remain mandatory
+following work; no capability advertisement or production action is enabled.
+
+This conservative per-target frontier is not a bulk-GC throughput claim. Each
+intervening publication invalidates it; a service loop must not silently rebuild
+the whole task graph for every root and call that scalable convergence. U5 must
+qualify the batching/convergence path and its measured work bounds. Do not relax
+the frontier or reuse detached marks to obtain that performance.
+
+Qualification September20: all141frozen C6 inputs passed the final Linux,
+macOS and Windows gates. Linux passed2049library/affected cases and16individual
+ten-second deadlines (maximum261ms); macOS1150library/815affected/257narrow;
+Windows1165library/815affected/257narrow. All platforms passed185reference tests,
+502independent fixtures and their required static/format checks. The error audit
+retains1501reviewed identities; C6 changes only13line locations from green C5.
+Windows completed09:42:07UTC and its sole six-minute collector completed09:44:19.
+All raw evidence is local and checked by the
+[combined proof](evidence/user-facing-v4-u1-task-root-exclusion-proof-20260920.json).
+It retains the executed REDs and intermediate fixture, architecture and format
+failures. No task selector, quarantine/sweep completion or service readiness is
+implied by this independently qualified root-retention milestone.

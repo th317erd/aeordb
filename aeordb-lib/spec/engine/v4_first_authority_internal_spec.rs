@@ -5636,6 +5636,7 @@ struct PreparedGuardedRootRetirementV1 {
 impl PreparedGuardedRootRetirementV1 {
   fn request<'a>(&'a self, cancellation: &'a CancellationToken) -> RootRetirementPublicationRequestV1<'a> {
     RootRetirementPublicationRequestV1 {
+      task_exclusion: None,
       hash_algorithm: HashAlgorithm::Blake3_256,
       intent: &self.intent,
       support_closure: &self.support_closure,
@@ -6401,6 +6402,7 @@ impl PreparedGuardedRootReclaimV1 {
     pin_coordinator: &'a RootReadPinCoordinatorV1,
   ) -> RootReclaimPublicationRequestV1<'a> {
     RootReclaimPublicationRequestV1 {
+      task_exclusion: None,
       hash_algorithm: HashAlgorithm::Blake3_256,
       retention_permit: &self.retention_permit,
       support_closure: &self.support_closure,

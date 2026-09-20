@@ -198,6 +198,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
   let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
+  let semantic_task_root_exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
   let staging_protection_path = source_root.join("engine/v4/staging_protection.rs");
   let disk_kv_path = source_root.join("engine/disk_kv_store.rs");
   let header_publication_path = source_root.join("engine/v4/header_publication.rs");
@@ -993,6 +994,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &read_view_native_path,
       &semantic_catalog_native_path,
       &semantic_mutation_observation_path,
+      &semantic_task_root_exclusion_path,
       &staging_protection_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
@@ -1019,6 +1021,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &read_view_native_path,
     &semantic_catalog_native_path,
     &semantic_mutation_observation_path,
+    &semantic_task_root_exclusion_path,
     &staging_protection_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();
@@ -1069,6 +1072,51 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       }
       assert!(compact.contains("_memory:MemoryReservation"));
       assert!(compact.contains("decode_semantic_mutation_selection("));
+    } else if owner_path == &semantic_task_root_exclusion_path {
+      // This projection borrows the existing publisher and returns a small
+      // target-bound decision. It must not become another writer or snapshot.
+      let compact: String = owner_source.split_whitespace().collect();
+      for required in [
+        "publisher:&'publisherV4FirstAuthorityPublisher",
+        "frontier:[u8;DATABASE_HEADER_V4_REGION_LENGTH]",
+        "_memory:MemoryReservation",
+        "find_captured_slot(namespace_root_hash)?",
+        "mark.bitmap.is_marked(position)?",
+        "std::ptr::eq(self,evidence.publisher)",
+        "evidence.namespace_root_hash!=namespace_root_hash",
+        "evidence.frontier!=observation.region",
+        "_authority:&MutexGuard<'_,FirstAuthorityRootStateV1>",
+        "check_cancelled(&evidence.cancellation)?;evidence._memory.check_admission()?;",
+      ] {
+        assert!(compact.contains(required), "root task exclusion lost its bound native decision: {required}");
+      }
+      for forbidden in [
+        "StorageEngine",
+        "DiskKVStore",
+        "DenseMarkBitmap",
+        "Arc<ReadSnapshot>",
+        "root_state.lock",
+        "lock_kv(",
+        "publish_",
+        ".flush(",
+        "std::fs",
+        "OpenOptions",
+        "implCloneforNativeSemanticTaskRootExclusionV1",
+      ] {
+        assert!(!compact.contains(forbidden), "root task exclusion gained physical or detached ownership: {forbidden}");
+      }
+      assert_eq!(authority_source.matches(".validate_semantic_task_root_exclusion_locked(").count(), 2);
+      for method in ["fn publish_root_retirement_excluded(", "fn publish_root_reclaim_excluded("] {
+        let body = authority_source.split(method).nth(1).unwrap().split("\n  pub fn ").next().unwrap();
+        let lock = body.find("self.root_state.lock()").unwrap();
+        let check = body.find(".validate_semantic_task_root_exclusion_locked(").unwrap();
+        let retry = body.find("let exact_retry").unwrap();
+        let publication = body.find("self.publish_immutable_gc_artifact_locked(").unwrap();
+        assert!(
+          lock < check && check < retry && retry < publication,
+          "{method} must check task evidence under the existing guard before retry/publication"
+        );
+      }
     } else if owner_path == &staging_protection_path {
       let compact: String = owner_source.split_whitespace().collect();
       assert!(compact.contains("_memory:MemoryReservation"));

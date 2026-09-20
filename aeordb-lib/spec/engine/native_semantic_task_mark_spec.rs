@@ -3,6 +3,8 @@
 mod boundary;
 #[path = "native_semantic_task_mark_interruption_spec.rs"]
 mod interruption;
+#[path = "native_semantic_task_root_exclusion_spec.rs"]
+mod root_exclusion;
 use super::*;
 use crate::engine::kv_pages::{MAX_ENTRIES_PER_PAGE, page_size};
 

@@ -656,6 +656,7 @@ fn guarded_retirement_rejects_the_current_head_before_publishing_authority() {
   let error = publisher
     .publish_root_retirement(
       RootRetirementPublicationRequestV1 {
+        task_exclusion: None,
         hash_algorithm: algorithm,
         intent: &intent,
         support_closure: &support_closure,

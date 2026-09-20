@@ -293,15 +293,16 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn mark_runtime_only_binds_the_readonly_captured_task_adapter() {
+fn mark_runtime_only_binds_captured_task_retention_adapters() {
   let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let bitmap_path = source_root.join("engine/v4/gc_mark_runtime.rs");
   let snapshot_path = source_root.join("engine/kv_snapshot.rs");
   let adapter_path = source_root.join("engine/v4/semantic_task_mark_native.rs");
+  let exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
   let mut sources = Vec::new();
   rust_sources(&source_root, &mut sources);
 
-  let callers: Vec<_> = sources
+  let mut callers: Vec<_> = sources
     .into_iter()
     .filter(|path| path != &bitmap_path && path != &snapshot_path)
     .filter(|path| {
@@ -310,15 +311,18 @@ fn mark_runtime_only_binds_the_readonly_captured_task_adapter() {
     })
     .map(|path| path.strip_prefix(&source_root).unwrap().to_owned())
     .collect();
+  callers.sort();
   assert_eq!(
     callers,
-    vec![PathBuf::from("engine/v4/semantic_task_mark_native.rs")],
-    "only the capture-bound task contribution is admitted"
+    vec![PathBuf::from("engine/v4/semantic_task_mark_native.rs"), PathBuf::from("engine/v4/semantic_task_root_exclusion.rs")],
+    "only the captured task contribution and its root-specific exclusion projection are admitted"
   );
 
-  let adapter_source = fs::read_to_string(adapter_path).unwrap();
-  for forbidden in ["publish_", "lock_kv", "root_state", ".flush(", "control_store", "authorizes_reclaim", "std::fs", "VoidManager"] {
-    assert!(!adapter_source.contains(forbidden), "task contribution contains forbidden authority token {forbidden}");
+  for path in [adapter_path, exclusion_path] {
+    let adapter_source = fs::read_to_string(path).unwrap();
+    for forbidden in ["publish_", "lock_kv", "root_state", ".flush(", "control_store", "authorizes_reclaim", "std::fs", "VoidManager"] {
+      assert!(!adapter_source.contains(forbidden), "task projection contains forbidden authority token {forbidden}");
+    }
   }
 
   let bitmap_source = fs::read_to_string(bitmap_path).unwrap();

@@ -26,6 +26,78 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,09:46UTC: the root-exclusion combined proof PASSED against all141
+unchanged MAIN inputs. Windows completed09:42:07 and its collector sealed,
+copied and strictly verified every artifact by09:44:19. Linux2049library/affected,
+macOS1150library/815affected/257narrow and Windows1165library/815affected/257narrow
+passed, with185reference/502fixture and required static checks per platform.
+All16new root cases and14parent task-mark cases pass on each native platform;
+individual Linux deadlines peaked261ms. The audit keeps1501reviewed identities.
+[Combined evidence](../evidence/user-facing-v4-u1-task-root-exclusion-proof-20260920.json)
+records exact sources/binaries, resource bounds and preserved failures. Fetched
+origin remains identical to entry17158a65. A non-writing proof recheck precedes
+the scoped milestone commit; U1/U2–U7 remain open.
+
+Following isolated RED2 is also complete and strictly verified: legacy quarantine
+retry now passes; the task-capable final boundary still fails for missing native
+evidence; both independent merge targets fail at the explicit unavailable entry.
+C1 implements only that bounded effective-merge core and formats its two tests.
+Its146-input SHA is`851b1b290bea5456f29bb6a4b36178e012f5c5584e803a464f9161a13e842256`;
+desktop unit`aeordb-v4-task-physical-exclusion-candidate1-20260920` launched09:44:03,
+invocation`b812524d6dc842d6a4e7f29f919c088f`. No result yet. All following code remains
+outside MAIN; native quarantine/sweep integration and wider merge failure/resource
+coverage remain required. No services, installed binaries or production data changed.
+
+September20,09:33UTC: root C6 Linux finished09:09:30 and macOS09:13:14;
+both were sealed09:16:58 and every raw artifact is local. The strict Unix proof
+passes: Linux2049library/affected and macOS1150library/815affected plus all
+required narrow/static/reference/fixture gates. Windows has passed257narrow and
+815affected tests; its library stage remains active under the sole six-minute
+collector. No combined proof or landing is claimed yet. The local Windows
+evidence parser's inherited32-target expectation was corrected to the actual
+38-target inventory before collection; no test or resource requirement changed.
+
+The following isolated physical-quarantine RED1 preserved two failures: the
+missing task-capable native evidence check, and an overly strict legacy retry
+fixture that compared unsettled KV bytes. The retry left both header slots
+unchanged but settled buffered KV state (72612to72566bytes). All seven raw
+artifacts are local and strictly checked. RED2 explicitly settles the fixture
+before retaining its byte-stability assertion, and adds two callable effective-
+candidate merge targets against an independent ordered-map oracle. It launched
+09:32:03,146inputs SHA`ba08b821f35af2d3714a75632124c8193efd8de6eab5f3068c6e7dd1e6ba1011`;
+no result yet. Its merge entry is refusing scaffolding only, outside MAIN.
+No task writer, ordinary capability, service or production operation is enabled.
+
+September20,09:04UTC: root-exclusion C5 preflight completed08:54:44 with all gates
+passing:16new cases/individual deadlines(max256ms),1150library,44root/GC,
+formatting, reviewed1501-entry error audit and strict workspace Clippy. All raw
+evidence is local and checked. The preserved intermediate failures were fixture
+identity, the missing named architecture handoff, and four formatting differences;
+no behavior checks or audit allowances were weakened. C6 adds only13reviewed
+audit-line relocations, with141-input SHA
+`5338db879ce88bb33f9880963e5d0f7e75acb47d9959d5f3c358e85c5452d6c0`.
+MAIN matches all141inputs exactly;13code/test/audit paths are owned, uncommitted.
+Final Linux launched09:01:05, invocation`b16a66bd33864629bc08faf174634950`;
+macOS driver54661 and Windows4192 launched at the same boundary. Windows has
+one six-minute collector; no duplicate status polling. Final qualification and
+combined proof remain pending. Quarantine/sweep and task ownership are still
+required dependencies; no task selector or ordinary-service capability is enabled.
+
+September20,08:33UTC: task marking landed/pushed as `17158a65`; the isolated
+following root-exclusion work remains outside MAIN. RED2 completed with one
+positive characterization and three target failures; all raw evidence is local
+and strictly checked. C1 implements target-bound native exclusion at both final
+root retirement and reclaim boundaries and passed all four initial tests.
+C2 expanded to sixteen cases with unchanged production bytes: fifteen passed;
+the unrelated-root fixture failed its own distinctness assertion because it
+reused the original empty tree. The failure is preserved and strictly verified.
+C3 changes only that fixture to publish a real distinct ordinary-file namespace;
+its 141-input manifest is `05e08783aad153f7253b59694dcd9361fd0357a541ee4a7195206c5126b3e91f`.
+Preflight2 launched08:31:05 on desktop, invocation
+`5ce1a1240e9e4c7793795d4c581b0fcf`; no result yet. Final three-platform scripts
+are prepared, not launched. Task selectors, quarantine/sweep integration and
+U2–U7 remain open; no production/service operations have occurred.
+
 September20,07:59UTC: task-mark C4 has passed Linux, macOS and Windows on the
 same137 frozen inputs. Windows completed07:53:27; its six-minute collector
 sealed/copied/strictly verified every artifact and exited successfully07:57:05.

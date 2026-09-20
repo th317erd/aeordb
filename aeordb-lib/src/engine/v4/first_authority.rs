@@ -10,7 +10,8 @@ pub use semantic_mutation_observation::{
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
 pub use semantic_mutation_observation::{
-  NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, SemanticTaskMarkErrorV1, SemanticTaskMarkSummaryV1,
+  NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, NativeSemanticTaskRootExclusionV1, SemanticTaskMarkErrorV1,
+  SemanticTaskMarkSummaryV1,
 };
 pub use semantic_mutation_observation::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use semantic_mutation_observation::{
@@ -1516,6 +1517,8 @@ pub trait RootRetirementAuthorityVerifierV1 {
 
 #[derive(Clone, Copy)]
 pub struct RootRetirementPublicationRequestV1<'a> {
+  /// Required for task-capable headers, including exact retries.
+  pub task_exclusion: Option<&'a NativeSemanticTaskRootExclusionV1<'a>>,
   pub hash_algorithm: HashAlgorithm,
   pub intent: &'a RootRetirementIntentV1,
   pub support_closure: &'a RootLifecycleSupportClosureV1,
@@ -1531,6 +1534,8 @@ pub struct RootRetirementPublicationRequestV1<'a> {
 
 #[derive(Clone, Copy)]
 pub struct RootReclaimPublicationRequestV1<'a> {
+  /// Required for task-capable headers, including exact retries.
+  pub task_exclusion: Option<&'a NativeSemanticTaskRootExclusionV1<'a>>,
   pub hash_algorithm: HashAlgorithm,
   pub retention_permit: &'a RootExpiryRetentionPermitV1,
   pub support_closure: &'a RootLifecycleSupportClosureV1,
@@ -1603,6 +1608,7 @@ pub struct RootReclaimPublicationReceiptV1 {
 
 #[derive(Debug)]
 pub enum RootRetirementPublicationErrorV1 {
+  TaskRetention(SemanticTaskMarkErrorV1),
   Invalid { code: &'static str, message: String },
   Committed { code: &'static str, message: String, receipt: Box<RootRetirementPublicationReceiptV1> },
   Format(FormatError),
@@ -1616,6 +1622,7 @@ pub enum RootRetirementPublicationErrorV1 {
 impl RootRetirementPublicationErrorV1 {
   pub fn code(&self) -> &str {
     match self {
+      Self::TaskRetention(source) => source.code(),
       Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
       Self::Format(source) => source.code(),
       Self::Authority(source) => source.code(),
@@ -1638,6 +1645,7 @@ impl RootRetirementPublicationErrorV1 {
     match self {
       Self::Committed { receipt, .. } => Some(receipt),
       Self::Invalid { .. }
+      | Self::TaskRetention(_)
       | Self::Format(_)
       | Self::Authority(_)
       | Self::Pin(_)
@@ -1651,6 +1659,7 @@ impl RootRetirementPublicationErrorV1 {
 impl Display for RootRetirementPublicationErrorV1 {
   fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
     match self {
+      Self::TaskRetention(source) => write!(formatter, "root-retirement native task retention: {source}"),
       Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
       Self::Committed { code, message, receipt } => write!(
         formatter,
@@ -1671,6 +1680,7 @@ impl Display for RootRetirementPublicationErrorV1 {
 impl Error for RootRetirementPublicationErrorV1 {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
+      Self::TaskRetention(source) => Some(source),
       Self::Format(source) => Some(source),
       Self::Authority(source) => Some(source),
       Self::Pin(source) => Some(source),
@@ -1684,6 +1694,7 @@ impl Error for RootRetirementPublicationErrorV1 {
 
 #[derive(Debug)]
 pub enum RootReclaimPublicationErrorV1 {
+  TaskRetention(SemanticTaskMarkErrorV1),
   Invalid { code: &'static str, message: String },
   Committed { code: &'static str, message: String, receipt: Box<RootReclaimPublicationReceiptV1> },
   Format(FormatError),
@@ -1696,6 +1707,7 @@ pub enum RootReclaimPublicationErrorV1 {
 impl RootReclaimPublicationErrorV1 {
   pub fn code(&self) -> &str {
     match self {
+      Self::TaskRetention(source) => source.code(),
       Self::Invalid { code, .. } | Self::Committed { code, .. } => code,
       Self::Format(source) => source.code(),
       Self::Authority(source) => source.code(),
@@ -1717,6 +1729,7 @@ impl RootReclaimPublicationErrorV1 {
     match self {
       Self::Committed { receipt, .. } => Some(receipt),
       Self::Invalid { .. }
+      | Self::TaskRetention(_)
       | Self::Format(_)
       | Self::Authority(_)
       | Self::Pin(_)
@@ -1729,6 +1742,7 @@ impl RootReclaimPublicationErrorV1 {
 impl Display for RootReclaimPublicationErrorV1 {
   fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
     match self {
+      Self::TaskRetention(source) => write!(formatter, "root-reclaim native task retention: {source}"),
       Self::Invalid { code, message } => write!(formatter, "{code}: {message}"),
       Self::Committed { code, message, receipt } => write!(
         formatter,
@@ -1748,6 +1762,7 @@ impl Display for RootReclaimPublicationErrorV1 {
 impl Error for RootReclaimPublicationErrorV1 {
   fn source(&self) -> Option<&(dyn Error + 'static)> {
     match self {
+      Self::TaskRetention(source) => Some(source),
       Self::Format(source) => Some(source),
       Self::Authority(source) => Some(source),
       Self::Pin(source) => Some(source),
@@ -6836,6 +6851,9 @@ impl V4FirstAuthorityPublisher {
         "root retirement was canceled during final authority recheck",
       ));
     }
+    self
+      .validate_semantic_task_root_exclusion_locked(&_authority, request.task_exclusion, &observation, &request.intent.namespace_root_hash)
+      .map_err(RootRetirementPublicationErrorV1::TaskRetention)?;
 
     let selected_control = {
       let kv = self.lock_kv()?;
@@ -7143,6 +7161,14 @@ impl V4FirstAuthorityPublisher {
         "root reclaim was canceled during final authority recheck",
       ));
     }
+    self
+      .validate_semantic_task_root_exclusion_locked(
+        &_authority,
+        request.task_exclusion,
+        &observation,
+        request.retention_permit.namespace_root_hash(),
+      )
+      .map_err(RootReclaimPublicationErrorV1::TaskRetention)?;
 
     let selected_control = {
       let kv = self.lock_kv()?;
@@ -12248,6 +12274,7 @@ fn root_reclaim_support_error(source: super::gc_lifecycle::RootLifecycleSupportC
 fn root_reclaim_from_retirement_error(source: RootRetirementPublicationErrorV1) -> RootReclaimPublicationErrorV1 {
   match source {
     RootRetirementPublicationErrorV1::Invalid { code, message } => RootReclaimPublicationErrorV1::Invalid { code, message },
+    RootRetirementPublicationErrorV1::TaskRetention(source) => RootReclaimPublicationErrorV1::TaskRetention(source),
     RootRetirementPublicationErrorV1::Format(source) => RootReclaimPublicationErrorV1::Format(source),
     RootRetirementPublicationErrorV1::Authority(source) => RootReclaimPublicationErrorV1::Authority(source),
     RootRetirementPublicationErrorV1::Pin(source) => RootReclaimPublicationErrorV1::Pin(source),
