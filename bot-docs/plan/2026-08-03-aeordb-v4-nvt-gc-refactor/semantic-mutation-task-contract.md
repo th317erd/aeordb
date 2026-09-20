@@ -995,3 +995,72 @@ plugin membership, metadata/source failures and cancellation/resource release.
 The exact105-input candidate preserves the existing full-root and source-reader
 regressions and1501audit reviews. This completes only the retained source-set
 observation prerequisite; source-prefix and durable task authority remain open.
+
+### Retained compiler-prefix admission — entry28248ec6
+
+Before the enclosing task owner restores Compiling or Pruning, compose retained
+source validation with existing catalog-progress admission and exact class1
+source-projection comparisons. Add
+`admit_captured_semantic_compiler_progress(task_id, checkpoint_sequence, bounds)`.
+Its opaque non-Clone output owns the requested compiled registry, admitted
+catalog progress, derived request and completed source statistics while borrowing
+the captured inventory. Consuming catalog parts strips that wrapper and supplies
+only the existing catalog primitives. No task selection, durable retention,
+writer fence or activation is granted. Other phases use their own owners.
+
+One ASCM/ASMC pair, historical base metadata and cumulative source/namespace
+operations cover the whole proof. Semantic object reads share the same captured
+physical-byte/work meters and canonical kind/identity reader. Compilers, retained
+alias snapshots and semantic decode scratch receive separately named workspace
+ceilings on the same coordinator. No full-map load, per-source budget reset or
+COW write replay is permitted. Revalidate once per restart, not after every
+in-process compiler step.
+
+Runtime construction order is the global configuration slot first, followed by
+namespace configuration full-file paths in byte order. A Compiling None cursor
+means before the global slot; owner `/` means that slot was processed even when
+absent. A nonroot owner must name a member of the BASE/REQUEST namespace union.
+Processed owners must equal requested compiled projections; unprocessed owners
+must equal BASE projections for incremental work, or be absent for fresh work.
+Compare IDs and canonical definition bytes, and independently count expected
+bindings to exclude extra class1 entries. Pruning requires the entire requested
+configuration set plus existing exact unused-candidate closure. Its remaining
+candidate root determines forward progress; a codec-valid dependency-ID cursor
+is informational, not proof of any historical deletion or ordinal. New writers
+use the previously qualified None-cursor pruning strategy.
+
+The following task writer and this admission owner share one deterministic
+mode rule without new ASMC bytes. Nonempty Complete BASE catalogs must first
+pass existing strict Complete admission with retained BASE registry/counts;
+unsupported producer profiles or malformed catalogs cannot fall back to fresh.
+The exact unchanged compiled registry permits incremental work; registry change
+requires fresh construction. Content-only and valid Complete-empty bases use
+fresh construction. Complete-empty with actual BASE configurations is invalid.
+Request hash comes from capture, final count from ASMC and required capabilities
+from the admitted BASE state; old catalog/compiler capability checks remain.
+
+Failing-first proof must admit a correct global-first prefix after native
+close/reopen and unrelated current-input change, while refusing a same-count
+wrong projection that the old independent source/catalog admissions accept.
+Cover all hashes, cursor/order/deletion/alias/mode cases, malformed and missing
+inputs, exact cumulative quotas, actual allocation refusal/retry, cancellation,
+pressure and reservation release. At least one admitted continuation must
+finish and reopen with an independently expected final catalog. Ten-second
+individual native deadlines and final Linux/macOS/Windows/static/reference gates
+precede landing. This is an implementation contract, not a completed proof.
+
+Qualification September20: the exact110-input C9 snapshot passed the combined
+[three-platform compiler-prefix proof](evidence/user-facing-v4-u1-compiler-prefix-proof-20260920.json).
+All23native cases pass on Linux, Mac and Windows; Linux additionally enforces
+individual10second deadlines (slowest4566ms). The real continuation/finish/reopen
+case covers all five hash algorithms and independent final owner keys. Tests
+also cover changed aliases/registry, extra bindings, missing/damaged catalogs,
+unsupported profiles, source positions, shared exact quotas and operational
+refusal/retry. Actual allocation injection is qualified at control-body loading,
+not every possible inherited allocation site. Original behavioral RED bodies,
+canonical object read/check order and existing source-validation checks remain.
+Linux passed1673library/affected; Mac1070library; Windows1085library. All native
+platform gates,185reference tests,502independent fixtures and1501unchanged audit
+reviews are source/binary-bound in the proof. This closes read-only compiler
+prefix admission only. Durable task selection, retention, fencing and atomic
+activation remain required; no generic writer or runtime capability was enabled.

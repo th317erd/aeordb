@@ -466,7 +466,7 @@ impl<'a, 'observer> CatalogReadOperationV1<'a, 'observer> {
     )
   }
 
-  fn source_bounds(&self) -> NativeSemanticSourceReadBoundsV1 {
+  pub(super) fn source_bounds(&self) -> NativeSemanticSourceReadBoundsV1 {
     NativeSemanticSourceReadBoundsV1 {
       maximum_body_bytes: self.bounds.maximum_source_bytes,
       maximum_chunk_entity_bytes: self.bounds.maximum_chunk_entity_bytes,

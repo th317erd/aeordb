@@ -3,6 +3,9 @@
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
 pub use semantic_mutation_observation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
+pub use semantic_mutation_observation::{
+  NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1,
+};
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use semantic_mutation_observation::{

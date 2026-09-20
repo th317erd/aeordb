@@ -3,6 +3,7 @@ use super::*;
 #[path = "semantic_source_union_native.rs"]
 mod source_union;
 pub use source_union::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
+pub use source_union::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 pub use source_union::{
   NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,
   NativeSemanticSourceUnionRequestV1, NativeSemanticSourceUnionV1,

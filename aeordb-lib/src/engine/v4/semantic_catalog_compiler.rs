@@ -395,7 +395,7 @@ impl<'a> Compiler<'a> {
   }
 }
 
-fn configuration_owner(path: &str) -> Result<Vec<u8>> {
+pub(super) fn configuration_owner(path: &str) -> Result<Vec<u8>> {
   let directory = path.trim_end_matches('/').as_bytes();
   let suffix = b"/.aeordb-config/indexes.json";
   let length = directory

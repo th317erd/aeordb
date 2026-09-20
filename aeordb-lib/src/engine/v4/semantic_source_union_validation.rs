@@ -1,4 +1,7 @@
 //! Declared retained-source validation, not compiler or durable task authority.
+#[path = "semantic_compiler_prefix_native.rs"]
+mod compiler_prefix;
+pub use compiler_prefix::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 use super::*;
 use super::super::super::super::source_catalog::{catalog_read_error, CatalogReadOperationV1, SourceCatalogCursorV1};
 use crate::engine::v4::root_authority::{decode_namespace_semantic_binding, NamespaceSemanticBindingInputV1};
@@ -47,6 +50,24 @@ impl NativeSemanticMutationInventoryV1<'_> {
     bounds: NativeSemanticSourceUnionValidationBoundsV1,
     before_complete: impl FnOnce(),
   ) -> UnionResult<SemanticSourceUnionValidationSummaryV1> {
+    self
+      .with_validated_captured_semantic_source_union(task_id, checkpoint_sequence, bounds, |_, _, _, _| Ok(()), before_complete)
+      .map(|(summary, ())| summary)
+  }
+
+  fn with_validated_captured_semantic_source_union<T>(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticSourceUnionValidationBoundsV1,
+    after_validation: impl FnOnce(
+      &RetainedSourceUnionOperationV1<'_, '_, '_, &CapturedEntityLookupV1<'_>>,
+      &crate::engine::v4::root_authority::NamespaceSemanticBindingV1,
+      &[u8],
+      u64,
+    ) -> UnionResult<T>,
+    before_complete: impl FnOnce(),
+  ) -> UnionResult<(SemanticSourceUnionValidationSummaryV1, T)> {
     let catalog = CatalogReadOperationV1::new(self, bounds.catalog, None)?;
     let (companion, checkpoint_bytes) = catalog.load_companion_and_checkpoint(task_id, checkpoint_sequence)?;
     let manifest =
@@ -153,20 +174,24 @@ impl NativeSemanticMutationInventoryV1<'_> {
           .into(),
       );
     }
+    let result = after_validation(&operation, &base, &checkpoint_bytes, base_configurations)?;
     before_complete();
     catalog.check()?;
     namespace.check()?;
     metadata.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     let (read_bytes, catalog_work) = catalog.statistics();
-    Ok(SemanticSourceUnionValidationSummaryV1 {
-      protected_paths: protected.paths,
-      namespace_paths,
-      base_configuration_count: base_configurations,
-      requested_configuration_count: requested_configurations,
-      read_bytes,
-      catalog_work,
-      namespace_work: bounds.namespace.maximum_work - namespace.lookup.remaining_work.get(),
-    })
+    Ok((
+      SemanticSourceUnionValidationSummaryV1 {
+        protected_paths: protected.paths,
+        namespace_paths,
+        base_configuration_count: base_configurations,
+        requested_configuration_count: requested_configurations,
+        read_bytes,
+        catalog_work,
+        namespace_work: bounds.namespace.maximum_work - namespace.lookup.remaining_work.get(),
+      },
+      result,
+    ))
   }
 }
 

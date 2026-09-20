@@ -26,6 +26,142 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,01:02UTC: Windows completed every final gate00:55:57 and was
+sealed01:01:24. All raw evidence is local. The combined
+[110-input compiler-prefix proof](../evidence/user-facing-v4-u1-compiler-prefix-proof-20260920.json)
+passes against MAIN: Linux1673library/affected,23narrow and23individual deadlines
+(slowest4566ms); Mac257narrow/519affected/1070library; Windows257narrow/519affected/
+1085library. All platforms passed185reference,502independent fixtures and the
+required static/format gates. Audit retains1501reviews; only13line locations
+changed. Original behavioral RED bodies and canonical physical read/check order
+are mechanically preserved. Fetch again found0/0drift. Full source review found
+no new file/KV owner, persisted format, task selection or activation authority.
+The21-file coherent milestone is ready for scoped commit/push. U1's enclosing
+task publication/retention/activation and all U2–U7 remain open. No production,
+installation, service or retained FS-Server1 action occurred.
+
+September20,00:56UTC: Windows library passed1085tests00:52:09 (including all
+23compiler-prefix cases), Clippy passed00:55:08, reference00:55:28 and fixtures
+00:55:39. Its final batched formatting/driver receipt and sealing remain pending;
+next poll>=01:00:50UTC. Linux and Mac evidence is already sealed/local/verified.
+No commit or full v4-readiness claim yet. A preliminary read-only next task-owner
+inventory exists in campaign cache semantic-task-runtime-entry-inventory.md;
+it explicitly leaves the coupled writer API and GC-consumer trace unfrozen.
+
+September20,00:40UTC: Mac completed all9gates00:35:41 and was sealed00:39:34;
+all66raw artifacts are local and strictly verified:257narrow,519affected,
+1070library,185reference,502independent fixtures and all static gates. Windows
+affected passed00:36:29; its library remained active00:39:05 with13.08GB
+available RAM,42.47GB system and51.42GB test-disk free. Next Windows poll
+>=00:44:10UTC. MAIN remains byte-identical to C9; fetch again reports0/0drift.
+Combined qualification and scoped commit await native Windows completion.
+
+September20,00:34UTC: C9/full1 Linux passed every gate00:27:04 and was
+sealed00:29:44. All66raw artifacts are local; strict verifier passes1673
+library/affected,23narrow,23individual deadlines (slowest4566ms),185reference,
+502independent fixtures and all static gates. The18owned source/test/audit files
+are integrated through patch tooling. Exact-source checking caught a final
+newline added to audit JSON; formatting restored the frozen output, and all110
+inputs now match MAIN exactly. No runtime or test behavior changed in integration.
+Mac narrow/affected/audit/format/Clippy passed as of00:33:29; its library was
+running. Windows narrow passed00:30:10 and affected was running. Native final
+results and combined proof/commit remain pending. Next native poll>=00:38:35UTC.
+No later task writer is enabled; U1 and U2–U7 remain unfinished.
+
+September20,00:27UTC: C9 narrow23/deadlines23, format, audit and strictClippy
+passed; all35completed-stage raw artifacts are local and strictly verified.
+Slowest individual case4,566ms under10seconds. Linux full affected/library is
+still running as of00:23:48; reference/contracts/debt have no result yet.
+The same exact110-input C9 packet is now in native qualification concurrently:
+Mac driver80958 and Windows driver10232 launched00:27UTC after prior-source
+sealing/identity, resource and script syntax guards. These are verification
+jobs only; no following runtime implementation or MAIN integration has begun.
+Next Linux poll>=00:28:50; native polls>=00:32:20UTC. Running native gates in
+parallel changes no acceptance condition; every required gate still precedes
+landing. Task publication/retention/activation and U2–U7 remain owed.
+
+September20,00:21UTC: C8 passed23native cases and23individual10second
+deadlines, then formatting and audit preview. StrictClippy refused exactly
+three redundant fixture drops of borrowed, non-Drop staging adapters. All36
+raw candidate/preflight artifacts are local and strictly verified. Audit
+retains1501IDs/reviews with only13line shifts. C9 removes only those three
+fixture statements and imports that exact metadata; runtime remains C3 and
+all assertions survive. The110-input candidate is
+7877dcd4f647c082c7c3bc02c07d9a580874e1dc74bd6fd87ab68ff4a21d6d7d.
+Desktop full1 invocation08c06a89bb474f3dbd82022f86da1c64/PID460156 launched
+00:18:32UTC; next poll>=00:23:35UTC. It reruns narrow/deadlines/format/audit/
+strictClippy, then full library+21affected targets, reference/contracts/debt.
+No full1 result is claimed. Mac/Windows final scripts are prepared; Windows
+native syntax checks pass and its available disk/RAM exceed entry floors.
+Neither native final qualification nor MAIN source integration has begun.
+The combined verifier is prepared but unexecuted; U1 and U2–U7 remain open.
+
+September20,00:12UTC: C6 passed20native cases at23:59:53UTC, including actual
+continue/finish/reopen at all five hashes. C7 passed22and failed one fixture
+setup: its catalog root was internal, but the damage test targeted a leaf path.
+The runtime did not change. C8 corrects only that fixture's kind selection;
+all23cases remain. Seven raw artifacts per completed candidate are local and
+strictly verified. C8/preflight1 launched00:11:24UTC, desktop invocation
+d833579c677443fb9bfab43c053a6715/PID452605; next poll>=00:16:25UTC.
+Source110inputs
+00e80351fffa700303d713525b47539613727bf35eff067e4c59e2fa183cf1ab.
+If narrow tests pass, the same driver runs23individual10second deadlines,
+formatting, audit preview and strictworkspaceClippy. No preflight success yet.
+Preservation checks now also compare both original behavioral RED test bodies
+exactly. Fetch confirms0/0drift atHEAD28248. Full affected/library/native gates
+and actual source integration remain pending; task ownership and U2–U7 open.
+
+September20,00:01UTC: compiler-prefix C3 passed12native cases, C4 passed14
+and failed one newly unstaged fixture-state setup. C5 corrected that setup but
+stopped at a borrowed Vec move in its new Complete-empty fixture before tests.
+All seven raw artifacts per round are local and strictly verified, including
+the C5 compilation failure (no behavioral result claimed). C6 fixes that
+fixture ownership and adds inconsistent Complete-empty/source and informational
+pruning cursor tests:110inputs
+2d7f82f5c74522a9a92ff68a88a9d1b81234c6584d5b03100d5aa3f2f06792e5,
+desktop invocation2436db32c44a421ab420bf0d80c85c17, launched23:58:34UTC.
+Next poll>=September20,00:03:35UTC. Runtime remains C3, entirely isolated in
+compiler-prefix-overlay. Further local-only tests cover extra owner bindings,
+damaged catalog/definition cause preservation, missing nonempty BASE catalog
+and cancellation retry with a fresh capture; these are not yet qualified.
+Full static/affected/native-platform gates, integration and commit remain owed.
+U1 and U2–U7 remain open; no production/services/retained-data action.
+
+September19,23:38UTC: compiler-prefix RED1 executed0pass/2fail at23:09:55,
+both reaching the callable unavailable boundary (not a compile failure).
+C1 passed6native cases23:21:21, including correct/wrong retained projection,
+reopen/current-input change, phase/cursor refusal and catalog continuation.
+C2 passed8/9cases23:28:13; its new empty-base fixture incorrectly republished
+an already-admitted identical HEAD under another transaction. C3 reuses that
+existing root; no publisher guard was changed. All7raw per completed round are
+local and strictly verified. C3 is running:109inputs
+f63b3ac35e05f0ab756302fa5a9b38584f0f66577a37d9a2004e70e496fed46c,
+invocation7ed367b9c4bc49b488d2b69e5bba6bdc, launched23:34:17; nextpoll>=23:39:25.
+It adds independent cumulative byte/work limits, allocation/refusal/retry and
+entry/final cancellation/pressure checks. All runtime remains in the isolated
+compiler-prefix overlay; no new source integrated or milestone committed.
+Following alias/registry tests are local-only drafts until a new frozen packet.
+Complete task ownership, retention, fencing, activation and U2–U7 remain owed.
+
+September19,23:07UTC: compiler-prefix characterization1 passed at22:54:06:
+1test/1047filtered, ten native combinations across all five hashes,1.31s.
+Both correct and wrong-source class1 projections pass the two old independent
+admissions. All seven raw artifacts are local and strictly verified against
+the106-input packet; no runtime changes. Prefix admission design now fixes
+global-first ordering, deterministic fresh/incremental selection and shared
+budget/ownership rules in the campaign cache semantic-compiler-prefix-entry.md.
+Next: callable failing-first native reopen/current-change regression, then
+read-only source-prefix integration. U1 and U2–U7 remain unfinished.
+
+September19,22:54UTC: source-union validation is committed/pushed as
+28248ec6147badd336a0d7a09a9e1d6550dd731b, with0/0upstream drift and clean tracked
+source. Following test-only compiler-prefix characterization has106inputs
+`a9834b325cddb5d7ec84d86e15a482c5515e93f3dcd9874f1cbefcc15ba12a05`.
+Desktop invocationbd23a6cd864248118727569147c94d6b/PID350754 launched22:53:04.
+It tests whether independent source/catalog admission accepts both correct and
+wrong-source configuration projections with the same plausible counts. No
+execution result, new prefix API or runtime implementation is claimed yet.
+
 September19,22:49UTC: Windows completed every final gate22:47:20 and was
 sealed22:48:50. All raw evidence is local. The combined
 [105-input source-union validation proof](../evidence/user-facing-v4-u1-source-union-validation-proof-20260919.json)

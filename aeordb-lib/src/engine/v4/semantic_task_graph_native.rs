@@ -5,6 +5,7 @@ use crate::engine::v4::semantic_catalog::SemanticCatalogReadErrorV1;
 use std::cell::RefCell;
 #[path = "semantic_task_catalog_graph.rs"]
 mod catalog;
+pub(super) use catalog::load_captured_semantic_object;
 #[path = "semantic_task_namespace_graph.rs"]
 mod namespace;
 

@@ -9,6 +9,33 @@ use crate::engine::v4::semantic_catalog::{
   validate_semantic_definition_identity_v1,
 };
 
+/// Shared captured canonical object reader; callers retain their own exact
+/// snapshot, cumulative lookup admission and enclosing decode reservation.
+pub(in crate::engine::v4::first_authority) fn load_captured_semantic_object<E>(
+  file: &File,
+  lookup: &impl FirstAuthorityEntityLookupV1,
+  header: &DatabaseHeaderV4,
+  kind: u16,
+  identity: &[u8],
+  check: impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<Option<Vec<u8>>, E>
+where
+  E: From<FirstAuthorityPublicationErrorV1> + From<FormatError> + From<SemanticMutationObservationErrorV1>,
+{
+  check()?;
+  let path = semantic_object_path(header.hash_algorithm, kind, identity)?;
+  let cap = crate::engine::v4::semantic_store::semantic_object_cap(kind)?;
+  let Some(loaded) = load_canonical_system_file_at_path(file, lookup, header, &path, SEMANTIC_OBJECT_CONTENT_TYPE, cap)? else {
+    return Ok(None);
+  };
+  check()?;
+  let object = decode_semantic_object(&loaded.body, header.hash_algorithm)?;
+  if object.kind_id != kind || object.object_id != identity {
+    return Err(invalid("semantic_task_graph_semantic_identity", "semantic object differs from its canonical captured path").into());
+  }
+  Ok(Some(loaded.body))
+}
+
 struct CapturedCatalogSource<'operation, 'capture, 'visitor> {
   operation: &'operation GraphOperation<'capture, 'visitor>,
   failure: RefCell<Option<SemanticTaskGraphErrorV1>>,
@@ -36,20 +63,7 @@ impl SemanticCatalogObjectSourceV1 for CapturedCatalogSource<'_, '_, '_> {
 
 impl GraphOperation<'_, '_> {
   pub(super) fn semantic_object(&self, kind: u16, identity: &[u8]) -> Result<Option<Vec<u8>>> {
-    self.check()?;
-    let path = semantic_object_path(self.algorithm(), kind, identity)?;
-    let cap = crate::engine::v4::semantic_store::semantic_object_cap(kind)?;
-    let Some(loaded) =
-      load_canonical_system_file_at_path(self.file(), &self.lookup, self.header(), &path, SEMANTIC_OBJECT_CONTENT_TYPE, cap)?
-    else {
-      return Ok(None);
-    };
-    self.check()?;
-    let object = decode_semantic_object(&loaded.body, self.algorithm())?;
-    if object.kind_id != kind || object.object_id != identity {
-      return Err(invalid("semantic_task_graph_semantic_identity", "semantic object differs from its canonical captured path").into());
-    }
-    Ok(Some(loaded.body))
+    load_captured_semantic_object(self.file(), &self.lookup, self.header(), kind, identity, || self.check())
   }
 
   pub(super) fn walk_catalog(&self, root: &[u8], records: u64, nodes: u64) -> Result<SemanticCatalogWalkStatsV1> {

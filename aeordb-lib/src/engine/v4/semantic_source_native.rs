@@ -4,6 +4,7 @@ use super::*;
 #[path = "semantic_namespace_source_native.rs"]
 mod namespace_sources;
 pub use namespace_sources::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
+pub use namespace_sources::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 pub use namespace_sources::NativeSemanticNamespaceSourceCursorV1;
 pub use namespace_sources::{
   NativeSemanticSourceReplacementV1, NativeSemanticSourceUnionBoundsV1, NativeSemanticSourceUnionErrorV1,

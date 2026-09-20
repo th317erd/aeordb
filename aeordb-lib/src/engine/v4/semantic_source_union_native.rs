@@ -2,6 +2,7 @@
 #[path = "semantic_source_union_validation.rs"]
 mod validation;
 pub use validation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
+pub use validation::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 use super::*;
 use super::super::super::source_base::NativeSemanticSourceBaseV1;
 use crate::engine::v4::parser_registry_compiler::SemanticCompilationErrorV1;
@@ -57,6 +58,10 @@ pub struct NativeSemanticSourceUnionRequestV1<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeSemanticSourceUnionErrorV1 {
+  #[error(transparent)]
+  CatalogCompilation(#[from] crate::engine::v4::semantic_catalog_compiler::SemanticCatalogCompilationErrorV1),
+  #[error(transparent)]
+  Catalog(#[from] crate::engine::v4::semantic_catalog::SemanticCatalogReadErrorV1),
   #[error(transparent)]
   RootAuthority(#[from] crate::engine::v4::root_authority::RootAuthorityReadError),
   #[error(transparent)]

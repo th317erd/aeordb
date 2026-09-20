@@ -1,6 +1,8 @@
 //! Exact retained-source counts and independent fingerprint preimages.
 #[path = "native_semantic_source_union_validation_boundary_spec.rs"]
 mod boundary;
+#[path = "native_semantic_compiler_prefix_spec.rs"]
+mod compiler_prefix;
 use super::*;
 use super::super::super::retained_source_spec::seed_retained_revision;
 use crate::engine::v4::semantic_mutation_control::decode_semantic_mutation_checkpoint;

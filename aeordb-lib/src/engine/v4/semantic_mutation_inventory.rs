@@ -13,6 +13,7 @@ pub use source_control_staging::{NativeSemanticSourceControlPublicationErrorV1, 
 #[path = "semantic_source_native.rs"]
 mod protected_sources;
 pub use protected_sources::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
+pub use protected_sources::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 #[path = "semantic_source_base_native.rs"]
 mod source_base;
 pub use protected_sources::NativeSemanticNamespaceSourceCursorV1;
