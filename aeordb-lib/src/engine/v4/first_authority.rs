@@ -13619,6 +13619,12 @@ trait FirstAuthorityEntityLookupV1 {
   fn admit_read(&self, _locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
     Ok(())
   }
+  fn admit_metadata_read(&self, _locator: &KVEntry, _read_length: usize) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    Err(FirstAuthorityPublicationErrorV1::invalid(
+      "first_authority_metadata_admission",
+      "metadata reads require an explicitly bounded captured lookup",
+    ))
+  }
 }
 
 impl FirstAuthorityEntityLookupV1 for DiskKVStore {
@@ -13639,6 +13645,9 @@ impl<T: FirstAuthorityEntityLookupV1> FirstAuthorityEntityLookupV1 for MutexGuar
   }
   fn admit_read(&self, locator: &KVEntry) -> Result<(), FirstAuthorityPublicationErrorV1> {
     (**self).admit_read(locator)
+  }
+  fn admit_metadata_read(&self, locator: &KVEntry, read_length: usize) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    (**self).admit_metadata_read(locator, read_length)
   }
 }
 
@@ -13683,6 +13692,52 @@ fn read_entity_bounded(
     ));
   }
   Ok(Some(bytes))
+}
+
+/// Read checked framing and the exact physical key, not the opaque payload.
+/// Physical length is observed once by the protected scan; its captured lookup
+/// separately checks retained extents and charges every actual prefix byte.
+fn read_entity_metadata_type(
+  file: &File,
+  kv: &impl FirstAuthorityEntityLookupV1,
+  key: &[u8],
+  write_sequence_high_water: u64,
+  physical_file_length: u64,
+) -> Result<Option<EntryTypeV4>, FirstAuthorityPublicationErrorV1> {
+  let Some(locator) = kv.get(key)? else {
+    return Ok(None);
+  };
+  let length = usize::try_from(locator.total_length).map_err(|error| {
+    FirstAuthorityPublicationErrorV1::invalid("first_authority_locator_length", format!("locator length exceeds usize: {error}"))
+  })?;
+  let algorithm = kv.hash_algo();
+  let prefix_length = checked_whole_entity_encoded_length(algorithm, algorithm.hash_length(), 0)?;
+  let read_length = length.min(prefix_length);
+  let mut prefix = [0u8; super::entity::WHOLE_ENTITY_V1_MAX_HEADER_LENGTH];
+  if prefix_length > prefix.len() {
+    return Err(FirstAuthorityPublicationErrorV1::invalid("first_authority_metadata_width", "registered metadata exceeds fixed scratch"));
+  }
+  kv.admit_metadata_read(&locator, read_length)?;
+  let physical_end = locator
+    .offset
+    .checked_add(u64::from(locator.total_length))
+    .ok_or_else(|| FirstAuthorityPublicationErrorV1::invalid("first_authority_metadata_extent", "entity extent overflowed"))?;
+  if physical_end > physical_file_length {
+    return Err(FirstAuthorityPublicationErrorV1::invalid("first_authority_metadata_extent", "entity extends beyond the physical file"));
+  }
+  read_file_at_native(file, locator.offset, &mut prefix[..read_length])
+    .map_err(|error| FirstAuthorityPublicationErrorV1::invalid("first_authority_readback_io", error.to_string()))?;
+  let header = super::entity::decode_whole_entity_header_v1(&prefix[..read_length], algorithm, write_sequence_high_water, length)?;
+  if header.key_length != algorithm.hash_length()
+    || key.len() != algorithm.hash_length()
+    || prefix[..read_length].get(header.header_length..prefix_length) != Some(key)
+  {
+    return Err(FirstAuthorityPublicationErrorV1::invalid(
+      "first_authority_locator_identity",
+      "KV locator resolves to another WholeEntity key",
+    ));
+  }
+  Ok(Some(header.entry_type))
 }
 
 fn ensure_retirement_recovery_not_cancelled(cancellation: &CancellationToken) -> Result<(), FirstAuthorityPublicationErrorV1> {

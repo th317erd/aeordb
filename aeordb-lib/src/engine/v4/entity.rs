@@ -161,11 +161,31 @@ pub fn encode_whole_entity(request: &WholeEntityWriteV1<'_>) -> FormatResult<Vec
   Ok(entity)
 }
 
-pub fn decode_whole_entity<'a>(
-  entity: &'a [u8],
+/// Checked physical framing only; this does not verify the key or payload.
+#[derive(Debug)]
+pub(crate) struct WholeEntityHeaderV1<'a> {
+  pub entity_version: u8,
+  pub entry_type: EntryTypeV4,
+  pub flags: u8,
+  pub hash_algorithm: HashAlgorithm,
+  pub compression_algorithm: CompressionAlgorithm,
+  pub timestamp_ms: u64,
+  pub write_sequence: u64,
+  pub integrity_hash: &'a [u8],
+  pub header_length: usize,
+  pub key_length: usize,
+  pub value_length: usize,
+}
+
+/// The input must contain the header, and may also contain the body. The
+/// caller supplies the independently bounded physical length, not a length
+/// trusted from this header. Full decoding uses the actual input length.
+pub(crate) fn decode_whole_entity_header_v1(
+  entity: &[u8],
   expected_hash_algorithm: HashAlgorithm,
   write_sequence_high_water: u64,
-) -> FormatResult<WholeEntityV1<'a>> {
+  physical_length: usize,
+) -> FormatResult<WholeEntityHeaderV1<'_>> {
   if entity.len() < 12 {
     return Err(error(MalformedInputClass::TruncationOrTrailingBytes, "truncated_entity_prefix", "need 12-byte entity prefix"));
   }
@@ -204,11 +224,11 @@ pub fn decode_whole_entity<'a>(
   let total_length = usize::try_from(u32_at(entity, 8)).map_err(|_| {
     error(MalformedInputClass::LengthCountOrArithmeticOverflow, "total_length_conversion", "total length does not fit usize")
   })?;
-  if total_length != entity.len() {
+  if total_length != physical_length {
     return Err(error(
       MalformedInputClass::TruncationOrTrailingBytes,
       "total_length",
-      format!("declared {total_length}, input {}", entity.len()),
+      format!("declared {total_length}, input {physical_length}"),
     ));
   }
 
@@ -255,11 +275,11 @@ pub fn decode_whole_entity<'a>(
   let value_end = key_end.checked_add(value_length).ok_or_else(|| {
     error(MalformedInputClass::LengthCountOrArithmeticOverflow, "value_end_overflow", "key end plus value length overflow")
   })?;
-  if value_end != entity.len() {
+  if value_end != physical_length {
     return Err(error(
       MalformedInputClass::TruncationOrTrailingBytes,
       "entity_length_disagreement",
-      format!("calculated {value_end}, input {}", entity.len()),
+      format!("calculated {value_end}, input {physical_length}"),
     ));
   }
 
@@ -275,8 +295,32 @@ pub fn decode_whole_entity<'a>(
     return Err(error(MalformedInputClass::NonzeroReservedOrPadding, "reserved_nonzero", "whole entity v1 reserve"));
   }
 
-  let integrity_hash = &entity[41..41 + hash_width];
-  let key = &entity[header_length..key_end];
+  Ok(WholeEntityHeaderV1 {
+    entity_version,
+    entry_type,
+    flags,
+    hash_algorithm: stored_hash_algorithm,
+    compression_algorithm,
+    timestamp_ms: u64_at(entity, 25),
+    write_sequence,
+    integrity_hash: &entity[41..41 + hash_width],
+    header_length,
+    key_length,
+    value_length,
+  })
+}
+
+pub fn decode_whole_entity<'a>(
+  entity: &'a [u8],
+  expected_hash_algorithm: HashAlgorithm,
+  write_sequence_high_water: u64,
+) -> FormatResult<WholeEntityV1<'a>> {
+  let header = decode_whole_entity_header_v1(entity, expected_hash_algorithm, write_sequence_high_water, entity.len())?;
+  // Both sums and their equality to the physical input were checked above.
+  let key_end = header.header_length + header.key_length;
+  let value_end = key_end + header.value_length;
+  let integrity_hash = header.integrity_hash;
+  let key = &entity[header.header_length..key_end];
   let stored_value = &entity[key_end..value_end];
   let computed_integrity = digest_parts(
     expected_hash_algorithm,
@@ -291,13 +335,13 @@ pub fn decode_whole_entity<'a>(
   }
 
   Ok(WholeEntityV1 {
-    entity_version,
-    entry_type,
-    flags,
-    hash_algorithm: stored_hash_algorithm,
-    compression_algorithm,
-    timestamp_ms: u64_at(entity, 25),
-    write_sequence,
+    entity_version: header.entity_version,
+    entry_type: header.entry_type,
+    flags: header.flags,
+    hash_algorithm: header.hash_algorithm,
+    compression_algorithm: header.compression_algorithm,
+    timestamp_ms: header.timestamp_ms,
+    write_sequence: header.write_sequence,
     integrity_hash,
     key,
     stored_value,

@@ -183,6 +183,20 @@ impl FirstAuthorityEntityLookupV1 for CapturedEntityLookupV1<'_> {
       ));
     }
     self.validate_reference_extent(locator)?;
+    self.charge_read_bytes(length)
+  }
+
+  fn admit_metadata_read(&self, locator: &KVEntry, read_length: usize) -> Result<(), FirstAuthorityPublicationErrorV1> {
+    if self.cancellation.is_cancelled() {
+      return Err(EngineError::Cancelled("captured semantic task read".to_string()).into());
+    }
+    self.validate_reference_extent(locator)?;
+    self.charge_read_bytes(read_length as u64)
+  }
+}
+
+impl CapturedEntityLookupV1<'_> {
+  fn charge_read_bytes(&self, length: u64) -> Result<(), FirstAuthorityPublicationErrorV1> {
     let remaining = self.remaining_read_bytes.get().checked_sub(length).ok_or_else(|| {
       FirstAuthorityPublicationErrorV1::invalid(
         "semantic_task_inventory_read_bound",
@@ -222,17 +236,43 @@ impl CapturedEntityLookupV1<'_> {
 }
 
 impl NativeSemanticMutationInventoryV1<'_> {
+  /// Metadata-only discovery; opaque ordinary payloads are not integrity-verified.
+  /// Checked physical headers and keys classify entries; every FileRecord and
+  /// canonical control dependency is still fully inspected. Completion only
+  /// exhausts the captured inventory, never grants retention or resume authority.
+  pub fn visit_metadata(
+    &self,
+    visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
+    self.visit_entries(visitor, true)
+  }
+
   /// Stream provisional task observations. Only a complete successful result
   /// proves this captured current-KV inventory was exhausted; callbacks cannot
   /// grant GC closure or resume authority. Each simultaneous visit is admitted
   /// separately, without holding the publisher's root or KV mutex.
   pub fn visit(
     &self,
+    visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
+    self.visit_entries(visitor, false)
+  }
+
+  fn visit_entries(
+    &self,
     mut visitor: impl FnMut(&SemanticMutationObservationV1) -> Result<bool, SemanticMutationObservationErrorV1>,
+    metadata_only: bool,
   ) -> Result<SemanticMutationInventorySummaryV1, SemanticMutationObservationErrorV1> {
     check_cancelled(&self.cancellation)?;
     self._memory.check_admission()?;
     let scan_memory = self.memory.reserve(MemoryOwner::Task, self.scan_scratch_bytes, AdmissionClass::Maintenance)?;
+    let physical_file_length = if metadata_only {
+      Some(
+        self._protection.publisher().file.metadata().map_err(EngineError::IoError).map_err(FirstAuthorityPublicationErrorV1::from)?.len(),
+      )
+    } else {
+      None
+    };
     let lookup = CapturedEntityLookupV1 {
       snapshot: &self.snapshot,
       header: &self.header.selected.header,
@@ -245,6 +285,21 @@ impl NativeSemanticMutationInventoryV1<'_> {
     let result = self.snapshot.visit_captured_entries(&self.cancellation, self.bounds.maximum_work, |entry| {
       let result = (|| {
         scan_memory.check_admission()?;
+        if let Some(file_length) = physical_file_length {
+          let header = &self.header.selected.header;
+          let kind = read_entity_metadata_type(
+            &self._protection.publisher().file,
+            &lookup,
+            &entry.hash,
+            header.write_sequence_high_water,
+            file_length,
+          )?
+          .ok_or_else(|| invalid("semantic_task_inventory_missing", "captured live entry cannot be resolved from the same snapshot"))?;
+          validate_inventory_role(entry, kind)?;
+          if kind != EntryTypeV4::FileRecord {
+            return Ok(true);
+          }
+        }
         let Some(observation) = self.inspect_entry(&lookup, entry)? else {
           return Ok(true);
         };
@@ -280,21 +335,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     let entity = decode_whole_entity(&bytes, header.hash_algorithm, header.write_sequence_high_water)?;
     // KV tags are not WholeEntity type IDs. Bind the frozen registries
     // explicitly instead of filtering on an unverified tag and hiding a task.
-    let expected_tag = match entity.entry_type {
-      EntryTypeV4::Chunk => kv_tag::CHUNK,
-      EntryTypeV4::FileRecord => kv_tag::FILE_RECORD,
-      EntryTypeV4::DirectoryIndex => kv_tag::DIRECTORY,
-      EntryTypeV4::DeletionRecord => kv_tag::DELETION,
-      EntryTypeV4::Snapshot => kv_tag::SNAPSHOT,
-      EntryTypeV4::Void => kv_tag::VOID,
-      EntryTypeV4::Fork => kv_tag::FORK,
-      EntryTypeV4::Symlink => kv_tag::SYMLINK,
-      EntryTypeV4::IndexArtifact => kv_tag::INDEX_ARTIFACT,
-      EntryTypeV4::GcArtifact => kv_tag::GC_ARTIFACT,
-    };
-    if locator.type_flags != expected_tag {
-      return Err(invalid("semantic_task_inventory_role", "captured KV role disagrees with its checked WholeEntity"));
-    }
+    validate_inventory_role(locator, entity.entry_type)?;
     if entity.entry_type != EntryTypeV4::FileRecord {
       return Ok(None);
     }
@@ -400,6 +441,25 @@ impl NativeSemanticMutationInventoryV1<'_> {
     )
     .map(Some)
   }
+}
+
+fn validate_inventory_role(locator: &KVEntry, entry_type: EntryTypeV4) -> Result<(), SemanticMutationObservationErrorV1> {
+  let expected_tag = match entry_type {
+    EntryTypeV4::Chunk => kv_tag::CHUNK,
+    EntryTypeV4::FileRecord => kv_tag::FILE_RECORD,
+    EntryTypeV4::DirectoryIndex => kv_tag::DIRECTORY,
+    EntryTypeV4::DeletionRecord => kv_tag::DELETION,
+    EntryTypeV4::Snapshot => kv_tag::SNAPSHOT,
+    EntryTypeV4::Void => kv_tag::VOID,
+    EntryTypeV4::Fork => kv_tag::FORK,
+    EntryTypeV4::Symlink => kv_tag::SYMLINK,
+    EntryTypeV4::IndexArtifact => kv_tag::INDEX_ARTIFACT,
+    EntryTypeV4::GcArtifact => kv_tag::GC_ARTIFACT,
+  };
+  if locator.type_flags != expected_tag {
+    return Err(invalid("semantic_task_inventory_role", "captured KV role disagrees with its checked WholeEntity"));
+  }
+  Ok(())
 }
 
 fn parse_control_path(path: &str) -> Result<(SystemControlKindV1, SystemControlSlotV1, &str), SemanticMutationObservationErrorV1> {

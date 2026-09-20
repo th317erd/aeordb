@@ -307,6 +307,41 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     assert!(!inventory.contains(forbidden), "captured task inventory gained another authority/unbounded collection: {forbidden}");
   }
   let authority_source = std::fs::read_to_string(&first_authority_path).unwrap();
+  for required in [
+    "pubfnvisit_metadata(",
+    "self.visit_entries(visitor,true)",
+    "self.visit_entries(visitor,false)",
+    "read_entity_metadata_type(",
+    "validate_inventory_role(entry,kind)?",
+    "ifkind!=EntryTypeV4::FileRecord{returnOk(true);}",
+    "self.inspect_entry(&lookup,entry)?",
+    "self.charge_read_bytes(read_lengthasu64)",
+  ] {
+    assert!(inventory.contains(required), "metadata inventory lost checked bounded classification: {required}");
+  }
+  let metadata_reader: String = authority_source
+    .split("fn read_entity_metadata_type(")
+    .nth(1)
+    .unwrap()
+    .split("fn ensure_retirement_recovery_not_cancelled(")
+    .next()
+    .unwrap()
+    .split_whitespace()
+    .collect();
+  for required in [
+    "kv.admit_metadata_read(&locator,read_length)?",
+    "checked_whole_entity_encoded_length(algorithm,algorithm.hash_length(),0)?",
+    "physical_end>physical_file_length",
+    "read_file_at_native(file,locator.offset,&mutprefix[..read_length])",
+    "super::entity::decode_whole_entity_header_v1(",
+    "header.key_length!=algorithm.hash_length()",
+    "prefix[..read_length].get(header.header_length..prefix_length)!=Some(key)",
+  ] {
+    assert!(metadata_reader.contains(required), "metadata physical reader lost shared framing or bounded admission: {required}");
+  }
+  assert!(!metadata_reader.contains("decode_whole_entity("), "metadata-only reader unexpectedly reads complete bodies");
+  let framing = std::fs::read_to_string(source_root.join("engine/v4/entity.rs")).unwrap();
+  assert_eq!(framing.matches("decode_whole_entity_header_v1(").count(), 2, "full framing must share exactly one header decoder");
   let source_catalog_build = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_catalog_build.rs")).unwrap();
   let assembly: String = source_catalog_build.split_whitespace().collect();
   for required in [

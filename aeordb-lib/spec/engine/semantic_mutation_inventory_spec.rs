@@ -1,3 +1,7 @@
+#[path = "native_task_inventory_metadata_spec.rs"]
+mod metadata;
+#[path = "native_task_discovery_payload_characterization_spec.rs"]
+mod payload_characterization;
 use super::*;
 
 fn bounds() -> NativeSemanticMutationInventoryBoundsV1 {

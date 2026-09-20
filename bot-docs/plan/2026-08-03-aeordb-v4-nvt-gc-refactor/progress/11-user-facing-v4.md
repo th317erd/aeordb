@@ -26,6 +26,123 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,04:01UTC: Windows final1 completed03:54:43 and sealed03:59:37;
+all96raw artifacts are local. The combined
+[120-input metadata proof](../evidence/user-facing-v4-u1-task-metadata-proof-20260920.json)
+passes against MAIN and all three native gate sets. Linux1825library/affected,
+Mac1096library, Windows1111library; all12new cases pass everywhere. No code
+changed after final C6 integration. Exact diff, reader/consumer and resource
+review is complete; fetched upstream is0/0. Ready for non-writing proof recheck
+and scoped14-file commit. U1 and U2–U7 remain open.
+
+Following test-only characterization2 completed03:54:50:1test/twohashes/0.11s,
+all raw local/strictly checked against185b09a319e12e38db84b2c0f83260cc47f0b1a9ab31d732924a2f4528b06278.
+The independently specified26-locator union matches both discovered tasks; each
+graph passes a per-task byte limit that their combined reads exceed. Char1's
+nested scratch refusal under64MiBsoft/96MiBhard is retained; char2 narrows only
+the small fixture's per-entity ceiling to256KiB, without raising memory limits.
+This demonstrates a missing composed budget, not a defect in the documented
+independent-call contracts. Next draft scope/tests are prepared; no next runtime
+implementation, durable mark or task writer is enabled. No jobs remain running.
+
+September20,03:48UTC: Mac final1 completed03:33:12 and sealed03:36:42;
+all66raw artifacts are local and strictly verified:1096library,645affected,
+257narrow,185reference and502fixtures, all static/format gates pass. Windows
+final1 remains in library,689cases completed including all12new metadata cases;
+no failure receipt. Nextpoll>=03:52:55. The following task-retention characterization
+is test-only:121inputs d5bf3cabc73009a30bc1b095ba569cff5a6c210bfdd6479ce548fefce88d713e,
+desktop invocationb12582e414b74f469023ac78f21685c8/PID643853 since03:46:37.
+Nextpoll>=03:51:37. It checks two selected task graphs against an independently
+enumerated26-locator union and shows separate per-task limits do not enforce a
+combined limit. It is not yet a result or implementation. Linux C6 evidence was
+sealed before this new test build; MAIN remains exactly C6. Draft next scope and
+two proposed RED tests are in cache only; no following runtime change has begun.
+
+September20,03:31UTC: metadata C6/full1 Linux completed03:29:23 and was sealed
+03:31:01. All raw artifacts are local; strict final Linux verifier passes.
+1096library plus729affected tests,12individual deadlines (slowest1309ms),
+185reference tests,502independent fixtures,1501reviewed audit occurrences,
+format/Clippy/debt gates all pass. Mac narrow/affected/audit/format/Clippy passed
+and library is active; Windows narrow passed and affected is active. Nextpoll
+>=03:35:45. Follow-on read-only tracing found the existing mark-runtime zero-caller
+guard and the distinct buffered-discovery versus flushed-slot contracts; a future
+retention adapter must preserve exact snapshot identity and cumulative budgets,
+not simply compose per-task meters that reset. No following runtime edits yet.
+
+September20,03:26UTC: C5/preflight2 completed03:13:52 with every gate passing;
+remaining raw artifacts are local and the full preflight verifier passes.
+Twelve individual deadlines passed (slowest1242ms). Final C6 includes the reviewed
+audit relocation metadata and unchanged C3 runtime:120inputs
+c325427bb1b4cc5475d16d0c48b71cc56a6c21f4281341bb284ff9629dcfddc2.
+All11owned source/test/audit paths are integrated into MAIN and byte-exact against
+the frozen packet. Linux full1, macOS final1 and Windows final1 launched03:24UTC;
+native final results are pending, next status checks>=03:30UTC. No production,
+service, installation or retained database action occurred.
+
+September20,03:17UTC: C5 passed12/12, twelve deadlines,5architecture cases,
+126shared reader/writer/GC/migration regressions and formatting. Completed raw
+artifacts are local/strictly checked. Clippy remained active at03:13:34; nextpoll
+>=03:18:35. The audit scanner still finds1501occurrences. Header factoring moved
+exactly three existing integer-conversion error mappings into the new shared
+function, changing their scanner IDs and producing pending review placeholders.
+The checked review maps those exact three patterns back to their existing
+typed-format-failure rationale;15line positions shift, no new suppression or
+relaxed review. Raw preview is retained unchanged. Separate reviewed metadata
+SHA2ad449b3bce47844bd1a0a42e55b342a932a46515627d4d08d19184254974958
+is in cache and overlay, not MAIN; final source/gates will include it. The final
+three-platform verifier and launch/seal scripts are prepared but not executed.
+
+September20,03:08UTC: metadata C3 passed10/10 cases in4.46s, all raw local and
+verified. C4 expanded to12 cases, passed11 and failed one new test's string-code
+expectation: the actual result was the existing typed
+`Authority(Engine(Cancelled("captured KV entry scan")))`, not a runtime defect.
+C4 raw is local/verified; its preflight never started. C5 changes only that
+assertion to match the typed cancellation, preserving runtime and original RED.
+120inputs410e6c130c9da4404dba70fa802c934a63c8159f98b3f43947e329dadcfa4b07.
+C5/preflight2 is launched on desktop; it will run the12cases, individual deadlines,
+first-authority architecture, six shared-reader/writer/GC/migration targets,
+format, audit preview and strictClippy before native fan-out. Final Linux/Mac/
+Windows drivers have been prepared, not launched. MAIN runtime is still0342eac4.
+
+September20,02:58UTC: metadata C1 failed to compile two new fixture helpers
+(FnOnce reused across two hashes and an unsupported test-setup error conversion).
+No behavior ran. Its raw evidence is local/strictly verified. C2 was prepared
+before that result and never launched; retain its packet as unrun history.
+C3 corrects those helpers and runs ten native metadata cases on desktop since
+02:55:38, invocationbbc0cd4eeee3461e830e8d52b3e54548/PID592803; nextpoll>=03:00:38.
+120inputs92f9415c3102d899ccad40fb165b11161cd7b1aeade88e886dbc32b1fd24bb2d.
+The next overlay additionally restores a formatting-only change to an existing
+assertion and adds empty/B-only/work/cancellation and dependency-binding cases
+(twelve total), not yet packaged or run. Mechanical preservation checks pass
+against0342eac4: original physical read order, header checks/diagnostics, full
+integrity checks, original deep-inventory regressions and both RED bodies.
+Metadata reads use the existing file/lookup owner, bounded stack header/key
+scratch and the same cumulative byte meter; FileRecords/control dependencies
+still use deep canonical owners. Full behavior/platform/static proof is pending.
+
+September20,02:44UTC: metadata RED1 compiled and executed0pass/2fail at the
+explicit `semantic_task_metadata_unavailable` refusal; no compilation failure.
+The small-task-only64KiB baseline passed before its target assertion. Exact
+116-input packet39bcbe5069303d9774a16eb36a5cc7b16601c9b25d2feb130f69a10b0865045c,
+desktop invocation09ff53af2e924c95a53b513ae46a6c66/PID580400, started02:38:42,
+finished02:39:42. MAIN runtime remains0342eac4; next changes stay in the isolated
+task-metadata-overlay until final qualification. Boundary fixtures prepared in
+that overlay are not part of RED1 and have not run. Next: shared header factoring,
+bounded native header/key observation and metadata entry with unchanged deep
+entry behavior, then original RED and added boundary/regression qualification.
+
+September20,02:36UTC: checkpoint milestone committed and pushed as
+`0342eac4448ec697d30384918563ce32a8c974e0`; upstream0/0. Both combined verifier
+and non-writing proof recheck passed before commit; all17owned files landed.
+Next entry is separately named bounded metadata-only task discovery, preserving
+the original deep scan. Source/consumer review found no production consumer of
+the current inventory summary beyond exports; its task-count/completion fields
+remain sufficient without inventing retention rights. The existing shared
+WholeEntity decoder is the framing owner; factoring it requires reader/writer
+and native consumer regressions. Exact scope and failing-first obligations are
+appended to semantic-mutation-task-contract.md; cache draft remains supporting
+territory notes. No implementation result or metadata RED yet.
+
 September20,02:33UTC: Windows final2 completed02:31:08 and was sealed02:32:07.
 All raw artifacts are local. The combined
 [113-input checkpoint proof](../evidence/user-facing-v4-u1-captured-checkpoint-proof-20260920.json)

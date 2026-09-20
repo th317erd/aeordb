@@ -1109,3 +1109,51 @@ runtime remains identical to C1, original behavioral RED cases unchanged.
 No persisted layout, generic writer or capability advertisement changed.
 This closes initial dependency staging, not selected-task retention, fencing,
 resumption or activation. Those and U2–U7 remain required.
+
+### Bounded metadata-only native task discovery — entry0342eac4
+
+The existing `visit` remains deep physical inspection. Add separately named
+`visit_metadata` with the same provisional task-count/completion result; neither
+entry grants retention, resumption or task selection. Completion means the
+captured KV inventory was exhausted, not integrity verification of opaque
+non-FileRecord payloads. Existing callers and error behavior remain unchanged.
+
+Factor WholeEntity header validation into its current decoder owner, preserving
+full-decoder validation order and diagnostics. The metadata physical read remains
+under first-authority/captured lookup ownership: fixed bounded header/key reads,
+CRC and component/total lengths, kind/version/hash/codec/reserved bytes, sequence,
+captured physical extent and exact locator/key/role binding must be checked before
+classifying the entry. Header integrity alone never certifies payload integrity.
+Fully read all FileRecords and all canonical control dependencies through existing
+owners, including ordinary large FileRecords under their current refusal policy.
+Use one snapshot and cumulative actual physical-byte/work budgets, separately
+admitted simultaneous scan scratch; no unchecked KV-tag filtering, live fallback,
+complete-key map, hidden flush or second framing parser.
+
+Retain the reproduced deep-read characterization and first execute a callable
+metadata RED: one small task fits64KiB, then adding an ordinary256KiB chunk must
+not prevent exact metadata discovery under that budget. Exercise all five hashes.
+Unrelated payload damage may remain opaque for metadata but must fail deep
+inspection; malformed headers, FileRecords and task dependencies must still fail.
+Add independent framing/diagnostic fixtures, exact quota boundaries, truncation/
+EOF/extent/identity/role failures, history/concurrent replacement, callback error/
+cancellation precedence, early completion, nested memory, allocation refusal and
+retry. Preserve original deep-inventory regressions. Include first-authority
+architecture in preflight, then final affected/static/reference/native-platform
+gates. This is discovery infrastructure, not the following graph-to-mark owner.
+
+Qualification September20: the exact120-input C6 snapshot passed the
+[three-platform metadata-discovery proof](evidence/user-facing-v4-u1-task-metadata-proof-20260920.json).
+All12native cases pass on Linux/macOS/Windows; Linux additionally enforces
+individual ten-second deadlines (slowest1309ms). Linux passed1825library/affected
+tests, Mac1096library and Windows1111library; both native platforms passed645
+affected and257narrow tests. Every platform passed185reference tests,
+502independent fixtures and required static/format gates. The audit preserves
+1501reviewed occurrences; three existing integer-conversion mappings changed
+scanner identity after moving into the shared header decoder, with exact old
+patterns and review rationale retained. Original deep-reader order/diagnostics,
+integrity checks and behavioral RED bodies are mechanically preserved.
+The proof retains the initial fixture compilation failures and the later typed-
+cancellation assertion correction. No runtime changed after passing C3.
+Metadata completion still says nothing about opaque payload integrity, global
+mark closure, durable task ownership or activation. Those and U2–U7 remain open.
