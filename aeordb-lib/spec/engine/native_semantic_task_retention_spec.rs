@@ -1,6 +1,10 @@
 //! Failing-first native composition targets; provisional graph references only.
 #[path = "native_semantic_task_retention_boundary_spec.rs"]
 mod boundary;
+#[path = "native_semantic_task_mark_characterization_spec.rs"]
+mod mark_characterization;
+#[path = "native_semantic_task_mark_spec.rs"]
+mod task_mark;
 use super::*;
 use super::retention_characterization::seed_second_task;
 

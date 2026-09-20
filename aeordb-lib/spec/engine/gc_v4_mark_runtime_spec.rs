@@ -293,10 +293,11 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn mark_runtime_remains_disconnected_from_live_gc_service_and_control_paths() {
+fn mark_runtime_only_binds_the_readonly_captured_task_adapter() {
   let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
   let bitmap_path = source_root.join("engine/v4/gc_mark_runtime.rs");
   let snapshot_path = source_root.join("engine/kv_snapshot.rs");
+  let adapter_path = source_root.join("engine/v4/semantic_task_mark_native.rs");
   let mut sources = Vec::new();
   rust_sources(&source_root, &mut sources);
 
@@ -309,7 +310,16 @@ fn mark_runtime_remains_disconnected_from_live_gc_service_and_control_paths() {
     })
     .map(|path| path.strip_prefix(&source_root).unwrap().to_owned())
     .collect();
-  assert!(callers.is_empty(), "P4-3 mark runtime activated before its owner gate: {callers:?}");
+  assert_eq!(
+    callers,
+    vec![PathBuf::from("engine/v4/semantic_task_mark_native.rs")],
+    "only the capture-bound task contribution is admitted"
+  );
+
+  let adapter_source = fs::read_to_string(adapter_path).unwrap();
+  for forbidden in ["publish_", "lock_kv", "root_state", ".flush(", "control_store", "authorizes_reclaim", "std::fs", "VoidManager"] {
+    assert!(!adapter_source.contains(forbidden), "task contribution contains forbidden authority token {forbidden}");
+  }
 
   let bitmap_source = fs::read_to_string(bitmap_path).unwrap();
   for forbidden in ["engine::gc", "VoidManager", "V4ControlStore", "candidate", "sweep", "authorizes_reclaim"] {

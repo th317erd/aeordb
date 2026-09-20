@@ -9,6 +9,9 @@ pub use semantic_mutation_observation::{
 };
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
+pub use semantic_mutation_observation::{
+  NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, SemanticTaskMarkErrorV1, SemanticTaskMarkSummaryV1,
+};
 pub use semantic_mutation_observation::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use semantic_mutation_observation::{
   NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1,

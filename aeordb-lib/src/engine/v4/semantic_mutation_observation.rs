@@ -6,6 +6,7 @@ pub use inventory::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceU
 pub use inventory::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 pub use inventory::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 pub use inventory::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
+pub use inventory::{NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, SemanticTaskMarkErrorV1, SemanticTaskMarkSummaryV1};
 pub use inventory::{NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1};
 pub use inventory::{NativeSemanticSourceControlPublicationErrorV1, NativeSemanticSourceNodeStagingRequestV1};
 pub use inventory::NativeSemanticNamespaceSourceCursorV1;

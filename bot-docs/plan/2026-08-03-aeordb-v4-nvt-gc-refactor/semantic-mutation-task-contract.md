@@ -1245,3 +1245,59 @@ count failures, formatting and malformed audit-packet attempts remain history.
 The final audit keeps all1501reviewed occurrence identities and changes only
 their line metadata. This qualifies read-only composed traversal and the scoped
 KV bookkeeping correction, not durable task publication or global GC completion.
+
+### Captured task bitmap contribution — following retention integration
+
+`NativeSemanticMutationInventoryV1::mark_captured_semantic_tasks` composes its
+qualified all-task visitor with the existing captured-slot validator and dense
+bitmap. The opaque result borrows the same inventory and staging-protection
+lifetime. It is only this capture's task contribution: no global completion,
+task selection, resume, release, publication, activation or reclaim permit.
+Public result access is read-only summary/bitmap bytes/full-locator membership.
+
+Reject every nonempty captured KV buffer, even with zero tasks. Never flush,
+recapture current state or create another physical owner. The enclosing global
+run-start owner still must explicitly flush and capture its complete frontier.
+Each callback resolves its key in the retained snapshot and compares flags,
+hash, offset and length before marking; a same-key replacement is not the same
+incarnation. Duplicate references are charged but mark idempotently. Any failure
+drops the provisional bitmap rather than returning partial completion.
+
+Bounds retain the existing cumulative discovery/graph/source work and physical
+read admission, adding positive maximum_slot_lookups and maximum_slot_page_bytes.
+Each resolution charges one full selected-algorithm page before lookup, including
+cache hits and repeated references. Report these as logical page bytes, not
+measured disk I/O. Reserve the entire bitmap and checked four-page decode scratch
+through the same coordinator before traversal. Check cancellation/pressure at
+each lookup and at successful completion; retain only bitmap memory afterwards.
+Membership queries separately admit bounded page scratch, preserve build counters,
+and return false for absent/deleted/different locators. Corrupt layout, malformed
+hash width and interruptions remain typed errors. Preserve original graph,
+bitmap, observation and integer-conversion causes across callback unwinding.
+
+Characterization independently proves26expected physical locators and the
+same-key/same-slot/different-offset hazard. Callable REDs precede implementation;
+bitmap bytes are compared with a separately enumerated captured-slot oracle,
+not only internal counters. Coverage includes exact combined limits, all hashes,
+empty/released tasks, buffered refusal, historical replacement, native reopen,
+later-task failure/retry, allocation refusal, simultaneous reservations and
+deterministic first/final interruption. A scoped test-only observer invokes the
+same build operation; the public entry supplies no callback. The bitmap's
+zero-production-caller guard is handed off only to this named adapter; forbidden
+service/control/reclaim ownership remains checked. Original reader/KV/bitmap
+tests survive. Individual deadlines and final native/static/reference proof
+precede landing.
+
+This does not persist a bitmap or qualify durable task discovery after process
+restart, GC mutation convergence, task fencing/checkpoint selection or atomic
+task/generation/HEAD activation. Those enclosing integrations remain required.
+
+Mark qualification:137-input C4 passed the final native gates, including14new
+cases, Linux2002library/affected, macOS1134library/784affected, Windows1149library/
+784affected,185reference and502independent fixtures. Individual Linux deadlines
+peaked348ms. Windows completed September20,07:53:27UTC; all raw evidence is local
+and checked. The [combined proof](evidence/user-facing-v4-u1-task-mark-proof-20260920.json)
+records the executed characterization, REDs, corrected audit failure, immutable
+source/binary identities, bounds and retained parent-only KV consumer evidence.
+This remains a read-only task contribution, not durable final reclamation
+enforcement or user-facing production readiness.

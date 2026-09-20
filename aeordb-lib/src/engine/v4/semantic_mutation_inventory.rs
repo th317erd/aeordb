@@ -5,6 +5,9 @@ pub use task_graph::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, 
 #[path = "semantic_task_retention_native.rs"]
 mod task_retention;
 pub use task_retention::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
+#[path = "semantic_task_mark_native.rs"]
+mod task_mark;
+pub use task_mark::{NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, SemanticTaskMarkErrorV1, SemanticTaskMarkSummaryV1};
 #[path = "semantic_source_capture_staging.rs"]
 mod source_capture_staging;
 pub use source_capture_staging::NativeCapturedSemanticCheckpointRequestV1;

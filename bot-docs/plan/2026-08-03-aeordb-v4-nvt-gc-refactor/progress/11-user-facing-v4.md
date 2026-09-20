@@ -26,6 +26,38 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,07:59UTC: task-mark C4 has passed Linux, macOS and Windows on the
+same137 frozen inputs. Windows completed07:53:27; its six-minute collector
+sealed/copied/strictly verified every artifact and exited successfully07:57:05.
+Linux passed2002library/affected cases,14individual deadlines(max348ms),185reference
+and502fixtures; macOS1134library/784affected/257narrow; Windows1149/784/257.
+All platform static/reference/fixture gates pass. MAIN remains byte-exact C4.
+The [combined proof](../evidence/user-facing-v4-u1-task-mark-proof-20260920.json)
+and its non-writing recheck both passed before landing. Fetched origin matches
+the entry revision. No task writer, global GC permit or service capability is
+enabled by this milestone.
+
+The isolated following root-exclusion test-only RED1 completed07:50:30 with
+1positive characterization and1target failure. All seven raw artifacts are local
+and strictly verified. Reopened task marking retains its base root, but the old
+final retirement path accepted an external absence claim after process guards
+were gone. RED2 adds a callable refusing root-proof boundary and a physical-reclaim
+target; launched07:56:26, outcome pending. Neither isolated candidate is in MAIN.
+Native target-bound exclusion must qualify both root boundaries, then quarantine
+and sweep, before any initial task selector is enabled. U1 and U2–U7 remain open.
+
+September20,07:17UTC: retention landed and pushed as `f59b718b` after the
+three-platform proof and non-writing recheck passed. MAIN now matches all137
+frozen task-mark C4 inputs exactly; only11 owned code/test/audit paths changed.
+Linux full1 completed07:11:18 and sealed07:15:13; its raw artifacts are local.
+Mac final1 passed narrow/affected/audit/format/Clippy and is running its library
+stage. Windows final1 launched07:14UTC, process8428. Neither pending platform
+nor combined qualification is claimed complete. The final run retains32 native
+affected targets, full libraries and static/reference/fixture gates. The15 older
+KV consumer targets remain explicitly parent-milestone evidence: KV code is
+byte-unchanged, not a newly executed mark-stage gate. No task selection, durable
+GC frontier or ordinary service capability has been enabled. U1/U2–U7 remain open.
+
 September20,07:05UTC: retention C7 has now passed all three native platform gate
 sets. Windows completed06:58:18 and sealed07:03:20; all raw evidence is local.
 The combined
