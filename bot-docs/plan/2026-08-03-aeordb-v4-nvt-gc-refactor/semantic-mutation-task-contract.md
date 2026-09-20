@@ -1064,3 +1064,48 @@ platform gates,185reference tests,502independent fixtures and1501unchanged audit
 reviews are source/binary-bound in the proof. This closes read-only compiler
 prefix admission only. Durable task selection, retention, fencing and atomic
 activation remain required; no generic writer or runtime capability was enabled.
+
+### Native initial checkpoint dependencies — entry8e8543be
+
+The following bounded integration derives and stages ASMC/ASCM from an opaque
+`NativeStagedSemanticSourceUnionV1`. It is immutable unselected work, not a
+selected task, durable retention grant or activation. The enclosing task owner
+still owes selection, replacement, fencing, GC retention and atomic activation.
+The only caller inputs are task ID, accepted mutation count, capture/publication
+times and workspace ceiling. Derive original physical/header/generation/base,
+requested tree, paired source catalogs/counts and source identity from that
+qualified union. Derive requested configuration count during its existing
+bounded global/namespace walk, and use the frozen current compiler/registry
+profiles. Sequence1/Captured has no compiler output or cursor.
+
+Share the guard-bound native source-control staging owner for canonical wrappers,
+exact idempotency, dependency batching and original committed-error receipts.
+No generic semantic-control publication bypass, second physical owner or runtime
+capability is permitted. Same exact pair at a later publication time is a
+byte-stable retry; the same immutable identity with different bytes must refuse.
+The capture's protection remains necessary after staging; reopening unselected
+dependencies never manufactures a resumable task.
+
+First execute native failing-first stage/readback/reopen tests against a callable
+refusal. Independently construct the control envelopes and test all hashes,
+source counts/history, invalid requests, resource/cancellation and physical
+ownership failures, interruption and exact retry. Keep existing source-node and
+generic writer refusal regressions and final three-platform qualification.
+This entry is a contract, not a completed native checkpoint-staging claim.
+
+Qualification September20: the exact113-input C4 snapshot passed the
+[three-platform checkpoint proof](evidence/user-facing-v4-u1-captured-checkpoint-proof-20260920.json).
+The13native cases cover independent control envelopes across all five hashes,
+requested configuration counts, retained historical inputs, exact and partial
+retries, concurrent publication, invalid requests, allocation/cancellation/
+pressure refusal, owner drift, committed receipts and actual close/reopen.
+Linux passed1686library/affected tests and13individual ten-second deadlines
+(slowest391ms); Mac1083library and Windows1098library. All platforms passed
+185reference tests,502independent fixtures and required static/format gates.
+The proof retains the initial test-helper compile failure, actual behavioral
+RED and C3's single architecture-assertion failure on all three platforms.
+C4 corrects that assertion to permit only the private derived dependency pair;
+runtime remains identical to C1, original behavioral RED cases unchanged.
+No persisted layout, generic writer or capability advertisement changed.
+This closes initial dependency staging, not selected-task retention, fencing,
+resumption or activation. Those and U2–U7 remain required.

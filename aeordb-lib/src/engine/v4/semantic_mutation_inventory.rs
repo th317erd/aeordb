@@ -4,6 +4,7 @@ mod task_graph;
 pub use task_graph::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 #[path = "semantic_source_capture_staging.rs"]
 mod source_capture_staging;
+pub use source_capture_staging::NativeCapturedSemanticCheckpointRequestV1;
 pub use source_capture_staging::{
   NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1,
 };

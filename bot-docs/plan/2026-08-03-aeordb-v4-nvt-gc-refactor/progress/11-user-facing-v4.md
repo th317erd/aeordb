@@ -26,6 +26,99 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September20,02:33UTC: Windows final2 completed02:31:08 and was sealed02:32:07.
+All raw artifacts are local. The combined
+[113-input checkpoint proof](../evidence/user-facing-v4-u1-captured-checkpoint-proof-20260920.json)
+passes against MAIN: Linux1686library/affected plus13individual deadlines,
+Mac1083library, Windows1098library; all13new checkpoint tests pass on each.
+Every platform passed185reference tests,502independent fixtures and required
+static/format gates. Diff/consumer review confirms exactly two private shared
+sink callers, no generic writer changes, preserved node publication ordering
+and original behavioral RED bodies. Fetch reports0/0drift. The17-file milestone
+is ready for scoped commit after the non-writing proof recheck; no source change
+has occurred since C4. Durable task authority and full v4 readiness remain open.
+
+September20,02:27UTC: Windows final2 library has passed768cases, including all13
+new checkpoint cases, and remains active; nextpoll>=02:30:50. Full candidate
+readiness still waits for the remaining library/static/reference/format receipts.
+A separate test-only discovery characterization completed02:20:01 on desktop:
+1test/twohashes/0.26s,115inputs
+`6f0e95356ae1095a0d392b4634fdf88d83895dbd2ef7f541dfea487847039026`.
+All seven raw files are local/strictly verified. With one small task and an
+ordinary256KiB chunk, the deep inventory rejects a64KiB read budget; ample budget
+finds the task without writes. No metadata implementation exists. Draft next
+scope/test targets are in campaign cache task-discovery-metadata-entry.md and
+native_task_inventory_metadata_spec.rs; they are not part of this C4 milestone.
+Desktop's isolated source now holds that test-only characterization overlay;
+checkpoint Linux evidence was already sealed before this later test build.
+
+September20,02:13UTC: Mac final2 completed02:11:05 and was sealed02:12:50;
+all66raw artifacts are local/strictly verified:257narrow,519affected,1083library,
+185reference,502fixtures and all static gates. Linux and MAIN remain exact C4.
+Windows final2 narrow passed02:04:50; affected remained active02:09:45 with
+42.44GB system/51.42GB test-disk free and13.1GB available RAM. Nextpoll>=02:14:45.
+For following ownership changes, include the existing first-authority architecture
+target in the narrow preflight before native fan-out; its C3 failure exposed a
+missed assertion update, not a runtime failure or a reason to relax the guard.
+
+September20,02:07UTC: C3/full1 passed1083Linux library tests but the broader
+architecture test still forbade checkpoint/source-companion kinds in the node
+staging file. All three platforms reproduced exactly that one assertion; full
+failed evidence is local and verified, not waived. C4 changes only that test:
+preserves node-only ingress and forbids mutable task/generation and independent
+writers while admitting exactly the derived pair through the private shared
+sink. Fourteen owned source/test/audit files;113inputs
+`78fec497be422ea28abf13e03c1eab31b1958c666deca0bf5875a923271874da`.
+Full2 Linux completed02:03:39, sealed02:06:11:1686library/affected,13narrow,
+13individual deadlines (slowest391ms),185reference,502fixtures and every static
+gate PASS. All66raw artifacts are local and strictly verified. MAIN integration
+matches every113input hash exactly; no subsequent runtime/test edits.
+Mac final2 driver96254 launched02:01:31; narrow/affected/audit/format/Clippy passed
+by02:07:03 and library is running. Windows final2 driver320 launched02:04:23.
+Nextpoll>=02:12:15Mac,02:09:25Windows. Combined final2 verifier is prepared;
+native completion, final proof, scoped commit and push remain pending.
+
+September20,01:53UTC: initial checkpoint RED1 stopped at three private test-helper
+compile errors (no behavior result); RED2 fixed only those test visibilities and
+formatting, then executed0pass/2fail at the callable unavailable boundary.
+C1 implemented the guarded dependency pair and passed11native cases; C2 added
+partial-pair retry and real close/reopen cases, passing13. All candidate/raw
+preflight evidence is local and strictly verified. C2 also passed13individual
+10second deadlines (slowest341ms), formatting, audit preview and strictworkspace
+Clippy. Audit retains1501IDs/reviews with only13line shifts. Mechanical review
+preserves both original behavioral RED bodies and the original node publisher's
+validation/readback/error ordering; generic publication remains unchanged.
+C3 imports only that audit metadata, freezing113inputs as
+`557ce26ccbee25557a3bb514c9440b75cb1858ba8e5d621109561503c4921111`.
+Full Linux invocation0eac15db58894171abf0b84121dd922c/PID536891 launched01:51:45;
+Mac driver91766 launched01:52:30; Windows driver2124 launched01:52:55.
+Next polls>=01:56:45Linux,01:57:30Mac,01:57:55Windows. Broader/native qualification
+and MAIN source integration remain pending. This stages immutable unselected
+dependencies only; full task retention/fencing/activation and U2–U7 remain open.
+
+September20,01:19UTC: next bounded entry is guarded staging of the initial
+Captured checkpoint/source companion derived from the actual staged source
+union. This replaces a fixture-only seeding step, not task selection or durable
+retention. The native GC consumer trace found only v3-run and maintenance-
+inspection production implementations; no task-graph-to-mark consumer is
+presumed complete. Coupled task publication remains gated. Exact contract is
+appended to semantic-mutation-task-contract.md; design/territory details are in
+campaign cache captured-checkpoint-entry.md. Main source stays at8e8543be.
+Isolated112-input RED1 packet
+`fd2943e4aa1f933699c2b7b98e9540a9dea006f0d2d1c7544f2a4b7bfb5a6d11`
+launched01:18:56UTC on desktop, invocation6b988cb57af2418cae184b8addf865d0,
+PID507881. Two independent envelope/readback/reopen tests target a callable
+unavailable boundary. No executed RED result yet; next poll>=01:23:56UTC.
+Local test review prepared explicit sibling-helper visibility and repository
+formatting corrections for a following packet; no implementation has started.
+
+September20: compiler-prefix milestone committed and pushed as
+`8e8543beaccc019f5f945880943ba0b43aa63ec1`; upstream divergence0/0.
+The combined verifier and its non-writing `--check` both passed before commit.
+All21owned files landed, leaving unrelated untracked work untouched. Continuing
+the coupled task-owner/retention integration from its preliminary inventory;
+no generic task writer, capability advertisement or ordinary v4 service enabled.
+
 September20,01:02UTC: Windows completed every final gate00:55:57 and was
 sealed01:01:24. All raw evidence is local. The combined
 [110-input compiler-prefix proof](../evidence/user-facing-v4-u1-compiler-prefix-proof-20260920.json)

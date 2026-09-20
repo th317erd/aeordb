@@ -10,7 +10,7 @@ use crate::engine::v4::semantic_source_capture::{
   SemanticSourceCaptureV1, SemanticSourceLeafEntryV1, encode_semantic_source_capture_v1, encode_semantic_source_leaf_v1,
 };
 
-fn validation_bounds(tree: &[u8]) -> NativeSemanticSourceUnionValidationBoundsV1 {
+pub(super) fn validation_bounds(tree: &[u8]) -> NativeSemanticSourceUnionValidationBoundsV1 {
   let prior = union_bounds(tree);
   NativeSemanticSourceUnionValidationBoundsV1 {
     catalog: NativeSemanticSourceCatalogBoundsV1 {
@@ -36,7 +36,7 @@ fn retained_source_union_validation_preserves_standalone_namespace_cursor_send()
   assert_send::<NativeSemanticNamespaceSourceCursorV1<'static>>();
 }
 
-fn independent_fingerprint(algorithm: HashAlgorithm, rows: &SourceMap) -> Vec<u8> {
+pub(super) fn independent_fingerprint(algorithm: HashAlgorithm, rows: &SourceMap) -> Vec<u8> {
   use sha2::Digest;
   let mut bytes = b"aeordb.semantic-mutation-sources.v1\0".to_vec();
   for (path, revision) in rows {

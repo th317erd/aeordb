@@ -1,4 +1,6 @@
 //! Real source-union sinks and reopen readback; no task selection is inferred.
+#[path = "native_captured_semantic_checkpoint_spec.rs"]
+mod captured_checkpoint;
 use super::*;
 
 fn enable_node_staging(publisher: &V4FirstAuthorityPublisher) {

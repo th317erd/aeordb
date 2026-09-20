@@ -84,6 +84,7 @@ pub struct NativeSemanticSourceUnionV1<'a> {
   requested_directory_root: Vec<u8>,
   catalogs: SemanticSourceCatalogPairV1,
   fingerprint: SemanticMutationSourceFingerprintV1,
+  requested_configuration_count: u64,
   _memory: MemoryReservation,
 }
 
@@ -105,6 +106,12 @@ impl NativeSemanticSourceUnionV1<'_> {
   }
   pub fn fingerprint(&self) -> &SemanticMutationSourceFingerprintV1 {
     &self.fingerprint
+  }
+  pub fn requested_configuration_count(&self) -> u64 {
+    self.requested_configuration_count
+  }
+  pub(in crate::engine::v4::first_authority) fn captured_inventory(&self) -> &NativeSemanticMutationInventoryV1<'_> {
+    self.capture
   }
 }
 
@@ -149,11 +156,15 @@ impl NativeSemanticMutationInventoryV1<'_> {
       paths.append_path(replacement.path)?;
     }
     let mut alias_count = 0;
+    let mut requested_configuration_count = 0u64;
     for (path, kind) in
       [(GLOBAL_INDEXES, SemanticSourceAliasKindV1::IndexConfiguration), (GLOBAL_PARSERS, SemanticSourceAliasKindV1::ParserRegistry)]
     {
       for requested in [false, true] {
         let source = operation.read_selected(path, requested, operation.source_bounds(path)?)?;
+        if requested && path == GLOBAL_INDEXES && source.is_some() {
+          requested_configuration_count = 1;
+        }
         operation.discover_aliases(kind, source.as_ref().map(|source| source.body()), &mut alias_count, &mut paths)?;
       }
     }
@@ -163,6 +174,11 @@ impl NativeSemanticMutationInventoryV1<'_> {
       let mut count = 0u64;
       while let Some(pair) = namespaces.next_pair(&operation.namespace)? {
         count = count.checked_add(1).ok_or_else(|| resource("semantic_source_union_count", "namespace union count overflowed"))?;
+        if pair.requested.is_some() {
+          requested_configuration_count = requested_configuration_count
+            .checked_add(1)
+            .ok_or_else(|| resource("semantic_source_union_count", "requested configuration count overflowed"))?;
+        }
         for source in [pair.base.as_ref(), pair.requested.as_ref()].into_iter().flatten() {
           operation.discover_aliases(SemanticSourceAliasKindV1::IndexConfiguration, Some(source.body()), &mut alias_count, &mut paths)?;
         }
@@ -177,7 +193,15 @@ impl NativeSemanticMutationInventoryV1<'_> {
     let retained = requested_directory_root.capacity() as u64 + std::mem::size_of::<NativeSemanticSourceUnionV1<'_>>() as u64;
     memory.shrink(metadata - retained).map_err(SemanticMutationObservationErrorV1::from)?;
     memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-    Ok(NativeSemanticSourceUnionV1 { capture: self, base, requested_directory_root, catalogs, fingerprint, _memory: memory })
+    Ok(NativeSemanticSourceUnionV1 {
+      capture: self,
+      base,
+      requested_directory_root,
+      catalogs,
+      fingerprint,
+      requested_configuration_count,
+      _memory: memory,
+    })
   }
 }
 

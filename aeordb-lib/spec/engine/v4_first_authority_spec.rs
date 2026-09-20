@@ -561,8 +561,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "publish_mutable",
     "publish_successor",
     "SystemControlKindV1::SemanticMutationTask",
-    "SystemControlKindV1::SemanticMutationCheckpoint",
-    "SystemControlKindV1::SemanticSourceCapture",
+    "SystemControlKindV1::SemanticMutationGeneration",
     "HashMap",
     "HashSet",
     "unsafe",
@@ -571,6 +570,70 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   ] {
     assert!(!node_staging.contains(forbidden), "source node staging gained another writer/parser/authority path: {forbidden}");
   }
+  // The node front end still accepts only source nodes. The private shared
+  // sink additionally accepts exactly the derived immutable checkpoint pair.
+  let node_front = node_staging.split("pub(super)fnstage_captured_source_controls(").next().unwrap();
+  assert!(!node_front.contains("SystemControlKindV1::SemanticMutationCheckpoint"));
+  assert!(!node_front.contains("SystemControlKindV1::SemanticSourceCapture"));
+  for required in [
+    "controls.len()==2&&controls[0].kind==SystemControlKindV1::SemanticMutationCheckpoint&&controls[1].kind==SystemControlKindV1::SemanticSourceCapture",
+    "if!nodes&&!pair{returnErr(",
+    "self.stage_captured_source_controls(&controls,request.publication_timestamp_ms,&memory,before_lock,observer)",
+  ] {
+    assert!(node_staging.contains(required), "shared dependency sink lost its exact permitted kinds: {required}");
+  }
+  let checkpoint_path = source_root.join("engine/v4/semantic_captured_checkpoint_staging.rs");
+  let checkpoint_source = std::fs::read_to_string(&checkpoint_path).unwrap();
+  let checkpoint: String = checkpoint_source.split_whitespace().collect();
+  for required in [
+    "implNativeStagedSemanticSourceUnionV1<'_>",
+    "letcapture=self.union.captured_inventory();",
+    "letheader=self.union.captured_header();",
+    "checkpoint_sequence:1",
+    "phase:SemanticMutationPhaseV1::Captured",
+    "expected_configuration_count:self.union.requested_configuration_count()",
+    "semantic_generation:self.union.generation_selection().control_sequence",
+    "base_namespace_root:&self.union.base_authority().root_hash",
+    "base_source_catalog:self.union.catalogs().base_root()",
+    "requested_source_catalog:self.union.catalogs().requested_root()",
+    "MemoryOwner::Task",
+    "AdmissionClass::Maintenance",
+    "encode_semantic_mutation_checkpoint(",
+    "encode_semantic_source_capture_v1(",
+    "try_digest_parts(algorithm,&[&encoded_checkpoint])",
+    "decode_semantic_source_capture_binding_v1(",
+    "capture.stage_captured_source_controls(&controls,request.publication_timestamp_ms,&memory,before_lock,observer)",
+  ] {
+    assert!(checkpoint.contains(required), "initial checkpoint lost captured ownership or shared encoding: {required}");
+  }
+  for forbidden in [
+    "OpenOptions",
+    "File::",
+    "StorageEngine",
+    "V4FirstAuthorityPublisher",
+    "lock_kv(",
+    "root_state.lock(",
+    "publish_",
+    "write_file",
+    "sync_file",
+    "capture_semantic_mutation_inventory(",
+    "capture_settled_snapshot(",
+    "SystemControlKindV1::SemanticMutationTask",
+    "SystemControlKindV1::SemanticMutationGeneration",
+    "RootReadAdmission",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!checkpoint.contains(forbidden), "initial checkpoint gained independent authority or an unchecked owner: {forbidden}");
+  }
+  let mut shared_sink_callers: Vec<_> =
+    files.iter().filter(|path| std::fs::read_to_string(path).unwrap().contains(".stage_captured_source_controls(")).collect();
+  shared_sink_callers.sort();
+  assert_eq!(shared_sink_callers, [&checkpoint_path, &source_root.join("engine/v4/semantic_source_control_staging.rs")]);
   let owned_staging = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_capture_staging.rs")).unwrap();
   let owned_staging: String = owned_staging.split_whitespace().collect();
   for required in [

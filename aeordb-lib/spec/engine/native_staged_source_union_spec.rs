@@ -3,7 +3,7 @@
 mod boundary;
 use super::*;
 
-fn staging_request() -> NativeSemanticSourceUnionStagingRequestV1 {
+pub(super) fn staging_request() -> NativeSemanticSourceUnionStagingRequestV1 {
   NativeSemanticSourceUnionStagingRequestV1 {
     publication_timestamp_ms: 100,
     maximum_source_copy_attempts: 16,

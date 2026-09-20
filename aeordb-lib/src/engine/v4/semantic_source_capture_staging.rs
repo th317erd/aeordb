@@ -1,4 +1,7 @@
 //! Owned native source sinks; never selected task, restart or activation authority.
+#[path = "semantic_captured_checkpoint_staging.rs"]
+mod captured_checkpoint;
+pub use captured_checkpoint::NativeCapturedSemanticCheckpointRequestV1;
 use super::*;
 use std::cell::RefCell;
 use crate::engine::v4::plugin_identity::ALIAS_MAX_LENGTH;

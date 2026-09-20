@@ -106,6 +106,30 @@ impl NativeSemanticMutationInventoryV1<'_> {
     for (index, control) in decoded.iter().enumerate() {
       controls.push(ImmutableSystemControlWriteV1 { kind, identity: &control.identity, encoded_control: request.encoded_nodes[index] });
     }
+    self.stage_captured_source_controls(&controls, request.publication_timestamp_ms, &memory, before_lock, observer)
+  }
+
+  // Private composition point for source nodes and the derived initial pair.
+  // Mutable tasks/generation and arbitrary immutable controls remain refused.
+  pub(super) fn stage_captured_source_controls(
+    &self,
+    controls: &[ImmutableSystemControlWriteV1<'_>],
+    publication_timestamp_ms: u64,
+    memory: &MemoryReservation,
+    before_lock: impl FnOnce(),
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, NativeSemanticSourceControlPublicationErrorV1> {
+    let nodes =
+      !controls.is_empty() && controls.len() <= 2 && controls.iter().all(|control| control.kind == SystemControlKindV1::SemanticSourceNode);
+    let pair = controls.len() == 2
+      && controls[0].kind == SystemControlKindV1::SemanticMutationCheckpoint
+      && controls[1].kind == SystemControlKindV1::SemanticSourceCapture;
+    if !nodes && !pair {
+      return Err(
+        invalid("semantic_source_staging_kind", "source staging accepts nodes or the derived initial checkpoint pair only").into(),
+      );
+    }
+    let captured_header = &self.header.selected.header;
     before_lock();
     let publisher = self._protection.publisher();
     let authority = publisher.root_state.lock().map_err(|poisoned| {
@@ -153,11 +177,11 @@ impl NativeSemanticMutationInventoryV1<'_> {
     {
       let kv = publisher.lock_kv().map_err(SemanticMutationObservationErrorV1::from)?;
       validate_kv_header_alignment(&kv, header).map_err(SemanticMutationObservationErrorV1::from)?;
-      for control in &controls {
+      for control in controls {
         check_cancelled(&self.cancellation)?;
         memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-        let path =
-          system_control_path(kind, control.identity, SystemControlSlotV1::Immutable).map_err(SemanticMutationObservationErrorV1::from)?;
+        let path = system_control_path(control.kind, control.identity, SystemControlSlotV1::Immutable)
+          .map_err(SemanticMutationObservationErrorV1::from)?;
         // Different body length cannot name the identical immutable node. The
         // existing canonical loader validates all framing/chunk/content checks.
         let existing = load_canonical_system_file_at_path(
@@ -169,7 +193,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
           control.encoded_control.len(),
         )
         .map_err(SemanticMutationObservationErrorV1::from)?;
-        let timestamp = request.publication_timestamp_ms as i64;
+        let timestamp = publication_timestamp_ms as i64;
         let (created_at, updated_at) = match existing.as_ref() {
           Some(existing) => (existing.record.created_at, existing.record.updated_at),
           None => (timestamp, timestamp),
@@ -188,7 +212,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
           path_key.try_reserve_exact(existing.locator.hash.len()).map_err(node_allocation)?;
           path_key.extend_from_slice(&existing.locator.hash);
           existing_receipts.push(ImmutableSystemControlPublicationReceiptV1 {
-            kind,
+            kind: control.kind,
             path_key,
             control_sequence: 1,
             write_sequence: existing.write_sequence,
@@ -226,11 +250,8 @@ impl NativeSemanticMutationInventoryV1<'_> {
     }
     let mut translated = Vec::new();
     translated.try_reserve_exact(controls.len()).map_err(node_allocation)?;
-    let publication = ImmutableEntityBatchPublicationRequestV1 {
-      database_id: &header.database_id,
-      entities: &entities,
-      publication_timestamp_ms: request.publication_timestamp_ms,
-    };
+    let publication =
+      ImmutableEntityBatchPublicationRequestV1 { database_id: &header.database_id, entities: &entities, publication_timestamp_ms };
     check_cancelled(&self.cancellation)?;
     memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     // Keep the root guard through the sole publisher. The KV guard is released.
@@ -244,7 +265,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     });
     match result {
       Ok(receipt) => {
-        let (receipt, complete) = translate_immutable_system_control_receipt(receipt, &controls, translated);
+        let (receipt, complete) = translate_immutable_system_control_receipt(receipt, controls, translated);
         if complete {
           Ok(receipt)
         } else {
@@ -259,7 +280,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
         }
       }
       Err(ImmutableEntityBatchPublicationErrorV1::Committed { code, message, receipt }) => {
-        let (receipt, complete) = translate_immutable_system_control_receipt(*receipt, &controls, translated);
+        let (receipt, complete) = translate_immutable_system_control_receipt(*receipt, controls, translated);
         let message = if complete { message } else { format!("{message}; source-node receipt shape is incomplete") };
         Err(ImmutableSystemControlPublicationErrorV1::committed(code, message, receipt).into())
       }
