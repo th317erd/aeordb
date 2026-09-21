@@ -1,6 +1,7 @@
 //! A coherent read of durable task controls, never a resume or retention permit.
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
+pub use inventory::SemanticCheckpointGraphSummaryV1;
 pub use inventory::NativeSemanticTaskRootExclusionV1;
 pub use inventory::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use inventory::NativeCapturedSemanticCheckpointRequestV1;

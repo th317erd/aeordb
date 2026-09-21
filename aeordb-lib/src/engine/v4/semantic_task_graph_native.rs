@@ -1,7 +1,9 @@
-//! Provisional selected-task physical reads, never GC or resume authority.
+//! Provisional task/checkpoint physical reads, never GC or resume authority.
 use super::*;
+use super::source_catalog::{CatalogPhysicalEntryObserverV1, CatalogReadOperationV1};
 use crate::engine::v4::read_view_native::NativeSelectedNamespaceReadErrorV1;
 use crate::engine::v4::semantic_catalog::SemanticCatalogReadErrorV1;
+use crate::engine::v4::semantic_mutation_control::SemanticMutationCheckpointV1;
 use std::cell::RefCell;
 #[path = "semantic_task_catalog_graph.rs"]
 mod catalog;
@@ -38,6 +40,35 @@ pub struct SemanticTaskGraphSummaryV1 {
   pub namespace_symlinks: u64,
   pub namespace_chunks: u64,
   pub source_paths: u64,
+}
+
+/// Structural checkpoint observation, never selected task disposition or a
+/// publication, resume, retention-release or global-mark permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticCheckpointGraphSummaryV1 {
+  pub checkpoint_sequence: u64,
+  pub physical_reads: u64,
+  pub read_bytes: u64,
+  /// Ordinary chunk locators, not payload reads or content integrity proof.
+  pub opaque_chunk_references: u64,
+  pub opaque_chunk_bytes: u64,
+  pub work: u64,
+  pub namespace_directories: u64,
+  pub namespace_files: u64,
+  pub namespace_symlinks: u64,
+  pub namespace_chunks: u64,
+  pub source_paths: u64,
+}
+
+#[derive(Default)]
+struct CheckpointGraphStatistics {
+  opaque_chunk_references: u64,
+  opaque_chunk_bytes: u64,
+  namespace_directories: u64,
+  namespace_files: u64,
+  namespace_symlinks: u64,
+  namespace_chunks: u64,
+  source_paths: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +116,21 @@ type Result<T> = std::result::Result<T, SemanticTaskGraphErrorV1>;
 type PhysicalVisitor<'a> = dyn FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1> + 'a;
 
 impl NativeSemanticMutationInventoryV1<'_> {
+  /// Validate an immutable checkpoint graph without selecting or resuming a
+  /// task. Entries are provisional until complete success, not GC authority.
+  pub fn visit_captured_semantic_checkpoint_metadata_entries(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticTaskGraphBoundsV1,
+    mut visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticCheckpointGraphSummaryV1> {
+    check_cancelled(&self.cancellation)?;
+    let operation = GraphOperation::new(self, bounds, &mut visitor, false, None)?;
+    let result = operation.read_checkpoint(task_id, checkpoint_sequence);
+    operation.complete_result(result)
+  }
+
   /// Traverse metadata and retain ordinary chunk references without verifying
   /// their payloads. Source/control/catalog bodies still use their exact bounded
   /// readers. This is not content verification, cheap commit admission, a
@@ -123,11 +169,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     }
     let operation = GraphOperation::new(self, bounds, &mut visitor, inspect_ordinary_payloads, admission)?;
     let result = operation.read(task_id);
-    let failure = operation.lookup.failure.borrow_mut().take();
-    match failure {
-      Some(original) => Err(original.into()),
-      None => result,
-    }
+    operation.complete_result(result)
   }
 }
 
@@ -190,6 +232,12 @@ impl FirstAuthorityEntityLookupV1 for GraphLookup<'_, '_> {
       return Err(FirstAuthorityPublicationErrorV1::invalid("semantic_task_graph_read_refused", "selected task physical read refused"));
     }
     Ok(())
+  }
+}
+
+impl CatalogPhysicalEntryObserverV1 for GraphLookup<'_, '_> {
+  fn observe(&self, locator: &KVEntry) -> std::result::Result<(), FirstAuthorityPublicationErrorV1> {
+    self.admit_read(locator)
   }
 }
 
@@ -261,6 +309,48 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
     &self.capture._protection.publisher().file
   }
 
+  fn complete_result<T>(&self, result: Result<T>) -> Result<T> {
+    match self.lookup.failure.borrow_mut().take() {
+      Some(original) => Err(original.into()),
+      None => result,
+    }
+  }
+
+  fn read_checkpoint(&self, task_id: &[u8; 16], sequence: u64) -> Result<SemanticCheckpointGraphSummaryV1> {
+    self.check()?;
+    let sources = CatalogReadOperationV1::new(self.capture, self.bounds.sources, Some(&self.lookup))?;
+    let (companion, checkpoint_bytes) = sources.load_companion_and_checkpoint(task_id, sequence)?;
+    let (manifest, checkpoint) = crate::engine::v4::semantic_source_capture::decode_semantic_source_capture_binding_v1(
+      &companion.bytes,
+      &checkpoint_bytes,
+      self.algorithm(),
+    )?;
+    let source_summary = sources.visit_pairs(&manifest, |_, _, _| Ok::<_, SemanticMutationObservationErrorV1>(true))?;
+    if !source_summary.complete {
+      return Err(invalid("semantic_task_graph_source_incomplete", "source branch did not complete").into());
+    }
+    sources.check()?;
+    // Release catalog traversal workspace before reserving graph decode space.
+    // The companion retains the reservation for both immutable control bodies.
+    drop(sources);
+    let mut summary = CheckpointGraphStatistics { source_paths: source_summary.paths, ..Default::default() };
+    self.walk_checkpoint(&checkpoint, &mut summary)?;
+    self.check()?;
+    Ok(SemanticCheckpointGraphSummaryV1 {
+      checkpoint_sequence: checkpoint.checkpoint_sequence,
+      physical_reads: self.lookup.reads.get(),
+      read_bytes: self.lookup.captured.bounds.maximum_read_bytes - self.lookup.captured.remaining_read_bytes.get(),
+      opaque_chunk_references: summary.opaque_chunk_references,
+      opaque_chunk_bytes: summary.opaque_chunk_bytes,
+      work: self.lookup.work.get(),
+      namespace_directories: summary.namespace_directories,
+      namespace_files: summary.namespace_files,
+      namespace_symlinks: summary.namespace_symlinks,
+      namespace_chunks: summary.namespace_chunks,
+      source_paths: summary.source_paths,
+    })
+  }
+
   fn read(&self, task_id: &[u8; 16]) -> Result<SemanticTaskGraphSummaryV1> {
     self.check()?;
     let task =
@@ -279,22 +369,10 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
       },
       reserve_observation_memory(&self.capture.memory)?,
     )?;
-    let mut summary = SemanticTaskGraphSummaryV1 {
-      disposition: observation.disposition(),
-      checkpoint_sequence: None,
-      physical_reads: 0,
-      read_bytes: 0,
-      opaque_chunk_references: 0,
-      opaque_chunk_bytes: 0,
-      work: 0,
-      namespace_directories: 0,
-      namespace_files: 0,
-      namespace_symlinks: 0,
-      namespace_chunks: 0,
-      source_paths: 0,
-    };
+    let mut summary = CheckpointGraphStatistics::default();
+    let mut checkpoint_sequence = None;
     if let Some(checkpoint) = observation.checkpoint()? {
-      summary.checkpoint_sequence = Some(checkpoint.checkpoint_sequence);
+      checkpoint_sequence = Some(checkpoint.checkpoint_sequence);
       // Same capture, with an additional enclosing read admission on every
       // branch callback. The source reader retains its own logical work bound.
       let sources = self.capture.visit_captured_source_physical_entries_admitted(
@@ -308,61 +386,76 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
         return Err(invalid("semantic_task_graph_source_incomplete", "source branch did not complete").into());
       }
       summary.source_paths = sources.paths;
-      let _graph_decode_memory =
-        self.capture.memory.reserve(MemoryOwner::Task, 8 * self.capture.bounds.maximum_entity_bytes as u64, AdmissionClass::Maintenance)?;
-      let base = load_namespace_authority_from_lookup(
-        self.file(),
-        &self.lookup,
-        &self.capture.header.selected,
-        checkpoint.base_namespace_root,
-        &self.capture.cancellation,
-      )?
-      .ok_or_else(|| invalid("semantic_task_graph_base_missing", "selected task admitted base is absent"))?;
-      self.walk_namespace(&base.root.namespace_tree_root, &mut summary)?;
-      self.walk_state(&base.semantic_state)?;
-      drop(base);
-      self.walk_namespace(checkpoint.staged_directory_root, &mut summary)?;
-      if let Some(root) = checkpoint.catalog_root {
-        let counts = self.walk_catalog(root, checkpoint.record_count, checkpoint.node_count)?;
-        if counts.class_counts[1] != checkpoint.configuration_count
-          || counts.class_counts[6].checked_add(counts.class_counts[7]) != Some(checkpoint.dependency_count)
-        {
-          return Err(invalid("semantic_task_graph_catalog_counts", "selected task catalog member counts disagree").into());
-        }
-      }
-      if let Some(root) = checkpoint.pruning_catalog_root {
-        self.walk_catalog(root, checkpoint.pruning_record_count, checkpoint.pruning_node_count)?;
-      }
-      if let Some(state_id) = checkpoint.semantic_state {
-        let bytes =
-          self.semantic_object(1, state_id)?.ok_or_else(|| invalid("semantic_task_graph_state_missing", "task output state is absent"))?;
-        let decoded = decode_semantic_object(&bytes, self.algorithm())?;
-        let state =
-          decoded.semantic_state.ok_or_else(|| invalid("semantic_task_graph_state_kind", "task output has another semantic kind"))?;
-        self.validate_output(&checkpoint, &state)?;
-        self.walk_state(&state)?;
-      }
-      if let Some(root_id) = checkpoint.candidate_namespace_root {
-        let bytes = self.raw(root_id, kv_tag::DIRECTORY, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP)?;
-        let root =
-          crate::engine::v4::namespace::decode_namespace_root_entity(&bytes, self.algorithm(), self.header().write_sequence_high_water)?;
-        if root.root_hash != root_id || Some(root.semantic_state_root.as_slice()) != checkpoint.semantic_state {
-          return Err(invalid("semantic_task_graph_candidate_closure", "staged candidate differs from its checkpoint output").into());
-        }
-        // STAGED candidate bytes are retained. Deliberately do not look for or
-        // manufacture a RootAdmissionCommit for this unactivated candidate.
-        // Ordinary-change rebase can give the candidate another tree. Retain
-        // that additional branch instead of assuming it equals the request.
-        if root.namespace_tree_root != checkpoint.staged_directory_root {
-          self.walk_namespace(&root.namespace_tree_root, &mut summary)?;
-        }
-      }
+      self.walk_checkpoint(&checkpoint, &mut summary)?;
     }
     self.check()?;
-    summary.physical_reads = self.lookup.reads.get();
-    summary.read_bytes = self.lookup.captured.bounds.maximum_read_bytes - self.lookup.captured.remaining_read_bytes.get();
-    summary.work = self.lookup.work.get();
-    Ok(summary)
+    Ok(SemanticTaskGraphSummaryV1 {
+      disposition: observation.disposition(),
+      checkpoint_sequence,
+      physical_reads: self.lookup.reads.get(),
+      read_bytes: self.lookup.captured.bounds.maximum_read_bytes - self.lookup.captured.remaining_read_bytes.get(),
+      opaque_chunk_references: summary.opaque_chunk_references,
+      opaque_chunk_bytes: summary.opaque_chunk_bytes,
+      work: self.lookup.work.get(),
+      namespace_directories: summary.namespace_directories,
+      namespace_files: summary.namespace_files,
+      namespace_symlinks: summary.namespace_symlinks,
+      namespace_chunks: summary.namespace_chunks,
+      source_paths: summary.source_paths,
+    })
+  }
+
+  fn walk_checkpoint(&self, checkpoint: &SemanticMutationCheckpointV1<'_>, summary: &mut CheckpointGraphStatistics) -> Result<()> {
+    let _graph_decode_memory =
+      self.capture.memory.reserve(MemoryOwner::Task, 8 * self.capture.bounds.maximum_entity_bytes as u64, AdmissionClass::Maintenance)?;
+    let base = load_namespace_authority_from_lookup(
+      self.file(),
+      &self.lookup,
+      &self.capture.header.selected,
+      checkpoint.base_namespace_root,
+      &self.capture.cancellation,
+    )?
+    .ok_or_else(|| invalid("semantic_task_graph_base_missing", "selected task admitted base is absent"))?;
+    self.walk_namespace(&base.root.namespace_tree_root, summary)?;
+    self.walk_state(&base.semantic_state)?;
+    drop(base);
+    self.walk_namespace(checkpoint.staged_directory_root, summary)?;
+    if let Some(root) = checkpoint.catalog_root {
+      let counts = self.walk_catalog(root, checkpoint.record_count, checkpoint.node_count)?;
+      if counts.class_counts[1] != checkpoint.configuration_count
+        || counts.class_counts[6].checked_add(counts.class_counts[7]) != Some(checkpoint.dependency_count)
+      {
+        return Err(invalid("semantic_task_graph_catalog_counts", "selected task catalog member counts disagree").into());
+      }
+    }
+    if let Some(root) = checkpoint.pruning_catalog_root {
+      self.walk_catalog(root, checkpoint.pruning_record_count, checkpoint.pruning_node_count)?;
+    }
+    if let Some(state_id) = checkpoint.semantic_state {
+      let bytes =
+        self.semantic_object(1, state_id)?.ok_or_else(|| invalid("semantic_task_graph_state_missing", "task output state is absent"))?;
+      let decoded = decode_semantic_object(&bytes, self.algorithm())?;
+      let state =
+        decoded.semantic_state.ok_or_else(|| invalid("semantic_task_graph_state_kind", "task output has another semantic kind"))?;
+      self.validate_output(checkpoint, &state)?;
+      self.walk_state(&state)?;
+    }
+    if let Some(root_id) = checkpoint.candidate_namespace_root {
+      let bytes = self.raw(root_id, kv_tag::DIRECTORY, FIRST_AUTHORITY_NAMESPACE_ROOT_ENTITY_CAP)?;
+      let root =
+        crate::engine::v4::namespace::decode_namespace_root_entity(&bytes, self.algorithm(), self.header().write_sequence_high_water)?;
+      if root.root_hash != root_id || Some(root.semantic_state_root.as_slice()) != checkpoint.semantic_state {
+        return Err(invalid("semantic_task_graph_candidate_closure", "staged candidate differs from its checkpoint output").into());
+      }
+      // STAGED candidate bytes are retained. Deliberately do not look for or
+      // manufacture a RootAdmissionCommit for this unactivated candidate.
+      // Ordinary-change rebase can give the candidate another tree. Retain
+      // that additional branch instead of assuming it equals the request.
+      if root.namespace_tree_root != checkpoint.staged_directory_root {
+        self.walk_namespace(&root.namespace_tree_root, summary)?;
+      }
+    }
+    Ok(())
   }
 
   fn raw(&self, key: &[u8], role: u8, cap: usize) -> Result<Vec<u8>> {

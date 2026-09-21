@@ -26,6 +26,130 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September21,15:51UTC: Windows final1 completed15:48:30.749UTC, exit0 through
+format-batched. Counts257narrow/1138affected/1189library/186reference and502
+fixtures; strictClippy and complete formatting passed. The sole collector99892
+finished15:50:25 with complete/exit0; every raw artifact is local and its strict
+verifier passes. All three native platforms now pass the combined platform
+verification for the integrated161-input C3 SHA
+`a7ff2f39c1b6b417167ea7012c101a661ce5683e06dd3ea4ba48dbc9f9d390`.
+
+Final review covered complete shared traversal equivalence, exact independent
+edge oracles, captured-only reads, callback/error priority, memory lifetimes,
+missing late dependencies, all phases/hash widths and unchanged task discovery,
+mark/root/physical-exclusion regressions. No further correction was found.
+The source-only projection does not publish a task or activate service behavior.
+Final proof generation/check and the16owned-path commit are the immediate next
+steps. U1 remains open; U2–U7 remain required. No qualification job remains live.
+Following work starts with19prepared task-selection RED cases, not a production
+operation. Preserve all prior failed/raw evidence and unrelated WIP.
+
+September21,15:47UTC: C3 integrated-source verification still passes. Linux's
+12individual cases took at most501ms. Windows's sole collector99892 reports
+951library cases completed at15:44:15, with narrow/affected already exit0;
+the next scheduled check is approximately15:50:16. Final Windows and combined
+proof/landing remain pending. Fresh upstream fetch is0/0. Review is complete
+for the current unit;19following selector tests, an unavailable-API draft and
+its source-only guarded runners are scratch-only, syntax checked but unrun.
+No next runtime changes or additional remote jobs have been started.
+
+September21,15:30UTC: all161 C3 source inputs are integrated byte-for-byte in
+MAIN; HEAD remains ad5358a8 until the remaining qualification passes. Linux
+completed15:14:43 and Mac15:12:41; both are sealed, all raw evidence is local,
+and their strict verifiers pass. Linux counts2314library/affected,186reference,
+502fixtures,12narrow,42affected preflight and12individual deadlines, plus
+format/audit1501/strictClippy/debt. Mac counts1174library,1140affected,
+257narrow,186reference,502fixtures and its required static/debt gates.
+
+Windows is the only remaining final gate. Its sole six-minute collector is
+managed exec99892; the15:26:11check shows narrow and affected exit0, with the
+library stage starting. Next scheduled check approximately15:32:12. Do not
+duplicate the collector or claim a three-platform pass yet. The combined
+verifier/proof and coherent16-path landing remain pending. Nine following
+task-selection tests are unregistered/unrun scratch drafts, not C3 inputs.
+Integrated review found no further correction; no task writer, capability,
+production database or service was changed. U1 and U2–U7 remain open.
+
+September21,15:12UTC: C3 Linux confirmed live15:11:38 in the broad suite;
+narrow12, affected42, individual12, format, audit1501 and Clippy have passed.
+Mac PID45552 confirmed live15:11:40; narrow/affected/audit/format/Clippy/library/
+reference receipts are all0, contracts/debt/whole-driver result still pending.
+Windows final1 launched with CIMPID8264. Its sole six-minute collector runs in
+managed exec99892; first15:08:08check reports narrow passed and56affected cases
+completed. Next collector check approximately15:14:10; do not duplicate it.
+Next ordinary Linux/Mac checks>=15:17. No whole-final qualification claim yet.
+
+Read-only review mechanically compared the extracted checkpoint graph body to
+ad5358a8: identical modulo function extraction/borrowing; namespace traversal
+diff changes only its counter type. The13owned source paths are enumerated by
+the new integration helper. The combined proof/verifier is prepared, syntax
+checked and unrun pending final gates. Four following-task-selection tests are
+unregistered/unrun scratch drafts, not part of frozen C3. Writer entry review
+confirms ASMG is required, generic control exact retries precede its guards, and
+semantic selection needs a dedicated typed guard before exact retry. No generic
+semantic writer refusal, task capability, production or service behavior changed.
+
+September21,15:00UTC: resumed from current authoritative state. The previous
+unit made progress: C2 completed September20,14:51:01, all preflight gates
+passed. Today all raw evidence was collected and strictly verified:12narrow,
+12individual deadlines,100affected across three targets,1174library, formatting,
+audit preview and strict Clippy. The1501audit identities are unchanged; only13
+line locations moved. Peak6.224GB; minimumhome92.881GB/Data325.357GB.
+C1 retains its12/12/100passes and formatting-only failure in two test-module
+declaration orders; those orders are C2's only changes. C2 manifest161inputs
+SHA`caae28a250cea8719c67d21111f78f28e8be9a2a4fefb7017764c68ebadfec3a`.
+
+C3 changes only the reviewed audit line metadata; final161-input manifest SHA
+`a7ff2f39c1b6b417167ea7012c101a66161ce5683e06dd3ea4ba48dbc9f9d390`.
+Linux full qualification launched14:59:51, desktop PID2114668, invocation
+`18715ea3c6ff4fe1b53c37520649ea03`, unit name still ends20260920 because the
+reviewed runner's task suffix is fixed. First ordinary check>=15:05UTC.
+Mac/Windows final1 source-only packets/runners transferred and launch requests
+sent; results must be collected before claiming either job is running.
+Windows is reachable without a VM change; freeC42.004GB, testD51.417GB.
+Desktop home93.023GB/Data325.353GB, availableRAM26.833GB; existing host swap
+remains distinct from the job's no-swap cgroup. Fresh origin fetch is0/0.
+MAIN runtime remains ad5358a8; no install, production or retained DB action.
+
+September20,14:35UTC: checkpoint RED2 completed14:24:54, exit101 as expected;
+all seven raw artifacts are local and its strict verifier passes. It ran12cases:
+the missing-pair refusal passed, and11failed at the explicit unavailable-reader
+boundary. No fixture setup failure remains. Manifest161inputs SHA
+`eb6b5f07f87912fa98ae361355b5f951d2c585cc8ee5e4a2975260e15642bb1f`;
+desktop unit invocation`1962cbd6c03648898b63f0a7ee93374e`, PID1446893.
+Peak3.715GB, minimumhome92.892GB/Data325.358GB. RED1 is retained: five intended
+failures plus six fixture failures caused by deleting task KV before loading
+generation under the unchanged header/KV consistency guard. RED2 defers that
+fixture deletion until both reads complete; no production guard was changed.
+
+The isolated implementation now factors the existing checkpoint graph body,
+reuses CatalogReadOperation for the exact immutable pair and paired sources,
+and retains the selected-task reader's original observation/source path. It
+restores original callback errors at both entry points, drops source traversal
+workspace before graph decode, and keeps companion/control memory charged.
+Architecture assertions require shared traversal and a distinct summary without
+task disposition. Local formatting and runner syntax checks passed; native
+compilation/behavior remains unverified pending candidate1. MAIN runtime is
+still ad5358a8. No task selector, service, capability or production change.
+
+September20,14:16UTC: physical exclusion landed/pushed as
+`ad5358a8c4a15ecfe7873e45f706809fe32fd111`, origin0/0. Exactly27owned paths
+were staged; all24source/test blobs matched the final158-input proof.
+The saved proof is1,078,440bytes and its full deterministic check passed before
+commit. Old parent-bound final verifiers must not be executed against new HEAD.
+All native qualification jobs and the Windows bridge/collector have finished.
+
+Unselected checkpoint graph entry now has12registered failing-first tests in
+an isolated source overlay, with a distinct summary and an explicitly refusing
+reader stub. MAIN runtime remains the landed commit. RED1 is161inputs SHA
+`34a5a1f5bd9f1bef5e5119cc45797dba9c041da5a57866d5f57e91823295aa6c`.
+Desktop launched14:14:33, unit`aeordb-v4-task-checkpoint-graph-red1-20260920`,
+invocation`401ac4b24daa4f0093b3c9430b490a49`, PID1437215. First ordinary check
+>=14:19:45. The source-only transfer refreshes mtimes/rechecks hashes, reuses
+the bounded j2/6GiB-noSwap/CPU200 gate, and preserves prior evidence.
+Admission freehome92.89GB, Data325.36GB, availableRAM24.48GB; existing host swap
+is not a claim of a swap-free host. No implementation or passing RED proof yet.
+
 September20 final physical-exclusion qualification: Windows final2 C16 completed
 13:59:14UTC, all seven stages passed; both collector and bridge finished
 14:00:41 with complete/exit0. Every raw artifact is local and strict platform

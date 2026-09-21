@@ -9,6 +9,8 @@ mod phase;
 mod retention;
 #[path = "native_semantic_task_retention_characterization_spec.rs"]
 mod retention_characterization;
+#[path = "native_unselected_semantic_checkpoint_graph_spec.rs"]
+mod unselected;
 use super::*;
 use std::collections::BTreeMap;
 use crate::engine::v4::semantic_mutation_control::decode_semantic_mutation_checkpoint;

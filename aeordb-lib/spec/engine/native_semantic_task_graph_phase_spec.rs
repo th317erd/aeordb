@@ -1,6 +1,8 @@
 //! Phase-specific retained edges; these fixtures do not publish production tasks.
 #[path = "native_semantic_task_graph_structure_spec.rs"]
 mod structure;
+#[path = "native_unselected_semantic_checkpoint_phase_spec.rs"]
+mod unselected;
 use super::*;
 use crate::engine::v4::dependency::{DependencyRecordV1, encode_dependency_record};
 use crate::engine::v4::namespace::{

@@ -8,6 +8,7 @@ pub use semantic_mutation_observation::{
   NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1,
 };
 pub use semantic_mutation_observation::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
+pub use semantic_mutation_observation::SemanticCheckpointGraphSummaryV1;
 pub use semantic_mutation_observation::{NativeSemanticTaskRetentionBoundsV1, SemanticTaskRetentionSummaryV1};
 pub use semantic_mutation_observation::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use semantic_mutation_observation::{

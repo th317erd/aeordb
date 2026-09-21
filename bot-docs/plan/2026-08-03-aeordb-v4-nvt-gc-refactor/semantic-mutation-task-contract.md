@@ -1449,3 +1449,47 @@ recovery. The positive sweep fixture records callback outcomes without actual
 physical removal. Service-level GC execution, batching/convergence, unselected
 checkpoint validation and coupled task/generation/HEAD publication remain
 required. No task writer, runtime capability or production service is enabled.
+
+### Unselected immutable checkpoint graph — entry ad5358a8
+
+Initial task selection cannot use a selected-task reader's Absent result as
+proof of its staged graph. Add explicit captured checkpoint metadata traversal
+by nonzero task ID and checkpoint sequence. Missing ASCM/ASMC is an error, never
+an empty successful task observation. Return a distinct checkpoint summary;
+preserve the existing selected-task result shape, dispositions and counters.
+
+Reuse the captured catalog owner's canonical ASCM/ASMC loading/binding and
+paired-source traversal. Factor the existing checkpoint graph body, retaining
+admitted-base namespace/state, staged namespace, partial/pruning catalogs,
+definition/module edges, output state and unadmitted candidate/rebase trees.
+Never fabricate ASMT to invoke the selected reader or fall back to current KV,
+aliases or HEAD. Ordinary chunk payloads remain opaque references with checked
+captured roles/extents, not a claim of verified content integrity.
+
+All callbacks are provisional until complete success and may repeat. Preserve
+original callback failures, cancellation, cumulative physical read/work bounds,
+separate source bounds, bounded namespace workspace/depth and reservation
+release. Tests must distinguish absent task from a valid unselected graph,
+check independently enumerated edges across hashes/reopen, reject late missing
+dependencies and binding disagreement, preserve selected-reader regressions,
+and individually bound the new cases. This observation alone grants no task
+selection, fencing, resume, pin release, root admission or global GC authority.
+
+Qualification September21: the final161-input C3 snapshot matches MAIN exactly
+and passes Linux, macOS and native Windows. Linux passed2314library/affected,
+186reference,502independent fixtures and12individual ten-second cases (maximum
+501ms); macOS passed1174library/1140affected/257narrow; Windows passed1189library/
+1138affected/257narrow. Both native platforms also passed186reference/502fixtures
+and their prescribed formatting/static gates. Windows finished15:48:30UTC;
+its six-minute collector sealed and verified all local raw evidence by15:50:25.
+
+The [combined proof](evidence/user-facing-v4-u1-unselected-checkpoint-graph-proof-20260921.json)
+binds exact source, lock, tool and executable identities, both retained REDs,
+the test-module ordering correction and unchanged1501audit identities with13
+line-only metadata changes. Shared selected-task graph, retention and physical
+exclusion cases remain required and passed on all three platforms. The real
+initial-staging path and close/reopen are exercised; later-phase fixtures seed
+controls through the existing test owner. No service or bulk-throughput claim,
+ordinary-content integrity check, universal allocator recovery, task writer,
+capability advertisement or production action is implied. Durable selection,
+resume/fencing, checkpoint replacement and coupled activation remain U1 work.

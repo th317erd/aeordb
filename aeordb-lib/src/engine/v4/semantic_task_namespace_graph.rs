@@ -30,13 +30,13 @@ impl Drop for NamespaceCharge<'_> {
 }
 
 impl GraphOperation<'_, '_> {
-  pub(super) fn walk_namespace(&self, root: &[u8], summary: &mut SemanticTaskGraphSummaryV1) -> Result<()> {
+  pub(super) fn walk_namespace(&self, root: &[u8], summary: &mut CheckpointGraphStatistics) -> Result<()> {
     let mut ancestry = Vec::new();
     ancestry.try_reserve_exact(self.bounds.maximum_depth).map_err(graph_allocation)?;
     self.directory(DirectoryVisit { hash: root, path: "/", lower: None, upper: None, btree_child: false }, &mut ancestry, summary)
   }
 
-  fn directory(&self, visit: DirectoryVisit<'_>, ancestry: &mut Vec<Vec<u8>>, summary: &mut SemanticTaskGraphSummaryV1) -> Result<()> {
+  fn directory(&self, visit: DirectoryVisit<'_>, ancestry: &mut Vec<Vec<u8>>, summary: &mut CheckpointGraphStatistics) -> Result<()> {
     self.check()?;
     if ancestry.len() >= self.bounds.maximum_depth {
       return Err(invalid("semantic_task_graph_namespace_depth", "namespace graph exceeds its admitted depth").into());
@@ -123,7 +123,7 @@ impl GraphOperation<'_, '_> {
     self.check()
   }
 
-  fn file_record(&self, entry: &ChildEntry, path: &str, summary: &mut SemanticTaskGraphSummaryV1) -> Result<()> {
+  fn file_record(&self, entry: &ChildEntry, path: &str, summary: &mut CheckpointGraphStatistics) -> Result<()> {
     let bytes = self.raw(&entry.hash, kv_tag::FILE_RECORD, 4 << 20)?;
     let entity = decode_whole_entity(&bytes, self.algorithm(), self.header().write_sequence_high_water)?;
     if entity.entry_type != EntryTypeV4::FileRecord
@@ -188,7 +188,7 @@ impl GraphOperation<'_, '_> {
     increment(&mut summary.namespace_files)
   }
 
-  fn ordinary_chunk_reference(&self, key: &[u8], summary: &mut SemanticTaskGraphSummaryV1) -> Result<()> {
+  fn ordinary_chunk_reference(&self, key: &[u8], summary: &mut CheckpointGraphStatistics) -> Result<()> {
     self.lookup.step(1)?;
     if key.len() != self.algorithm().hash_length() || key.iter().all(|byte| *byte == 0) {
       return Err(invalid("semantic_task_graph_chunk_reference", "ordinary chunk reference must have a nonzero selected-width key").into());
@@ -217,7 +217,7 @@ impl GraphOperation<'_, '_> {
     Ok(())
   }
 
-  fn symlink(&self, entry: &ChildEntry, path: &str, summary: &mut SemanticTaskGraphSummaryV1) -> Result<()> {
+  fn symlink(&self, entry: &ChildEntry, path: &str, summary: &mut CheckpointGraphStatistics) -> Result<()> {
     let bytes = self.raw(&entry.hash, kv_tag::SYMLINK, (2 << 16) + 4096)?;
     let entity = decode_whole_entity(&bytes, self.algorithm(), self.header().write_sequence_high_water)?;
     if entity.entry_type != EntryTypeV4::Symlink

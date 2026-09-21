@@ -248,9 +248,18 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "failure.borrow_mut().take()",
     "checkpoint.pruning_catalog_root",
     "checkpoint.candidate_namespace_root",
+    "visit_captured_semantic_checkpoint_metadata_entries(",
+    "CatalogReadOperationV1::new(",
+    "sources.load_companion_and_checkpoint(",
+    "sources.visit_pairs(",
+    "drop(sources)",
+    "fn walk_checkpoint(",
   ] {
     assert!(graph.contains(required), "captured task graph omitted a shared owner or checkpoint branch: {required}");
   }
+  assert_eq!(graph.matches("self.walk_checkpoint(&checkpoint, &mut summary)?;").count(), 2);
+  let checkpoint_summary = graph.split("pub struct SemanticCheckpointGraphSummaryV1 {").nth(1).unwrap().split('}').next().unwrap();
+  assert!(!checkpoint_summary.contains("disposition"), "an unselected checkpoint cannot invent selected-task disposition");
   let namespace_graph = std::fs::read_to_string(source_root.join("engine/v4/semantic_task_namespace_graph.rs")).unwrap();
   for required in [
     "decode_validated_selected_directory_node(",

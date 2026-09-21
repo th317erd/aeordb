@@ -1,6 +1,8 @@
 //! Draft following-boundary tests; registered after the original failing run.
 use super::*;
 use std::path::Path;
+#[path = "native_unselected_semantic_checkpoint_spec.rs"]
+mod unselected;
 
 fn with_checkpoint_fixture(
   test: impl FnOnce(&V4FirstAuthorityPublisher, &NativeStagedSemanticSourceUnionV1<'_>, &MemoryCoordinator, &CancellationToken, &Path),
