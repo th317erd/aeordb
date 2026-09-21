@@ -14,6 +14,7 @@ pub use task_mark::{NativeSemanticTaskMarkBoundsV1, NativeSemanticTaskMarkV1, Se
 #[path = "semantic_source_capture_staging.rs"]
 mod source_capture_staging;
 pub use source_capture_staging::NativeCapturedSemanticCheckpointRequestV1;
+pub use source_capture_staging::{NativeInitialSemanticTaskSelectionErrorV1, NativeInitialSemanticTaskSelectionRequestV1};
 pub use source_capture_staging::{
   NativeSemanticSourceUnionStagingRequestV1, NativeStagedSemanticSourceUnionV1, SemanticSourceUnionStagingSummaryV1,
 };

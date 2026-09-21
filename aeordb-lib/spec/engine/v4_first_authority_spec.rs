@@ -197,6 +197,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_catalog_native_path = source_root.join("engine/v4/semantic_catalog_native.rs");
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
+  let initial_task_path = source_root.join("engine/v4/semantic_initial_task_selection.rs");
   let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
   let semantic_task_root_exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
   let semantic_task_physical_exclusion_path = source_root.join("engine/v4/semantic_task_physical_exclusion.rs");
@@ -682,6 +683,8 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     "encode_semantic_source_capture_v1(",
     "try_digest_parts(algorithm,&[&encoded_checkpoint])",
     "decode_semantic_source_capture_binding_v1(",
+    "fnprepare_initial_checkpoint(",
+    "PreparedInitialSemanticCheckpointV1",
     "capture.stage_captured_source_controls(&controls,request.publication_timestamp_ms,&memory,before_lock,observer)",
   ] {
     assert!(checkpoint.contains(required), "initial checkpoint lost captured ownership or shared encoding: {required}");
@@ -714,6 +717,86 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     files.iter().filter(|path| std::fs::read_to_string(path).unwrap().contains(".stage_captured_source_controls(")).collect();
   shared_sink_callers.sort();
   assert_eq!(shared_sink_callers, [&checkpoint_path, &source_root.join("engine/v4/semantic_source_control_staging.rs")]);
+  let initial_task_source = std::fs::read_to_string(&initial_task_path).unwrap();
+  let initial_task: String = initial_task_source.split_whitespace().collect();
+  for required in [
+    "implNativeStagedSemanticSourceUnionV1<'_>",
+    "self.prepare_initial_checkpoint(request.checkpoint)?",
+    "encode_semantic_mutation_task(",
+    "control_sequence:1",
+    "fencing_token:1",
+    "pins_released:false",
+    "created_at_ms:request.checkpoint.captured_at_ms",
+    "updated_at_ms:request.checkpoint.captured_at_ms",
+    "visit_captured_semantic_checkpoint_metadata_entries_expected(",
+    "Some((&pair.encoded_checkpoint,&pair.encoded_companion))",
+    "observation.region!=fresh.header.region",
+    "generation.as_ref()!=Some(self.union.generation_selection())",
+    "task.bytes!=encoded_task",
+    "validate_mutable_system_control_expectation(current.as_ref(),None,header.hash_algorithm)?",
+    "idempotent_mutable_system_control_receipt(&current,observation)",
+    "authority.staging_accounting_failed||authority.active_staging_protections==0",
+    "AdmittedMutableSystemControlPublicationV1{",
+    "memory.check_admission()",
+    "drop(fresh)",
+    "drop(pair)",
+  ] {
+    assert!(initial_task.contains(required), "initial task lost typed source/authority admission: {required}");
+  }
+  for forbidden in [
+    "StorageEngine",
+    "DiskKVStore",
+    "std::fs",
+    "OpenOptions",
+    "write_file",
+    "sync_file",
+    "encode_semantic_mutation_checkpoint(",
+    "encode_semantic_source_capture_v1(",
+    "load_immutable_system_control_file(",
+    "publish_successor_authority",
+    "publish_mutable_system_control(",
+    "begin_atomic_visibility_batch",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!initial_task.contains(forbidden), "initial selection gained another physical/schema/unbounded owner: {forbidden}");
+  }
+  let mut admitted_callers: Vec<_> = files
+    .iter()
+    .filter(|path| std::fs::read_to_string(path).unwrap().contains(".publish_admitted_mutable_system_control_with_observer("))
+    .collect();
+  admitted_callers.sort();
+  assert_eq!(admitted_callers, [&first_authority_path, &initial_task_path]);
+  let authority_compact: String = authority_source.split_whitespace().collect();
+  assert!(authority_compact.contains("structAdmittedMutableSystemControlPublicationV1<'publisher,'request>"));
+  assert!(!authority_compact.contains("pubstructAdmittedMutableSystemControlPublicationV1"));
+  assert!(authority_compact.contains("authority:MutexGuard<'publisher,FirstAuthorityRootStateV1>"));
+  assert!(authority_compact.contains("std::ptr::eq(self,publisher)"));
+  let generic = authority_source
+    .split("fn publish_mutable_system_control_with_observer(")
+    .nth(1)
+    .unwrap()
+    .split("fn publish_admitted_mutable_system_control_with_observer(")
+    .next()
+    .unwrap();
+  assert!(generic.find("semantic_task_writer_not_qualified").unwrap() < generic.find("retirement_owner.flush(").unwrap());
+  let lock = initial_task.find("publisher.selected_semantic_authority_guard()").unwrap();
+  let frontier = initial_task.find("observation.region!=fresh.header.region").unwrap();
+  let generation = initial_task.find("generation.as_ref()!=Some(self.union.generation_selection())").unwrap();
+  let publish = initial_task.find(".publish_admitted_mutable_system_control_with_observer(").unwrap();
+  let retry = initial_task.find("idempotent_mutable_system_control_receipt(&current,observation)").unwrap();
+  let selected_task = initial_task.find("letcurrent_task=").unwrap();
+  assert!(lock < frontier && frontier < selected_task && selected_task < generation && generation < retry && retry < publish);
+  let final_checks = &initial_task[generation..retry];
+  assert!(final_checks.contains("check_cancelled(&capture.cancellation)?"));
+  assert!(final_checks.contains("memory.check_admission()"));
+  assert!(!initial_task.contains("kv.flush("));
+  assert!(initial_task.find(".flush(").unwrap() < initial_task.find("capture_semantic_mutation_inventory(").unwrap());
   let owned_staging = std::fs::read_to_string(source_root.join("engine/v4/semantic_source_capture_staging.rs")).unwrap();
   let owned_staging: String = owned_staging.split_whitespace().collect();
   for required in [

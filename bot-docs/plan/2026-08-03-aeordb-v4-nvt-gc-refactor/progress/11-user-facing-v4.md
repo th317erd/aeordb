@@ -26,6 +26,171 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September21,17:55UTC: C5 initial durable task selection is qualified on matching
+Linux/macOS/native Windows source. Windows finished17:47:13UTC; collector86581
+sealed and strictly verified all raw records17:49:48UTC, then exited0. Counts:
+257narrow/1231affected/1208library/186reference/502fixtures, strict Clippy and
+379format roots passed. The combined three-platform verifier passed; all164
+MAIN inputs match SHA667b0d51abfde59b3fca64d8025334af4ce21d87a2f2d9defa27ef0d7dcff47c.
+Freshfetch17:54UTC confirms entry430e7be0 equals origin/development. Source review
+and retained RED/correction evidence are complete; create/check the combined
+proof and land only the15 owned paths. This finishes initial selection, not U1.
+
+Following task-work RED1 compiled and failed for the intended missing behavior
+at17:46:22UTC: zero passes/one failure/1193filtered; explicit
+`semantic_task_work_not_qualified` at real acquisition after close/reopen.
+No compile or fixture failure and no resource termination. All seven raw files
+are collected locally. Four additional negative/retry draft cases exist only in
+the scratch overlay, not the frozen RED1 snapshot or MAIN. No active remote
+jobs remain. Finish their entry contract and callable RED before adding behavior.
+
+September21,17:46UTC: Windows C5 final2 has passed257narrow/1231affected;
+at17:43:45 its library had completed1097cases. Sole collector86581 continues
+six-minute checks, next approximately17:49:46. Linux/Mac C5 raw proofs are sealed
+and strictly verified locally. MAIN still matches all164C5 inputs; freshfetch
+17:35 keeps HEAD430e7be0/origin0/0. Final source review found no new issue; it
+retains the original corrections and bounded evidence limitations.
+
+Use the idle, sealed Linux runner for a following **refusing-only** RED without
+changing MAIN, the C5 archives or native Windows checkout. Task-work RED1 has
+166inputs SHA`1772fc406ed33ca88b744f7baf3d21f10472b8f736712c18ffb20a1b5861e458`;
+launched17:45:17 PID2254659, unit`aeordb-v4-task-work-red1-20260921`, invocation
+`9c0d9a8b21d84ca38a477b6ba493d318`. First ordinary check>=17:51:17. Its one
+registered test attempts real initial selection/reopen, fenced acquisition,
+first Compiling checkpoint/reopen, retained-prefix admission and retention at
+allfive hashes. The new API always refuses; no following writer behavior is
+implemented or qualified. Complete the negative/fault/resource entry and parent
+qualification before implementing it. This uses separate source/evidence names;
+the earlier unregistered draft is no longer the only preparatory artifact.
+
+September21,17:19UTC: C5 Linux final2 finished17:11:58 with all gates passing;
+sealed17:17:21, complete raw evidence local and strictly verified. Counts:
+2427library/affected,19narrow,19individual deadlines,186reference,502independent
+fixtures; formatting/audit1501/strictClippy/debt passed. Minimum freehome88.395GB,
+Data325.217GB; peak job memory6GiB, no resource termination.
+
+C5 macOS final2 finished17:05:13; sealed17:11:25 and strictly verified locally:
+1193library/1234affected/257narrow/186reference/502fixtures and prescribed static
+gates. Neither Linux nor Mac has a remaining task-selection job. Windows C5
+final2 remains the sole pending platform, collector86581 last17:13:40 reports
+narrow passed/65affected cases; next scheduled around17:19:41. No new runtime
+code or selected capabilities were changed while these final gates ran.
+
+September21,17:08UTC: Windows C4 completed17:03:53:257narrow passes and
+1230affected passes/one retirement caller-registry failure across72targets.
+All raw records are local; the architecture-correction verifier strictly checks
+the same sole failure on all three platforms and byte-identical C4/C5 runtime.
+Windows C5 final2 launched CIMPID9392; sole collector86581 checks every six
+minutes, first approximately17:13:30. The old collector53883 is closed.
+
+At17:04, Linux C5 had passed Clippy and entered broad; Mac C5 had reached its
+final debt-selftest after library/reference/contracts. Neither final proof is
+sealed yet. Next ordinary Linux/Mac check>=17:10:30UTC. MAIN matches all164
+C5 inputs; the generic writer prefix and physical body equivalence verify.
+Freshfetch17:07 shows HEAD430e7be0 and origin/development0/0. No runtime changes
+or following-unit implementation occurred during qualification.
+
+September21,16:58UTC: Linux C4 stopped16:52:28 on the same retirement caller
+registry; its complete partial raw evidence is local. C5 Linux final2 launched
+16:57:09, PID2214302, unit`aeordb-v4-task-selection-candidate5-20260921`,
+invocation`0c0de585f4f84557b14acb4fcbbfc87c`. First ordinary check>=17:03UTC.
+Mac C5 final2 PID81323 remains live; at16:56:39 narrow had passed and affected
+was running. C4 Mac partial proof strictly verifies257narrow/134affected passes
+and the one registry failure. C5 changes no runtime bytes.
+
+Windows still runs C4 final1. Its sole collector53883 reported82affected cases
+at16:53:43 and next checks around16:59:44. C5 source and final2 scripts/control
+are transferred but not launched; require finished C4 evidence and inspect all
+failures before reusing that checkout. The new architecture-correction verifier
+will retain all three original failure records alongside final2 green results.
+U1 and the enclosing completion goal remain open; no service is changed.
+
+September21,16:51UTC: C4 macOS final1 stopped16:44:31 on the retirement-owner
+caller registry: the new selector borrows the existing journal but was missing
+from the reviewed caller list. Narrow257 passed; all partial Mac raw evidence
+is local. C5 adds that one caller and assertions forbidding a new chain, direct
+append or reconstruction, while requiring the shared sink before graph capture.
+No runtime bytes change. This corrects a missed architecture-test dependency,
+not a relaxation permitting a second physical owner.
+
+C5 has164inputs SHA`667b0d51abfde59b3fca64d8025334af4ce21d87a2f2d9defa27ef0d7dcff47c`,
+integrated exactly in MAIN. Mac final2 launchedPID81323 at approximately16:49:33;
+next ordinary check>=16:56. Linux C4 is still running its broad disk-KV cases
+at16:50:26; Windows C4's sole collector53883 reported narrow0 and57affected
+cases at16:47:42, next scheduled approximately16:53:42. Let their bounded stages
+finish and preserve/inspect failures before reusing each source checkout.
+No C5 Linux/Windows job has been launched. Full completion remains pending.
+The following lifecycle note is preparatory inspection only, with no new code.
+
+September21,16:41UTC: C3 preflight completed16:34:55 with all gates passing;
+all raw evidence is local and strictly verified. Counts19narrow/19deadlines/
+183affected/1193library plus format/audit-preview/strictClippy. Cgroup peak6GiB;
+minimum freehome92.986GB/Data325.352GB. No resource termination.
+
+C4 changes only13audit line locations, with all1501reviewed identities unchanged.
+Its163-input SHA`3ad0663122493b3bedb5a6e723fd3ce3ab4be415b58ee04ba02c337a3217258e`
+is integrated exactly in MAIN and independently verified. HEAD remains430e7be0,
+origin0/0 on the16:34fetch. Eleven owned source/test/audit paths and the two
+plan documents are the current unit; unrelated files are preserved.
+
+Final Linux launched16:40:27, PID2195931, unit
+`aeordb-v4-task-selection-candidate4-20260921`, invocation
+`ada12d76fbde4cd29cb031ab1e87c810`. Mac final1 launchedPID71824; Windows
+final1 launchedCIMPID10472. First ordinary Linux/Mac check>=16:46UTC. Windows
+has one six-minute collector; retain its managed handle and do not duplicate.
+No final-platform pass is claimed yet. Windows freeC41.992GB/testD51.417GB;
+no VM configuration or service change was needed. U1 and U2–U7 remain open.
+
+September21,16:28UTC: C2 passed19narrow,19individual ten-second deadlines
+(maximum301ms) and183affected tests across eight targets. Only formatting
+failed: two unrelated expressions compacted by the local formatter. All C2 raw
+evidence is local and completed stages strictly verified. C1's original three
+failures remain retained; their assertions were not relaxed.
+
+C3 restores only those two expression layouts. Its163-input SHA is
+`2ca53e3362524ab25e6f3b307b44d3e5d16aa39089a45166fcbd51373de99708`.
+Desktop preflight launched16:28:03, PID2182397, unit
+`aeordb-v4-task-selection-candidate3-20260921`, invocation
+`5473be420b7640dfa53cdb8ab109f8f8`. First ordinary check>=16:34UTC.
+The generic wrapper prefix and physical body compare mechanically identical to
+430e7be0 after expanding the identical shared retry-receipt projection.
+Final platform runners are prepared, not launched; their affected inventory
+expands to72targets,1234Unix/1231Windows tests. The additional platform difference
+is the existing Unix-only migration-root-map path case. MAIN remains unchanged.
+
+September21,16:21UTC: RED1 strictly verified:1pass/18expected failures,
+1174filtered; raw artifacts retained. C1 compiled and completed16:11:55 with
+16passes/3failures, no resource termination; all eight raw files are local.
+Frozen163-input SHA`9bb273fb43eace3f5710a09c4bbbc148d645872e35006bfe2f1589a352e16d8e`.
+Its desktop unit is stopped; no qualification job or collector remains live.
+
+Two failures expose initial selection reaching shared KV flush before retry or
+conflict refusal: selected task bytes remain unchanged but buffered KV state is
+folded into pages and the file shrinks92/184bytes. Correct the typed selector's
+guarded read-only retry/conflict admission without altering existing generic
+family ordering. The third failure is excessive fixture entity scratch during
+overlapping discovery/graph traversal after reopen; reuse the existing bounded
+retention-fixture cap, preserving the64/96MiB memory policy and pressure tests.
+Implementation remains isolated/unqualified; MAIN runtime remains430e7be0.
+U1 and U2–U7 remain open. No production, service or capability change.
+
+September21,15:57UTC: checkpoint-reader milestone landed and pushed as
+`430e7be05c8d18714b6316dcb34582f90350802c`, origin0/0. The749,771-byte
+combined proof passed its complete deterministic check before commit; all13
+source/test blobs matched C3 in the reviewed16-path index. Every qualification
+job/collector is finished. Its parent-bound final verifier is historical now;
+do not rerun it against the new HEAD.
+
+Initial task selection has19registered failing-first tests and a callable
+refusing API in the isolated task-selection overlay. No selector behavior is
+implemented. RED1 has163inputs SHA
+`2488e57be5136baba4cc53d433c252c8d1f4002effdfb91d07c797f1e7dd4cc9`.
+Desktop launched15:56:40, unit`aeordb-v4-task-selection-red1-20260921`,
+invocation`3255e6397e8f440988ef12189f9548b1`, PID2159257. First ordinary
+check>=16:02UTC. Admission freehome93.019GB/Data325.354GB, availableRAM22.137GB;
+existing host swap is distinct from the6GiB/noSwap/CPU200 job limit. MAIN
+runtime remains the landed reader. No production/service/capability change.
+
 September21,15:51UTC: Windows final1 completed15:48:30.749UTC, exit0 through
 format-batched. Counts257narrow/1138affected/1189library/186reference and502
 fixtures; strictClippy and complete formatting passed. The sole collector99892

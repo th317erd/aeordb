@@ -1,6 +1,8 @@
 //! Draft following-boundary tests; registered after the original failing run.
 use super::*;
 use std::path::Path;
+#[path = "native_initial_semantic_task_selection_spec.rs"]
+mod initial_task;
 #[path = "native_unselected_semantic_checkpoint_spec.rs"]
 mod unselected;
 

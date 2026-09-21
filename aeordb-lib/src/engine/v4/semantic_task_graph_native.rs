@@ -123,11 +123,24 @@ impl NativeSemanticMutationInventoryV1<'_> {
     task_id: &[u8; 16],
     checkpoint_sequence: u64,
     bounds: NativeSemanticTaskGraphBoundsV1,
+    visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
+  ) -> Result<SemanticCheckpointGraphSummaryV1> {
+    self.visit_captured_semantic_checkpoint_metadata_entries_expected(task_id, checkpoint_sequence, bounds, None, visitor)
+  }
+
+  // Typed initial selection supplies bodies derived by the same staging owner.
+  // Compare them inside the shared read so work/read ceilings remain cumulative.
+  pub(super) fn visit_captured_semantic_checkpoint_metadata_entries_expected(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    bounds: NativeSemanticTaskGraphBoundsV1,
+    expected_pair: Option<(&[u8], &[u8])>,
     mut visitor: impl FnMut(&KVEntry) -> std::result::Result<(), SemanticMutationObservationErrorV1>,
   ) -> Result<SemanticCheckpointGraphSummaryV1> {
     check_cancelled(&self.cancellation)?;
     let operation = GraphOperation::new(self, bounds, &mut visitor, false, None)?;
-    let result = operation.read_checkpoint(task_id, checkpoint_sequence);
+    let result = operation.read_checkpoint(task_id, checkpoint_sequence, expected_pair);
     operation.complete_result(result)
   }
 
@@ -316,10 +329,22 @@ impl<'a, 'visitor> GraphOperation<'a, 'visitor> {
     }
   }
 
-  fn read_checkpoint(&self, task_id: &[u8; 16], sequence: u64) -> Result<SemanticCheckpointGraphSummaryV1> {
+  fn read_checkpoint(
+    &self,
+    task_id: &[u8; 16],
+    sequence: u64,
+    expected_pair: Option<(&[u8], &[u8])>,
+  ) -> Result<SemanticCheckpointGraphSummaryV1> {
     self.check()?;
     let sources = CatalogReadOperationV1::new(self.capture, self.bounds.sources, Some(&self.lookup))?;
     let (companion, checkpoint_bytes) = sources.load_companion_and_checkpoint(task_id, sequence)?;
+    if let Some((expected_checkpoint, expected_companion)) = expected_pair {
+      if checkpoint_bytes != expected_checkpoint || companion.bytes != expected_companion {
+        return Err(
+          invalid("semantic_task_initial_checkpoint_mismatch", "initial selection differs from its exact staged source pair").into(),
+        );
+      }
+    }
     let (manifest, checkpoint) = crate::engine::v4::semantic_source_capture::decode_semantic_source_capture_binding_v1(
       &companion.bytes,
       &checkpoint_bytes,

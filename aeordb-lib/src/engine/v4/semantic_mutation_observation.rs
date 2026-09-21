@@ -5,6 +5,7 @@ pub use inventory::SemanticCheckpointGraphSummaryV1;
 pub use inventory::NativeSemanticTaskRootExclusionV1;
 pub use inventory::{NativeSemanticTaskPhysicalExclusionBoundsV1, NativeSemanticTaskPhysicalExclusionV1};
 pub use inventory::NativeCapturedSemanticCheckpointRequestV1;
+pub use inventory::{NativeInitialSemanticTaskSelectionErrorV1, NativeInitialSemanticTaskSelectionRequestV1};
 pub use inventory::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use inventory::{NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1};
 pub use inventory::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};

@@ -3,6 +3,7 @@
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
 pub use semantic_mutation_observation::NativeCapturedSemanticCheckpointRequestV1;
+pub use semantic_mutation_observation::{NativeInitialSemanticTaskSelectionErrorV1, NativeInitialSemanticTaskSelectionRequestV1};
 pub use semantic_mutation_observation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use semantic_mutation_observation::{
   NativeSemanticCompilerProgressBoundsV1, NativeSemanticCompilerProgressV1, SemanticCompilerConstructionModeV1,
@@ -286,6 +287,17 @@ pub struct MutableSystemControlPublicationRequestV1<'a> {
   pub monotonic_now_ms: u64,
 }
 
+// Constructed only after the generic-family gate or typed initial-task admission.
+// The guard owns the authority boundary continuously through the shared writer.
+struct AdmittedMutableSystemControlPublicationV1<'publisher, 'request> {
+  publisher: &'publisher V4FirstAuthorityPublisher,
+  authority: MutexGuard<'publisher, FirstAuthorityRootStateV1>,
+  observation: DatabaseHeaderObservationV4,
+  request: MutableSystemControlPublicationRequestV1<'request>,
+  timestamp: i64,
+  prior_hard_publication_sequence: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedMutableSystemControlV1 {
   pub selected_slot: SystemControlSlotV1,
@@ -304,6 +316,23 @@ pub struct MutableSystemControlPublicationReceiptV1 {
   pub retirement_hard_publication_sequence: Option<u64>,
   pub observation: DatabaseHeaderObservationV4,
   pub idempotent: bool,
+}
+
+// A read-only projection, not publication authority. Callers must establish
+// exact request equality and retain their authority guard before returning it.
+fn idempotent_mutable_system_control_receipt(
+  current: &LoadedMutableSystemControlV1,
+  observation: DatabaseHeaderObservationV4,
+) -> MutableSystemControlPublicationReceiptV1 {
+  MutableSystemControlPublicationReceiptV1 {
+    selected_slot: current.selected_slot,
+    control_sequence: current.control_sequence,
+    control_digest: current.control_digest.clone(),
+    replaced_slot: false,
+    retirement_hard_publication_sequence: None,
+    observation,
+    idempotent: true,
+  }
 }
 
 #[derive(Debug)]
@@ -3732,6 +3761,41 @@ impl V4FirstAuthorityPublisher {
         ));
       }
     }
+    self.publish_admitted_mutable_system_control_with_observer(
+      AdmittedMutableSystemControlPublicationV1 {
+        publisher: self,
+        authority,
+        observation,
+        request,
+        timestamp,
+        prior_hard_publication_sequence,
+      },
+      retirement_owner,
+      observer,
+    )
+  }
+
+  fn publish_admitted_mutable_system_control_with_observer(
+    &self,
+    admitted: AdmittedMutableSystemControlPublicationV1<'_, '_>,
+    retirement_owner: &mut RetirementJournalOwnerV1,
+    observer: &mut dyn FirstAuthorityDependencyObserverV1,
+  ) -> Result<MutableSystemControlPublicationReceiptV1, MutableSystemControlPublicationErrorV1> {
+    let AdmittedMutableSystemControlPublicationV1 {
+      publisher,
+      authority,
+      observation,
+      request,
+      timestamp,
+      prior_hard_publication_sequence,
+    } = admitted;
+    if !std::ptr::eq(self, publisher) {
+      return Err(MutableSystemControlPublicationErrorV1::invalid(
+        "mutable_control_admission_owner",
+        "guarded mutable-control admission belongs to another publisher",
+      ));
+    }
+    let header = &observation.selected.header;
     if observation.selected.redundancy_degraded || header.head_hash.iter().all(|byte| *byte == 0) {
       return Err(MutableSystemControlPublicationErrorV1::invalid(
         "mutable_control_missing_authority",
@@ -3766,15 +3830,7 @@ impl V4FirstAuthorityPublisher {
     let pair = load_mutable_system_control_pair(&self.file, &kv, header, request.kind, request.identity)?;
     if let Some(current) = pair.selected.as_ref() {
       if current.bytes == request.encoded_control {
-        return Ok(MutableSystemControlPublicationReceiptV1 {
-          selected_slot: current.selected_slot,
-          control_sequence: current.control_sequence,
-          control_digest: current.control_digest.clone(),
-          replaced_slot: false,
-          retirement_hard_publication_sequence: None,
-          observation,
-          idempotent: true,
-        });
+        return Ok(idempotent_mutable_system_control_receipt(current, observation));
       }
     }
     validate_mutable_system_control_guards(&self.file, &kv, header, &request)?;

@@ -1493,3 +1493,70 @@ controls through the existing test owner. No service or bulk-throughput claim,
 ordinary-content integrity check, universal allocator recovery, task writer,
 capability advertisement or production action is implied. Durable selection,
 resume/fencing, checkpoint replacement and coupled activation remain U1 work.
+
+### Initial durable task selection — entry 430e7be0
+
+Select the initial Queued ASMT only from the opaque staged source union and its
+already-published, exactly derived ASCM/ASMC pair. The caller supplies task/boot
+identity, the original capture request, physical publication clocks and explicit
+read/work/memory bounds, not arbitrary serialized task/control bodies. Reuse the
+initial-pair derivation and the qualified captured graph reader; never silently
+stage a missing pair or accept absent-task discovery as complete graph evidence.
+
+Initial task fencing token, control sequence and checkpoint sequence are1;
+pins remain held.
+Use the immutable capture time for both initial logical creation/update times,
+separate from the physical attempt timestamp, so an exact retry remains byte
+stable. Compare exact selected generation with the original captured selection;
+ordinary HEAD advancement is allowed only with unchanged semantic inputs and
+fresh current graph/frontier admission. A generation advance, even an equivalent
+raw rewrite or change-and-back, requires recapture. An existing advanced,
+different-owner or released task cannot be reset by the initial selector.
+
+All native publication stays with first_authority's existing physical owner.
+Keep the generic semantic-control refusal; expose no boolean/serialized-body
+override. A private typed admission binds the retained source owner, derived
+pair/task bytes, current physical instance/writer fence, generation, capabilities,
+healthy staging protection, cancellation, accounted scratch and exact fresh
+captured frontier. Recheck before exact retry and writes under the same root
+guard that remains held through publication. Flush pending retirement before
+capture or safely refuse a later frontier change; never weaken its chronology.
+Preserve existing generic-family retries and original committed error receipts.
+
+Initial exact retry and conflicting-current-task refusal must also precede the
+shared physical writer's KV-buffer flush. Under the retained root guard, read
+the selected task through the canonical pair loader and compare exact derived
+bytes; project an idempotent receipt only after all final admission checks.
+Existing generic family flush/retry ordering remains unchanged. Pending
+retirement still settles before graph capture as specified above.
+
+The callable refusing RED precedes implementation. Require independent literal
+task bytes, real stage/select/close/reopen/retention, conflicting/advanced retries,
+owner/epoch/generation races, ordinary rebase versus late-frontier refusal,
+missing pair/graph, named allocation failure, resource/cancellation bounds and
+pre/postcommit recovery. Preserve all shared mutable-control, migration,
+index-operation, receipt, selected-reader and GC regressions. Individual narrow
+deadlines, strict static/format/reference gates and final-source native platform
+qualification precede landing. Selection does not complete takeover, resumed
+compilation, replacement checkpoint selection, safe pin release, atomic
+task/generation/HEAD activation or any service/capability integration.
+
+Qualification September21: all164 C5 inputs match MAIN and passed the complete
+Linux, macOS and native Windows gates. Linux passed2427library/affected cases,
+19narrow cases,19individual ten-second deadlines (maximum292ms),186reference
+tests and502independent fixtures, plus audit1501/strict Clippy/format/debt gates.
+macOS passed1193library/1234affected/257narrow; Windows passed1208library/
+1231affected/257narrow. Both also passed186reference/502fixtures and their
+prescribed static/format gates. Windows completed17:47:13UTC; the sole collector
+sealed and verified its raw records17:49:48UTC.
+
+The [combined proof](evidence/user-facing-v4-u1-initial-task-selection-proof-20260921.json)
+binds source, locks, tools and binaries; original behavioral RED and corrections
+are retained. The C4 retirement caller-registry failure occurred on all three
+platforms; C5 adds the reviewed borrowed caller and source assertions without
+changing runtime bytes. The shared physical writer body is mechanically
+unchanged. Named allocation refusal is not universal allocation recovery;
+ordinary content retention is not payload-integrity verification. Pending
+retirement may settle before a read-only task retry. Restart observation is
+qualified, but fenced resumed work and subsequent checkpoint/activation/service
+integration remain required. No capability or production service is enabled.

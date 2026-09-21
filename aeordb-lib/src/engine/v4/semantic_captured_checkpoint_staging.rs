@@ -19,6 +19,12 @@ pub struct NativeCapturedSemanticCheckpointRequestV1 {
   pub maximum_workspace_bytes: usize,
 }
 
+pub(super) struct PreparedInitialSemanticCheckpointV1 {
+  pub(super) encoded_checkpoint: Vec<u8>,
+  pub(super) encoded_companion: Vec<u8>,
+  pub(super) memory: MemoryReservation,
+}
+
 impl NativeStagedSemanticSourceUnionV1<'_> {
   /// Stage the initial Captured dependency pair under the union's protection.
   /// This never selects a task or grants retention after the guard is dropped.
@@ -36,15 +42,37 @@ impl NativeStagedSemanticSourceUnionV1<'_> {
     before_lock: impl FnOnce(),
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, NativeSemanticSourceControlPublicationErrorV1> {
+    let PreparedInitialSemanticCheckpointV1 { encoded_checkpoint, encoded_companion, memory } = self.prepare_initial_checkpoint(request)?;
+    let capture = self.union.captured_inventory();
+    let mut identity = [0; 24];
+    identity[..16].copy_from_slice(&request.task_id);
+    identity[16..].copy_from_slice(&1u64.to_le_bytes());
+    let controls = [
+      ImmutableSystemControlWriteV1 {
+        kind: SystemControlKindV1::SemanticMutationCheckpoint,
+        identity: &identity,
+        encoded_control: &encoded_checkpoint,
+      },
+      ImmutableSystemControlWriteV1 {
+        kind: SystemControlKindV1::SemanticSourceCapture,
+        identity: &identity,
+        encoded_control: &encoded_companion,
+      },
+    ];
+    capture.stage_captured_source_controls(&controls, request.publication_timestamp_ms, &memory, before_lock, observer)
+  }
+
+  pub(super) fn prepare_initial_checkpoint(
+    &self,
+    request: NativeCapturedSemanticCheckpointRequestV1,
+  ) -> Result<PreparedInitialSemanticCheckpointV1, SemanticMutationObservationErrorV1> {
     let capture = self.union.captured_inventory();
     check_cancelled(&capture.cancellation)?;
     capture._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     self._memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
     let header = self.union.captured_header();
     if request.task_id.iter().all(|byte| *byte == 0) || request.mutation_count == 0 {
-      return Err(
-        invalid("semantic_captured_checkpoint_identity", "initial checkpoint requires a task ID and accepted mutation count").into(),
-      );
+      return Err(invalid("semantic_captured_checkpoint_identity", "initial checkpoint requires a task ID and accepted mutation count"));
     }
     if request.captured_at_ms < 0
       || (request.captured_at_ms as u64) < header.updated_at_ms
@@ -52,9 +80,10 @@ impl NativeStagedSemanticSourceUnionV1<'_> {
       || request.publication_timestamp_ms > i64::MAX as u64
       || request.publication_timestamp_ms < request.captured_at_ms as u64
     {
-      return Err(
-        invalid("semantic_captured_checkpoint_time", "capture/publication times must be ordered within the signed persistent range").into(),
-      );
+      return Err(invalid(
+        "semantic_captured_checkpoint_time",
+        "capture/publication times must be ordered within the signed persistent range",
+      ));
     }
     let algorithm = header.hash_algorithm;
     // Fixed Captured envelopes plus the existing source publisher's simultaneous
@@ -136,21 +165,6 @@ impl NativeStagedSemanticSourceUnionV1<'_> {
     .map_err(SemanticMutationObservationErrorV1::from)?;
     decode_semantic_source_capture_binding_v1(&encoded_companion, &encoded_checkpoint, algorithm)
       .map_err(SemanticMutationObservationErrorV1::from)?;
-    let mut identity = [0; 24];
-    identity[..16].copy_from_slice(&request.task_id);
-    identity[16..].copy_from_slice(&1u64.to_le_bytes());
-    let controls = [
-      ImmutableSystemControlWriteV1 {
-        kind: SystemControlKindV1::SemanticMutationCheckpoint,
-        identity: &identity,
-        encoded_control: &encoded_checkpoint,
-      },
-      ImmutableSystemControlWriteV1 {
-        kind: SystemControlKindV1::SemanticSourceCapture,
-        identity: &identity,
-        encoded_control: &encoded_companion,
-      },
-    ];
-    capture.stage_captured_source_controls(&controls, request.publication_timestamp_ms, &memory, before_lock, observer)
+    Ok(PreparedInitialSemanticCheckpointV1 { encoded_checkpoint, encoded_companion, memory })
   }
 }
