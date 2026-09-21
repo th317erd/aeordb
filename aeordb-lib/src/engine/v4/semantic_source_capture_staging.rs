@@ -5,6 +5,7 @@ pub use captured_checkpoint::NativeCapturedSemanticCheckpointRequestV1;
 #[path = "semantic_initial_task_selection.rs"]
 mod initial_task;
 pub use initial_task::{NativeInitialSemanticTaskSelectionErrorV1, NativeInitialSemanticTaskSelectionRequestV1};
+pub(super) use initial_task::validate_initial_task_owner;
 use super::*;
 use std::cell::RefCell;
 use crate::engine::v4::plugin_identity::ALIAS_MAX_LENGTH;

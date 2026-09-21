@@ -119,12 +119,35 @@ impl NativeSemanticMutationInventoryV1<'_> {
     before_lock: impl FnOnce(),
     observer: &mut dyn FirstAuthorityDependencyObserverV1,
   ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, NativeSemanticSourceControlPublicationErrorV1> {
+    self.stage_captured_source_controls_guarded(controls, publication_timestamp_ms, memory, (before_lock, observer), None)
+  }
+
+  pub(in crate::engine::v4::first_authority) fn stage_captured_work_controls(
+    &self,
+    controls: &[ImmutableSystemControlWriteV1<'_>],
+    publication_timestamp_ms: u64,
+    memory: &MemoryReservation,
+    work: &NativeSemanticTaskWorkV1<'_>,
+    hooks: (impl FnOnce(), &mut dyn FirstAuthorityDependencyObserverV1),
+  ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, NativeSemanticSourceControlPublicationErrorV1> {
+    self.stage_captured_source_controls_guarded(controls, publication_timestamp_ms, memory, hooks, Some(work))
+  }
+
+  fn stage_captured_source_controls_guarded(
+    &self,
+    controls: &[ImmutableSystemControlWriteV1<'_>],
+    publication_timestamp_ms: u64,
+    memory: &MemoryReservation,
+    hooks: (impl FnOnce(), &mut dyn FirstAuthorityDependencyObserverV1),
+    work: Option<&NativeSemanticTaskWorkV1<'_>>,
+  ) -> Result<ImmutableSystemControlBatchPublicationReceiptV1, NativeSemanticSourceControlPublicationErrorV1> {
+    let (before_lock, observer) = hooks;
     let nodes =
       !controls.is_empty() && controls.len() <= 2 && controls.iter().all(|control| control.kind == SystemControlKindV1::SemanticSourceNode);
     let pair = controls.len() == 2
       && controls[0].kind == SystemControlKindV1::SemanticMutationCheckpoint
       && controls[1].kind == SystemControlKindV1::SemanticSourceCapture;
-    if !nodes && !pair {
+    if (work.is_some() || !nodes) && !pair {
       return Err(
         invalid("semantic_source_staging_kind", "source staging accepts nodes or the derived initial checkpoint pair only").into(),
       );
@@ -169,6 +192,13 @@ impl NativeSemanticMutationInventoryV1<'_> {
           invalid("semantic_source_node_capability", "captured and current authority must declare source/task capabilities").into(),
         );
       }
+    }
+    if let Some(work) = work {
+      if observation.region != self.header.region {
+        return Err(invalid("semantic_task_work_frontier", "authority changed before checkpoint pair staging").into());
+      }
+      // Exact task/generation admission precedes retry and the shared KV flush.
+      work.validate_selected_work(publisher, &observation)?;
     }
     let mut prepared = Vec::new();
     prepared.try_reserve_exact(controls.len()).map_err(node_allocation)?;

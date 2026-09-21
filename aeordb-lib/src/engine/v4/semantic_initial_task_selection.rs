@@ -212,7 +212,10 @@ impl NativeStagedSemanticSourceUnionV1<'_> {
   }
 }
 
-fn validate_initial_task_owner(captured: &DatabaseHeaderV4, current: &DatabaseHeaderV4) -> Result<(), SemanticMutationObservationErrorV1> {
+pub(in crate::engine::v4::first_authority) fn validate_initial_task_owner(
+  captured: &DatabaseHeaderV4,
+  current: &DatabaseHeaderV4,
+) -> Result<(), SemanticMutationObservationErrorV1> {
   if current.database_id != captured.database_id
     || current.hash_algorithm != captured.hash_algorithm
     || current.physical_instance_id != captured.physical_instance_id

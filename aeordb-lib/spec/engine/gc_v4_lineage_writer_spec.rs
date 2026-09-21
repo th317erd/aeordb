@@ -463,6 +463,16 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
   assert!(initial_task.find(".flush(").unwrap() < initial_task.find("capture_semantic_mutation_inventory(").unwrap());
   assert!(initial_task.contains(".publish_admitted_mutable_system_control_with_observer("));
 
+  let task_work = fs::read_to_string(source_root.join("engine/v4/semantic_task_work.rs")).unwrap();
+  let task_work: String = task_work.split_whitespace().collect();
+  assert!(task_work.contains("retirement_owner:&mutRetirementJournalOwnerV1"));
+  assert!(!task_work.contains("RetirementJournalOwnerV1::"));
+  assert!(!task_work.contains("retirement_owner.append("));
+  assert!(!task_work.contains("reconstruct_retirement_journal_summary("));
+  assert!(task_work.contains(".flush(&mutSharedFirstAuthorityRetirementSinkV1{publisher})"));
+  assert!(task_work.find(".flush(").unwrap() < task_work.find("capture_semantic_mutation_inventory(").unwrap());
+  assert!(task_work.contains(".publish_admitted_mutable_system_control_with_observer("));
+
   let mut callers = Vec::new();
   let mut sources = Vec::new();
   rust_sources(&source_root, &mut sources);
@@ -492,6 +502,7 @@ fn writer_has_only_reviewed_authority_callers_and_no_independent_watermark_contr
       PathBuf::from("engine/v4/migration_root_map_owner.rs"),
       PathBuf::from("engine/v4/migration_source_gc.rs"),
       PathBuf::from("engine/v4/semantic_initial_task_selection.rs"),
+      PathBuf::from("engine/v4/semantic_task_work.rs"),
     ],
     "retirement owner must remain confined to reviewed physical-authority, migration and typed task callers"
   );

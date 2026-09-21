@@ -1,6 +1,11 @@
 //! Captured task discovery is not a resume, root admission or GC closure permit.
 #[path = "semantic_task_graph_native.rs"]
 mod task_graph;
+#[path = "semantic_task_work.rs"]
+mod task_work;
+pub use task_work::{
+  NativeSemanticTaskCompilerStartRequestV1, NativeSemanticTaskWorkErrorV1, NativeSemanticTaskWorkRequestV1, NativeSemanticTaskWorkV1,
+};
 pub use task_graph::SemanticCheckpointGraphSummaryV1;
 pub use task_graph::{NativeSemanticTaskGraphBoundsV1, SemanticTaskGraphErrorV1, SemanticTaskGraphSummaryV1};
 #[path = "semantic_task_retention_native.rs"]

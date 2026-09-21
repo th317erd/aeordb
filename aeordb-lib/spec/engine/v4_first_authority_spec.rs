@@ -198,6 +198,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_mutation_observation_path = source_root.join("engine/v4/semantic_mutation_observation.rs");
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
   let initial_task_path = source_root.join("engine/v4/semantic_initial_task_selection.rs");
+  let task_work_path = source_root.join("engine/v4/semantic_task_work.rs");
   let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
   let semantic_task_root_exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
   let semantic_task_physical_exclusion_path = source_root.join("engine/v4/semantic_task_physical_exclusion.rs");
@@ -213,7 +214,10 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     .filter(|path| std::fs::read_to_string(path).unwrap().contains("NativeStagingProtectionV1"))
     .collect();
   staging_consumers.sort();
-  assert_eq!(staging_consumers, [&semantic_catalog_native_path, &semantic_mutation_inventory_path, &staging_protection_path]);
+  assert_eq!(
+    staging_consumers,
+    [&semantic_catalog_native_path, &semantic_mutation_inventory_path, &task_work_path, &staging_protection_path]
+  );
   let inventory_source = std::fs::read_to_string(&semantic_mutation_inventory_path).unwrap();
   for name in ["semantic_task_graph_native.rs", "semantic_task_namespace_graph.rs", "semantic_task_catalog_graph.rs"] {
     let graph = std::fs::read_to_string(source_root.join("engine/v4").join(name)).unwrap();
@@ -658,7 +662,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   assert!(!node_front.contains("SystemControlKindV1::SemanticSourceCapture"));
   for required in [
     "controls.len()==2&&controls[0].kind==SystemControlKindV1::SemanticMutationCheckpoint&&controls[1].kind==SystemControlKindV1::SemanticSourceCapture",
-    "if!nodes&&!pair{returnErr(",
+    "if(work.is_some()||!nodes)&&!pair{returnErr(",
     "self.stage_captured_source_controls(&controls,request.publication_timestamp_ms,&memory,before_lock,observer)",
   ] {
     assert!(node_staging.contains(required), "shared dependency sink lost its exact permitted kinds: {required}");
@@ -771,7 +775,70 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     .filter(|path| std::fs::read_to_string(path).unwrap().contains(".publish_admitted_mutable_system_control_with_observer("))
     .collect();
   admitted_callers.sort();
-  assert_eq!(admitted_callers, [&first_authority_path, &initial_task_path]);
+  assert_eq!(admitted_callers, [&first_authority_path, &initial_task_path, &task_work_path]);
+  let task_work = std::fs::read_to_string(&task_work_path).unwrap();
+  let task_work: String = task_work.split_whitespace().collect();
+  for required in [
+    "observed:&'aSemanticMutationObservationV1",
+    "task.fencing_token.max(checkpoint.checkpoint_sequence).checked_add(1)",
+    "task.control_sequence.checked_add(2)",
+    "generation.as_ref()!=observed.generation_selection()",
+    "Some(current)if&current==selected",
+    "Some(current)ifcurrent.bytes==encoded_task",
+    "observation.region!=fresh.header.region",
+    "validate_initial_task_owner(header,&observation.selected.header)",
+    "AdmittedMutableSystemControlPublicationV1{",
+    "_memory:MemoryReservation",
+  ] {
+    assert!(task_work.contains(required), "task work lost a required guard: {required}");
+  }
+  for forbidden in [
+    "kv.flush(",
+    "StorageEngine",
+    "DiskKVStore",
+    "std::fs",
+    "OpenOptions",
+    "write_file",
+    "sync_file",
+    "publish_successor_authority",
+    "publish_mutable_system_control(",
+    "begin_atomic_visibility_batch",
+    "unsafe",
+    "unwrap(",
+    "expect(",
+  ] {
+    assert!(!task_work.contains(forbidden), "task work gained a second or unguarded owner: {forbidden}");
+  }
+  let acquisition = task_work.split("fnbegin_semantic_task_work_observed<'a>(").nth(1).unwrap();
+  let work_lock = acquisition.find("publisher.selected_semantic_authority_guard()").unwrap();
+  let work_generation = acquisition.find("generation.as_ref()!=observed.generation_selection()").unwrap();
+  let work_retry = acquisition.find("idempotent_mutable_system_control_receipt(&current,observation)").unwrap();
+  let work_publish = acquisition.find(".publish_admitted_mutable_system_control_with_observer(").unwrap();
+  assert!(work_lock < work_generation && work_generation < work_retry && work_retry < work_publish);
+  for required in [
+    "cancellation:cancellation.clone()",
+    "prepare_captured_semantic_compiler_inputs(",
+    "SemanticCatalogContinuationV1::from_complete(",
+    "SemanticCatalogContinuationV1::start(",
+    "capture.stage_captured_work_controls(",
+    "fresh.admit_captured_semantic_compiler_progress(",
+    "self.validate_selected_work(publisher,&observation)",
+    "std::ptr::eq(self._protection.publisher(),publisher)",
+    "generation.as_ref()!=self._observed.generation_selection()",
+    "current.bytes!=self._encoded_task",
+    "current.control_digest!=self.receipt.control_digest",
+    "pubfncommitted_checkpoint_receipt(",
+  ] {
+    assert!(task_work.contains(required), "compiler work lost a required boundary: {required}");
+  }
+  let pair_guard = node_staging.find("work.validate_selected_work(publisher,&observation)").unwrap();
+  let pair_retry = node_staging.find("ifexisting_receipts.len()==controls.len()").unwrap();
+  let pair_publish = node_staging.find("publisher.publish_immutable_entity_batch_with_validation_locked(").unwrap();
+  assert!(pair_guard < pair_retry && pair_retry < pair_publish);
+  let mut guarded_pair_callers: Vec<_> =
+    files.iter().filter(|path| std::fs::read_to_string(path).unwrap().contains(".stage_captured_work_controls(")).collect();
+  guarded_pair_callers.sort();
+  assert_eq!(guarded_pair_callers, [&task_work_path]);
   let authority_compact: String = authority_source.split_whitespace().collect();
   assert!(authority_compact.contains("structAdmittedMutableSystemControlPublicationV1<'publisher,'request>"));
   assert!(!authority_compact.contains("pubstructAdmittedMutableSystemControlPublicationV1"));
@@ -1089,6 +1156,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
       &semantic_mutation_observation_path,
       &semantic_task_physical_exclusion_path,
       &semantic_task_root_exclusion_path,
+      &task_work_path,
       &staging_protection_path,
     ],
     "first-authority publisher escaped the reviewed owners: {publisher_callers:?}"
@@ -1117,6 +1185,7 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     &semantic_mutation_observation_path,
     &semantic_task_physical_exclusion_path,
     &semantic_task_root_exclusion_path,
+    &task_work_path,
     &staging_protection_path,
   ] {
     let owner_source = std::fs::read_to_string(owner_path).unwrap();

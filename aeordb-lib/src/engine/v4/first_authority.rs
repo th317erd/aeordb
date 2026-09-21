@@ -3,6 +3,9 @@
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
 pub use semantic_mutation_observation::NativeCapturedSemanticCheckpointRequestV1;
+pub use semantic_mutation_observation::{
+  NativeSemanticTaskCompilerStartRequestV1, NativeSemanticTaskWorkErrorV1, NativeSemanticTaskWorkRequestV1, NativeSemanticTaskWorkV1,
+};
 pub use semantic_mutation_observation::{NativeInitialSemanticTaskSelectionErrorV1, NativeInitialSemanticTaskSelectionRequestV1};
 pub use semantic_mutation_observation::{NativeSemanticSourceUnionValidationBoundsV1, SemanticSourceUnionValidationSummaryV1};
 pub use semantic_mutation_observation::{

@@ -1560,3 +1560,87 @@ ordinary content retention is not payload-integrity verification. Pending
 retirement may settle before a read-only task retry. Restart observation is
 qualified, but fenced resumed work and subsequent checkpoint/activation/service
 integration remain required. No capability or production service is enabled.
+
+### Fenced Captured work and first compiler checkpoint — entry 112c965a
+
+Extend the same native owner from an opaque selected-task observation, never
+caller-supplied task bytes. The first scope accepts only held Queued/Capturing
+tasks with a Captured checkpoint. Other phases remain explicit refusals until
+their continuation is implemented; no timer-based expiry, automatic copy
+adoption, task reset, pin release, generation change or HEAD activation is added.
+
+Reserve the next immutable checkpoint identity by selecting a fresh task fence
+`max(old_fence, selected_checkpoint_sequence) + 1`, with checked overflow.
+Preflight room for both task control advances before the reservation write.
+Advance the control sequence once while preserving its old checkpoint, phase,
+pins and creation time; select the explicit holder boot and current writer epoch.
+The work handle owns this one reservation. Final checkpoint selection advances
+control again without changing its fence. Every fresh acquisition, including
+the same boot, advances the fence; an exact retry from the same opaque prior
+observation derives the same target. An abandoned reservation is never reused
+by a fresh operation, and an unknown immutable collision refuses rather than
+overwriting or scanning for an unused ID. Independent control/fence/checkpoint
+counters remain legal, including checkpoint sequence larger than task control.
+
+The observation must belong to the current physical instance and writer epoch;
+a newer writer may explicitly observe and take over an older task in that same
+physical database. Its captured immutable pair retains the original capture
+epoch. Current and observed reader/writer capabilities, exact captured semantic
+generation, task bytes, healthy staging protection, cancellation, accounted
+memory and freshly validated graph/frontier are required. Repeat these checks
+under the existing root guard through publication; exact retry/conflict precedes
+the legacy KV flush. Settle pending retirement before graph capture. Borrow the
+existing retirement owner; restart callers reconstruct/resume its existing chain.
+
+Consume the opaque work handle to start the existing semantic catalog
+continuation. Share retained-source preparation, parser-registry compilation and
+base construction-mode admission with the current prefix reader. A nonempty
+Complete base is strictly admitted even if its registry changes; corruption or
+unsupported semantics cannot fall back to fresh compilation. Matching registries
+use `from_complete`; changed registry, content-only or valid Complete-empty use
+`start`. Complete-empty with retained configurations refuses. The progress reader
+continues to reject Captured; do not weaken it to manufacture a continuation.
+
+Derive the Compiling/None-cursor checkpoint from actual continuation roots and
+counts and unchanged immutable capture fields. Derive its own source companion
+with the reserved sequence and new payload digest. Use the existing immutable
+pair publisher with a private exact task/generation guard at its final root-lock
+boundary. Catalog staging may leave unselected immutable objects on interruption;
+it cannot confer task authority. Freshly validate the staged graph and exact
+retained compiler prefix, then recheck all guards and select through the already
+qualified mutable physical owner. Preserve typed committed task receipts and
+distinguish committed immutable staging from selected task commitment. Generation
+and ordinary HEAD remain unchanged by this unit.
+
+Verification starts with callable refusing REDs before runtime behavior. Require
+the real all-hash initial selection/reopen/acquisition/first compiler selection/
+reopen/prefix/retention path, literal persisted-field expectations, exact retries,
+fresh same/new-owner fencing, valid high checkpoint counters, exhaustion,
+terminal/released/missing/malformed inputs, owner/generation/capability races,
+ordinary versus late HEAD changes, cancellation/pressure/allocation release,
+pre/postcommit outcomes, orphan-pair interruption and restart with old retention.
+Exercise fresh/incremental/changed-registry and Complete-empty/nonempty source
+modes. Preserve the shared physical/migration/index/GC caller registries and
+regressions. Ten-second new-case Linux deadlines and matching final source on
+Linux/macOS/Windows precede landing. General stepping/pruning/resume, activation,
+pin release and service/capability integration remain following U1-U7 work.
+
+Qualification September21: C15's170inputs match MAIN and passed Linux, macOS
+and native Windows final gates. Linux passed2461broad cases in73targets, all34
+new cases and34individual ten-second deadlines (maximum811ms),186reference
+tests and502independent fixtures, plus audit1501, strict Clippy, format and debt.
+macOS passed1227library/1234affected/257narrow; Windows passed1242library/
+1231affected/257narrow. Both also passed186reference/502fixtures and their
+prescribed static/format gates. Windows completed21:01:06UTC and its sole
+collector sealed, collected and strictly verified the raw evidence21:03:26UTC.
+
+The [combined proof](evidence/user-facing-v4-u1-fenced-task-work-proof-20260921.json)
+retains all failed starts, including the real cross-publisher private-pair gap
+and its regression, both explicit architecture-inventory corrections, C13's
+single Clippy correction and C14's launcher count error. C15 is byte-identical
+to C14; no test or runtime code changed for that launcher retry. The existing
+generic/admitted mutable writer body is mechanically identical to entry112c965a.
+Late cancellation of shared retirement preserves its original committed error
+and task receipt; immutable pair commitment alone is not task selection.
+This qualification does not complete resumed configuration/pruning/Ready work,
+atomic activation, terminal pin release, public runtime or production readiness.

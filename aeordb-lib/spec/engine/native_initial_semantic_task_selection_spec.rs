@@ -1,4 +1,6 @@
 //! Initial task selection: real staging, independent bytes and native boundaries.
+#[path = "native_semantic_task_work_spec.rs"]
+mod work;
 use super::*;
 
 fn selection_bounds() -> NativeSemanticTaskGraphBoundsV1 {

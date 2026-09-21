@@ -26,6 +26,185 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September21,21:04UTC: C15 final Linux completed20:19:20, sealed20:22:37 and all
+70raw stage files plus driver/environment/tool identities are local and strictly
+verified.73broad targets passed2461tests;34narrow/34individual deadlines
+(maximum811ms),186reference and502independent fixtures passed, with audit1501,
+strict Clippy, format and debt gates. Broad peak6,308,466,688bytes remains below
+the6GiB job limit; minimum home free88,464,855,040bytes and Data325,338,701,824bytes
+remain above their floors. No resource termination. MAIN now matches all170C15
+inputs across18owned source/spec/audit paths; all final native runs are complete.
+
+Mac final1 C15 completed20:29:44 and sealed20:35:37. All raw records are local;
+strict verification passed257narrow/1234affected/1227library/186reference/
+502fixtures and the prescribed static/format gates. Windows final1 completed
+21:01:06 and sealed21:03:18; sole collector84565 completed successfully21:03:26.
+Its local raw records strictly pass257narrow/1231affected/1242library/186reference,
+502independent fixtures, strict Clippy and379batched formatting roots. No monitor
+or qualification job remains. Fresh fetch20:54 leaves HEAD and origin/development
+equal112c965a, with no upstream integration needed.
+
+The [combined proof](../evidence/user-facing-v4-u1-fenced-task-work-proof-20260921.json)
+binds170source inputs, locks, tools, executables, original RED/correction history,
+individual Linux deadlines, all native gates and the unchanged physical mutable
+writer. This qualifies fenced Captured work and first Compiling selection only.
+Next U1: resumed configuration batches, dependency pruning and Ready output;
+activation, terminal transitions/pin release and U2–U7 remain open. The separate
+next-entry position model passed776paths/5002transitions and catches bare-owner
+versus configuration-file ordering; it is planning evidence, not native proof.
+
+September21,20:08UTC: C14's narrow34 and affected54 passed, but the final launcher
+supplied170 source inputs as the expected individual test count; that checker
+stopped immediately with34!==170 and executed zero cases. All21raw records and
+terminal receipt are retained/strictly verified. C15 is a byte-identical source
+and archive retry with distinct source_count/case_count names and explicit34.
+It launched20:07:10 PID2467963 invocationc94486d1700b4117833f4a0d9619735d;
+first ordinary poll>=20:13:10. The retry launcher requires the exact preceding
+argument failure, inactive unit, no Rust process and unchanged170inputs before
+launch, and does not extract or touch source. Native jobs remain unlaunched;
+their C15 packets are transferred. All final readiness gates remain owed.
+
+September21,19:58UTC: C13 review passed34work/22prefix/34individual deadlines/
+54affected, audit preview and formatting. Strict Clippy found one nonminimal
+Boolean in the shared immutable pair gate. C14 simplifies exactly that expression
+and its architecture literal; all8truth-table combinations are identical. The
+strict correction verifier checks both full files against those exact changes,
+all other inputs, and all49raw C13 records. Audit retains1501identities/reviews/
+caps, with13line-only changes plus conventional finalLF. C10/C12 inventory
+failures remain retained;14pre-C13 runs pass the history evidence verifier.
+
+Final Linux C14 launched19:57:53 PID2450873,
+invocation7769f6f549f743be9d92ba10e6dd11eb,170inputs
+SHA81e7b054e4040fe8c8f93c1818a6448e5313199188f251c8fa726c740d52b4dc.
+First ordinary poll>=20:03:53UTC. Full driver includes narrow/affected/deadlines/
+format/audit/Clippy/73broad targets/reference/contracts/debt. Its complete source
+must remain unchanged throughout. C14 packets, native scripts and fresh control
+are transferred to Mac and Windows, but neither native job/source extraction has
+started; wait for final Linux static success. Windows parser checks pass allfive
+scripts. Mac has~232GB free. Freshfetch19:59 keeps MAIN112c965a/origin0/0.
+All18owned source/spec/fixture paths remain isolated, not integrated into MAIN.
+
+September21,19:40UTC: C9 confirmed the private cross-publisher admission defect;
+C10 binds validation to the actual publisher under its root lock. C10 passed all
+34work cases,22prefix cases and34individual10second checks (maximum781ms).
+Affected tests passed53/54; the sole failure is an exact architecture inventory
+missing the new borrowed NativeStagingProtectionV1 task-work caller. All28raw
+records and terminal review receipt are local and strictly verified. Runtime
+peak3,786,084,352bytes; minimum Data free325,202,534,400bytes. The shared mutable
+physical method remains unchanged.
+
+C11 is an unlaunched source packet; explicit repository rustfmt configuration
+then produced C12's formatted architecture-only correction. C12 launched19:40:03
+PID2400608 invocationcf205873618447b58646bf641520807d,170inputs
+SHAf6230ae5cad43ba96898dd39b60b65959acaab0d3544a61292874098c16cae70.
+First ordinary check>=19:46:03UTC. Its full review unit must terminate before
+source reuse. Local next draft additionally formats two new spec files; these
+draft bytes are not C12. Final Linux launcher/verifier now prepared and syntax
+checked; native final runners remain unlaunched. All final qualification, source
+integration and U1 continuation remain owed; no production/service change.
+
+September21,19:24UTC: C6 compiled25/26 work passes plus22prefix passes. Its one
+fault observer incorrectly expected new keys when final selection replaces the
+existing A slot; the next observer checks that old locator remains visible while
+the replacement is buffered. C7 was compile-only (missing decoder import in a
+new fixture), retained with an exact import-correction check. C8 compiled32/33
+work passes plus22prefix passes. Its only failure expected Ok after cancelling
+the shared retirement token; the existing physical owner correctly returned
+`mutable_control_retirement_flush` with the committed control3 receipt. Preserve
+that original result: do not hide the bookkeeping failure or lose commitment.
+Every completed raw set is collected locally and strictly checked.
+
+C9 is test-only on C8 runtime: it tests work-only late cancellation separately
+from shared-token cancellation and adds a private cross-publisher guard RED using
+a disposable tiny DB copy with identical persisted IDs. The guard currently
+reads the work's publisher while its caller holds the capture's root lock; the
+new test must establish whether this private misuse can pass. No claimed public
+service exposure or production-copy operation.34tests/170inputs
+SHA52e5ecdb1900f0833e3fb6e7f4edf6911d45f56d8e4ed73c136634b42e146a15;
+launched19:21:09 PID2367644 invocation7064e5e1a2b24f93aea3f70096cad2cd,
+first ordinary check>=19:27:09UTC. Fix that owner binding only after inspecting
+the actual RED. The C10 runner can automatically proceed from green narrow and
+prefix to deadlines34/affected/audit-preview/format/Clippy, keeping source frozen
+in one bounded unit. No review/native-platform job is launched yet. Prepared
+Mac/Windows final1 scripts preserve C5's gates and source/deadline/resource checks.
+Freshfetch19:17 keeps MAIN112c965a/origin0/0; MAIN runtime remains unchanged.
+
+September21,19:02UTC: C4 and C5 acquisition/prefix preflights are complete and
+strictly checked, with all14 raw files per candidate collected. C4 passed12work
+cases and failed9 compiler-start cases; C5 passed12 and failed14 after splitting
+the seven source-mode cases. Every source-mode fixture reaches its intended
+unavailable-start boundary. Both preserve22 existing prefix passes; neither had
+a resource termination or compile failure.
+
+The first compiler-start implementation is isolated C6,170inputs
+SHAcc20d620e8ecbb37da64aa84cb70e0debf2c20d6ba29b5a26e60e4885a57a3a1.
+Launched18:56:58 PID2332685, unit`aeordb-v4-task-work-candidate6-20260921`,
+invocation`b7baa7a61e6e4530b667b2f5583f65d4`; next check>=19:02:58UTC.
+It retains the original work token/memory, shares strict Captured compiler input
+preparation, derives the actual continuation pair, guards its existing immutable
+publisher with exact work/generation, then validates graph/prefix and selects
+through the unchanged mutable physical writer. Not compiled/qualified evidence
+yet. Local next overlay adds six compiler cases: two nine-way boundary matrices,
+late cancellation receipt, immutable pair pre/postcommit receipts, unsupported
+Captured profiles and true orphan/reopen/existing-journal continuation. The next
+overlay also binds final graph validation to exact derived pair bytes and exposes
+only private test observers for the two publication boundaries. No MAIN runtime
+integration, native platform qualification, U1 completion or readiness claim.
+
+September21,18:31UTC: task-work candidate1 failed compilation at the new work
+handle's Debug derive; its raw record is retained and the narrow local Debug
+projection correction is strictly checked. Candidate2 compiled and completed
+18:22:06 with10passes/8failures/1193filtered (1.37s runtime). Seven failures reach
+the deliberately unimplemented compiler transition; the eighth test incorrectly
+retries an injected durability-failed writer without closing it. Inspection of
+the existing coordinator confirms it retains and returns the original hard
+failure. Do not weaken that latch. The corrected fixture closes the old writer,
+reopens, verifies the original selected task, and acquires new explicit work.
+All candidate2 raw files are local and its partial-result verifier passes.
+
+Candidate3 now has170inputs SHAe2328e6e0899dabcf6e5a3f5f46c5ff53ae69821147595abb7690df0457b2399,
+with20work tests. It bundles the private observed hooks without lint suppression,
+fixes the fault fixture's reopen boundary, and adds real source construction-mode
+tests. Compiler start still refuses. Linux launched18:29:27 PID2298450,
+unit`aeordb-v4-task-work-candidate3-20260921`, invocation
+`618246f1447848309d409242b2abe4a9`; next ordinary check>=18:35:27UTC.
+No work-owner behavior has been integrated into MAIN. The following shared
+compiler-input factoring and guarded pair/ASMT publication remain to implement
+after these failing-first cases are checked. No final gate or U1 completion is
+claimed by the acquisition-only passes.
+
+September21,18:18UTC: task-work RED1/RED2/RED3 all compile and strictly verify
+their intended behavioral failures. RED2 finished17:58:29 (1pass/4fail); RED3
+finished18:06:28 (2pass/11fail), both1193filtered with no resource termination.
+All seven raw records per run are local. RED3 source168inputs
+SHAc1960d0976fbc6a3a845eed969f3df944f544c4db34995184fe63382d8a55fba.
+
+Isolated candidate1 implements only fenced Captured acquisition; compiler start
+still explicitly refuses. The public owner requires opaque observed task/generation,
+checked fence/control reservation, guarded exact retry, shared owner/capability
+checks, complete graph and final frontier. Both physical/journal source registries
+now include the bounded borrowed caller; no second physical writer is introduced.
+Candidate1 source168inputs SHAa591a6a32164fd2c1e0653c8bbb56035d0abaab47c90316d341e09d5ad0a5be8;
+Linux launched18:12:50 PID2281481 unit`aeordb-v4-task-work-candidate1-20260921`,
+invocation`2d41f0c1e81043bda9c1ea397fdfd00a`; first check>=18:18:50UTC.
+Five additional compiler-boundary drafts and a private refusing observed-start
+entry exist only in the local overlay, not candidate1 or MAIN. Need their actual
+RED plus construction-mode/restart cases before implementing the compiler half.
+The existing task contract now records the next112c965a entry; U1 remains open.
+
+September21,18:00UTC: initial task selection landed and pushed as112c965a;
+the968783-byte combined proof passed exact verification before committing.
+Only15owned paths were staged; unrelated owner files remain untouched. Do not
+rerun its430e7be0-parent-bound verifier against the successor commit.
+
+The next coherent unit starts at112c965a: fenced work acquisition plus the first
+Captured-to-Compiling checkpoint. RED1 is strictly verified; RED2 adds four
+boundary cases (five total) with an always-refusing API,167inputs
+SHA85981cb4273b5ab9277f34055ea39403746393151ba187e19b0bfae2d5f4bad7.
+Linux launched17:57:30 PID2265390, unit`aeordb-v4-task-work-red2-20260921`,
+invocation`de1a47c678174e32a5cccb0e1b0bae23`; next check>=18:03:30UTC.
+No Windows/Mac job remains. Fenced compiler work is not yet implemented.
+
 September21,17:55UTC: C5 initial durable task selection is qualified on matching
 Linux/macOS/native Windows source. Windows finished17:47:13UTC; collector86581
 sealed and strictly verified all raw records17:49:48UTC, then exited0. Counts:

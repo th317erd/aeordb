@@ -51,7 +51,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     before_complete: impl FnOnce(),
   ) -> UnionResult<SemanticSourceUnionValidationSummaryV1> {
     self
-      .with_validated_captured_semantic_source_union(task_id, checkpoint_sequence, bounds, |_, _, _, _| Ok(()), before_complete)
+      .with_validated_captured_semantic_source_union(task_id, checkpoint_sequence, bounds, |_, _, _, _, _| Ok(()), before_complete)
       .map(|(summary, ())| summary)
   }
 
@@ -63,6 +63,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
     after_validation: impl FnOnce(
       &RetainedSourceUnionOperationV1<'_, '_, '_, &CapturedEntityLookupV1<'_>>,
       &crate::engine::v4::root_authority::NamespaceSemanticBindingV1,
+      &[u8],
       &[u8],
       u64,
     ) -> UnionResult<T>,
@@ -174,7 +175,7 @@ impl NativeSemanticMutationInventoryV1<'_> {
           .into(),
       );
     }
-    let result = after_validation(&operation, &base, &checkpoint_bytes, base_configurations)?;
+    let result = after_validation(&operation, &base, &checkpoint_bytes, &companion.bytes, base_configurations)?;
     before_complete();
     catalog.check()?;
     namespace.check()?;

@@ -11,8 +11,8 @@ use crate::engine::v4::semantic_catalog::{
   SemanticCatalogObjectSourceV1, SemanticCatalogReadErrorV1, SemanticCatalogReaderV1, SemanticCatalogTraversalBoundsV1,
 };
 use crate::engine::v4::semantic_catalog_compiler::{
-  AdmittedSemanticCatalogProgressV1, SemanticCatalogCompilationRequestV1, admit_semantic_catalog_progress_v1, admit_semantic_catalog_v1,
-  configuration_owner,
+  AdmittedSemanticCatalogProgressV1, CompiledSemanticCatalogV1, SemanticCatalogCompilationRequestV1, admit_semantic_catalog_progress_v1,
+  admit_semantic_catalog_v1, configuration_owner,
 };
 use crate::engine::v4::semantic_catalog_mutation::SemanticCatalogSnapshotV1;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationCheckpointV1, SemanticMutationCursorV1, SemanticMutationPhaseV1};
@@ -24,6 +24,15 @@ use std::cell::RefCell;
 const SEMANTIC_DECODE_WORKSPACE_BYTES: usize = 16 << 20;
 type CatalogParts =
   (SemanticCatalogCompilationRequestV1, CompiledParserRegistryV1, AdmittedSemanticCatalogProgressV1, SemanticCompilerConstructionModeV1);
+
+// Retained source/compiler inputs only. No task, checkpoint or HEAD authority.
+pub(in crate::engine::v4::first_authority) struct PreparedSemanticCompilerInputsV1 {
+  pub(in crate::engine::v4::first_authority) request: SemanticCatalogCompilationRequestV1,
+  pub(in crate::engine::v4::first_authority) registry: CompiledParserRegistryV1,
+  pub(in crate::engine::v4::first_authority) base_admission: Option<CompiledSemanticCatalogV1>,
+  base_registry: Option<CompiledParserRegistryV1>,
+  pub(in crate::engine::v4::first_authority) mode: SemanticCompilerConstructionModeV1,
+}
 
 struct PrefixConfigurationSourceV1<'a> {
   catalog_root: &'a [u8],
@@ -110,10 +119,57 @@ impl NativeSemanticMutationInventoryV1<'_> {
       task_id,
       checkpoint_sequence,
       bounds.sources,
-      |operation, base, checkpoint, base_count| operation.admit_prefix(base, checkpoint, base_count, bounds),
+      |operation, base, checkpoint, _, base_count| operation.admit_prefix(base, checkpoint, base_count, bounds),
       before_complete,
     )?;
     Ok(NativeSemanticCompilerProgressV1 { _capture: self, registry, progress, request, mode, sources })
+  }
+
+  // Source preparation only: Captured is deliberately still invalid as progress.
+  // The caller's bounded publication reservation owns the returned companion copy.
+  pub(in crate::engine::v4::first_authority) fn prepare_captured_semantic_compiler_inputs(
+    &self,
+    task_id: &[u8; 16],
+    checkpoint_sequence: u64,
+    expected_checkpoint: &[u8],
+    bounds: NativeSemanticCompilerProgressBoundsV1,
+  ) -> UnionResult<(PreparedSemanticCompilerInputsV1, Vec<u8>)> {
+    let (_, prepared) = self.with_validated_captured_semantic_source_union(
+      task_id,
+      checkpoint_sequence,
+      bounds.sources,
+      |operation, base, checkpoint_bytes, companion, base_count| {
+        let algorithm = operation.catalog.algorithm();
+        let checkpoint =
+          decode_semantic_mutation_checkpoint(checkpoint_bytes, algorithm).map_err(SemanticMutationObservationErrorV1::from)?;
+        if checkpoint_bytes != expected_checkpoint || checkpoint.phase != SemanticMutationPhaseV1::Captured {
+          return Err(invalid("semantic_task_work_checkpoint", "compiler start requires the exact selected Captured checkpoint").into());
+        }
+        if checkpoint.compiler_fingerprint != crate::engine::v4::semantic_compiler_profile::semantic_compiler_fingerprint_v1(algorithm)
+          || checkpoint.semantic_registry_fingerprint
+            != crate::engine::v4::system_family::embedded_system_family_registry(algorithm)
+              .map_err(SemanticMutationObservationErrorV1::from)?
+              .semantic_projection_fingerprint
+        {
+          return Err(invalid("semantic_catalog_base_profile", "checkpoint compiler or semantic registry profile is not supported").into());
+        }
+        if bounds.maximum_semantic_decode_workspace_bytes < SEMANTIC_DECODE_WORKSPACE_BYTES {
+          return Err(resource("semantic_compiler_prefix_workspace", "semantic decode scratch exceeds its operational ceiling").into());
+        }
+        let decode = self
+          .memory
+          .reserve(MemoryOwner::Task, SEMANTIC_DECODE_WORKSPACE_BYTES as u64, AdmissionClass::Maintenance)
+          .map_err(SemanticMutationObservationErrorV1::from)?;
+        let source = PrefixObjectSource { catalog: operation.catalog, capture: self, decode: &decode, failure: RefCell::new(None) };
+        let result = operation.prepare_compiler_inputs(base, checkpoint.expected_configuration_count, base_count, bounds, &source);
+        let inputs = source.finish(result)?;
+        operation.catalog.check()?;
+        decode.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
+        Ok((inputs, copy_namespace_bytes(companion)?))
+      },
+      || {},
+    )?;
+    Ok(prepared)
   }
 }
 
@@ -190,46 +246,19 @@ impl<A: NamespaceReadAdmissionV1> RetainedSourceUnionOperationV1<'_, '_, '_, A> 
       if !matches!(checkpoint.phase, SemanticMutationPhaseV1::Compiling | SemanticMutationPhaseV1::Pruning) {
         return Err(invalid("semantic_catalog_progress_phase", "catalog progress admission requires compiling or pruning work").into());
       }
-      let registry = self.compile_registry(self.manifest.requested_source_catalog, bounds)?;
-      let request = SemanticCatalogCompilationRequestV1 {
-        hash_algorithm: self.catalog.algorithm(),
-        expected_configuration_count: checkpoint.expected_configuration_count,
-        required_capabilities: base.semantic_state.required_capabilities,
-        maximum_workspace_bytes: bounds.maximum_compiler_workspace_bytes,
-      };
+      let PreparedSemanticCompilerInputsV1 { request, registry, base_admission, base_registry, mode } =
+        self.prepare_compiler_inputs(base, checkpoint.expected_configuration_count, base_count, bounds, &source)?;
       let cancelled = || capture.cancellation.is_cancelled();
-      let mut base_registry = None;
-      let mut base_admission = None;
-      let mut base_snapshot = None;
-      let mut mode = SemanticCompilerConstructionModeV1::Fresh;
-      if let SemanticAvailabilityV1::Complete { catalog_root, catalog_record_count, catalog_node_count, .. } =
-        &base.semantic_state.availability
-      {
-        if *catalog_record_count == 0 {
-          if base_count != 0 {
-            return Err(invalid("semantic_compiler_prefix_empty_base", "Complete-empty base has retained configurations").into());
-          }
-        } else {
-          let compiled = self.compile_registry(self.manifest.base_source_catalog, bounds)?;
-          base_admission = Some(admit_semantic_catalog_v1(
-            SemanticCatalogCompilationRequestV1 { expected_configuration_count: base_count, ..request },
-            &base.semantic_state.object_id,
-            &compiled,
-            &source,
-            &capture.memory,
-            &cancelled,
-          )?);
-          base_snapshot = Some(SemanticCatalogSnapshotV1 {
+      let base_snapshot = match &base.semantic_state.availability {
+        SemanticAvailabilityV1::Complete { catalog_root, catalog_record_count, catalog_node_count, .. } if *catalog_record_count != 0 => {
+          Some(SemanticCatalogSnapshotV1 {
             root_object_id: Some(catalog_root),
             record_count: *catalog_record_count,
             node_count: *catalog_node_count,
-          });
-          if compiled.projection() == registry.projection() {
-            mode = SemanticCompilerConstructionModeV1::Incremental;
-          }
-          base_registry = Some(compiled);
+          })
         }
-      }
+        _ => None,
+      };
       let progress = admit_semantic_catalog_progress_v1(request, checkpoint_bytes, &registry, &source, &capture.memory, &cancelled)?;
       self.verify_prefix(PrefixVerificationV1 {
         checkpoint: &checkpoint,
@@ -249,6 +278,51 @@ impl<A: NamespaceReadAdmissionV1> RetainedSourceUnionOperationV1<'_, '_, '_, A> 
       Ok((request, registry, progress, mode))
     })();
     source.finish(result)
+  }
+
+  fn prepare_compiler_inputs(
+    &self,
+    base: &NamespaceSemanticBindingV1,
+    expected_configuration_count: u64,
+    base_count: u64,
+    bounds: NativeSemanticCompilerProgressBoundsV1,
+    source: &dyn SemanticCatalogObjectSourceV1,
+  ) -> UnionResult<PreparedSemanticCompilerInputsV1> {
+    let registry = self.compile_registry(self.manifest.requested_source_catalog, bounds)?;
+    let request = SemanticCatalogCompilationRequestV1 {
+      hash_algorithm: self.catalog.algorithm(),
+      expected_configuration_count,
+      required_capabilities: base.semantic_state.required_capabilities,
+      maximum_workspace_bytes: bounds.maximum_compiler_workspace_bytes,
+    };
+    let capture = self.namespace.capture;
+    let cancelled = || capture.cancellation.is_cancelled();
+    let mut base_registry = None;
+    let mut base_admission = None;
+    let mut mode = SemanticCompilerConstructionModeV1::Fresh;
+    if let SemanticAvailabilityV1::Complete { catalog_record_count, .. } = &base.semantic_state.availability {
+      if *catalog_record_count == 0 {
+        if base_count != 0 {
+          return Err(invalid("semantic_compiler_prefix_empty_base", "Complete-empty base has retained configurations").into());
+        }
+      } else {
+        let compiled = self.compile_registry(self.manifest.base_source_catalog, bounds)?;
+        // Even a changed registry must first prove the nonempty Complete base.
+        base_admission = Some(admit_semantic_catalog_v1(
+          SemanticCatalogCompilationRequestV1 { expected_configuration_count: base_count, ..request },
+          &base.semantic_state.object_id,
+          &compiled,
+          source,
+          &capture.memory,
+          &cancelled,
+        )?);
+        if compiled.projection() == registry.projection() {
+          mode = SemanticCompilerConstructionModeV1::Incremental;
+        }
+        base_registry = Some(compiled);
+      }
+    }
+    Ok(PreparedSemanticCompilerInputsV1 { request, registry, base_admission, base_registry, mode })
   }
 
   fn compile_registry(&self, root: &[u8], bounds: NativeSemanticCompilerProgressBoundsV1) -> UnionResult<CompiledParserRegistryV1> {
