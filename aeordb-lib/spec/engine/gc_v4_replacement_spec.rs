@@ -554,3 +554,6 @@ fn replacement_boundary_has_no_live_v3_service_or_control_store_activation() {
   assert!(!controls.contains("RetirementJournalReplacementCoordinatorV1"));
   assert!(controls.contains("store_control_file_record_v1"), "the named v4 ControlStore remains a v3 FileRecord transition writer");
 }
+
+#[path = "gc_v4_buffered_batch_spec.rs"]
+mod buffered_batch;

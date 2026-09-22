@@ -26,6 +26,170 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September22,03:38UTC: retirement Candidate4 completed all Windows gates at
+03:29:31. The sole collector sealed/copied/strictly verified96raw records, then
+requested normal guest shutdown03:34:38. Host checks03:35:50/03:36:26 confirm
+QEMU3030860 gone and no remaining QEMU processes; available RAM is34GiB.
+The collector exited0; no Windows monitor remains active.
+
+Exactly five retirement-owned paths are now integrated in MAIN; all189inputs
+match the qualified packet. Combined proof generation and deep comparison pass,
+covering Linux2,503broad/73targets, macOS1,261library/1,242affected and Windows
+1,276library/1,239affected, plus all static/reference/history gates. Proof:
+[buffered retirement](../evidence/user-facing-v4-u1-buffered-retirement-proof-20260922.json)
+(1,017,477bytes,SHA27150f96d44cc562cdd102ce6892053ce9523e953bd5dabd4e17e56d3fac851e).
+The current HEAD is still103327da pending this coherent milestone commit.
+
+Separate activation Candidate1 executed5passes/2failures at03:30:36 in2,783ms;
+eight raw records strictly verify. The two failures are test-assumption errors:
+the first-publication observer wrongly requires an existing replacement slot to
+be absent, and cancellation of the shared retirement token correctly returns
+a committed-receipt error after the task commits. Candidate2 corrects only that
+test file, checking old public locators versus hidden replacements and both
+attempt-only/shared-retirement cancellation contracts. Runtime unchanged and
+not integrated. No Candidate2 outcome yet; complete U1 and U2–U7 remain open.
+
+September 22, 03:29 UTC: Windows C4 library completed successfully at03:25:55;
+the sole collector observed Clippy running at03:28:24. Linux/macOS evidence
+remains green; source integration waits for Windows. Collector saves/verifies
+results then requests normal VM shutdown, which still needs host verification.
+
+Activation RED2 was a test compilation failure (missing decoder import), not
+a behavior result. Eight raw files are retained and its build-failure verifier
+passes. RED3 changes only that import and ran all seven tests against the
+deliberately refusing entry:0passed/7failed in992ms, finished03:21:54, all eight
+records strictly verified. Candidate1 now shares the existing reservation owner
+through a private purpose distinction; compiler phase rules stay unchanged.
+It launched03:28:56 on desktop under unchanged limits;190input SHA
+`537067ef7175db2deb62f79e88c307f5014c55fe94437e2d8597c9f9d3414c09`.
+No success claimed yet. This reserves Activating ownership only; the coupled
+activation/rebase/current-path transaction and terminal release remain owed.
+Fresh upstream fetch shows HEAD/origin equal at103327da; MAIN runtime unchanged.
+
+September 22, 03:11 UTC: Windows Candidate4 affected tests passed at 03:02:16;
+its 03:10:22 collector observation shows the library stage still running, with
+620 completed cases. The VM is needed for that run and will be shut down after
+collection. No C4 integration/commit yet.
+
+The following activation unit now has a separate scratch TDD candidate, not
+part of C4 or MAIN. A real compiled Ready-task test reaches a deliberately
+refusing new activation-work entry and fails in 124 ms. RED1's eight records
+pass strict verification; its 190-input SHA is
+`69c3837aaa6c70468cc6572d27d5bfcc174c08b32c04212650c1d3f9ad593f7b`.
+Peak Linux memory was 3,938,185,216 bytes under the unchanged 6 GiB/no-swap cap.
+This is a missing-feature RED, not evidence of an existing activation writer.
+Six additional cases and an observation hook are prepared in RED2; they still
+use the refusing method. No functional reservation/activation implementation
+has been made yet. Final coupled authority, rebase, protected paths and pin
+release remain required parts of U1; a reservation is not its completion.
+
+September 22, 02:47 UTC: Final Candidate4 Linux qualification completed at
+02:31:21; all 67 collected raw records pass verification, including 2,503 tests
+across 73 targets, all eleven new cases, formatting, strict Clippy, unchanged
+1,501-occurrence audit, 186 reference tests and 502 independent fixtures.
+macOS completed at 02:29:49; all 66 records pass verification (1,261 library,
+1,242 affected and 257 narrower tests plus the static/reference gates).
+Windows has now launched with PID1492 against the same frozen 189 inputs.
+Its single six-minute collector observed the narrow stage passing at 02:42:37
+and the affected stage still running at 02:46:17. The collector will save and
+verify the evidence, then request normal guest shutdown; host exit verification
+remains required. No source integration/commit or full-v4 readiness claim yet.
+
+September 22, 02:18 UTC: Candidate3 passed the 78 affected tests and the audit
+preview (same 1,501 identities/reviews/caps; seven line locations changed).
+Formatting found only one extra trailing blank line in the test registration;
+Clippy did not run. All 22 partial-review records are strictly verified and kept.
+Candidate4 changes only that whitespace and installs the exact audit preview;
+its runtime is unchanged from Candidate3. The 189-input SHA is
+`efa9a4936c686cdaf5be4b1ca9f7afb5f787f642af200a9ee9dc5488a92333b7`.
+The broader final-source Linux gate launched at 02:16:43 UTC, PID3008668/
+invocation `08fc3e1ad14442b980edd5e7d4f4a5cb`; native macOS launched at
+02:17:14 UTC, PID44624. Next combined ordinary check: 02:23:14 or later.
+Both include the outstanding format/Clippy checks; neither has a result yet.
+Windows remains off. No source integration or milestone commit yet.
+
+September 22, 02:07 UTC: Candidate3 passed all eleven narrow cases again
+(eight external: 44 ms; three internal: 20 ms), completing at 02:00:49 UTC.
+Eight raw files are collected and the normal seven are strictly verified.
+Peak sampled memory was 3,955,183,616 bytes, without a resource termination.
+Its affected/static review launched at 02:06:34 UTC, PID3000456/invocation
+`ea420aed523f4b8b88aa1021bfcff027`; next ordinary check is 02:12:34 or later.
+The audit correction has not yet passed that gate. VM remains off; no final
+source integration, native qualification or production readiness is claimed.
+
+September 22, 02:00 UTC: Candidate2's affected suite passed all 78 tests, but
+its audit preview refused a 1,501→1,502 increase: the new input-length conversion
+discarded its conversion error. The 15 failed-review raw records are collected
+and strictly verified. Formatting/Clippy did not run; no audit cap was raised.
+Candidate3 reuses the already validated reason counts through checked arithmetic
+instead of duplicating that conversion. Capacity still bounds work before the
+scan, and pending-count checks still precede mutation. Its 189-input SHA is
+`d81fbfb24378c0ae1db6df58f5b190646a9da8bca1d7563a413a01943a53083c`.
+Targeted qualification launched at 01:58:31 UTC, PID2994808/invocation
+`c5120bfce37d42e7a694cfdfdab38c54`; next normal check is 02:04:31 or later.
+Windows remains off. Final-source broad/native qualification is still owed.
+
+September 22, 01:53 UTC: Candidate2 passed all eleven targeted regressions
+(external eight: 47 ms; internal three: 24 ms), including all five hash algorithms
+through both final-interruption tests. Eight raw files are collected; normal
+receipts, exact source/binary bindings and resource guards pass verification.
+The seven-target affected run plus audit preview, formatting and strict Clippy
+launched at 01:48:30 UTC, PID2986206/invocation
+`d067afbfbdbd4fb990bc5b8398d44aa3`. Next normal check: 01:54:30 or later.
+Final-source Linux/native runners are prepared but not running. Windows remains
+off; its future collector now requests graceful shutdown only after successful
+collection/verification and an idle-job check. Full U1 and U2–U7 remain open.
+
+September 22, 01:42 UTC: RED4 reached the actual tests: eight external cases
+passed, the mid-append rollback case passed, and both after-last interruption
+cases failed by returning a prepared permit. All seven normal records are strictly
+verified, with the additional compile log retained. Candidate2 adds the final
+operability check and exact prior-state restoration. Its 189-input SHA is
+`72b832b6d75e2bcc692c674f983ba31815d51f4a0fe0255c4e46221fef81eef0`;
+it launched at 01:40:50 UTC, PID2980311/invocation
+`e8f061998483481580d2eeb3fd859103`. Next ordinary check: 01:46:50 or later.
+No candidate or broad qualification result yet. The VM remains off; the desktop
+reports 36 GiB available RAM. MAIN runtime remains unchanged at103327da.
+
+September 22, 01:31 UTC: retirement Candidate1 passed all eight targeted cases
+in 43 ms; all seven raw records are strictly verified. Deterministic mid/final
+append interruption tests were then registered in RED3. Its two-job build hit
+the fixed 6 GiB cgroup limit before any tests executed (systemd `oom-kill`,
+01:18:37 UTC). The four partial raw files and systemd/journal report are retained;
+there is no normal exit receipt, and this is not behavioral RED evidence.
+
+RED4 retries the identical 189-input manifest and identical source archive with
+one compiler job and streamed compile logs. Resource ceilings and the 10-second
+whole-group execution deadlines are unchanged. It launched at 01:28:43 UTC,
+PID2971666/invocation `9ecb8bd006824565840583f070549124`; next normal check is
+01:34:43 or later. Source SHA:
+`6e45046f53c243e440a0185ee6744d9cd86df505bc571bfc36f2e8ddc06fa522`.
+No runtime fix for the proposed final-interruption behavior has been made before
+its actual test result. MAIN retirement source remains entry103327da; only its
+contract/ledger are changed. Windows remains gracefully off.
+
+September 22, 01:07 UTC: resumed compiler milestone landed and pushed as
+`103327da9fad4ac03493648b136a4d322ca55fbc`. Exactly 30 owned paths were committed;
+unrelated owner files were preserved. Final proof regeneration plus deep equality
+passed in 98,051 ms. The original --check mode redundantly reruns imported history
+and exceeded its local 110-second deadline; no helper or test was weakened.
+The complete --json reconstruction followed by the same deep comparison avoids
+that duplicate work. Source, platform, history and artifact checks all ran.
+
+Next U1 prerequisite is buffered plural retirement admission, in a separate
+overlay, not yet integrated. RED1 confirmed the single-record refused-capacity
+clock bug; RED2 ran eight cases, with three passing refusals and five expected
+behavioral failures (29 ms). All 14 raw records are retained and strictly verified.
+Candidate1 performs whole-batch capacity/count preflight and restores the exact
+prior soft state on append refusal, retaining the single-record API and existing
+ordinary preparation/physical publishers. It launched at 01:06:42 UTC on desktop,
+PID2955693/invocation `0f821a147d0640d9912926cdcebcf698`; next ordinary check is
+01:12:42 or later. Its 188-input SHA is
+`5ce28f14946d0e672fc3a0d14480fa35d3cb21adbbb84bc7701acd23cc761902`.
+Candidate results, deterministic mid-append interruption tests, affected/broad/
+native gates and source integration remain owed. `win11vm` stays off until a
+new Windows job actually needs it. No production readiness claim is made.
+
 September 22, 00:57 UTC: resumed compiler C14 is now qualified on all three
 platforms, with all raw evidence collected and strictly verified. Windows
 completed at 00:53:18 UTC: 1,273 library, 1,231 affected, 257 narrow, 186 reference

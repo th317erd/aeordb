@@ -9624,7 +9624,7 @@
     {
       "id": "esq-v1-3568baeb31a260286058-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1050,
+      "line": 1102,
       "column": 27,
       "enclosing_item": "retirement_journal_replacement_batch_digest_v1",
       "kind": "error_conversion",
@@ -9634,7 +9634,7 @@
     {
       "id": "esq-v1-8050d32914d13d0e72b3-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1404,
+      "line": 1456,
       "column": 41,
       "enclosing_item": "impl RetirementJournalOwnerV1::preflight_record_batch",
       "kind": "error_conversion",
@@ -9644,7 +9644,7 @@
     {
       "id": "esq-v1-7a42ec99a1abe9b7ee21-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1452,
+      "line": 1504,
       "column": 39,
       "enclosing_item": "impl RetirementJournalOwnerV1::validate_order",
       "kind": "error_conversion",
@@ -9654,7 +9654,7 @@
     {
       "id": "esq-v1-e8373df0ea00f98b5aa8-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1496,
+      "line": 1548,
       "column": 31,
       "enclosing_item": "impl RetirementJournalOwnerV1::flush_pending",
       "kind": "error_conversion",
@@ -9664,7 +9664,7 @@
     {
       "id": "esq-v1-3cf3a2d1bc68bfe1797f-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1533,
+      "line": 1585,
       "column": 27,
       "enclosing_item": "impl RetirementJournalOwnerV1::encode_pending_segment",
       "kind": "error_conversion",
@@ -9674,7 +9674,7 @@
     {
       "id": "esq-v1-b9ee108cf38bb1b167d3-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1598,
+      "line": 1650,
       "column": 3,
       "enclosing_item": "required_memory_bytes",
       "kind": "error_conversion",
@@ -9684,7 +9684,7 @@
     {
       "id": "esq-v1-04fce5a85a12011c3fd8-00",
       "file": "aeordb-lib/src/engine/v4/gc_retirement.rs",
-      "line": 1624,
+      "line": 1676,
       "column": 30,
       "enclosing_item": "encode_record",
       "kind": "error_conversion",

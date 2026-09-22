@@ -633,8 +633,8 @@ impl PreparedRetirementJournalReplacementV1 {
     }
   }
 
-  /// Remove the exact soft record admitted by `prepare_buffered_single` after
-  /// a replacement is proven not to have activated.
+  /// Remove the exact soft suffix admitted by buffered preparation after
+  /// its replacements are proven not to have activated.
   ///
   /// Any intervening owner mutation latches the owner instead of guessing
   /// which retirement evidence is safe to remove.
@@ -902,12 +902,57 @@ impl<'coordinator> RetirementJournalReplacementCoordinatorV1<'coordinator> {
     if batch.replacements.len() != 1 {
       return Err(RetirementJournalReplacementAdmissionErrorV1::Preflight("buffered authority admission requires exactly one replacement"));
     }
-    let (reason_counts, batch_digest) = self.preflight_batch(&batch, monotonic_now_ms)?;
-    let replacement = &batch.replacements[0];
-    let before = self.owner.soft_state();
+    self.prepare_buffered_batch(batch, monotonic_now_ms)
+  }
+
+  /// Admit a complete replacement batch without invoking the durable sink.
+  ///
+  /// The entire batch must fit the owner's existing bounded segment. Refusal
+  /// preserves its prior soft records and clocks; successful preparation owns
+  /// one exact rollback suffix. Activate while holding publication authority,
+  /// then flush immediately after releasing it, as for the single-record path.
+  pub fn prepare_buffered_batch(
+    &mut self,
+    batch: RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+  ) -> Result<PreparedRetirementJournalReplacementV1, RetirementJournalReplacementAdmissionErrorV1> {
+    self.prepare_buffered_batch_observed(batch, monotonic_now_ms, |_| {})
+  }
+
+  fn prepare_buffered_batch_observed(
+    &mut self,
+    batch: RetirementJournalReplacementBatchV1<'_>,
+    monotonic_now_ms: u64,
+    mut after_record: impl FnMut(usize),
+  ) -> Result<PreparedRetirementJournalReplacementV1, RetirementJournalReplacementAdmissionErrorV1> {
     self
       .owner
-      .append_buffered(
+      .preflight_operation(monotonic_now_ms)
+      .map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 })?;
+    let overflow = || RetirementJournalReplacementAdmissionErrorV1::Journal {
+      source: RetirementJournalOwnerErrorV1::ArithmeticOverflow,
+      admitted_records: 0,
+    };
+    let prospective_length = batch
+      .replacements
+      .len()
+      .checked_mul(retirement_record_length(self.owner.algorithm))
+      .and_then(|bytes| self.owner.current_segment_length().checked_add(bytes))
+      .ok_or_else(overflow)?;
+    if prospective_length > self.owner.options.target_segment_bytes {
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Journal {
+        source: RetirementJournalOwnerErrorV1::InvalidOptions("buffered replacement does not fit the admitted retirement segment"),
+        admitted_records: 0,
+      });
+    }
+    let (reason_counts, batch_digest) = self.preflight_batch(&batch, monotonic_now_ms)?;
+    // The segment bound limits the scan before any mutation. Reuse its validated
+    // reason counts instead of repeating a lossy conversion of the input length.
+    let replacement_count = reason_counts.iter().try_fold(0u32, |total, count| total.checked_add(*count)).ok_or_else(overflow)?;
+    self.owner.pending_records.checked_add(replacement_count).ok_or_else(overflow)?;
+    let before = self.owner.soft_state();
+    for (index, replacement) in batch.replacements.iter().enumerate() {
+      if let Err(source) = self.owner.append_buffered(
         RetirementJournalRecordWriteV1 {
           reason: replacement.reason,
           replacement_publication_sequence: batch.replacement_publication_sequence,
@@ -916,18 +961,25 @@ impl<'coordinator> RetirementJournalReplacementCoordinatorV1<'coordinator> {
           replacement_incarnation: replacement.replacement_incarnation,
         },
         monotonic_now_ms,
-      )
-      .map_err(|source| RetirementJournalReplacementAdmissionErrorV1::Journal {
-        admitted_records: u32::from(source.incoming_record_retained()),
-        source,
-      })?;
+      ) {
+        // This path never calls the sink: every appended record remains a soft
+        // suffix, including when cancellation or memory pressure arrives late.
+        self.owner.restore_soft_state(before);
+        return Err(RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 });
+      }
+      after_record(index + 1);
+    }
+    if let Err(source) = self.owner.ensure_operable() {
+      self.owner.restore_soft_state(before);
+      return Err(RetirementJournalReplacementAdmissionErrorV1::Journal { source, admitted_records: 0 });
+    }
     let after = self.owner.soft_state();
     Ok(PreparedRetirementJournalReplacementV1 {
       permit: RetirementJournalActivationPermitV1 {
         hash_algorithm: self.owner.algorithm,
         replacement_publication_sequence: batch.replacement_publication_sequence,
         retired_at_ms: batch.retired_at_ms,
-        replacement_count: 1,
+        replacement_count,
         reason_counts,
         batch_digest,
       },
@@ -1630,3 +1682,7 @@ fn encode_record(record: RetirementJournalRecordWriteV1<'_>, algorithm: HashAlgo
   encoded.extend_from_slice(record.replacement_incarnation);
   Ok(encoded)
 }
+
+#[cfg(test)]
+#[path = "../../../spec/engine/gc_v4_buffered_batch_internal_spec.rs"]
+mod buffered_batch_internal;

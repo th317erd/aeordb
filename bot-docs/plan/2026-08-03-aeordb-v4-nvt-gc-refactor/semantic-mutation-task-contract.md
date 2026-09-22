@@ -1728,3 +1728,60 @@ One-shot catalog parity shares compiler primitives; it is not an independent
 compiler. Small-fixture allocation ceilings do not establish large-source scaling.
 The per-batch source-union validation cost and all remaining activation/public
 runtime obligations above are unchanged by this qualification.
+
+### Buffered plural retirement prerequisite — entry 103327da
+
+Atomic activation will replace multiple current controls and possibly protected
+current-path records under the existing physical authority. Its retirement owner
+must admit an entire bounded replacement group without recursively invoking the
+durable sink. Extend the existing coordinator; do not add another journal/writer.
+Ordinary sink-capable preparation remains unchanged, and the single-record API
+still rejects any cardinality other than one.
+
+Preflight owner, clock and complete segment capacity before scanning the batch.
+The admitted segment bounds scan/memory cost and therefore the possible record
+count. Reuse the resulting validated reason counts to derive the permit count,
+with checked total/pending arithmetic before mutation. Retain the existing
+identity/extent/order/digest rules. No incoming record may remain
+owned after a refused buffered batch; restore the exact prior pending bytes,
+sequence/order and clock state even when cancellation or pressure arrives after
+an earlier record was buffered. Bind successful rollback to the same owner and
+exact suffix; intervening changes still refuse and latch rather than guessing.
+Caller activation and post-authority flush obligations remain unchanged.
+
+Entry failing proof: refused single-record capacity advances last_observed_at_ms,
+so a valid earlier retry fails ClockRegression despite zero admitted records.
+The unchanged-runtime RED1 reproduces this in 6 ms. A callable refusing batch
+entry then yields five expected failures among eight cases in 29 ms. Preserve
+both evidence sets. Initial cases cover five hash algorithms, all five reasons,
+literal record widths/incarnations, exact/one-byte-short capacity, retained-prefix
+bytes, malformed last input, ordering, clock, empty input, cancellation, pressure,
+and owner/suffix-bound rollback. Add deterministic interruption during and after
+the last append; entry-only failures do not prove that rollback path.
+
+This prerequisite is not physical activation/rebase proof. No HEAD/task/generation
+transaction, protected current-path mutation, root admission, terminal transition
+or pin release is conferred. Full native coupled publication/reopen/fault tests
+remain required in the following activation work. Initial independent RED work
+ran while the compiler's frozen Windows qualification finished; final landing
+must follow the green compiler milestone and the prerequisite's own full gates.
+
+Qualification September 22: final Candidate4 passed Linux2,503 broad cases
+across73targets, all11new cases,78affected cases, macOS1,261library/1,242affected/
+257narrow, and Windows1,276library/1,239affected/257narrow. Formatting, strict
+Clippy, reference186, independent fixtures502 and prescribed audit/debt gates
+passed. All67Linux/66macOS/96Windows raw records are collected and verified.
+The unchanged1,501audit identities/reviews/caps have seven line-only updates.
+The exact189input manifest is
+`efa9a4936c686cdaf5be4b1ca9f7afb5f787f642af200a9ee9dc5488a92333b7`;
+see [the combined proof](evidence/user-facing-v4-u1-buffered-retirement-proof-20260922.json).
+
+The after-last cancellation/pressure tests first failed against the partial
+implementation, then passed across all five algorithms after the final check
+and exact-state restoration. The two-job build interruption, failed audit and
+format review remain explicit evidence; none is represented as a passing run.
+Final compilation uses one job within the unchanged6GiB/no-swap ceiling.
+Ordinary preparation/append/discard and the entire first-authority publisher
+remain byte-identical to entry103327da. Exactly five owned paths were integrated,
+and all189source hashes match qualification. This completes this prerequisite
+only; atomic activation, rebase and the full public-runtime obligations remain.
