@@ -1,4 +1,5 @@
 //! A coherent read of durable task controls, never a resume or retention permit.
+pub use inventory::{NativeSemanticTaskCompilerAdvanceReceiptV1, NativeSemanticTaskCompilerAdvanceRequestV1};
 #[path = "semantic_mutation_inventory.rs"]
 mod inventory;
 pub use inventory::SemanticCheckpointGraphSummaryV1;

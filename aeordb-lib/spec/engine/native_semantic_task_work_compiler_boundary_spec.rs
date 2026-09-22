@@ -13,9 +13,9 @@ fn current_work_selection(publisher: &V4FirstAuthorityPublisher) -> LoadedMutabl
   publisher.load_mutable_system_control(SystemControlKindV1::SemanticMutationTask, &[1; 16], &[2; 16]).unwrap().unwrap()
 }
 
-struct FailingTaskReplacementObserver {
-  previous: KVEntry,
-  called: bool,
+pub(super) struct FailingTaskReplacementObserver {
+  pub(super) previous: KVEntry,
+  pub(super) called: bool,
 }
 
 #[test]

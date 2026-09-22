@@ -33,18 +33,27 @@ impl IndexConfigurationAliasSnapshotV1 for NoModeAliases {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum BaseMode {
+pub(super) enum BaseMode {
   ContentOnly,
   CompleteEmpty,
   Incremental,
   IncrementalRemoval,
+  IncrementalPruning,
   ChangedRegistry,
   EmptyWithConfiguration,
   UnsupportedProfile,
 }
 
 fn compiler_mode_case(algorithm: HashAlgorithm, mode: BaseMode) {
-  let (_directory, path, _coordinator, publisher) =
+  let _ = compiler_mode_case_with_inspect(algorithm, mode, |_| {});
+}
+
+pub(super) fn compiler_mode_case_with_inspect(
+  algorithm: HashAlgorithm,
+  mode: BaseMode,
+  inspect: impl FnOnce(TaskWorkFixture<'_>),
+) -> (tempfile::TempDir, PathBuf) {
+  let (directory, path, _coordinator, publisher) =
     create_environment_for_algorithm_at_kv_stage("task-work-compiler-mode", None, [1; 16], algorithm, 0);
   let initial = request_for_database_and_algorithm([1; 16], algorithm);
   let mut root = publisher.publish(&initial).unwrap().namespace_root.root_hash;
@@ -52,7 +61,11 @@ fn compiler_mode_case(algorithm: HashAlgorithm, mode: BaseMode) {
   seed_union_generation(&publisher);
   let memory = MemoryCoordinator::new(MemoryPolicy::new(768 << 20, 1024 << 20, 1, 16 << 20).unwrap());
   let cancellation = CancellationToken::new();
-  let configuration_body = br#"{"$v":1,"indexes":[]}"#;
+  let configuration_body: &[u8] = if matches!(mode, BaseMode::IncrementalPruning) {
+    br#"{"$v":1,"indexes":[{"name":"value","type":"typed_exact_blake3_v1"}]}"#
+  } else {
+    br#"{"$v":1,"indexes":[]}"#
+  };
   let configured = !matches!(mode, BaseMode::CompleteEmpty);
   if configured {
     seed_files(&publisher, &[(INDEX_SOURCE.to_owned(), "application/json", configuration_body)]);
@@ -191,7 +204,7 @@ fn compiler_mode_case(algorithm: HashAlgorithm, mode: BaseMode) {
       .map(|revision| NativeSemanticSourceReplacementV1 { path: PARSER_SOURCE, file_record_id: Some(revision) })
       .into_iter()
       .collect::<Vec<_>>();
-    if matches!(mode, BaseMode::IncrementalRemoval) {
+    if matches!(mode, BaseMode::IncrementalRemoval | BaseMode::IncrementalPruning) {
       replacements.push(NativeSemanticSourceReplacementV1 { path: INDEX_SOURCE, file_record_id: None });
     }
     let staged = capture
@@ -240,21 +253,30 @@ fn compiler_mode_case(algorithm: HashAlgorithm, mode: BaseMode) {
       assert_eq!(result.unwrap().control_sequence, 3);
       let capture = protection.capture_semantic_mutation_inventory(work_request(1).inventory_bounds, &memory, &cancellation).unwrap();
       let progress = capture.admit_captured_semantic_compiler_progress(&[2; 16], 2, start.compiler_bounds).unwrap();
-      let incremental = matches!(mode, BaseMode::Incremental | BaseMode::IncrementalRemoval);
+      let incremental = matches!(mode, BaseMode::Incremental | BaseMode::IncrementalRemoval | BaseMode::IncrementalPruning);
       assert_eq!(
         progress.construction_mode(),
         if incremental { SemanticCompilerConstructionModeV1::Incremental } else { SemanticCompilerConstructionModeV1::Fresh }
       );
       assert_eq!(progress.configuration_count(), u64::from(incremental));
-      if matches!(mode, BaseMode::IncrementalRemoval) {
+      if matches!(mode, BaseMode::IncrementalRemoval | BaseMode::IncrementalPruning) {
         assert_eq!(progress.sources().requested_configuration_count, 0);
         assert_eq!(progress.sources().base_configuration_count, 1);
       }
     }
     assert_eq!(publisher.observe().unwrap().selected.header.head_hash, root);
   }
+  inspect(TaskWorkFixture {
+    publisher: &publisher,
+    memory: &memory,
+    cancellation: &cancellation,
+    path: &path,
+    tree: &initial.namespace_tree.root_hash,
+    retirement: &mut retirement,
+  });
   drop(retirement);
   assert_eq!(memory.snapshot().unwrap().reserved_bytes, 0);
+  (directory, path)
 }
 
 #[test]

@@ -1,4 +1,8 @@
 //! Retained source-position admission, not durable task or activation authority.
+#[path = "semantic_compiler_batch_native.rs"]
+mod compiler_batch;
+#[path = "semantic_compiler_output_native.rs"]
+mod compiler_output;
 use super::*;
 use super::super::super::super::super::task_graph::load_captured_semantic_object;
 use crate::engine::v4::index_configuration_compiler::{
@@ -473,7 +477,7 @@ impl<A: NamespaceReadAdmissionV1> RetainedSourceUnionOperationV1<'_, '_, '_, A> 
         }
         Ok(())
       };
-    let pruning = checkpoint.phase == SemanticMutationPhaseV1::Pruning;
+    let pruning = matches!(checkpoint.phase, SemanticMutationPhaseV1::Pruning | SemanticMutationPhaseV1::Ready);
     let cursor_owner = match checkpoint.cursor {
       SemanticMutationCursorV1::ConfigurationOwner(owner) => Some(owner),
       _ => None,

@@ -1,4 +1,10 @@
-//! Fenced Captured work and guarded first compiler checkpoint selection.
+//! Fenced native compiler work and guarded checkpoint selection.
+#[path = "semantic_task_advance.rs"]
+mod compiler_advance;
+#[path = "semantic_task_compiler_publication.rs"]
+mod compiler_publication;
+use compiler_publication::TaskCompilerPublicationContextV1;
+pub use compiler_advance::{NativeSemanticTaskCompilerAdvanceReceiptV1, NativeSemanticTaskCompilerAdvanceRequestV1};
 use super::*;
 use crate::engine::v4::semantic_mutation_control::{SemanticMutationPhaseV1, SemanticMutationTaskStateV1, encode_semantic_mutation_task};
 use source_capture_staging::validate_initial_task_owner;
@@ -41,6 +47,8 @@ pub enum NativeSemanticTaskWorkErrorV1 {
   SourceUnion(#[from] NativeSemanticSourceUnionErrorV1),
   #[error(transparent)]
   Checkpoint(#[from] NativeSemanticSourceControlPublicationErrorV1),
+  #[error(transparent)]
+  Candidate(#[from] ImmutableEntityBatchPublicationErrorV1),
 }
 
 impl NativeSemanticTaskWorkErrorV1 {
@@ -51,13 +59,14 @@ impl NativeSemanticTaskWorkErrorV1 {
       Self::Publication(source) => source.code(),
       Self::SourceUnion(_) => "semantic_task_work_source_union",
       Self::Checkpoint(source) => source.code(),
+      Self::Candidate(source) => source.code(),
     }
   }
 
   pub fn committed_receipt(&self) -> Option<&MutableSystemControlPublicationReceiptV1> {
     match self {
       Self::Publication(source) => source.committed_receipt(),
-      Self::Observation(_) | Self::Graph(_) | Self::SourceUnion(_) | Self::Checkpoint(_) => None,
+      Self::Observation(_) | Self::Graph(_) | Self::SourceUnion(_) | Self::Checkpoint(_) | Self::Candidate(_) => None,
     }
   }
 
@@ -65,6 +74,14 @@ impl NativeSemanticTaskWorkErrorV1 {
   pub fn committed_checkpoint_receipt(&self) -> Option<&ImmutableSystemControlBatchPublicationReceiptV1> {
     match self {
       Self::Checkpoint(source) => source.committed_receipt(),
+      _ => None,
+    }
+  }
+
+  /// A staged candidate is not a selected task or an admitted namespace root.
+  pub fn committed_candidate_receipt(&self) -> Option<&ImmutableEntityBatchPublicationReceiptV1> {
+    match self {
+      Self::Candidate(source) => source.committed_receipt(),
       _ => None,
     }
   }
@@ -140,6 +157,15 @@ impl NativeSemanticTaskWorkV1<'_> {
     let header = &self._observed.header.selected.header;
     let algorithm = header.hash_algorithm;
     let task = decode_semantic_mutation_task(&self._encoded_task, algorithm).map_err(SemanticMutationObservationErrorV1::from)?;
+    if !matches!(task.state, SemanticMutationTaskStateV1::Queued | SemanticMutationTaskStateV1::Capturing)
+      || self
+        ._observed
+        .checkpoint()
+        .map_err(SemanticMutationObservationErrorV1::from)?
+        .is_none_or(|checkpoint| checkpoint.phase != SemanticMutationPhaseV1::Captured)
+    {
+      return Err(invalid("semantic_task_work_phase", "compiler start requires Captured work, not an existing continuation").into());
+    }
     if request.publication_timestamp_ms == 0
       || request.publication_timestamp_ms > i64::MAX as u64
       || request.publication_timestamp_ms < self.request.publication_timestamp_ms
@@ -150,20 +176,7 @@ impl NativeSemanticTaskWorkV1<'_> {
     if retirement_owner.hash_algorithm() != algorithm || retirement_owner.database_id() != header.database_id {
       return Err(invalid("semantic_task_work_retirement_owner", "task and retirement owner belong to different databases").into());
     }
-    let body_bytes = 3 * 36 + 168 + 112 + 112 + 16 * algorithm.hash_length();
-    let workspace = body_bytes
-      .checked_add(4 * FIRST_AUTHORITY_CONTROL_ENTITY_CAP)
-      .and_then(|bytes| bytes.checked_mul(16))
-      .and_then(|bytes| bytes.checked_add(256 << 10))
-      .filter(|bytes| *bytes <= request.maximum_workspace_bytes)
-      .ok_or(SemanticMutationObservationErrorV1::Resource {
-        code: "semantic_task_work_workspace",
-        message: "compiler selection exceeds its admitted publication workspace",
-      })?;
-    let memory = self
-      .memory
-      .reserve(MemoryOwner::Task, workspace as u64, AdmissionClass::Maintenance)
-      .map_err(SemanticMutationObservationErrorV1::from)?;
+    let memory = self.reserve_compiler_publication_workspace(request.maximum_workspace_bytes)?;
     let publisher = self._protection.publisher();
     let mut task_id = [0; 16];
     task_id.copy_from_slice(task.task_id);
@@ -238,101 +251,15 @@ impl NativeSemanticTaskWorkV1<'_> {
       ..old_checkpoint
     };
     memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-    let encoded_checkpoint =
-      encode_semantic_mutation_checkpoint(&checkpoint, algorithm).map_err(SemanticMutationObservationErrorV1::from)?;
-    let digest = try_digest_parts(algorithm, &[&encoded_checkpoint])
-      .map_err(|source| SemanticMutationObservationErrorV1::Allocation { code: "semantic_task_work_digest_allocation", source })?;
-    let encoded_companion = encode_semantic_source_capture_v1(
-      &SemanticSourceCaptureV1 {
-        checkpoint_sequence: self.reserved_checkpoint_sequence,
-        checkpoint_payload_hash: &digest,
-        ..old_companion
-      },
-      algorithm,
-    )
-    .map_err(SemanticMutationObservationErrorV1::from)?;
-    decode_semantic_source_capture_binding_v1(&encoded_companion, &encoded_checkpoint, algorithm)
-      .map_err(SemanticMutationObservationErrorV1::from)?;
-    let encoded_task = encode_semantic_mutation_task(
-      &SemanticMutationTaskV1 {
-        control_sequence: task.control_sequence + 1,
-        state: SemanticMutationTaskStateV1::Compiling,
-        checkpoint_sequence: self.reserved_checkpoint_sequence,
-        checkpoint_payload_hash: &digest,
-        updated_at_ms: request.publication_timestamp_ms as i64,
-        ..task
-      },
-      algorithm,
-    )
-    .map_err(SemanticMutationObservationErrorV1::from)?;
+    let prepared = self.prepare_compiler_checkpoint(&checkpoint, &old_companion, request.publication_timestamp_ms)?;
     drop(continuation);
     drop(inputs);
-    let mut identity = [0; 24];
-    identity[..16].copy_from_slice(&task_id);
-    identity[16..].copy_from_slice(&self.reserved_checkpoint_sequence.to_le_bytes());
-    let controls = [
-      ImmutableSystemControlWriteV1 {
-        kind: SystemControlKindV1::SemanticMutationCheckpoint,
-        identity: &identity,
-        encoded_control: &encoded_checkpoint,
-      },
-      ImmutableSystemControlWriteV1 {
-        kind: SystemControlKindV1::SemanticSourceCapture,
-        identity: &identity,
-        encoded_control: &encoded_companion,
-      },
-    ];
-    let capture = self._protection.capture_semantic_mutation_inventory(self.request.inventory_bounds, &self.memory, &self.cancellation)?;
-    capture.stage_captured_work_controls(&controls, request.publication_timestamp_ms, &memory, &self, (before_pair, pair_observer))?;
-    drop(capture);
-    let fresh = self._protection.capture_semantic_mutation_inventory(self.request.inventory_bounds, &self.memory, &self.cancellation)?;
-    fresh.visit_captured_semantic_checkpoint_metadata_entries_expected(
-      &task_id,
-      self.reserved_checkpoint_sequence,
-      self.request.graph_bounds,
-      Some((&encoded_checkpoint, &encoded_companion)),
-      |_| Ok(()),
-    )?;
-    let progress = fresh.admit_captured_semantic_compiler_progress(&task_id, self.reserved_checkpoint_sequence, request.compiler_bounds)?;
-    drop(progress);
-    before_selection();
-    let SelectedSemanticAuthorityGuardV1 { _authority: authority, .. } =
-      publisher.selected_semantic_authority_guard().map_err(SemanticMutationObservationErrorV1::from)?;
-    self.validate_work_protection(&authority)?;
-    memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-    let observation = publisher.observe().map_err(SemanticMutationObservationErrorV1::from)?;
-    if observation.region != fresh.header.region {
-      return Err(invalid("semantic_task_work_frontier", "authority changed after compiler graph and prefix validation").into());
-    }
-    let current = self.validate_selected_work(publisher, &observation)?;
-    memory.check_admission().map_err(SemanticMutationObservationErrorV1::from)?;
-    let expected = Some(MutableSystemControlExpectationV1 {
-      selected_slot: current.selected_slot,
-      control_sequence: current.control_sequence,
-      control_digest: current.control_digest,
-    });
-    drop(fresh);
-    Ok(publisher.publish_admitted_mutable_system_control_with_observer(
-      AdmittedMutableSystemControlPublicationV1 {
-        publisher,
-        authority,
-        observation,
-        request: MutableSystemControlPublicationRequestV1 {
-          database_id: &header.database_id,
-          kind: SystemControlKindV1::SemanticMutationTask,
-          identity: &task_id,
-          expected,
-          guards: &[],
-          encoded_control: &encoded_task,
-          publication_timestamp_ms: request.publication_timestamp_ms,
-          monotonic_now_ms: request.monotonic_now_ms,
-        },
-        timestamp: request.publication_timestamp_ms as i64,
-        prior_hard_publication_sequence,
-      },
+    self.select_compiler_checkpoint(
+      prepared,
+      TaskCompilerPublicationContextV1 { request, memory: &memory, prior_hard_publication_sequence },
       retirement_owner,
-      observer,
-    )?)
+      (before_pair, before_selection, pair_observer, observer),
+    )
   }
 
   fn validate_work_protection(&self, authority: &FirstAuthorityRootStateV1) -> Result<(), SemanticMutationObservationErrorV1> {
@@ -436,11 +363,15 @@ impl NativeStagingProtectionV1<'_> {
       .checkpoint()
       .map_err(SemanticMutationObservationErrorV1::from)?
       .ok_or_else(|| invalid("semantic_task_work_checkpoint", "work requires a held checkpoint"))?;
-    if task.pins_released
-      || !matches!(task.state, SemanticMutationTaskStateV1::Queued | SemanticMutationTaskStateV1::Capturing)
-      || checkpoint.phase != SemanticMutationPhaseV1::Captured
-    {
-      return Err(invalid("semantic_task_work_phase", "this work entry requires a held Captured checkpoint").into());
+    let phase_matches = match task.state {
+      SemanticMutationTaskStateV1::Queued | SemanticMutationTaskStateV1::Capturing => checkpoint.phase == SemanticMutationPhaseV1::Captured,
+      SemanticMutationTaskStateV1::Compiling => {
+        matches!(checkpoint.phase, SemanticMutationPhaseV1::Compiling | SemanticMutationPhaseV1::Pruning)
+      }
+      _ => false,
+    };
+    if task.pins_released || !phase_matches {
+      return Err(invalid("semantic_task_work_phase", "work requires a held Captured or unfinished compiler checkpoint").into());
     }
     if task.database_id != header.database_id
       || task.physical_instance_id != header.physical_instance_id

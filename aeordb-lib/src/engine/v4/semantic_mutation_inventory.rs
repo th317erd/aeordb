@@ -1,4 +1,5 @@
 //! Captured task discovery is not a resume, root admission or GC closure permit.
+pub use task_work::{NativeSemanticTaskCompilerAdvanceReceiptV1, NativeSemanticTaskCompilerAdvanceRequestV1};
 #[path = "semantic_task_graph_native.rs"]
 mod task_graph;
 #[path = "semantic_task_work.rs"]

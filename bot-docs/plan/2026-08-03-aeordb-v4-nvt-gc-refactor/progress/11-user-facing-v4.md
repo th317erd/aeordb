@@ -26,6 +26,223 @@ cross those operational boundaries.
 
 ## Current facts (not a readiness claim)
 
+September 22, 00:57 UTC: resumed compiler C14 is now qualified on all three
+platforms, with all raw evidence collected and strictly verified. Windows
+completed at 00:53:18 UTC: 1,273 library, 1,231 affected, 257 narrow, 186 reference
+tests, 502 independent fixtures, strict Clippy and all 379 formatting target roots.
+Its 96 raw files and environment seal are local; the sole collector completed
+successfully at 00:54:09. Linux passed 2,492 broad cases across 73 targets and
+31 individually bounded cases (maximum 3,288 ms); macOS passed 1,258 library and
+1,234 affected cases. Each Unix qualification has 66 sealed raw records. Audit
+remains 1,501 reviewed occurrences with unchanged identities, allowances and caps.
+
+The combined platform verifier passes against exact 186-input C14 SHA
+`2f8742c132ea5f6409f47c50a24db17c8f371ed1a8299d1525781bf7641b6892`.
+MAIN source equivalence and whitespace checks pass; fresh origin fetch still
+matches entry fe18ccac. The machine-checkable proof is
+[resumed compiler proof](../evidence/user-facing-v4-u1-resumed-semantic-compiler-proof-20260921.json).
+The proof retains original RED/correction history, including all three C12 static
+inventory failures and unrun local C13 preparation; no failed evidence is erased.
+The exact reviewed source and proof are being landed as one milestone.
+
+At the owner's request, `win11vm` was gracefully shut down after qualification
+and evidence collection; its host process is confirmed gone. The desktop reports
+37 GiB available RAM. Future Windows work should start the VM only when needed
+and shut it down when jobs and evidence collection finish.
+
+U1 still requires atomic activation/rebase, coupled protected current-path
+changes, terminal transitions and safe pin release; U2–U7 remain open. This is
+not default-v4 or production readiness. The separate retirement prerequisite's
+RED1 confirmed capacity refusal advancing the owner clock (6 ms; all seven raw
+records verified). RED2, with eight cases and a callable refusing plural entry,
+launched at 00:54:13, PID2946519/invocation
+`8b175910d9b44a69bd4b902103c75620`; it is not part of C14 or MAIN. No production
+database, AeorDB service, installed binary or capability advertisement changed.
+
+September22,00:49UTC: Windowsfinal2 is still qualifying unchanged C14 under
+collector18863; at00:41:54 it had768passing library cases after its passing narrow
+and affected suites. MAIN remains the exact integrated C14; no landing yet.
+An independent retirement prerequisite now runs on the idle desktop in a separate
+overlay: RED1 registers a single capacity-refusal/clock regression against the
+UNCHANGED owner. It launched00:46:58, PID2940197, invocation
+`1de2675b4d1b4804a1fb6ad2fbec5f36`,188inputs SHA
+`625a64908b0e85f36b735cb7bbd5b03ad4aa5ec548fd919581006298a82f1f9c`.
+No result is claimed yet. Its existing30minute compile/resource guard and10second
+whole narrow-group deadline apply. This work does not depend on the compiler's
+new runtime or alter Windows' candidate; it cannot land ahead of that milestone.
+The prerequisite has its own mapped entry/test review and control. Actual atomic
+activation, rebase, protected current-path changes and terminal release remain
+separate required work, as do U2–U7.
+
+September22,00:20UTC: C14's full Linux and macOS qualification is green and
+sealed; all66raw records per platform are local and strictly verified. Linux
+completed00:08:03 with2492broad tests/73targets,31individual10s cases (max3288ms),
+71early affected,186reference and502fixtures, audit1501/format/Clippy/debt.
+macOS completed00:10:01 with1258library/1234affected/257narrow/186reference/
+502fixtures and all static/debt gates. Linux's lowest broad home headroom was
+88,036,876,288bytes and Data325,316,624,384bytes; no resource termination.
+
+All27owned source/spec/audit paths are integrated in MAIN and its186input hashes
+match the qualified frozen C14 exactly. Fresh fetch00:16 still matches entry
+fe18ccac. Owner WIP is preserved; nothing staged, committed, installed or deployed.
+Windowsfinal2 is the only remaining job; at00:17:50 its narrow257cases passed
+and affected suite had554passing cases, with no reported failure. The sole
+collector18863 checks every6minutes. Final combined proof and commit wait for it.
+The full user-facing refactor remains open beyond this compiler milestone.
+
+September22,00:06UTC: corrected C14 passes31new cases (maximum3288ms),
+71early affected cases including the corrected root inventory, format/audit1501/
+strictClippy. All35raw stage files strictly verified. Linux broad remains active
+and demonstrably advances through existing migration targets inside its30minute
+stage deadline, with about95GBhome/325GBData free. No production changes.
+
+Macfinal2 C14 launched23:54:24 PID10384. Windowsfinal1 C12 completed00:02:24
+with257narrow+1230affected passing and exactly the known root-inventory failure;
+all15raw files and cross-platform failure history are verified. Its collector
+is terminal. Windowsfinal2 C14 launched~00:04:50 PID10428; the sole new collector
+began00:05:40 on a6minute interval. No duplicate Windows monitor. Final186input
+source SHA remains `2f8742c132ea5f6409f47c50a24db17c8f371ed1a8299d1525781bf7641b6892`.
+Full Linux and both final2 native gates, source integration and combined proof
+still precede landing. Atomic activation/rebase/terminal release and U2–U7 remain.
+
+September21,23:47UTC: C12 full qualification is NOT green. Linux broad reached
+2476passing cases/72targets, then one static owner-inventory failure: root encoder
+occurrences10vs8. The new compiler's import/derived-candidate call were omitted
+from the existing v4_root_migration_spec registry. The final15-case target and
+reference/contracts/debt were not reached. Macfinal1 independently failed the
+same affected target; Windowsfinal1 is still running under its sole collector.
+All43Linux and15Mac raw records are retained; no landing or source reuse while
+a host's job is live. No runtime fault has been established by this failure.
+
+C14 adds precise attribution and constraints for that module, keeping admission
+and publication encoders at zero there; all C12 runtime/source inputs are identical.
+It reruns the17-case root target early with71affected cases, then the full gates.
+186inputs SHA `2f8742c132ea5f6409f47c50a24db17c8f371ed1a8299d1525781bf7641b6892`;
+Linux launched23:45:46 PID2869086/invocation`8acfc5a54229487d823f3bd61f0148ef`.
+C13 was a local preparation mistake (unchanged entry spec added to the manifest),
+retained but never transferred or run. Final2 native reruns await corrected Linux
+static success and their predecessor's completed failure evidence. U1/U2–U7 open.
+
+September21,23:38UTC: frozen continuation C12 passed all31 new individual10s
+tests (maximum3276ms),54affected regressions, formatting, audit1501 and strict
+Clippy. All35raw records for those five stages are local; strict verification
+passes after waiting for collection to finish (one premature local verifier
+read a not-yet-copied Clippy manifest and was rerun after collection). Linux
+broad/reference/contracts/debt qualification continues under invocation
+`80a1b883a449460894d4c8c101854074`. Exact185-input source SHA
+`ad5f2dd2aa30fc5af0a48d9ff72277789889eef3a85ed7fdbda2a44856562eb4`.
+
+C10's new Option cursor audit occurrence was replaced with an exhaustive match;
+C11 passed every case/audit/format, then reported three redundant non-Drop
+test-helper drops. C12 removes exactly those three statements and applies13
+line-only audit metadata updates, without increasing allowances or changing
+C11 runtime behavior. All failures and complete raw evidence are retained.
+Matching source now runs on macOS (driver98770) and native Windows (driver5424).
+The sole Windows collector checks every6minutes; do not add duplicate monitoring.
+MAIN runtime remains fe18ccac until final qualification/integration. No production
+services, installation, capability flags or retained databases changed. U1
+activation/terminal/pin-release and U2–U7 remain required.
+
+September21,23:11UTC: C8's28new/34old/22prefix/17architecture cases all passed;
+all29raw records strictly verified. C9 then passed30/31new plus every prior
+regression and architecture case. Its two interrupted Ready pairs reopened with
+a fresh fence in211ms; conflicting reserved-pair refusal passed116ms; all batch
+allocation budgets passed. The remaining failure was malformed-output test
+variant3 constructing2nodes/1record, rejected by the codec before output admission.
+Variants0–2 reached their intended checks;4–5 were not reached. All30raw records,
+including reviewed-driver refusal, are retained and verified.
+
+C10 changes only that fixture to a structurally valid2record/3node pair and reruns
+all31cases before static review. Launched23:06:46, PID2771980, invocation
+`e9006c6ec2d8414793087c4a0ba4e143`;185inputs
+`cf0adc65e0dc8d2a9eeef9eaa273c81ef8ab3b66ace618c893cc5d0a9da18d1b`.
+Next ordinary poll>=23:12:46. Local next overlay also corrects four test files'
+formatting to the actual2021edition; this is not in C10. Runtime remainsC5.
+Final native runners are prepared/transferred and native syntax checks pass;
+no native source packet or job has launched. Mac/Windows are idle with adequate
+preflight disk/RAM. Broad/native gates and audit/static review still precede
+landing; the full refactor is not yet production-ready.
+
+September 21, 22:50 UTC: continuation C6 passed all21 new cases, including
+27 final-boundary guard variations, five source modes and four dependencies
+pruned across actual restarts. C7 passed all26 new cases after adding exact
+publication-workspace admission, injected allocation failure, six read/compiler
+limits, four missing retained objects and both late-cancellation outcomes.
+Both also passed34 prior work,22 prefix and17 architecture cases; all29 raw
+records per run are local and strictly verified before source reuse. C7 ran
+22:40:03–22:42:57,182inputs
+`4d4828c761d5133d773029754cb618a899c6273265ef8745b401f2b746b263d8`;
+its narrow peak3,785,252,864bytes and observed disk floors remained safe.
+No runtime changes were needed after C5. C5's one failure was the test observer
+assuming a new key rather than replacement of an existing task slot; C6 uses
+the established replacement observer and exercises both fault branches.
+
+C8 launched22:49:22UTC, PID2731825, invocation
+`78780fb7175e443e9453f9705266be58`,183inputs
+`e6a43f1528b7acafd6d4b781e89ca0499d87d74f59b7a5a936fed8f0a9a2fcae`.
+It adds shared/reintroduced dependency tests and static bounded-batch assertions,
+plus whitespace-only formatting of the fault spec; no runtime changes.
+Expected28 new cases, not yet observed. Next ordinary check>=22:55:22UTC.
+Further staged-output interruption/restart and malformed output checks precede
+strict static, broad and all-native-platform qualification. MAIN remains at
+fe18ccac; U1 activation/pin release and U2–U7 remain open.
+
+September 21, 22:22 UTC: the first actual continuation candidate C4 passed all
+7 individually bounded native cases, all34 prior work cases and all22 prefix
+cases. This includes real Ready output without HEAD/generation/pin changes and
+global/file-path order across batches1/2/7, compared with separate one-shot
+compilation. Longest new case3,713ms; peak3,799,879,680bytes; disk floors safe.
+All22 raw records strictly verify against177inputs
+`8d427c2ae09119fce56d6bb20e27d6adf2d3368262d3beb1692168e06a128e24`.
+
+C5 launched22:21:53UTC on the desktop (PID2672236),179inputs
+`9ba9c45f03ccb59038091f01ea668cbf0d0460ac81b187c7d0aa2419ca770bf0`.
+It adds all-five-hash Ready/reopen/literal task-byte proof, pre/postcommit
+candidate/pair/task faults, cancellation at each publication boundary, reviewed
+architecture inventories and shared publication scratch. Twelve new cases,
+old34/prefix22 and both affected architecture targets are running. First ordinary
+poll>=22:27:53. New runtime remains isolated in the task-advance overlay; MAIN
+runtime stays atfe18ccac. Source modes, real pruning/restart, wider fault/resource
+coverage and complete qualification remain owed before landing.
+
+Earlier C1 had two fixture clock regressions (20,000 after30,000), not an advance
+failure. C2 corrected only those fixture clocks and reached the actual Ready
+stub RED. C3 added callable invalid/stale/order REDs:2pass/5stub failures, with
+old34/prefix22 still passing. All raw failure evidence is retained and verified.
+The per-case proof adapter now verifies many test invocations of one unchanged
+binary explicitly; old proof helpers remain untouched. Prior launcher/driver
+bytes are preserved as `*-through-c4.sh` with hashes confirmed against the
+desktop originals before updating the C5 driver to include architecture targets.
+
+September 21, 21:41 UTC: next-unit RED1 reproduced the real persisted Compiling
+acquisition refusal in 94 ms. Its Node runner stalled after recording the result;
+only that finished runner was sent SIGTERM after exact process checks. Preserve
+wrapper exit 143 separately from the actual test exit 101. All raw evidence is
+local. An unchanged-source RED2 used a direct shell test runner, reproduced the
+same refusal in 92 ms and exited normally at 21:33:08. Its 171-input manifest and
+archive are byte-identical to RED1; both runs pass source/evidence verification.
+
+Candidate 1 launched on the desktop at 21:40:14 (PID 2605075), with 172 inputs
+and three new tests. It extends fenced acquisition to Compiling/Pruning, prevents
+restarting Captured compilation, and exposes an always-refusing advance API for
+the Ready-output RED. It also runs the 34 prior work and 22 prefix cases. First
+ordinary check is no earlier than 21:46:14. Results are pending; no Ready behavior
+has been implemented. MAIN runtime is unchanged at the last green commit.
+
+September 21, 21:12 UTC: fenced Captured work and first compiler selection landed
+and pushed as `fe18ccacc475309a5b4c6ef68cbdb229a2e5d4b0`. The saved combined proof
+passes its exact recheck; precisely 21 owned source/spec/document/proof paths
+landed. Tracked tree was clean and origin matched before entering the next unit.
+All prior native jobs and the sole Windows collector are complete.
+
+Next U1 entry: resumed Compiling/Pruning batches and Ready output, following the
+new task-contract section. The inspected producer/consumer and test inventory is
+in `/home/wyatt/.cache/codex/v4-service-completion-20260913/task-advance-entry-review.md`.
+First target: real Compiling selection, close/reopen, original retirement-chain
+resume and fresh work acquisition; existing runtime still refuses this phase.
+Runtime changes remain isolated from MAIN until qualified. No activation, terminal
+pin release or public-runtime readiness is claimed by this next unit.
+
 September21,21:04UTC: C15 final Linux completed20:19:20, sealed20:22:37 and all
 70raw stage files plus driver/environment/tool identities are local and strictly
 verified.73broad targets passed2461tests;34narrow/34individual deadlines

@@ -199,6 +199,8 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let semantic_mutation_inventory_path = source_root.join("engine/v4/semantic_mutation_inventory.rs");
   let initial_task_path = source_root.join("engine/v4/semantic_initial_task_selection.rs");
   let task_work_path = source_root.join("engine/v4/semantic_task_work.rs");
+  let task_compiler_publication_path = source_root.join("engine/v4/semantic_task_compiler_publication.rs");
+  let task_advance_path = source_root.join("engine/v4/semantic_task_advance.rs");
   let semantic_source_native_path = source_root.join("engine/v4/semantic_source_native.rs");
   let semantic_task_root_exclusion_path = source_root.join("engine/v4/semantic_task_root_exclusion.rs");
   let semantic_task_physical_exclusion_path = source_root.join("engine/v4/semantic_task_physical_exclusion.rs");
@@ -775,8 +777,12 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
     .filter(|path| std::fs::read_to_string(path).unwrap().contains(".publish_admitted_mutable_system_control_with_observer("))
     .collect();
   admitted_callers.sort();
-  assert_eq!(admitted_callers, [&first_authority_path, &initial_task_path, &task_work_path]);
-  let task_work = std::fs::read_to_string(&task_work_path).unwrap();
+  assert_eq!(admitted_callers, [&first_authority_path, &initial_task_path, &task_compiler_publication_path, &task_work_path]);
+  let task_work = [&task_work_path, &task_compiler_publication_path, &task_advance_path]
+    .iter()
+    .map(|path| std::fs::read_to_string(path).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
   let task_work: String = task_work.split_whitespace().collect();
   for required in [
     "observed:&'aSemanticMutationObservationV1",
@@ -838,7 +844,84 @@ fn first_authority_allows_only_reviewed_owners_and_exclusively_owns_atomic_root_
   let mut guarded_pair_callers: Vec<_> =
     files.iter().filter(|path| std::fs::read_to_string(path).unwrap().contains(".stage_captured_work_controls(")).collect();
   guarded_pair_callers.sort();
-  assert_eq!(guarded_pair_callers, [&task_work_path]);
+  assert_eq!(guarded_pair_callers, [&task_compiler_publication_path]);
+  let advance: String = std::fs::read_to_string(&task_advance_path).unwrap().split_whitespace().collect();
+  let candidate = advance.split("fnstage_compiler_candidate(").nth(1).unwrap();
+  for required in [
+    "maximum_configuration_steps==0",
+    "maximum_pruning_steps==0",
+    "request.monotonic_now_ms<self.request.monotonic_now_ms",
+    "advance_captured_semantic_compiler(",
+    "self.prepare_compiler_checkpoint(",
+    "self.select_compiler_checkpoint(",
+  ] {
+    assert!(advance.contains(required), "advance lost a bounded continuation guard: {required}");
+  }
+  for required in [
+    "entity_version:1",
+    "entry_type:EntryTypeV4::DirectoryIndex",
+    "flags:WHOLE_ENTITY_V1_FLAG_SYSTEM",
+    "observation.region!=captured.region",
+    "self.validate_work_protection(&authority)",
+    "memory.check_admission()",
+  ] {
+    assert!(candidate.contains(required), "candidate staging lost a guard: {required}");
+  }
+  assert!(
+    candidate.find("publisher.selected_semantic_authority_guard()").unwrap()
+      < candidate.find("self.validate_selected_work(publisher,&observation)").unwrap()
+  );
+  assert!(
+    candidate.find("self.validate_selected_work(publisher,&observation)").unwrap()
+      < candidate.find("publisher.publish_immutable_entity_batch_with_validation_locked(").unwrap()
+  );
+  let mut candidate_callers: Vec<_> = files
+    .iter()
+    .filter(|path| std::fs::read_to_string(path).unwrap().contains("ImmutableEntityValidationV1::PrevalidatedSemanticTaskCandidate"))
+    .collect();
+  candidate_callers.sort();
+  assert_eq!(candidate_callers, [&task_advance_path]);
+  let selection: String = std::fs::read_to_string(&task_compiler_publication_path).unwrap().split_whitespace().collect();
+  assert!(selection.contains("fresh.admit_captured_semantic_compiler_output("));
+  assert!(
+    selection.find("fresh.admit_captured_semantic_compiler_output(").unwrap()
+      < selection.find("publisher.selected_semantic_authority_guard()").unwrap()
+  );
+  for name in ["semantic_compiler_batch_native.rs", "semantic_compiler_output_native.rs"] {
+    let source = std::fs::read_to_string(source_root.join("engine/v4").join(name)).unwrap();
+    for forbidden in [
+      "StorageEngine",
+      "DiskKVStore",
+      "std::fs",
+      "File::",
+      "OpenOptions",
+      "lock_kv",
+      "root_state.lock",
+      "HashMap",
+      "HashSet",
+      "BTreeMap",
+      "BTreeSet",
+      "publish_successor_authority",
+      "publish_mutable_system_control",
+      "unwrap(",
+      "expect(",
+    ] {
+      assert!(!source.contains(forbidden), "compiler batch/output gained another authority or unbounded owner: {name}: {forbidden}");
+    }
+  }
+  let batch: String =
+    std::fs::read_to_string(source_root.join("engine/v4/semantic_compiler_batch_native.rs")).unwrap().split_whitespace().collect();
+  assert_eq!(batch.matches("self.with_validated_captured_semantic_source_union(").count(), 1);
+  assert_eq!(batch.matches("operation.admit_prefix(").count(), 1);
+  assert_eq!(batch.matches("continuation.finish_configurations(").count(), 1);
+  let admission = batch.find("operation.admit_prefix(").unwrap();
+  let first_write = batch.find("before_writes()?").unwrap();
+  let configurations = batch.find("whileletSome(pair)=namespaces.next_pair(").unwrap();
+  assert!(admission < first_write && first_write < configurations);
+  assert!(batch.contains("ifexhausted{continuation=continuation.finish_configurations("));
+  assert!(batch.contains("pair.path.as_bytes()<=&path[2..]"));
+  assert!(batch.contains("configuration_steps==request.maximum_configuration_steps"));
+  assert!(batch.contains("pruning_steps<request.maximum_pruning_steps"));
   let authority_compact: String = authority_source.split_whitespace().collect();
   assert!(authority_compact.contains("structAdmittedMutableSystemControlPublicationV1<'publisher,'request>"));
   assert!(!authority_compact.contains("pubstructAdmittedMutableSystemControlPublicationV1"));

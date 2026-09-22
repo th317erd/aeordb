@@ -1,4 +1,6 @@
 //! Failing-first retries, stale work, invalid inputs and counter exhaustion.
+#[path = "native_semantic_task_advance_spec.rs"]
+mod advance;
 #[path = "native_semantic_task_work_compiler_boundary_spec.rs"]
 mod compiler_boundary;
 #[path = "native_semantic_task_work_guard_spec.rs"]
@@ -17,7 +19,10 @@ struct TaskWorkFixture<'a> {
 }
 
 fn with_initial_task_for_work(test: impl FnOnce(TaskWorkFixture<'_>)) -> (tempfile::TempDir, PathBuf) {
-  let algorithm = HashAlgorithm::Blake3_256;
+  with_initial_task_for_work_algorithm(HashAlgorithm::Blake3_256, test)
+}
+
+fn with_initial_task_for_work_algorithm(algorithm: HashAlgorithm, test: impl FnOnce(TaskWorkFixture<'_>)) -> (tempfile::TempDir, PathBuf) {
   let (directory, path, _coordinator, publisher) =
     create_environment_for_algorithm_at_kv_stage("task-work-boundaries", None, [1; 16], algorithm, 0);
   let initial = request_for_database_and_algorithm([1; 16], algorithm);

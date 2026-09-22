@@ -1,4 +1,5 @@
 //! Atomic first-authority publication for a disconnected v4 database.
+pub use semantic_mutation_observation::{NativeSemanticTaskCompilerAdvanceReceiptV1, NativeSemanticTaskCompilerAdvanceRequestV1};
 
 #[path = "semantic_mutation_observation.rs"]
 mod semantic_mutation_observation;
@@ -2298,6 +2299,7 @@ enum ImmutableEntityValidationV1 {
   GenericContent,
   PrevalidatedSystemFiles,
   CapturedProtectedSource,
+  PrevalidatedSemanticTaskCandidate,
 }
 
 fn validate_immutable_entity_batch_request(

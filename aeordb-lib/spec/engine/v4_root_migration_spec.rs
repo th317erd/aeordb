@@ -798,6 +798,12 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
   {
     assert!(!semantic_catalog_compiler.contains(forbidden), "catalog staging acquired namespace authority: {forbidden}");
   }
+  let semantic_compiler_batch = fs::read_to_string(root.join("aeordb-lib/src/engine/v4/semantic_compiler_batch_native.rs")).unwrap();
+  for forbidden in ["StorageEngine", "DirectoryOps", "V4FirstAuthorityPublisher", "publish_successor_authority", "RootAdmissionCommit"] {
+    assert!(!semantic_compiler_batch.contains(forbidden), "completed compiler candidate acquired authority: {forbidden}");
+  }
+  assert!(semantic_compiler_batch.contains("namespace_tree_root: copy_namespace_bytes(operation.manifest.staged_directory_root)?"));
+  assert!(semantic_compiler_batch.contains("semantic_state_root: copy_namespace_bytes(&completed.semantic_state().object_id)?"));
   let template_start = migration_offline_run.find("fn authority_template(").unwrap();
   let template_end = migration_offline_run[template_start..].find("\nfn open_root_map").unwrap() + template_start;
   let template = &migration_offline_run[template_start..template_end];
@@ -813,11 +819,12 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
     expected_migration_root_map_owner_occurrences,
     expected_migration_offline_run_occurrences,
     expected_semantic_catalog_compiler_occurrences,
+    expected_semantic_compiler_batch_occurrences,
   ) in [
-    ("encode_namespace_root", 8, 2, 2, 0, 3, 0, 0),
-    ("encode_semantic_state_object", 7, 0, 0, 2, 0, 2, 2),
-    ("encode_root_publication_prepare_control", 5, 4, 0, 0, 0, 0, 0),
-    ("encode_root_admission_commit_control", 5, 4, 0, 0, 0, 0, 0),
+    ("encode_namespace_root", 10, 2, 2, 0, 3, 0, 0, 2),
+    ("encode_semantic_state_object", 7, 0, 0, 2, 0, 2, 2, 0),
+    ("encode_root_publication_prepare_control", 5, 4, 0, 0, 0, 0, 0, 0),
+    ("encode_root_admission_commit_control", 5, 4, 0, 0, 0, 0, 0, 0),
   ] {
     assert_eq!(
       production_sources.matches(encoder).count(),
@@ -853,6 +860,11 @@ fn immutable_authority_codecs_are_disconnected_from_storage_and_service_authorit
       semantic_catalog_compiler.matches(encoder).count(),
       expected_semantic_catalog_compiler_occurrences,
       "root encoder {encoder} has an unexpected semantic-staging call shape"
+    );
+    assert_eq!(
+      semantic_compiler_batch.matches(encoder).count(),
+      expected_semantic_compiler_batch_occurrences,
+      "root encoder {encoder} has an unexpected completed-compiler candidate call shape"
     );
   }
 

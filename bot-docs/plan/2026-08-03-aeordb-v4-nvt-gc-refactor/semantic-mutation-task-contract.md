@@ -1644,3 +1644,87 @@ Late cancellation of shared retirement preserves its original committed error
 and task receipt; immutable pair commitment alone is not task selection.
 This qualification does not complete resumed configuration/pruning/Ready work,
 atomic activation, terminal pin release, public runtime or production readiness.
+
+### Resumed compiler batches and Ready output — entry fe18ccac
+
+Continue the same work owner from held Compiling tasks with Compiling or Pruning
+checkpoints. Preserve the existing fresh fence, two-control preflight, explicit
+takeover, exact generation and read-only reservation retry rules. Captured still
+requires start; Ready and terminal tasks cannot silently restart compilation.
+
+A consuming advance request supplies positive configuration/pruning batch limits
+and explicit compiler/source/graph/read/workspace bounds and ordered clocks.
+Admit the exact retained source union and saved compiler prefix once per batch,
+then rebind the existing catalog continuation and requested registry. Stream one
+configuration at a time: global owner `/` first, then namespace configuration
+file path order. Bare directory-name order is not equivalent. The saved owner
+identifies the last actually visited source position, including deletions/no-ops;
+the configuration count alone cannot establish end-of-input. Require explicit
+source exhaustion before the existing live-dependency exclusion pass and Pruning.
+
+Use the existing candidate catalog as the pruning queue. The dependency cursor
+remains informational, never permission to skip candidates. Apply bounded pruning
+steps and preserve both actual roots/counts in each derived checkpoint. Reuse the
+same guarded immutable pair and mutable task finalization as compiler start;
+do not add another file/KV owner or raw-body public override.
+
+When pruning is exhausted, finish through the existing compiler and derive a
+candidate NamespaceRoot from its real SemanticState, the captured staged tree
+and admitted capabilities. Stage this derived root through a narrow composition
+inside the existing publisher. Generic immutable publication must still refuse
+v1 NamespaceRoots. No RootAdmissionCommit, HEAD, generation change or pin release
+is conferred by these staged bytes. Select Ready/ReadyToActivate only after exact
+output graph, final source projections and current work guards pass. Keep the
+progress reader rejecting Ready/Captured; completed output has a distinct typed
+admission sharing the existing compiler/prefix logic, not rewritten phase bytes.
+
+Recheck ownership, memory, cancellation, generation and exact reserved task before
+writes and at candidate/pair/final selection boundaries. Re-capture after owned
+staging advances the frontier; a later unaccounted frontier change refuses. Keep
+old selected retention until replacement selection. Immutable and task commitment
+receipts remain distinct; preserve existing retirement and late-cancel semantics.
+Unknown immutable collisions refuse without overwrite or identity scanning.
+
+Complete persisted admission costs a source-union pass per resumed batch. Do not
+repeat full admission per configuration, retain all configurations in memory, or
+claim constant-time resume. Exercise numeric per-batch work and memory bounds;
+tiny batches may amplify scans and must be accounted for in later runtime defaults
+and final performance acceptance. No root/KV guard spans a compiler pass.
+
+Entry verification: first reproduce real Compiling close/reopen/reacquisition
+refusal before changing behavior, then callable advance/Ready REDs. Cover all
+hashes, Fresh/Incremental/changed-registry modes, partitions of source work,
+root and nested/prefix-related owner order, additions/deletions/no-ops, shared
+dependency removal/reintroduction, pruning interruption and complete output.
+Use literal persisted-field expectations, independent source-position models and
+separate one-shot compiler execution; the latter is not an independent compiler.
+Retain malformed/profile/phase, stale/cross-owner, generation/frontier, counter,
+resource/cancellation and pre/postcommit faults, real retirement-chain restart,
+old/new graph retention and staged-root-without-admission checks. Preserve all
+34 prior task-work and 22 prefix cases, architecture inventories and shared owner
+regressions. Individual 10-second Linux deadlines and exact final-source Linux,
+macOS, Windows, reference/static/architecture gates precede landing. Activation,
+terminal pin release and U2–U7 remain separate required work.
+
+Qualification September 22: the exact 186-input C14 candidate passed Linux
+2,492 broad cases/73 targets, all 31 new cases under individual 10-second
+deadlines (maximum 3,288 ms), 71 early affected cases, macOS 1,258 library/
+1,234 affected/257 narrow, and native Windows 1,273 library/1,231 affected/
+257 narrow. Reference 186, independent fixtures 502, formatting, strict Clippy
+and prescribed audit/debt gates pass. Audit occurrence identities, reviews and
+caps remain unchanged at 1,501; 13 line locations alone were refreshed.
+All 66 Linux, 66 macOS and 96 Windows raw records are retained locally and
+strictly verified. The exact manifest SHA is
+`2f8742c132ea5f6409f47c50a24db17c8f371ed1a8299d1525781bf7641b6892`;
+see [the combined proof](evidence/user-facing-v4-u1-resumed-semantic-compiler-proof-20260921.json).
+
+The final static correction attributes the new compiler's exact root-encoder
+import/call and still forbids admission/publication encoders there; it does not
+relax generic root publication. Failed C12 Linux/macOS/Windows inventory results
+and the unused C13 preparation are preserved. Shared physical method bodies
+remain identical to entry; only private staging composition/type exports change.
+The source-position model covers 776 paths, 5,002 transitions and 2,642 batches.
+One-shot catalog parity shares compiler primitives; it is not an independent
+compiler. Small-fixture allocation ceilings do not establish large-source scaling.
+The per-batch source-union validation cost and all remaining activation/public
+runtime obligations above are unchanged by this qualification.
